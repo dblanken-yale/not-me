@@ -40,15 +40,14 @@ REPOS: Dict[str, Tuple[str, str, Optional[str], str]] = {
     "lookalike": (GH + "acme/app-fork.git", "feature/x", "", ""),
     "pushdefault": (GH + "acme/app.git", "feature/x", "", "pushdefault"),
     "main": (GH + "acme/app.git", "main", "", ""),
-    "mainpboff": (GH + "acme/app.git", "main",
-                  "guard: {protected_branches: off}\nconfirm_guard_off: [protected_branches]", ""),
-    "cfgallow": (GH + "acme/app.git", "feature/x", "allow_repos: [acme/friend]", ""),
+    "mainpboff": (GH + "acme/app.git", "main", "", ""),
+    "cfgallow": (GH + "acme/app.git", "feature/x", "", ""),
     "tracker": (GH + "acme/app.git", "feature/x", "tracker: acme/issues\nrepos: [{name: acme/web}]", ""),
-    "off": (GH + "acme/app.git", "feature/x", "guard: {other_repo: off}\nconfirm_guard_off: [other_repo]", ""),
-    "offnoconfirm": (GH + "acme/app.git", "feature/x", "guard: {other_repo: off}", ""),
-    "alloff": (GH + "acme/app.git", "main",
-               "guard: {other_repo: off, protected_branches: off, force_push: off, destructive_git: off}\n"
-               "confirm_guard_off: [other_repo, protected_branches, force_push, destructive_git]", ""),
+    "off": (GH + "acme/app.git", "feature/x", "", ""),
+    "offnoconfirm": (GH + "acme/app.git", "feature/x", "", ""),
+    "alloff": (GH + "acme/app.git", "main", "", ""),
+    "repooff": (GH + "acme/app.git", "feature/x", "guard: {other_repo: off}\nconfirm_guard_off: [other_repo]", ""),
+    "repoallow": (GH + "acme/app.git", "feature/x", "allow_repos: [acme/friend]", ""),
     "live": (GH + "acme/app.git", "feature/x", "mode: live", ""),
     "run": (GH + "acme/app.git", "feature/x", None, "run"),
     "running": (GH + "acme/app.git", "feature/x", "", "run"),
@@ -56,6 +55,18 @@ REPOS: Dict[str, Tuple[str, str, Optional[str], str]] = {
     "bare": (GH + "acme/app.git", "main", None, ""),
     "ssh": ("git@github.com:acme/app.git", "feature/x", "", ""),
     "sshurl": ("ssh://git@github.com/acme/app.git", "feature/x", "", ""),
+}
+
+# The repo layer may only tighten guard.*, mode, enabled and protected_branches, and its
+# allow_repos entries are ignored; loosening settings live in the GLOBAL layer. Each repo
+# here gets its own NOT_ME_HOME ("g-<repo>") whose project.md carries this frontmatter.
+GLOBAL_LAYER: Dict[str, str] = {
+    "mainpboff": "guard: {protected_branches: off}\nconfirm_guard_off: [protected_branches]",
+    "cfgallow": "allow_repos: [acme/friend]",
+    "off": "guard: {other_repo: off}\nconfirm_guard_off: [other_repo]",
+    "offnoconfirm": "guard: {other_repo: off}",
+    "alloff": "guard: {other_repo: off, protected_branches: off, force_push: off, destructive_git: off}\n"
+              "confirm_guard_off: [other_repo, protected_branches, force_push, destructive_git]",
 }
 
 # home -> allowed-repos.json text (None = no file)
@@ -94,6 +105,10 @@ def build_fixtures(root: Path) -> Dict[str, str]:
         home.mkdir(parents=True, exist_ok=True)
         if text is not None:
             (home / "allowed-repos.json").write_text(text, encoding="utf-8")
+    for repo_name, front in GLOBAL_LAYER.items():
+        home = root / "homes" / f"g-{repo_name}"
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "project.md").write_text(f"---\nschema: 1\n{front}\n---\n# Project\n", encoding="utf-8")
     for name, (origin, branch, front, extra) in REPOS.items():
         repo = root / name
         repo.mkdir(parents=True, exist_ok=True)
@@ -131,7 +146,8 @@ def build_fixtures(root: Path) -> Dict[str, str]:
 def variant_paths(root: Path, variant: str) -> Tuple[Path, Path]:
     """(cwd, NOT_ME_HOME) for a variant."""
     repo, _, home = variant.partition("@")
-    return Path(root).resolve() / repo, Path(root).resolve() / "homes" / (home or "h0")
+    default = f"g-{repo}" if repo in GLOBAL_LAYER else "h0"
+    return Path(root).resolve() / repo, Path(root).resolve() / "homes" / (home or default)
 
 
 def expand(value: Any, root: Path, home: Path) -> Any:
@@ -500,8 +516,14 @@ bash(A, None, "git push > push.log 2>&1")
 bash(B, FP, "git push --force 2>&1")
 bash(B, OR, "gh pr comment 1 -R acme/other -b x &> /dev/null")
 
+# The repo layer cannot loosen: an off and an allow_repos entry there are ignored.
+bash(B, OR, "gh pr comment 1 --repo acme/other -b x", "repooff")
+bash(B, OR, FRIEND, "repoallow")
+_repo_allow_id = CASES[-1][0]
+
 # Substrings a block message must contain, by case id.
 MESSAGE_CHECKS: Dict[str, List[str]] = {
     CASES[17][0]: ["not-me guard [other_repo]", "/not-me:allow-repo acme/other", "acme/other --everywhere",
                    "This repo (acme/app) may write only to: acme/app."],
+    _repo_allow_id: ["/not-me:allow-repo acme/friend"],
 }
