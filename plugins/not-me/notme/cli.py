@@ -10,9 +10,12 @@ directory. The global flags are also accepted after the subcommand.
 
 Trust anchor: the session project is the main checkout of the git toplevel of the working directory. Restricted
 mode is the default: a --project-dir or CLAUDE_PROJECT_DIR naming another checkout is refused and NOT_ME_HOME is
-ignored. Only a person at a terminal (stdin is a tty) with neither CLAUDECODE nor CLAUDE_PROJECT_DIR set gets
-those honoured. NOT_ME_DRY_RUN can only turn dry-run on. `allow-repo add|remove` and `pause off` need a terminal
-and NOT_ME_OPERATOR_CONFIRM set to the gh login, everywhere.
+ignored. Only a person gets those honoured: stdin is a terminal, neither CLAUDECODE nor CLAUDE_PROJECT_DIR is set,
+and no ancestor process is Claude Code (the CLI or the desktop app; the app's own terminal panel is a child of it,
+so use a separate terminal application). When the process ancestry cannot be read, the CLI stays restricted.
+NOT_ME_DRY_RUN can only turn dry-run on. `allow-repo add|remove` and `pause off` also need NOT_ME_OPERATOR_CONFIRM
+set to the private operator token in <not-me home>/operator-token (create it with `notme doctor --init-token`).
+The PreToolUse guard is the enforcement; this check is a second layer.
 
 --dry-run, NOT_ME_DRY_RUN=1 or `mode: dry-run` send every write to the intended-writes ledger instead of
 GitHub; write commands then carry "dry_run": true. Write commands take --log PATH (an existing run log under
@@ -44,7 +47,7 @@ if _PLUGIN_DIR not in sys.path:  # lets scripts load this file by path (the docs
 
 from notme import claims, config as config_mod, doctor as doctor_mod, feedback as feedback_mod  # noqa: E402
 from notme import gh as gh_mod, git as git_mod, guard as guard_mod, paths, prove, runlog, states  # noqa: E402
-from notme import writeback, writes  # noqa: E402
+from notme import humans, writeback, writes  # noqa: E402
 from notme.dryrun import LedgerError  # noqa: E402
 from notme.gh import csv, names_of, login_of  # noqa: E402
 from notme.queue import NotOpen, make_queue, stale_claims  # noqa: E402
@@ -196,7 +199,8 @@ class Deps:
                  stdin: Optional[TextIO] = None, stdout: Optional[TextIO] = None, stderr: Optional[TextIO] = None,
                  hook_cmd: Optional[List[str]] = None, cwd: Optional[str] = None,
                  argv: Sequence[str] = (), sleep: Optional[Callable[[float], None]] = None,
-                 clock: Optional[Callable[[], float]] = None):
+                 clock: Optional[Callable[[], float]] = None,
+                 process_check: Optional[Callable[[], bool]] = None):
         self.runner = runner
         self.sleep: Callable[[float], None] = sleep or time.sleep
         self.clock: Callable[[], float] = clock or time.monotonic
@@ -207,6 +211,7 @@ class Deps:
         self.hook_cmd = hook_cmd
         self.cwd = cwd
         self.argv = list(argv)
+        self.process_check = process_check or humans.under_claude_process_tree
 
     def isatty(self) -> bool:
         """True only when stdin is a real terminal (a person typing, not a model's tool call)."""
@@ -230,9 +235,10 @@ class Context:
     def __init__(self, args: argparse.Namespace, deps: Deps):
         self.args, self.deps = args, deps
         self.warnings: List[str] = []
-        # Restricted is the default. Only a person at a terminal (stdin a tty, which a model's Bash call cannot
-        # fake) with no Claude Code variables set gets overrides honoured; the Claude variables can only restrict.
-        self.restricted = any(deps.env.get(k) for k in CLAUDE_ENV) or not deps.isatty()
+        # Restricted is the default. A tty alone proves nothing (a pty wrapper fakes one), so a person also needs no
+        # Claude Code variable and no Claude Code ancestor process; an unreadable ancestry counts as Claude Code.
+        self.restricted = (any(deps.env.get(k) for k in CLAUDE_ENV) or not deps.isatty()
+                           or bool(deps.process_check()))
         self.session_project, self.work_dir = self._anchor()
         self.env = self._trusted_env()
         self._cfg: Optional[config_mod.Config] = None
@@ -294,15 +300,18 @@ class Context:
         return self.work_dir
 
     def require_human(self, what: str) -> None:
-        """Refuse `what` unless stdin is a terminal and NOT_ME_OPERATOR_CONFIRM is the gh login. The refusal carries
-        the command a person can run in their own terminal."""
-        given = self.deps.env.get(CONFIRM_ENV)
-        if self.deps.isatty() and given and given.lower() == self.gh.me().lower():
+        """Refuse `what` unless a person runs it (not restricted) and NOT_ME_OPERATOR_CONFIRM is the operator
+        token. The refusal carries the command to run in a terminal that Claude Code did not start."""
+        if not self.restricted and humans.token_matches(self.cfg.home, self.deps.env.get(CONFIRM_ENV)):
             return
+        token = humans.token_path(self.cfg.home)
         notme = [str(Path(_PLUGIN_DIR) / "bin" / "notme"), *self.deps.argv]
-        command = f"{CONFIRM_ENV}=<your-gh-login> " + " ".join(shlex.quote(a) for a in notme)
-        raise fail(ExitCode.ERROR, "human_only", f"{what} is for a person: run it in your own terminal with "
-                                                f"{CONFIRM_ENV} set to your gh login", terminal_cmd=command)
+        command = f'{CONFIRM_ENV}="$(cat {shlex.quote(str(token))})" ' + " ".join(shlex.quote(a) for a in notme)
+        raise fail(ExitCode.ERROR, "human_only",
+                   f"{what} is for a person: run it in a terminal application that Claude Code did not start "
+                   f"(not the desktop app's terminal panel), with {CONFIRM_ENV} set to the operator token "
+                   f"(create one with `notme doctor --init-token`); {humans.SECOND_LAYER}",
+                   terminal_cmd=command, note=humans.SECOND_LAYER)
 
     # --- config ---
 
@@ -1162,7 +1171,8 @@ def cmd_log_start(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     Output: path, run_id, skill, ref
     """
     try:
-        log = runlog.RunLog.start(ctx.log_root(create=True), args.skill, args.ref, force=args.force, project_dir=ctx.work_dir)
+        log = runlog.RunLog.start(ctx.log_root(create=True), args.skill, args.ref, force=args.force,
+                                  project_dir=ctx.work_dir)
     except runlog.ActiveRunError as exc:
         raise fail(ExitCode.ERROR, "active_run", f"another run is active: {exc.existing.get('run_id')}",
                    existing=exc.existing) from None
@@ -1351,8 +1361,9 @@ _ALLOW_ARGS = [arg("slug", nargs="?", metavar="SLUG"), arg("--board", metavar="O
 @command("allow-repo add", "allow a repo or board", args=_ALLOW_ARGS)
 def cmd_allow_repo_add(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """Allow a repo (or, with --board, a project board) for this project or everywhere. Only a person may do this:
-    stdin must be a terminal and NOT_ME_OPERATOR_CONFIRM the gh login; otherwise the refusal (kind human_only)
-    carries the command to run.
+    it must run from a terminal Claude Code did not start, with NOT_ME_OPERATOR_CONFIRM set to the operator token;
+    otherwise the refusal (kind human_only) carries the command to run. The guard is the enforcement; this check is
+    a second layer.
 
     Output: added, scope, repo or board
     """
@@ -1626,14 +1637,19 @@ def cmd_pause(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     return {"paused": args.state == "on", "scope": scope}
 
 
-@command("doctor", "check tools, auth, config and the guard")
+@command("doctor", "check tools, auth, config and the guard", args=[
+    arg("--init-token", action="store_true", help="create the operator token (a person only; shown once)")])
 def cmd_doctor(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """Check the tools and setup: python, git and gh versions, gh auth and scopes, config, guard self-test, spawn
     depth. Exit 7 when the only failed required checks are gh, gh auth or gh scopes; exit 1 when another
-    required check fails.
+    required check fails. --init-token instead creates <not-me home>/operator-token (random, mode 0600) and shows
+    it once; only a person may run it (kind human_only otherwise), and an existing token is never replaced
+    (kind token_exists: delete the file to make a new one).
 
-    Output: ok, checks (name, ok, detail, required)
+    Output: ok, checks (name, ok, detail, required); with --init-token token, path
     """
+    if args.init_token:
+        return _init_token(ctx)
     checks = doctor_mod.run(ctx.deps.runner or gh_mod._default_runner, ctx.config_errors(), lambda: ctx.gh,
                             ctx.guard_state, ctx.env)
     verdict = doctor_mod.exit_kind(checks)
@@ -1641,6 +1657,20 @@ def cmd_doctor(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
         code = ExitCode.DEPENDENCY if verdict == "dependency" else ExitCode.ERROR
         raise CliExit(code, {"error": "a required check failed", "kind": "doctor", "ok": False, "checks": checks})
     return {"ok": True, "checks": checks}
+
+
+def _init_token(ctx: Context) -> Dict[str, Any]:
+    if ctx.restricted:
+        raise fail(ExitCode.ERROR, "human_only", "the operator token is created by a person, in a terminal "
+                                                 f"application that Claude Code did not start; {humans.SECOND_LAYER}",
+                   note=humans.SECOND_LAYER)
+    try:
+        token = humans.create_token(ctx.cfg.home)
+    except FileExistsError:
+        raise fail(ExitCode.ERROR, "token_exists", "an operator token already exists; delete "
+                                                   f"{humans.token_path(ctx.cfg.home)} to make a new one") from None
+    return {"token": token, "path": str(humans.token_path(ctx.cfg.home)),
+            "note": "shown once: keep it out of files the agent can read"}
 
 
 # --- parser ------------------------------------------------------------------------
@@ -1716,11 +1746,13 @@ def _log_line(cmd: Command, args: argparse.Namespace, dry: bool) -> str:
 def main(argv: Optional[Sequence[str]] = None, *, runner: Optional[gh_mod.Runner] = None,
          env: Optional[Mapping[str, str]] = None, stdin: Optional[TextIO] = None, stdout: Optional[TextIO] = None,
          stderr: Optional[TextIO] = None, hook_cmd: Optional[List[str]] = None, cwd: Optional[str] = None,
-         sleep: Optional[Callable[[float], None]] = None, clock: Optional[Callable[[], float]] = None) -> int:
+         sleep: Optional[Callable[[float], None]] = None, clock: Optional[Callable[[], float]] = None,
+         process_check: Optional[Callable[[], bool]] = None) -> int:
     """Run one invocation and return its exit code. The keyword arguments let tests inject the gh runner,
-    environment, streams, hook command, working directory, and the sleep and clock `wait-checks` uses."""
+    environment, streams, hook command, working directory, the sleep and clock `wait-checks` uses, and the
+    Claude Code ancestry check."""
     argv = list(sys.argv[1:] if argv is None else argv)
-    deps = Deps(runner, env, stdin, stdout, stderr, hook_cmd, cwd, argv, sleep, clock)
+    deps = Deps(runner, env, stdin, stdout, stderr, hook_cmd, cwd, argv, sleep, clock, process_check)
     code, payload = int(ExitCode.OK), {}
     try:
         try:
