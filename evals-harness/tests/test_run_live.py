@@ -2,9 +2,10 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePath
 from unittest import mock
 
 import _support as s
@@ -69,20 +70,16 @@ class RunLiveTest(unittest.TestCase):
         lines = [l for l in buf.getvalue().splitlines() if l.startswith("+ ") and not l.startswith("+ (")]
         kinds = []
         for line in lines:
-            if "--reset" in line:
-                kinds.append("reset")
-            elif "--scenario N1" in line and "grade_state" not in line:
-                kinds.append("seed")
-            elif "scaffold.py prepare" in line:
-                kinds.append("prepare")
-            elif "scaffold.py clean" in line:
-                kinds.append("clean")
-            elif "claude plugin eval" in line:
-                kinds.append("eval")
-            elif "grade_state.py" in line:
+            tokens = shlex.split(line[2:])
+            script = PurePath(tokens[0] if tokens[0] == "claude" else tokens[1]).name
+            if script == "seed_fixture.py":
+                kinds.append("reset" if "--reset" in tokens else "teardown" if "--teardown" in tokens else "seed")
+            elif script == "scaffold.py":
+                kinds.append(tokens[2])
+            elif script == "grade_state.py":
                 kinds.append("grade")
-            elif "--teardown" in line:
-                kinds.append("teardown")
+            elif tokens[:3] == ["claude", "plugin", "eval"]:
+                kinds.append("eval")
         self.assertEqual(kinds, ["reset", "seed", "prepare", "eval", "grade", "clean", "teardown"])
         self.assertEqual(list(Path(self.out).iterdir()), [])
 
@@ -111,7 +108,7 @@ class RunLiveTest(unittest.TestCase):
         env = next(e for n, _, e in rec.calls if n == "eval")
         self.assertEqual(env["EVAL_NOT_ME_RUN_ID"], "n1-1-test")
         self.assertEqual(env["EVAL_NOT_ME_SCENARIO"], "N1")
-        self.assertTrue(env["EVAL_NOT_ME_STAGE_DIR"].replace("\\", "/").endswith("n1-1-test/N1.stage"))
+        self.assertEqual(PurePath(env["EVAL_NOT_ME_STAGE_DIR"]).parts[-2:], ("n1-1-test", "N1.stage"))
         self.assertNotIn("NOT_ME_FIXTURE_TOKEN", env)
         self.assertNotIn("GH_TOKEN", env)
 
@@ -182,7 +179,7 @@ class RunLiveTest(unittest.TestCase):
         run_live.main(self.args("--backend", "ledger", "--keep-temp", "--ledger", "/kept/intended-writes.jsonl"),
                       runner=rec, rid_factory=rids, out=io.StringIO())
         grade = next(a for n, a, _ in rec.calls if n == "grade")
-        self.assertEqual(grade[grade.index("--ledger") + 1], "/kept/intended-writes.jsonl")
+        self.assertEqual(Path(grade[grade.index("--ledger") + 1]), Path("/kept/intended-writes.jsonl"))
         self.assertEqual(grade[grade.index("--backend") + 1], "ledger")
 
     def test_ledger_backend_without_keep_temp_is_refused(self):
