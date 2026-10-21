@@ -491,9 +491,10 @@ def label_sync(gh: Any, repo: str, n: int, *, set_to: Optional[Sequence[str]] = 
 
 def followup(gh: Any, cfg: Any, title: str, body: str, source_number: Optional[int] = None,
              parent: Optional[int] = None, labels: Sequence[str] = (),
-             source_repo: Optional[str] = None) -> Dict[str, Any]:
-    """Create a follow-up issue in the tracker; optionally tick it into a parent issue's task list."""
-    tracker = _tracker(cfg, gh.ctx.origin_repo)
+             source_repo: Optional[str] = None, repo: Optional[str] = None) -> Dict[str, Any]:
+    """Create a follow-up issue in `repo` (default: the tracker); optionally tick it into a parent issue's task
+    list. The write gate decides whether `repo` may be written."""
+    tracker = repo or _tracker(cfg, gh.ctx.origin_repo)
     if not writes.valid_slug(tracker):
         raise ValueError("no tracker repository is known")
     text = body.rstrip()

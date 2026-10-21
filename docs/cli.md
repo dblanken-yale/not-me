@@ -172,13 +172,46 @@ Output: repo, number, title, state, url, author, author_trusted, labels, status,
 
 ### `notme pick-needs-work`
 
-The lowest-numbered open PR labeled needs work and assigned to the operator, by a trusted author.
+The lowest-numbered open PR labeled needs work and assigned to the operator, by a trusted author. With --include-answered, a PR labeled question (assigned to the operator) whose newest lead or authority comment is newer than the last not-me marker also counts, and carries answered: true.
 
 ```
-notme pick-needs-work
+notme pick-needs-work [--include-answered] [--exclude N]
 ```
 
-Output: repo, number, title, url, head_ref, labels, others; or none (with reason when paused)
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `--include-answered` | optional | also PRs labeled question that a lead or authority has answered since our last marker |
+| `--exclude N` | optional | skip this PR (repeatable) |
+
+Output: repo, number, title, url, head_ref, labels, answered (only when true), others; or none (with reason when paused)
+
+### `notme pr-children`
+
+Open PRs in the same repository whose base branch is this PR's head branch (stacked children), from trusted authors only; the others are listed in skipped with a reason.
+
+```
+notme pr-children REF
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `REF` | required |  |
+
+Output: repo, number, head, children ([{number, url, head, base, author}]), skipped
+
+### `notme pr-by-head`
+
+Open PRs in the repository (--repo, default origin) whose head branch is BRANCH, same-repository PRs from trusted authors only (others are listed in skipped). Used to find the predecessor of a "Builds on" line.
+
+```
+notme pr-by-head BRANCH
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `BRANCH` | required |  |
+
+Output: repo, branch, prs ([{number, url, head, base, author}]), skipped
 
 ### `notme claim-pr`
 
@@ -225,6 +258,21 @@ notme bundle REF
 | `REF` | required |  |
 
 Output: the feedback.Bundle fields (repo, number, title, body, head_ref, head_sha, base, state, author, author_trusted, labels, review_requests, linked_issue, companions, checks, ...)
+
+### `notme wait-checks`
+
+Poll the PR's checks (as `notme bundle` reports them) every 30 seconds until every check has a conclusion or the time is up. This is the one long-running read: it can take as long as --minutes (default limits.ci_wait_minutes). It exits 0 whatever the state; the skill decides what a failure means. With no checks at all the state is none, at once.
+
+```
+notme wait-checks REF [--minutes N]
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `REF` | required |  |
+| `--minutes N` | optional | give up after N minutes (default limits.ci_wait_minutes) |
+
+Output: state (success, failure, pending or none), checks, waited_s
 
 ### `notme feedback`
 
@@ -286,15 +334,15 @@ Output: repo, number, kind, from, to, labels
 
 ### `notme labels-sync`
 
-Make an item's labels match: --set replaces the whole set, --add and --remove edit it. --check only reports.
+Make an item's labels match: --set replaces the whole set, --add and --remove edit it. --check only reports. A bare number is an item in the tracker; owner/name#N or a URL names an item in another allowed repository (a companion PR).
 
 ```
-notme labels-sync N [--set a,b] [--add a,b] [--remove a,b] [--check]
+notme labels-sync N|REF [--set a,b] [--add a,b] [--remove a,b] [--check]
 ```
 
 | Argument | Required | Meaning |
 |----------|----------|---------|
-| `N` | required |  |
+| `N|REF` | required | a number (in the tracker), #N, owner/name#N or a URL |
 | `--set a,b` | optional | replace the whole label set |
 | `--add a,b` | optional | labels to add |
 | `--remove a,b` | optional | labels to remove (not with --set) |
@@ -484,9 +532,26 @@ Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
 Output: repo, number, resolved
 
+### `notme issue-edit-body`
+
+Replace an issue's body with a file's text (no attribution is added). The file must pass the input-path checks; the target repository goes through the write gate.
+
+```
+notme issue-edit-body N|REF --body-file F
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `N|REF` | required | a number (in the tracker), #N, owner/name#N or a URL |
+| `--body-file F` | required |  |
+
+Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
+
+Output: repo, number, updated
+
 ### `notme followup`
 
-Create a follow-up issue in the tracker; --parent also ticks it into that issue's task list.
+Create a follow-up issue in the tracker, or in --repo when given (the allow list decides whether that repo may be written); --parent also ticks it into that issue's task list, which must be in the same repo.
 
 ```
 notme followup --title-file F --body-file F [--source N] [--parent N] [--labels a,b]
@@ -595,6 +660,61 @@ notme log last [--skill S]
 | `--skill S` | optional |  |
 
 Output: path, skill, ref, run_id, status, entries; or none
+
+### `notme log list`
+
+Run logs under the log root, newest first (by file name, which starts with a timestamp), optionally of one skill.
+
+```
+notme log list [--skill S] [--limit N]
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `--skill S` | optional |  |
+| `--limit N` | optional | at most N logs (default 20) (default 20) |
+
+Output: logs ([{path, run_id, skill, ref, status}])
+
+### `notme retro save`
+
+Copy an audit markdown file (an allowed input file) to <git-common-dir>/not-me/retro/<RID>.md. With --reviewed, also add RID to reviewed.txt there (once). Local files only: nothing is sent to GitHub.
+
+```
+notme retro save --run-id RID --audit-file F [--reviewed]
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `--run-id RID` | required |  |
+| `--audit-file F` | required |  |
+| `--reviewed` | optional | also mark the run as reviewed |
+
+Output: run_id, path, reviewed
+
+### `notme retro reviewed`
+
+The run ids marked reviewed, oldest first.
+
+```
+notme retro reviewed
+```
+
+Output: reviewed ([run ids])
+
+### `notme retro is-reviewed`
+
+Whether the run id is in the reviewed list.
+
+```
+notme retro is-reviewed RID
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `RID` | required |  |
+
+Output: run_id, reviewed
 
 ### `notme allow-repo add`
 
@@ -766,6 +886,20 @@ notme git worktree-remove PATH
 | `PATH` | required |  |
 
 Output: path, removed
+
+### `notme git remote-branch-exists`
+
+Whether origin has the branch (git ls-remote --exit-code --heads origin NAME), and its sha.
+
+```
+notme git remote-branch-exists NAME
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `NAME` | required |  |
+
+Output: exists, sha (null when it does not exist)
 
 ### `notme git status`
 

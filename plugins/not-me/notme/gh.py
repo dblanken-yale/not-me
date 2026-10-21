@@ -492,11 +492,14 @@ class GhClient:
         return self.read(["pr", "view", str(_num(n)), "-R", repo, "--json", _PR_FIELDS])
 
     def pr_list(self, repo: str, label: Optional[str] = None, assignee: Optional[str] = None,
-                state: str = "open") -> List[Dict[str, Any]]:
+                state: str = "open", head: Optional[str] = None, base: Optional[str] = None,
+                limit: Optional[int] = None) -> List[Dict[str, Any]]:
         self._repo(repo)
         argv = ["pr", "list", "-R", repo, "--state", state, "--json",
-                "number,title,headRefName,baseRefName,isDraft,author,labels,assignees,url"]
+                "number,title,headRefName,baseRefName,isDraft,isCrossRepository,author,labels,assignees,url"]
         argv += _repeat("--label", [label] if label else []) + _repeat("--assignee", [assignee] if assignee else [])
+        argv += _repeat("--head", [head] if head else []) + _repeat("--base", [base] if base else [])
+        argv += _repeat("--limit", [str(_num(limit))] if limit else [])
         return self.read(argv) or []
 
     def reviews(self, repo: str, n: int) -> List[Dict[str, Any]]:

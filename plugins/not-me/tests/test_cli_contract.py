@@ -117,7 +117,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual({" ".join(path) for path in cli.leaf_parsers(parser)}, known)
         self.assertEqual({k.split()[0] for k in known}, found)
         for name in ("me", "config", "preflight", "pick-issue", "claim-issue", "release-issue", "move-issue", "issue",
-                     "pick-needs-work", "claim-pr", "release-pr", "bundle", "feedback", "transition", "labels-sync",
+                     "pick-needs-work", "pr-children", "pr-by-head", "wait-checks", "issue-edit-body", "retro", "claim-pr", "release-pr", "bundle", "feedback", "transition", "labels-sync",
                      "labels-ensure", "reply-thread", "comment-upsert", "request-review", "pr-body", "pr-open",
                      "companion-prs", "testing-steps", "review-post", "resolve-threads", "pick-reviews",
                      "prove-target", "followup", "check-text", "log", "allow-repo", "guard", "git", "status",
@@ -151,10 +151,13 @@ class OutputShapeTests(CliCase):
     def test_every_read_command_emits_one_json_object(self):
         add_pr_state(self.fake)
         cases = [["me"], ["config"], ["config", "--explain"], ["config", "--check"], ["pick-issue"],
-                 ["issue", "1"], ["pick-needs-work"], ["bundle", "3"], ["feedback", "3"], ["pick-reviews"],
+                 ["issue", "1"], ["pick-needs-work"], ["pick-needs-work", "--include-answered", "--exclude", "3"], ["bundle", "3"],
+                 ["pr-children", "3"], ["pr-by-head", "feat/widget"], ["wait-checks", "3", "--minutes", "0"],
+                 ["feedback", "3"], ["pick-reviews"],
                  ["prove-target", "3"], ["labels-ensure", "--check"], ["labels-sync", "1", "--set", "to do", "--check"],
                  ["check-text", "--file", self.write_file("t.md", "fine\n")], ["status"], ["allow-repo", "list"],
-                 ["log", "last"], ["guard", "selftest"], ["doctor"]]
+                 ["log", "last"], ["log", "list"],
+                 ["guard", "selftest"], ["doctor"]]
         for argv in cases:
             with self.subTest(argv=argv):
                 code, payload, _ = self.cli(*argv)
@@ -178,7 +181,11 @@ class ExitCodeTests(CliCase):
         for argv in ([], ["nonsense"], ["issue"], ["issue", "not-a-ref"], ["labels-sync", "1"],
                      ["labels-sync", "1", "--set", "a", "--add", "b"],
                      ["labels-sync", "1", "--set", "a", "--remove", "b"], ["claim-issue", "1", "--bogus"],
-                     ["move-issue", "1", "--to", "nope"]):
+                     ["move-issue", "1", "--to", "nope"], ["pr-by-head"], ["pr-by-head", "a..b"],
+                     ["pr-by-head", "-x"], ["pr-children"], ["wait-checks", "3", "--minutes", "-1"],
+                     ["wait-checks", "3", "--minutes", "soon"], ["retro", "save"], ["retro", "save", "--run-id", "r"],
+                     ["retro", "is-reviewed"], ["log", "list", "--limit", "x"], ["issue-edit-body", "1"], ["git", "remote-branch-exists"],
+                     ["git", "remote-branch-exists", "a..b"], ["pick-needs-work", "--exclude", "x"]):
             with self.subTest(argv=argv):
                 code, payload, _ = self.cli(*argv)
                 self.assertEqual(code, 2, payload)
@@ -340,6 +347,7 @@ class DryRunTests(CliCase):
             "review-post": ["review-post", "3", "--event", "COMMENT", "--body-file", body],
             "resolve-threads": ["resolve-threads", "3", "--ids-file", str(self.project / "ids.json")],
             "followup": ["followup", "--title-file", title, "--body-file", body, "--parent", "1"],
+            "issue-edit-body": ["issue-edit-body", "1", "--body-file", body],
             "claim-pr": ["claim-pr", "3"],
             "release-pr": ["release-pr", "3"],
         }
@@ -386,7 +394,7 @@ class DryRunTests(CliCase):
 
 class NoneResultTests(CliCase):
     def test_none_result_is_exit_zero(self):
-        for argv in (["pick-needs-work"], ["pick-reviews"], ["log", "last"], ["prove-target", "3"]):
+        for argv in (["pick-needs-work"], ["pick-needs-work", "--include-answered"], ["pick-reviews"], ["log", "last"], ["prove-target", "3"]):
             with self.subTest(argv=argv):
                 self.assertTrue(self.ok(*argv)["none"])
 

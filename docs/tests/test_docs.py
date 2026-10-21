@@ -1,4 +1,4 @@
-"""Checks on the four user guides: requirements, install, config and guards.
+"""Checks on the user guides: requirements, install, config, guards, workflow and testing, and the READMEs.
 
 Run through scripts/run-tests.py, which puts plugins/not-me on sys.path.
 """
@@ -20,6 +20,11 @@ from notme import frontmatter  # noqa: E402
 GUIDES = ("requirements.md", "install.md", "config.md", "guards.md")
 DOC_NAMES = ("project", "standards", "verify", "review", "prove")
 RULES = ("other_repo", "protected_branches", "force_push", "destructive_git")
+NEW_DOCS = ("workflow.md", "testing.md")
+READMES = (ROOT / "README.md", PLUGIN / "README.md")
+VERBS = ("NONE", "PR", "PUSHED", "PARKED", "HELD", "REVIEWED", "PROVED", "FAILED", "STOP")
+SKILLS = ("not-me", "new", "update", "review", "prove", "ticket", "retro", "status", "setup", "config",
+          "doctor", "allow-repo")
 
 # Built from pieces so this file does not trip the repo's own denylist lint.
 FORBIDDEN = (
@@ -178,6 +183,97 @@ class TestInstallDoc(unittest.TestCase):
         for phrase in ("/plugin marketplace add dblanken-" + "ya" + "le/not-me", "/plugin install not-me@not-me",
                        "/plugin update not-me@not-me", "/not-me:doctor", "/not-me:setup", "gh auth refresh -s project"):
             self.assertIn(phrase.lower(), self.text)
+
+
+def skill_command(name: str) -> str:
+    return "/not-me" if name == "not-me" else f"/not-me:{name}"
+
+
+class TestWorkflowAndTestingDocs(unittest.TestCase):
+    def test_docs_exist_and_are_not_empty(self):
+        for name in NEW_DOCS:
+            path = DOCS / name
+            self.assertTrue(path.is_file(), f"{name} is missing")
+            self.assertGreater(len(path.read_text(encoding="utf-8").strip()), 2000, f"{name} is too short")
+
+    def test_no_forbidden_strings_or_em_dashes(self):
+        for name in NEW_DOCS:
+            text = read(name)
+            self.assertNotIn(EM_DASH, text, f"{name} contains an em dash")
+            for token in FORBIDDEN:
+                self.assertNotIn(token.lower(), text.lower(), f"{name} contains {token!r}")
+
+    def test_workflow_mentions_every_label_name(self):
+        text = read("workflow.md")
+        labels = default_meta("project")["labels"]
+        self.assertEqual(len(labels), 11)
+        for key, name in labels.items():
+            self.assertIn(f"`{name}`", text, f"workflow.md never names the label {name!r} ({key})")
+
+    def test_workflow_mentions_every_verb(self):
+        text = read("workflow.md")
+        for verb in VERBS:
+            self.assertIn(f"`{verb}`", text, f"workflow.md never explains the verb {verb}")
+
+    def test_workflow_has_a_state_diagram_and_core_topics(self):
+        text = read("workflow.md")
+        self.assertIn("```mermaid", text)
+        self.assertIn("stateDiagram-v2", text)
+        for phrase in ("needs human", "PAUSED", "/loop 2h /not-me --bg", "dry-run", "First week", "Companion",
+                       "Delegation"):
+            self.assertIn(phrase, text, f"workflow.md never mentions {phrase!r}")
+
+    def test_testing_names_every_script(self):
+        text = read("testing.md")
+        scripts = sorted(p.name for p in (ROOT / "scripts").iterdir() if p.is_file() and p.suffix in (".py", ".sh"))
+        self.assertTrue(scripts)
+        for name in scripts:
+            self.assertIn(name, text, f"testing.md never names scripts/{name}")
+        for name in ("run_guard_cases.py", "seed_fixture.py", "eval-live.sh"):
+            self.assertIn(name, text)
+
+    def test_testing_explains_both_fixture_repos(self):
+        text = read("testing.md").lower()
+        for phrase in ("fixture repo", "companion repo", "eval-lock", "_github", "post-as-bot", "github", "ledger",
+                       "safety", "outcome", "quality"):
+            self.assertIn(phrase, text, f"testing.md never mentions {phrase!r}")
+
+    def test_docs_are_linked_from_the_readmes(self):
+        for readme in READMES:
+            text = readme.read_text(encoding="utf-8")
+            for doc in ("requirements", "install", "config", "guards", "workflow", "cli", "testing", "release"):
+                self.assertIn(f"docs/{doc}.md", text, f"{readme.name} does not link docs/{doc}.md")
+
+
+class TestReadmes(unittest.TestCase):
+    def table_names(self, text: str) -> set:
+        rows = (line for line in text.splitlines() if line.startswith("| `/not-me"))
+        out = set()
+        for row in rows:
+            m = re.match(r"\| `(/not-me(?::[a-z-]+)?)", row)
+            if m:
+                out.add(m.group(1))
+        return out
+
+    def test_command_tables_list_all_twelve_skills(self):
+        wanted = {skill_command(n) for n in SKILLS}
+        self.assertEqual(len(wanted), 12)
+        for readme in READMES:
+            found = self.table_names(readme.read_text(encoding="utf-8"))
+            self.assertEqual(found, wanted, f"{readme.relative_to(ROOT)} command table differs")
+
+    def test_table_matches_the_skills_directory_when_present(self):
+        skills = PLUGIN / "skills"
+        if not skills.is_dir():
+            self.skipTest("skills are not on this branch yet")
+        self.assertEqual({p.name for p in skills.iterdir() if p.is_dir()}, set(SKILLS))
+
+    def test_readmes_have_no_forbidden_strings_or_em_dashes(self):
+        for readme in READMES:
+            text = readme.read_text(encoding="utf-8")
+            self.assertNotIn(EM_DASH, text, f"{readme.name} contains an em dash")
+            for token in FORBIDDEN:
+                self.assertNotIn(token.lower(), text.lower(), f"{readme.name} contains {token!r}")
 
 
 if __name__ == "__main__":

@@ -35,6 +35,7 @@ import re
 import secrets
 import shlex
 import sys
+import time
 from datetime import datetime, timezone
 from enum import IntEnum
 from pathlib import Path
@@ -197,8 +198,12 @@ class Deps:
     def __init__(self, runner: Optional[gh_mod.Runner] = None, env: Optional[Mapping[str, str]] = None,
                  stdin: Optional[TextIO] = None, stdout: Optional[TextIO] = None, stderr: Optional[TextIO] = None,
                  hook_cmd: Optional[List[str]] = None, cwd: Optional[str] = None,
-                 argv: Sequence[str] = (), process_check: Optional[Callable[[], bool]] = None):
+                 argv: Sequence[str] = (), sleep: Optional[Callable[[float], None]] = None,
+                 clock: Optional[Callable[[], float]] = None,
+                 process_check: Optional[Callable[[], bool]] = None):
         self.runner = runner
+        self.sleep: Callable[[float], None] = sleep or time.sleep
+        self.clock: Callable[[], float] = clock or time.monotonic
         self.env: Mapping[str, str] = os.environ if env is None else env
         self.stdin = stdin if stdin is not None else sys.stdin
         self.stdout = stdout if stdout is not None else sys.stdout
@@ -579,7 +584,7 @@ class Command:
 
 
 COMMANDS: List[Command] = []
-GROUPS = {"log": "run logs", "allow-repo": "the global allow list of repos and boards", "guard": "the write guard",
+GROUPS = {"log": "run logs", "retro": "retro audits kept in the git directory", "allow-repo": "the global allow list of repos and boards", "guard": "the write guard",
           "git": "git operations behind the write gate"}
 GLOBAL_FLAGS: List[Arg] = [
     arg("--project-dir", metavar="P", help="project directory (default: the git toplevel of the working "
@@ -767,29 +772,56 @@ def cmd_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict
 # --- handlers: pull requests ---------------------------------------------------
 
 
-@command("pick-needs-work", "the next PR to rework", running="none")
+@command("pick-needs-work", "the next PR to rework", running="none", args=[
+    arg("--include-answered", action="store_true",
+        help="also PRs labeled question that a lead or authority has answered since our last marker"),
+    arg("--exclude", type=int, action="append", metavar="N", help="skip this PR (repeatable)")])
 def cmd_pick_needs_work(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """The lowest-numbered open PR labeled needs work and assigned to the operator, by a trusted author.
+    With --include-answered, a PR labeled question (assigned to the operator) whose newest lead or authority
+    comment is newer than the last not-me marker also counts, and carries answered: true.
 
-    Output: repo, number, title, url, head_ref, labels, others; or none (with reason when paused)
+    Output: repo, number, title, url, head_ref, labels, answered (only when true), others; or none (with reason
+    when paused)
     """
-    labels = ctx.labels
-    operator, roster = ctx.operator, ctx.roster
-    skip = {labels.name("paused").lower(), labels.name("needs_human").lower()}
-    found = []
-    for pr in sorted(ctx.gh.pr_list(ctx.repo, label=labels.name("needs_work"), assignee=operator),
-                     key=lambda p: p["number"]):
-        author = login_of(pr.get("author"))
-        names = names_of(pr.get("labels"))
-        if pr.get("isDraft") or skip & {n.lower() for n in names}:
-            continue
-        if feedback_mod.trusted(roster, author) or author.lower() == operator.lower():
-            found.append((pr, names))
+    legacy = (ctx.meta.get("markers") or {}).get("legacy") or []
+    found = feedback_mod.needs_work_candidates(ctx.gh, ctx.repo, ctx.operator, ctx.roster, ctx.labels,
+                                               include_answered=args.include_answered, exclude=args.exclude or (),
+                                               legacy_markers=legacy)
     if not found:
         return {"none": True}
-    pr, names = found[0]
+    top = found[0]
+    pr = top["pr"]
     return {"repo": ctx.repo, "number": pr["number"], "title": pr.get("title"), "url": pr.get("url"),
-            "head_ref": pr.get("headRefName"), "labels": names, "others": [p["number"] for p, _ in found[1:]]}
+            "head_ref": pr.get("headRefName"), "labels": top["labels"],
+            **({"answered": True} if top["answered"] else {}), "others": [c["pr"]["number"] for c in found[1:]]}
+
+
+@command("pr-children", "open PRs stacked on a PR's branch", ref="repo", args=[ref_arg])
+def cmd_pr_children(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
+    """Open PRs in the same repository whose base branch is this PR's head branch (stacked children), from
+    trusted authors only; the others are listed in skipped with a reason.
+
+    Output: repo, number, head, children ([{number, url, head, base, author}]), skipped
+    """
+    head = ctx.gh.pr(repo, n).get("headRefName")
+    if not isinstance(head, str) or not head:
+        raise fail(ExitCode.ERROR, "not_found", f"{repo}#{n} has no head branch")
+    children, skipped = feedback_mod.stacked_children(ctx.gh, repo, ctx.roster, head)
+    return {"repo": repo, "number": n, "head": head, "children": [c for c in children if c["number"] != n],
+            "skipped": [s for s in skipped if s["number"] != n]}
+
+
+@command("pr-by-head", "open PRs with a head branch", args=[arg("branch", metavar="BRANCH")])
+def cmd_pr_by_head(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """Open PRs in the repository (--repo, default origin) whose head branch is BRANCH, same-repository PRs from
+    trusted authors only (others are listed in skipped). Used to find the predecessor of a "Builds on" line.
+
+    Output: repo, branch, prs ([{number, url, head, base, author}]), skipped
+    """
+    git_mod.valid_branch(args.branch)
+    found, skipped = feedback_mod.prs_by_head(ctx.gh, ctx.repo, ctx.roster, args.branch)
+    return {"repo": ctx.repo, "branch": args.branch, "prs": found, "skipped": skipped}
 
 
 @command("claim-pr", "claim a PR for this run", writes=True, running="error", ref="repo", args=[ref_arg])
@@ -823,6 +855,27 @@ def cmd_bundle(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dic
     """
     return feedback_mod.bundle(ctx.gh, repo, n, ctx.roster, tracker=ctx.tracker,
                                repos=ctx.meta.get("repos") or [ctx.tracker]).to_dict()
+
+
+@command("wait-checks", "wait for a PR's checks to finish", ref="repo", args=[
+    ref_arg, arg("--minutes", type=float, metavar="N", help="give up after N minutes (default limits.ci_wait_minutes)")])
+def cmd_wait_checks(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
+    """Poll the PR's checks (as `notme bundle` reports them) every 30 seconds until every check has a conclusion
+    or the time is up. This is the one long-running read: it can take as long as --minutes (default
+    limits.ci_wait_minutes). It exits 0 whatever the state; the skill decides what a failure means. With no
+    checks at all the state is none, at once.
+
+    Output: state (success, failure, pending or none), checks, waited_s
+    """
+    minutes = args.minutes if args.minutes is not None else float((ctx.meta.get("limits") or {}).get(
+        "ci_wait_minutes", 20))
+    if minutes < 0:
+        raise fail(ExitCode.USAGE, "usage", "--minutes must not be negative")
+
+    def fetch() -> List[Dict[str, Any]]:
+        return feedback_mod.bundle(ctx.gh, repo, n, ctx.roster, tracker=ctx.tracker, repos=[]).checks
+
+    return feedback_mod.wait_checks(fetch, minutes, sleep=ctx.deps.sleep, clock=ctx.deps.clock)
 
 
 @command("feedback", "trusted review findings on a PR", ref="repo", args=[
@@ -884,13 +937,14 @@ def cmd_transition(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
 
 
 @command("labels-sync", "make an item's labels match", writes=True, ref="tracker", args=[
-    number_arg,
+    arg("number", metavar="N|REF", help="a number (in the tracker), #N, owner/name#N or a URL"),
     OneOf(arg("--set", metavar="a,b", help="replace the whole label set"),
           arg("--add", metavar="a,b", help="labels to add")),
     arg("--remove", metavar="a,b", help="labels to remove (not with --set)"),
     arg("--check", action="store_true", help="only report whether the labels match")])
 def cmd_labels_sync(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
-    """Make an item's labels match: --set replaces the whole set, --add and --remove edit it. --check only reports.
+    """Make an item's labels match: --set replaces the whole set, --add and --remove edit it. --check only reports. A bare number
+    is an item in the tracker; owner/name#N or a URL names an item in another allowed repository (a companion PR).
 
     Output: repo, number, in_sync, changed, labels (current, or the new set)
     """
@@ -1055,16 +1109,31 @@ def cmd_resolve_threads(ctx: Context, args: argparse.Namespace, repo: str, n: in
     return {"repo": repo, "number": n, "resolved": writeback.resolve_fixed_threads(ctx.gh, repo, n, ids)}
 
 
+@command("issue-edit-body", "replace an issue's body", writes=True, ref="tracker", args=[
+    arg("number", metavar="N|REF", help="a number (in the tracker), #N, owner/name#N or a URL"), body_file_arg])
+def cmd_issue_edit_body(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
+    """Replace an issue's body with a file's text (no attribution is added). The file must pass the input-path
+    checks; the target repository goes through the write gate.
+
+    Output: repo, number, updated
+    """
+    with gh_mod.tmp_text_file(ctx.read_input(args.body_file), prefix="not-me-cli-") as path:
+        ctx.gh.issue_edit_body(repo, n, path)
+    return {"repo": repo, "number": n, "updated": True}
+
+
 @command("followup", "create a follow-up issue", writes=True, args=[
     title_file_arg, body_file_arg, arg("--source", type=int, metavar="N"), arg("--parent", type=int, metavar="N"),
     labels_arg])
 def cmd_followup(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Create a follow-up issue in the tracker; --parent also ticks it into that issue's task list.
+    """Create a follow-up issue in the tracker, or in --repo when given (the allow list decides whether that repo
+    may be written); --parent also ticks it into that issue's task list, which must be in the same repo.
 
     Output: number, url (both null in a dry run), parent
     """
     return writeback.followup(ctx.gh, ctx.cfg, ctx.read_line(args.title_file), ctx.read_input(args.body_file),
-                              args.source, args.parent, csv(args.labels), source_repo=ctx.repo)
+                              args.source, args.parent, csv(args.labels), source_repo=ctx.repo,
+                              repo=ctx.repo if getattr(args, "repo", None) else None)
 
 
 @command("check-text", "lint a text bound for GitHub", args=[
@@ -1165,6 +1234,101 @@ def cmd_log_last(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
         return {"none": True}
     return {"path": str(log.path), "skill": log.skill, "ref": log.ref, "run_id": log.run_id, "status": log.status,
             "entries": len(log.entries)}
+
+
+@command("log list", "recent run logs, newest first", args=[
+    arg("--skill", metavar="S"), arg("--limit", type=int, default=20, metavar="N", help="at most N logs (default 20)")])
+def cmd_log_list(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """Run logs under the log root, newest first (by file name, which starts with a timestamp), optionally of one
+    skill.
+
+    Output: logs ([{path, run_id, skill, ref, status}])
+    """
+    if args.limit < 1:
+        raise fail(ExitCode.USAGE, "usage", "--limit must be at least 1")
+    root = ctx.log_root()
+    if not root.is_dir():
+        return {"logs": []}
+    folders = [root / runlog._slug(args.skill)] if args.skill else [p for p in root.iterdir() if p.is_dir()]
+    files = sorted((f for folder in folders if folder.is_dir() for f in folder.glob("*.md")),
+                   key=lambda f: (f.name, str(f)), reverse=True)
+    out: List[Dict[str, Any]] = []
+    for file in files:
+        if len(out) >= args.limit:
+            break
+        try:
+            log = runlog.RunLog.open(file)
+        except (OSError, ValueError):
+            continue
+        out.append({"path": str(file), "run_id": log.run_id, "skill": log.skill, "ref": log.ref,
+                    "status": log.status})
+    return {"logs": out}
+
+
+# --- handlers: retro audits -------------------------------------------------------
+
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+REVIEWED_FILE = "reviewed.txt"
+
+
+def _retro_dir(ctx: Context) -> Path:
+    common = paths.git_common_dir(ctx.need_work_dir())
+    if common is None:
+        raise fail(ExitCode.ERROR, "git_error", "the project is not a git checkout, so there is no retro directory")
+    return common / "not-me" / "retro"
+
+
+def _run_id(value: str) -> str:
+    if not _RUN_ID_RE.match(value or ""):
+        raise fail(ExitCode.USAGE, "usage", f"invalid run id {value!r}: letters, digits, dot, dash, underscore")
+    return value
+
+
+def _reviewed_ids(retro: Path) -> List[str]:
+    try:
+        lines = (retro / REVIEWED_FILE).read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    return [ln.strip() for ln in lines if ln.strip()]
+
+
+@command("retro save", "keep a retro audit in the git directory", args=[
+    arg("--run-id", required=True, metavar="RID"), arg("--audit-file", required=True, metavar="F"),
+    arg("--reviewed", action="store_true", help="also mark the run as reviewed")])
+def cmd_retro_save(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """Copy an audit markdown file (an allowed input file) to <git-common-dir>/not-me/retro/<RID>.md. With
+    --reviewed, also add RID to reviewed.txt there (once). Local files only: nothing is sent to GitHub.
+
+    Output: run_id, path, reviewed
+    """
+    rid = _run_id(args.run_id)
+    text = ctx.read_input(args.audit_file)
+    retro = _retro_dir(ctx)
+    target = retro / f"{rid}.md"
+    runlog._atomic_write(target, text)
+    if args.reviewed and rid not in _reviewed_ids(retro):
+        with open(retro / REVIEWED_FILE, "a", encoding="utf-8", newline="\n") as handle:
+            handle.write(rid + "\n")
+    return {"run_id": rid, "path": str(target), "reviewed": rid in _reviewed_ids(retro)}
+
+
+@command("retro reviewed", "list the reviewed runs")
+def cmd_retro_reviewed(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """The run ids marked reviewed, oldest first.
+
+    Output: reviewed ([run ids])
+    """
+    return {"reviewed": _reviewed_ids(_retro_dir(ctx))}
+
+
+@command("retro is-reviewed", "has a run been reviewed", args=[arg("run_id", metavar="RID")])
+def cmd_retro_is_reviewed(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """Whether the run id is in the reviewed list.
+
+    Output: run_id, reviewed
+    """
+    rid = _run_id(args.run_id)
+    return {"run_id": rid, "reviewed": rid in _reviewed_ids(_retro_dir(ctx))}
 
 
 # --- handlers: allow list, guard, git ----------------------------------------------
@@ -1365,6 +1529,16 @@ def cmd_git_worktree_remove(ctx: Context, args: argparse.Namespace) -> Dict[str,
     """
     git_mod.worktree_remove(args.path, ctx.need_work_dir())
     return {"path": args.path, "removed": True}
+
+
+@command("git remote-branch-exists", "does origin have a branch", args=[arg("name", metavar="NAME")])
+def cmd_git_remote_branch_exists(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """Whether origin has the branch (git ls-remote --exit-code --heads origin NAME), and its sha.
+
+    Output: exists, sha (null when it does not exist)
+    """
+    sha = git_mod.remote_branch_sha(args.name, ctx.need_work_dir())
+    return {"exists": sha is not None, "sha": sha}
 
 
 @command("git status", "branch, cleanliness and origin")
@@ -1572,11 +1746,13 @@ def _log_line(cmd: Command, args: argparse.Namespace, dry: bool) -> str:
 def main(argv: Optional[Sequence[str]] = None, *, runner: Optional[gh_mod.Runner] = None,
          env: Optional[Mapping[str, str]] = None, stdin: Optional[TextIO] = None, stdout: Optional[TextIO] = None,
          stderr: Optional[TextIO] = None, hook_cmd: Optional[List[str]] = None, cwd: Optional[str] = None,
+         sleep: Optional[Callable[[float], None]] = None, clock: Optional[Callable[[], float]] = None,
          process_check: Optional[Callable[[], bool]] = None) -> int:
     """Run one invocation and return its exit code. The keyword arguments let tests inject the gh runner,
-    environment, streams, hook command, working directory and the Claude Code ancestry check."""
+    environment, streams, hook command, working directory, the sleep and clock `wait-checks` uses, and the
+    Claude Code ancestry check."""
     argv = list(sys.argv[1:] if argv is None else argv)
-    deps = Deps(runner, env, stdin, stdout, stderr, hook_cmd, cwd, argv, process_check)
+    deps = Deps(runner, env, stdin, stdout, stderr, hook_cmd, cwd, argv, sleep, clock, process_check)
     code, payload = int(ExitCode.OK), {}
     try:
         try:

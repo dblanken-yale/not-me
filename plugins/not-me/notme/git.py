@@ -38,6 +38,11 @@ def _run(args: Sequence[str], cwd: Any = None, check: bool = True) -> "subproces
     return proc
 
 
+def valid_branch(name: str) -> str:
+    """`name` when it is a plain branch name; ValueError (a usage error) otherwise."""
+    return _branch(name)
+
+
 def _branch(name: str) -> str:
     """A plain branch name: no leading dash or plus, no refspec colon, no spaces."""
     if not isinstance(name, str) or not _BRANCH_RE.fullmatch(name) or ".." in name:
@@ -81,6 +86,21 @@ def default_branch(gh: Any = None, origin_slug: Optional[str] = None, cwd: Any =
 
 def fetch(*refs: str, remote: str = "origin", cwd: Any = None) -> None:
     _run(["fetch", "--", _branch(remote), *[_branch(r) for r in refs]], cwd)
+
+
+def remote_branch_sha(name: str, cwd: Any = None) -> Optional[str]:
+    """The sha of origin's branch `name`, or None when origin has no such branch (ls-remote --exit-code exits 2)."""
+    proc = _run(["ls-remote", "--exit-code", "--heads", "origin", _branch(name)], cwd, check=False)
+    if proc.returncode == 2:
+        return None
+    if proc.returncode != 0:
+        raise GitError(["ls-remote"], proc.returncode, proc.stderr)
+    want = f"refs/heads/{name}"
+    for line in proc.stdout.splitlines():
+        sha, _, ref = line.partition("\t")
+        if ref.strip() == want:
+            return sha.strip()
+    return None
 
 
 def merge_base_into_current(base: str, cwd: Any = None) -> bool:
