@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# not-me command line: finds Python 3.9+ (see notme-python) and runs cli/notme.py.
+set -u
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+bin_dir="$(cd -P "$(dirname "$src")" && pwd)"
+plugin_root="$(dirname "$bin_dir")"
+
+exec bash "$bin_dir/notme-python" "$plugin_root/cli/notme.py" "$@"
