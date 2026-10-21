@@ -12,7 +12,7 @@ import subprocess
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 VALUE_FLAGS = {"-X", "--method", "-R", "--json", "-f", "-F", "--input", "--body-file", "--head", "--base",
-               "--title", "--label", "--reviewer", "--assignee", "--state"}
+               "--title", "--limit", "--label", "--reviewer", "--assignee", "--state"}
 
 Result = Tuple[int, str, str]
 
@@ -134,6 +134,7 @@ class FakeGitHub:
                       "reviewDecision", "mergeable"):
                 full[k] = thing[k]
             full["reviewRequests"] = [{"login": r} for r in thing["reviewRequests"]]
+            full["statusCheckRollup"] = thing.get("statusCheckRollup", [])
         unknown = [f for f in fields if f not in full]
         if unknown:
             raise KeyError(f"Unknown JSON field: {unknown[0]!r}")
@@ -169,11 +170,16 @@ class FakeGitHub:
             wanted = [t for t in self._repo(repo_flag)["things"].values() if t["kind"] == "pr"]
             state = (flags.get("--state") or ["open"])[0].upper()
             wanted = [t for t in wanted if state == "ALL" or t["state"] == state]
+            for head_ref in flags.get("--head", []):
+                wanted = [t for t in wanted if t["headRefName"] == head_ref]
             for label in flags.get("--label", []):
                 wanted = [t for t in wanted if label in t["labels"]]
             for who in flags.get("--assignee", []):
                 wanted = [t for t in wanted if who in t["assignees"]]
             return [self._view(t, fields) for t in wanted]
+        if head == "pr" and verb == "checks":
+            thing = self._thing(repo_flag, pos[2])
+            return thing["checks"] if "checks" in thing else None  # no "checks" key: unsupported, exits 1
         if head == "pr" and verb == "create":
             return self._pr_create(repo_flag, flags)
         if head == "pr" and verb == "edit":
@@ -331,9 +337,16 @@ class FakeGitHub:
         if "reviewThreads" in query:
             number = re.search(r"pullRequest\(number:(\d+)\)", query).group(1)
             pr = self._thing(f"{variables['owner']}/{variables['name']}", number)
-            nodes = [{"id": t["id"], "isResolved": t["isResolved"], "comments": {"nodes": [
-                {**c, "author": {"login": c["author"]}} for c in t["comments"]]}} for t in pr.get("threads", [])]
-            return {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}}
+            def author(c: Dict[str, Any]) -> Any:  # a dict (with __typename) passes through; None stays null
+                a = c["author"]
+                return a if isinstance(a, dict) or a is None else {"login": a}
+
+            nodes = [{"id": t["id"], "isResolved": t["isResolved"], "isOutdated": t.get("isOutdated", False),
+                      "comments": {"nodes": [{**c, "author": author(c)} for c in t["comments"]]}}
+                     for t in pr.get("threads", [])]
+            reviews = [{**r, "author": author(r)} for r in pr.get("review_nodes", [])]
+            return {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes},
+                                                            "reviews": {"nodes": reviews}}}}}
         board = self.state["board"]
         if "updateProjectV2ItemFieldValue" in query:
             names = {o["id"]: o["name"] for o in board["status_field"]["options"]}
