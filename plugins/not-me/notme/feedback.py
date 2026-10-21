@@ -22,7 +22,8 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-from .gh import GhClient, GhError
+from . import claims
+from .gh import GhClient, GhError, login_of, names_of
 from .roster import Roster
 
 MARKER_UPDATE = "<!-- not-me:update -->"
@@ -467,3 +468,77 @@ def feedback(gh: GhClient, repo: str, n: int, roster: Roster, *, since_marker: O
     _comment_findings(fb, roster, comments, list(legacy_markers), since_marker)
     _dedupe(fb)
     return fb
+
+
+# --- issue view and review candidates -------------------------------------------
+
+
+def issue_view(gh: GhClient, repo: str, n: int, roster: Roster, operator: str, labels: Any) -> Dict[str, Any]:
+    """An issue's facts. The title, body and comments of an author the roster does not trust are withheld, and
+    an untrusted commenter's comments are always dropped (only counted). labels is a states.Labels."""
+    issue = gh.issue(repo, n)
+    author = login_of(issue.get("author"))
+    ok = trusted(roster, author) or author.lower() == operator.lower()
+    every = issue.get("comments") or []
+    comments = [c for c in every if trusted(roster, login_of(c.get("author")), (c.get("author") or {}).get("type"))]
+    names = names_of(issue.get("labels"))
+    current = labels.current(names)
+    return {"repo": repo, "number": issue.get("number"), "title": issue.get("title") if ok else None,
+            "state": issue.get("state"), "url": issue.get("url"), "author": author, "author_trusted": ok,
+            "labels": names, "status": current[0] if current else None,
+            "assignees": [login_of(a) for a in issue.get("assignees") or []],
+            "body": issue.get("body") if ok else None,
+            "comments": [{"id": c.get("id"), "author": login_of(c.get("author")), "body": c.get("body")}
+                         for c in comments] if ok else [],
+            "comments_ignored": len(every) - len(comments)}
+
+
+def review_candidates(gh: GhClient, repo: str, operator: str, roster: Roster,
+                      label: str) -> "tuple[List[Dict[str, Any]], List[Dict[str, Any]]]":
+    """(picks, skipped) among open PRs carrying `label`, lowest number first.
+
+    A pick is a non-draft PR where the operator is a requested reviewer, the author is trusted and is not the
+    operator, and something changed since the operator's last submitted review (a new head SHA, or a comment
+    by the author after it). picks: {number, why, head_sha, title, url}; skipped: {number, reason}.
+    """
+    me = operator.lower()
+    picks: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    for item in sorted(gh.pr_list(repo, label=label), key=lambda p: p["number"]):
+        n = item["number"]
+        pr = gh.pr(repo, n)
+        author = login_of(pr.get("author"))
+        requested = {login_of(r).lower() for r in pr.get("reviewRequests") or []}
+        reason = None
+        if pr.get("isDraft"):
+            reason = "draft"
+        elif me not in requested:
+            reason = "operator is not a requested reviewer"
+        elif author.lower() == me:
+            reason = "operator is the author"
+        elif not trusted(roster, author, (pr.get("author") or {}).get("type")):
+            reason = "author not trusted"
+        why = None if reason else _review_reason(gh, repo, n, pr, author, me)
+        if why is None:
+            skipped.append({"number": n, "reason": reason or "unchanged since the last review"})
+        else:
+            picks.append({"number": n, "why": why, "head_sha": pr.get("headRefOid"), "title": pr.get("title"),
+                          "url": item.get("url")})
+    return picks, skipped
+
+
+def _review_reason(gh: GhClient, repo: str, n: int, pr: Dict[str, Any], author: str, me: str) -> Optional[str]:
+    """Why the operator should look again, or None when nothing changed since their last review."""
+    reviews = [r for r in gh.reviews(repo, n)
+               if login_of(r.get("user")).lower() == me and r.get("state") != "PENDING"]
+    if not reviews:
+        return "never reviewed"
+    last = max(reviews, key=lambda r: (r.get("submitted_at") or "", r.get("id") or 0))
+    if last.get("commit_id") != pr.get("headRefOid"):
+        return "new commits since the last review"
+    since = claims.parse_ts(last.get("submitted_at"))
+    for c in gh.comments(repo, n):
+        if (c.get("author") or "").lower() == author.lower() and \
+                (since is None or (claims.parse_ts(c.get("created_at")) or since) > since):
+            return "author commented since the last review"
+    return None

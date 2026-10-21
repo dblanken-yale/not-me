@@ -5,13 +5,10 @@ Projects v2 board (board.BoardQueue).
 """
 from __future__ import annotations
 
-import contextlib
-import os
-import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 try:  # Protocol is 3.8+
     from typing import Protocol
@@ -19,7 +16,7 @@ except ImportError:  # pragma: no cover
     Protocol = object  # type: ignore
 
 from .. import claims, paths
-from ..gh import GhClient, _login, notme_tmp_dir
+from ..gh import GhClient, _login, tmp_text_file
 from ..states import Labels
 from ..writes import WriteTarget, valid_slug
 
@@ -59,6 +56,10 @@ class Queue(Protocol):
     def move(self, n: int, state: str, require_current: Optional[str] = None) -> None: ...
 
     def state(self, n: int) -> Optional[str]: ...
+
+
+class NotOpen(Exception):
+    """The pull request is closed or merged, so it cannot be claimed."""
 
 
 class BaseQueue:
@@ -108,18 +109,8 @@ class BaseQueue:
 
     # --- the marker comment ---
 
-    @contextlib.contextmanager
-    def _body_file(self, text: str) -> Iterator[Path]:
-        fd, name = tempfile.mkstemp(prefix="not-me-claim-", suffix=".md", dir=str(notme_tmp_dir()))
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        try:
-            yield Path(name)
-        finally:
-            try:
-                os.unlink(name)
-            except OSError:
-                pass
+    def _body_file(self, text: str):
+        return tmp_text_file(text, prefix="not-me-claim-")
 
     def marker_trusted(self, login: Optional[str]) -> bool:
         """Whose claim markers are believed: the operator and anyone the roster trusts."""
@@ -160,34 +151,102 @@ class BaseQueue:
 
     # --- local lock ---
 
-    def _lock_file(self, n: int) -> Optional[Path]:
-        return claims.lock_path(self.claims_dir, n) if self.claims_dir else None
+    def _lock_file(self, n: int, kind: str = "issue") -> Optional[Path]:
+        return claims.lock_path(self.claims_dir, n, kind) if self.claims_dir else None
 
-    def lock(self, n: int) -> None:
-        path = self._lock_file(n)
+    def lock(self, n: int, kind: str = "issue") -> None:
+        path = self._lock_file(n, kind)
         if path is not None:
             claims.acquire_lock(path, self.run_id, self.stale_hours, self.now())
 
-    def unlock(self, n: int) -> None:
-        path = self._lock_file(n)
+    def unlock(self, n: int, kind: str = "issue", force: bool = False) -> None:
+        """Drop our lock; force drops it whichever run holds it."""
+        path = self._lock_file(n, kind)
         if path is not None:
-            claims.release_lock(path, self.run_id)
+            claims.release_lock(path, None if force else self.run_id)
+
+    # --- pull request claims ---
+
+    def live_foreign_claims(self, n: int) -> List[Tuple[Dict[str, Any], Dict[str, str]]]:
+        """Unreleased, fresh claim markers on n written by someone other than the operator."""
+        return [(c, m) for c, m in self.marker_comments(n)
+                if not self._is_me(m.get("login")) and not claims.is_released(m)
+                and not claims.stale(m["ts"], self.stale_hours, self.now())]
+
+    def claim_pr(self, n: int) -> Optional[int]:
+        """Claim PR n of this queue's repo for this run: refuse a closed, paused or needs-human PR or a live
+        foreign claim, take the local lock, post the claim marker, then check no earlier claim raced it.
+
+        A dry run records the marker in the ledger and takes no lock. Returns the marker comment id (None in a
+        dry run). ClaimLost when someone else holds it, NotOpen when it is closed.
+        """
+        repo = self.tracker
+        pr = self.gh.pr(repo, n)
+        if str(pr.get("state", "OPEN")).upper() != "OPEN":
+            raise NotOpen(f"{repo}#{n} is not open")
+        names = {str(x.get("name") if isinstance(x, dict) else x).lower() for x in pr.get("labels") or []}
+        for role in ("paused", "needs_human"):
+            if self.labels.name(role).lower() in names:
+                raise claims.ClaimLost(f"{repo}#{n} is marked {role}")
+        other = self.live_foreign_claims(n)
+        if other:
+            raise claims.ClaimLost(f"{repo}#{n} is claimed by {other[0][1]['login']}")
+        if self.gh.dry_run:
+            return self.upsert_marker(n)
+        self.lock(n, "pr")
+        try:
+            marker_id = self.upsert_marker(n)
+            mine = self._mine(n)
+            ours = (claims.parse_ts(claims.parse_marker(mine["body"])["ts"]), mine["id"]) if mine else None
+            older = [m["login"] for c, m in self.live_foreign_claims(n)
+                     if ours and (claims.parse_ts(m["ts"]), c["id"]) < ours]
+            if older:
+                self.mark_released(n)
+                raise claims.ClaimLost(f"{repo}#{n} was claimed first by {older[0]}")
+        except BaseException:
+            self.unlock(n, "pr")
+            raise
+        return marker_id
+
+    def release_pr(self, n: int) -> None:
+        """Mark the operator's claim on PR n released and remove the local lock, whichever run holds it."""
+        self.mark_released(n)
+        if not self.gh.dry_run:
+            self.unlock(n, "pr", force=True)
 
 
-def make_queue(cfg: Any, gh: GhClient, roster: Any, operator: str, run_id: str, *, tracker: Optional[str] = None,
-               project_dir: Any = None, clock: Optional[claims.Clock] = None) -> Queue:
-    """The queue for `queue.source` (labels or board)."""
+def stale_claims(gh: GhClient, tracker: str, labels: Labels, hours: float, branches: Sequence[str],
+                 is_trusted: Callable[[Optional[str]], bool]) -> List[Dict[str, Any]]:
+    """Open in-progress issues whose newest trusted claim marker is older than `hours` and that have no `<n>-`
+    branch, as [{number, title, url}]. Only reports."""
+    from .labels import is_stale
+
+    name = labels.name("in_progress")
+    issues = gh.read(["issue", "list", "-R", tracker, "--state", "open", "--label", name,
+                      "--json", "number,title,url,labels,comments", "--limit", "100"]) or []
+    return [{"number": i["number"], "title": i.get("title"), "url": i.get("url")} for i in issues
+            if is_stale(i, hours, branches, name, is_trusted=is_trusted)]
+
+
+def make_queue(cfg: Any, gh: GhClient, roster: Any, operator: str, run_id: str, *, kind: str = "issue",
+               repo: Optional[str] = None, tracker: Optional[str] = None, project_dir: Any = None,
+               clock: Optional[claims.Clock] = None) -> Any:
+    """The queue for `queue.source` (labels or board); kind="pr" gives the BaseQueue that claims pull requests
+    of `repo`. Claim locks live in <git-common-dir>/not-me/claims of project_dir."""
     meta = (cfg.meta or {}).get("project", {})
-    source = (meta.get("queue") or {}).get("source", "labels")
-    slug = tracker or meta.get("tracker")
+    slug = repo or tracker or meta.get("tracker")
     if slug in (None, "auto"):
         slug = gh.ctx.origin_repo
     if not slug:
         raise ValueError("no tracker repo: set `tracker` in project.md or run inside a clone with an origin")
     where = project_dir or getattr(cfg, "project_dir", None)
     common = paths.git_common_dir(where) if where else None
-    claims_dir = common / "not-me" / "claims" if common else None
-    kwargs = dict(claims_dir=claims_dir, clock=clock)
+    kwargs = dict(claims_dir=common / "not-me" / "claims" if common else None, clock=clock)
+    if kind == "pr":
+        return BaseQueue(cfg, gh, roster, operator, run_id, slug, **kwargs)
+    if kind != "issue":
+        raise ValueError(f"queue kind must be issue or pr, got {kind!r}")
+    source = (meta.get("queue") or {}).get("source", "labels")
     if source == "labels":
         from .labels import LabelQueue
         return LabelQueue(cfg, gh, roster, operator, run_id, slug, **kwargs)

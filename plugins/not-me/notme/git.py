@@ -6,9 +6,11 @@ import os
 import re
 import secrets
 import subprocess
+from dataclasses import dataclass
 from typing import Any, Iterable, List, Optional, Sequence
 
 from . import paths
+from .redact import redact
 
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]*$")
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
@@ -18,7 +20,7 @@ class GitError(Exception):
     def __init__(self, cmd: Sequence[str], returncode: int, stderr: str = ""):
         self.cmd = list(cmd)
         self.returncode = returncode
-        self.stderr = stderr
+        self.stderr = redact(stderr)
         super().__init__(f"git {' '.join(self.cmd)} failed (exit {returncode})")
 
 
@@ -103,8 +105,11 @@ def _push_urls(cwd: Any = None) -> List[str]:
     return _run(["remote", "get-url", "--push", "--all", "origin"], cwd).stdout.split()
 
 
-def push(branch: str, ctx: Any, cwd: Any = None) -> None:
+def push(branch: str, ctx: Any, cwd: Any = None, *, dry_run: bool = False, ledger: Any = None) -> None:
     """Push one branch to origin, after the write gate. No force flag, ever.
+
+    dry_run: run every check, rehearse the push with --dry-run, record it in ledger (when given) and send
+    nothing.
 
     The name is normalised first (a leading refs/heads/ or heads/ is stripped; HEAD and other refs/* are
     refused). ctx.protected_branches are fnmatch patterns ("release/*" works). The push is the explicit
@@ -132,7 +137,28 @@ def push(branch: str, ctx: Any, cwd: Any = None) -> None:
     decision = writes.check_write(target, ctx)
     if not decision.ok:
         raise WriteBlocked(decision, target)
-    _run(["push", "--", "origin", f"refs/heads/{name}:refs/heads/{name}"], cwd)
+    argv = ["push", "--", "origin", f"refs/heads/{name}:refs/heads/{name}"]
+    if dry_run:
+        push_dry_run(name, cwd)
+        if ledger is not None:
+            ledger.append("git push", target.describe(), ["git", *argv], description=f"push {name}")
+        return
+    _run(argv, cwd)
+
+
+@dataclass(frozen=True)
+class Status:
+    branch: Optional[str]
+    clean: bool
+    default_branch: str
+    origin: Optional[str]  # owner/name of a GitHub origin, else None
+
+
+def status(cwd: Any = None) -> Status:
+    """The checkout's branch (None when detached), cleanliness, default branch and GitHub origin repo."""
+    from . import writes
+    return Status(current_branch(cwd), is_clean(cwd), default_branch(None, None, cwd),
+                  writes.parse_origin(origin_url(cwd)))
 
 
 def stash_by_sha(cwd: Any = None) -> Optional[str]:

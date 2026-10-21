@@ -7,12 +7,9 @@ from __future__ import annotations
 
 import html
 import json
-import os
 import re
-import tempfile
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import gh as _gh
 from . import writes
@@ -59,20 +56,9 @@ def _run_marker(run_id: str) -> str:
     return RUN_MARKER.format(run_id=run_id)
 
 
-@contextmanager
-def _tmp_file(text: str, suffix: str = ".md") -> Iterator[Path]:
+def _tmp_file(text: str, suffix: str = ".md"):
     """A private temp file under not-me's temp dir, removed on exit."""
-    fd, name = tempfile.mkstemp(prefix="not-me-wb-", suffix=suffix, dir=str(_gh.notme_tmp_dir()))
-    path = Path(name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        yield path
-    finally:
-        try:
-            path.unlink()
-        except OSError:
-            pass
+    return _gh.tmp_text_file(text, prefix="not-me-wb-", suffix=suffix)
 
 
 def _ensure_markers(body: str, markers: Sequence[str]) -> str:
@@ -476,6 +462,28 @@ def label_swap(gh: Any, repo: str, n: int, remove: Sequence[str], add: Sequence[
     result += [name for name in add if name not in result]
     gh.labels_set(repo, n, result)
     return result
+
+
+def label_sync(gh: Any, repo: str, n: int, *, set_to: Optional[Sequence[str]] = None,
+               add: Sequence[str] = (), remove: Sequence[str] = (), check: bool = False) -> Dict[str, Any]:
+    """Make an item's labels match: set_to replaces the whole set, else add and remove edit it.
+
+    check=True only reports. Returns {repo, number, in_sync, changed, labels (current, or the new set)}.
+    """
+    current = gh.labels(repo, n)
+    have = {x.lower() for x in current}
+    if set_to is not None:
+        in_sync = have == {x.lower() for x in set_to}
+    else:
+        in_sync = all(a.lower() in have for a in add) and not any(r.lower() in have for r in remove)
+    if check or in_sync:
+        return {"repo": repo, "number": n, "in_sync": in_sync, "changed": False, "labels": current}
+    if set_to is not None:
+        gh.labels_set(repo, n, list(set_to))
+        new = list(set_to)
+    else:
+        new = label_swap(gh, repo, n, remove, add, current)
+    return {"repo": repo, "number": n, "in_sync": False, "changed": True, "labels": new}
 
 
 # --- follow-up issues --------------------------------------------------------------
