@@ -106,6 +106,18 @@ def _login(value: str) -> str:
     return value
 
 
+def tmp_dir_name() -> str:
+    """not-me-<uid>, or not-me-<user name> where there are no uids (Windows)."""
+    getuid = getattr(os, "getuid", None)
+    if getuid:
+        return f"not-me-{getuid()}"
+    try:
+        user = os.environ.get("USERNAME") or os.getlogin()
+    except OSError:
+        user = "user"
+    return "not-me-" + re.sub(r"[^A-Za-z0-9_.-]", "_", user)
+
+
 def notme_tmp_dir() -> Path:
     """<runtime or temp dir>/not-me-<uid>/, private (0700) and ours. The only temp place input files may live.
 
@@ -123,7 +135,7 @@ def notme_tmp_dir() -> Path:
                 base = Path(runtime)
         except OSError:
             pass
-    path = base / f"not-me-{me if me is not None else 0}"
+    path = base / tmp_dir_name()
     try:
         os.mkdir(path, 0o700)
     except FileExistsError:

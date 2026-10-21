@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from notme.dryrun import Ledger, LedgerError
+from tests.fakes import POSIX_MODES, symlink_or_skip
 
 
 class LedgerTests(unittest.TestCase):
@@ -37,8 +38,9 @@ class LedgerTests(unittest.TestCase):
         import os
         entry = self.ledger.append("a", "t", ["x"], payload_bytes=b"hello")
         copied = self.ledger.path.parent / entry["payload_path"]
-        self.assertEqual(copied.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(copied.parent.stat().st_mode & 0o777, 0o700)
+        if POSIX_MODES:
+            self.assertEqual(copied.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(copied.parent.stat().st_mode & 0o777, 0o700)
         self.assertEqual(copied.read_bytes(), b"hello")
 
     def test_payload_copy_never_follows_a_planted_symlink(self):
@@ -48,21 +50,16 @@ class LedgerTests(unittest.TestCase):
         sha = hashlib.sha256(b"payload").hexdigest()
         planted = self.ledger.path.parent / "payloads" / f"{sha}.md"
         planted.parent.mkdir(parents=True)
-        try:
-            planted.symlink_to(target)
-        except OSError:
-            self.skipTest("no symlinks")
-        self.ledger.append("a", "t", ["x"], payload_bytes=b"payload")
+        symlink_or_skip(self, planted, target)
+        with self.assertRaises(LedgerError):
+            self.ledger.append("a", "t", ["x"], payload_bytes=b"payload")
         self.assertEqual(target.read_text(), "keep me")
 
     def test_symlinked_ledger_file_is_refused(self):
         victim = self.dir / "victim.log"
         victim.write_text("keep", encoding="utf-8")
         self.ledger.path.parent.mkdir(parents=True)
-        try:
-            self.ledger.path.symlink_to(victim)
-        except OSError:
-            self.skipTest("no symlinks")
+        symlink_or_skip(self, self.ledger.path, victim)
         with self.assertRaises(LedgerError):
             self.ledger.append("a", "t", ["x"])
         self.assertEqual(victim.read_text(), "keep")
@@ -71,10 +68,7 @@ class LedgerTests(unittest.TestCase):
         real = self.dir / "elsewhere"
         real.mkdir()
         link = self.dir / "linked"
-        try:
-            link.symlink_to(real)
-        except OSError:
-            self.skipTest("no symlinks")
+        symlink_or_skip(self, link, real)
         with self.assertRaises(LedgerError):
             Ledger(link / "intended-writes.jsonl").append("a", "t", ["x"], payload_bytes=b"p")
         self.assertEqual(list(real.iterdir()), [])
@@ -84,10 +78,7 @@ class LedgerTests(unittest.TestCase):
         base.mkdir()
         real = self.dir / "elsewhere"
         real.mkdir()
-        try:
-            (base / "not-me").symlink_to(real)
-        except OSError:
-            self.skipTest("no symlinks")
+        symlink_or_skip(self, (base / "not-me"), real)
         ledger = Ledger(base / "not-me" / "logs" / "intended-writes.jsonl", base=base)
         with self.assertRaises(LedgerError):
             ledger.append("a", "t", ["x"], payload_bytes=b"p")
@@ -98,10 +89,7 @@ class LedgerTests(unittest.TestCase):
         project.mkdir()
         real = self.dir / "elsewhere2"
         real.mkdir()
-        try:
-            (project / ".not-me").symlink_to(real)
-        except OSError:
-            self.skipTest("no symlinks")
+        symlink_or_skip(self, (project / ".not-me"), real)
         with self.assertRaises(LedgerError):
             Ledger.default_for(project).append("a", "t", ["x"])
         self.assertEqual(list(real.iterdir()), [])
@@ -112,7 +100,8 @@ class LedgerTests(unittest.TestCase):
         ledger = Ledger(base / "not-me" / "logs" / "intended-writes.jsonl", base=base)
         ledger.append("a", "t", ["x"], payload_bytes=b"p")
         for d in (base / "not-me", base / "not-me" / "logs", base / "not-me" / "logs" / "payloads"):
-            self.assertEqual(d.stat().st_mode & 0o777, 0o700)
+            if POSIX_MODES:
+                self.assertEqual(d.stat().st_mode & 0o777, 0o700)
 
     def test_path_outside_base_refused(self):
         with self.assertRaises(LedgerError):
@@ -121,7 +110,8 @@ class LedgerTests(unittest.TestCase):
     def test_ledger_file_is_private_and_appends(self):
         self.ledger.append("a", "t", ["x"])
         self.ledger.append("b", "t", ["y"])
-        self.assertEqual(self.ledger.path.stat().st_mode & 0o777, 0o600)
+        if POSIX_MODES:
+            self.assertEqual(self.ledger.path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(len(self.ledger.read()), 2)
 
     def test_append_without_payload(self):

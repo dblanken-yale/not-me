@@ -45,6 +45,8 @@ def _real_dir(path: Path, base: Optional[Path] = None) -> None:
 
 def _write_new(dest: Path, data: bytes) -> None:
     """Create dest exclusively (never through a symlink, mode 0600); an existing one is left alone."""
+    if os.path.islink(dest):  # O_NOFOLLOW does not exist everywhere
+        raise LedgerError(f"{dest.name} is a symlink; refusing to write through it")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(str(dest), flags, 0o600)
@@ -87,6 +89,8 @@ class Ledger:
             copied = f"payloads/{sha}.md"
         entry = {"ts": utc_now(), "op": op, "target": target,
                  "argv": list(argv), "payload_sha256": sha, "payload_path": copied, "description": description}
+        if os.path.islink(self.path):  # O_NOFOLLOW does not exist everywhere
+            raise LedgerError(f"{self.path.name} is a symlink; refusing to write the ledger through it")
         flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
         try:
             fd = os.open(str(self.path), flags, 0o600)

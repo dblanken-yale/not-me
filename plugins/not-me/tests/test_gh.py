@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,7 @@ from notme import gh as ghmod
 from notme.dryrun import Ledger
 from notme.gh import GhClient, GhError, ReadbackMismatch, UnsafePath, WriteBlocked, is_read
 from notme.writes import GuardContext, WriteTarget
+from tests.fakes import POSIX_MODES, symlink_or_skip
 from tests.fakes.fakegh import FakeRunner
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "gh"
@@ -528,12 +530,12 @@ class LabelTests(Base):
         def spy(argv):
             if "--input" in argv:
                 path = Path(argv[argv.index("--input") + 1])
-                seen.append((path.parent, path.stat().st_mode & 0o777))
+                seen.append((path.parent, path.stat().st_mode & 0o777 if POSIX_MODES else None))
             return real(argv)
 
         client = GhClient(self.ctx, runner=spy, dry_run=False, ledger=self.ledger)
         client.labels_set("acme/app", 1, ["bug"])
-        self.assertEqual(seen, [(ghmod.notme_tmp_dir(), 0o600)])
+        self.assertEqual(seen, [(ghmod.notme_tmp_dir(), 0o600 if POSIX_MODES else None)])
         self.assertEqual(list(ghmod.notme_tmp_dir().glob("not-me-*.json")), [])
 
 
@@ -608,10 +610,7 @@ class InputFileSafetyTests(Base):
 
     def test_symlink_escape_refused(self):
         link = self.project / "link.md"
-        try:
-            link.symlink_to(Path("/etc/hosts"))
-        except OSError:
-            self.skipTest("no symlinks")
+        symlink_or_skip(self, link, Path("/etc/hosts"))
         with self.assertRaises(UnsafePath):
             self.client().comment_create("acme/app", 1, link)
 
@@ -621,8 +620,9 @@ class InputFileSafetyTests(Base):
 
     def test_notme_tmp_dir_file_allowed_and_private(self):
         tmp = ghmod.notme_tmp_dir()
-        self.assertEqual(tmp.stat().st_mode & 0o777, 0o700)
-        self.assertEqual(tmp.name, f"not-me-{os.getuid()}")
+        if POSIX_MODES:
+            self.assertEqual(tmp.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(tmp.name, ghmod.tmp_dir_name())
         path = tmp / "ok-body.md"
         path.write_text("ok", encoding="utf-8")
         self.addCleanup(path.unlink)
@@ -639,19 +639,20 @@ class InputFileSafetyTests(Base):
         patcher2 = mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": ""})
         patcher2.start()
         self.addCleanup(patcher2.stop)
-        return scratch / f"not-me-{os.getuid()}"
+        return scratch / ghmod.tmp_dir_name()
 
     def test_tmp_dir_planted_symlink_refused(self):
         target = self.fake_tmp()
         elsewhere = self.dir / "attacker"
         elsewhere.mkdir()
-        target.symlink_to(elsewhere)
+        symlink_or_skip(self, target, elsewhere)
         with self.assertRaises(RuntimeError):
             ghmod.notme_tmp_dir()
         with self.assertRaises(RuntimeError):
             self.client().labels_set("acme/app", 1, ["bug"])
         self.assertEqual(list(elsewhere.iterdir()), [])
 
+    @unittest.skipIf(not POSIX_MODES, "Windows has no POSIX permission bits")
     def test_tmp_dir_wrong_mode_refused_not_repaired(self):
         target = self.fake_tmp()
         target.mkdir(mode=0o755)
@@ -663,15 +664,17 @@ class InputFileSafetyTests(Base):
     def test_tmp_dir_created_private_and_reused(self):
         target = self.fake_tmp()
         self.assertEqual(ghmod.notme_tmp_dir(), target)
-        self.assertEqual(target.stat().st_mode & 0o777, 0o700)
+        if POSIX_MODES:
+            self.assertEqual(target.stat().st_mode & 0o777, 0o700)
         self.assertEqual(ghmod.notme_tmp_dir(), target)
 
+    @unittest.skipIf(not POSIX_MODES, "XDG_RUNTIME_DIR and uid ownership are POSIX only")
     def test_tmp_dir_prefers_owned_runtime_dir(self):
         self.fake_tmp()
         runtime = self.dir / "run"
         runtime.mkdir()
         with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(runtime)}):
-            self.assertEqual(ghmod.notme_tmp_dir(), runtime / f"not-me-{os.getuid()}")
+            self.assertEqual(ghmod.notme_tmp_dir(), runtime / ghmod.tmp_dir_name())
         with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(self.dir / "missing")}):
             self.assertEqual(ghmod.notme_tmp_dir().parent, self.dir / "systmp")
 
@@ -718,7 +721,12 @@ class SubprocessTests(Base):
         env = {"PATH": f"{FAKE_BIN}{os.pathsep}{os.environ['PATH']}", "FAKEGH_STATE": str(state),
                "FAKEGH_CALLS": str(calls)}
         with mock.patch.dict(os.environ, env):
-            c = GhClient(self.ctx, dry_run=False, ledger=self.ledger)
+            runner = None
+            if os.name == "nt":  # a shebang script cannot be executed directly here
+                shim = str(FAKE_BIN / "gh")
+                runner = lambda argv: subprocess.run([sys.executable, shim, *argv], capture_output=True,
+                                                     text=True)
+            c = GhClient(self.ctx, runner=runner, dry_run=False, ledger=self.ledger)
             self.assertEqual(c.me(), "octocat")
             c.comment_create("acme/app", 1, self.body("from subprocess"))
             self.assertEqual(c.comments("acme/app", 1)[0]["body"], "from subprocess")
@@ -736,6 +744,7 @@ class SubprocessTests(Base):
             with self.assertRaises(GhError):
                 GhClient(self.ctx, dry_run=False).me()
 
+    @unittest.skipIf(os.name == "nt", "Windows has no executable bit")
     def test_shim_is_executable(self):
         self.assertTrue(os.access(FAKE_BIN / "gh", os.X_OK))
 
