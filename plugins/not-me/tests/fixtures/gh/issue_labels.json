@@ -1,0 +1,4 @@
+[
+  {"id": 1, "node_id": "LA_1", "name": "to do", "color": "ededed", "default": false},
+  {"id": 2, "node_id": "LA_2", "name": "bug", "color": "d73a4a", "default": true}
+]

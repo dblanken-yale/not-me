@@ -1,0 +1,13 @@
+{
+  "number": 42,
+  "title": "Widget fails on empty input",
+  "body": "Steps to reproduce:\n1. Submit an empty form.",
+  "state": "OPEN",
+  "url": "https://github.com/acme/app/issues/42",
+  "author": {"login": "octocat"},
+  "labels": [{"id": "LA_1", "name": "to do", "description": "", "color": "ededed"}, {"id": "LA_2", "name": "bug", "description": "", "color": "d73a4a"}],
+  "assignees": [{"id": "U_1", "login": "hubot", "name": "Hu Bot"}],
+  "comments": [
+    {"id": "IC_1", "author": {"login": "octocat"}, "authorAssociation": "OWNER", "body": "Picking this up.", "createdAt": "2026-01-02T10:00:00Z", "url": "https://github.com/acme/app/issues/42#issuecomment-1001"}
+  ]
+}

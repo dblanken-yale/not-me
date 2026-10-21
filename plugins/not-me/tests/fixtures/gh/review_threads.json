@@ -1,0 +1,19 @@
+{
+  "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": [
+    {
+      "id": "PRRT_kwDOA",
+      "isResolved": false,
+      "comments": {"nodes": [
+        {"id": "PRRC_1", "databaseId": 2001, "author": {"login": "hubot"}, "authorAssociation": "MEMBER", "body": "This should return early.", "path": "src/widget.py", "line": 18, "url": "https://github.com/acme/app/pull/7#discussion_r2001"},
+        {"id": "PRRC_2", "databaseId": 2002, "author": {"login": "octocat"}, "authorAssociation": "OWNER", "body": "Done.", "path": "src/widget.py", "line": 18, "url": "https://github.com/acme/app/pull/7#discussion_r2002"}
+      ]}
+    },
+    {
+      "id": "PRRT_kwDOB",
+      "isResolved": true,
+      "comments": {"nodes": [
+        {"id": "PRRC_3", "databaseId": 2003, "author": null, "authorAssociation": "NONE", "body": "Nit.", "path": "README.md", "line": null, "url": "https://github.com/acme/app/pull/7#discussion_r2003"}
+      ]}
+    }
+  ]}}}}
+}

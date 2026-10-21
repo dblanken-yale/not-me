@@ -1,0 +1,16 @@
+{
+  "number": 7,
+  "title": "Handle empty input in the widget",
+  "body": "Fixes acme/app#42.",
+  "headRefName": "fix/empty-input",
+  "headRefOid": "0123456789abcdef0123456789abcdef01234567",
+  "baseRefName": "main",
+  "state": "OPEN",
+  "isDraft": false,
+  "isCrossRepository": false,
+  "author": {"login": "octocat"},
+  "labels": [{"name": "needs review"}],
+  "reviewRequests": [{"__typename": "User", "login": "hubot"}],
+  "reviewDecision": "REVIEW_REQUIRED",
+  "mergeable": "MERGEABLE"
+}

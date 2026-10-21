@@ -1,0 +1,10 @@
+{
+  "data": {"repositoryOwner": {"projectV2": {
+    "id": "PVT_kwDOA",
+    "field": {"id": "PVTSSF_1", "options": [{"id": "f75ad846", "name": "To Do"}, {"id": "47fc9ee4", "name": "In progress"}]},
+    "items": {"nodes": [
+      {"id": "PVTI_1", "fieldValueByName": {"name": "To Do"}, "content": {"number": 42, "repository": {"nameWithOwner": "acme/app"}}},
+      {"id": "PVTI_2", "fieldValueByName": null, "content": {}}
+    ]}
+  }}}
+}
