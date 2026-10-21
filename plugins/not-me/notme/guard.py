@@ -15,6 +15,10 @@ Rule groups, each switched by `guard.<rule>` in project.md:
 Self-protection (the allow list, the plugin's own files, and not-me config
 during a run) is always on.
 
+Residual risk: a token file readable by the same OS user cannot be fully hidden
+from an agent running as that user; this guard is the enforcement, and the
+operator token is a second layer, not a secret.
+
 The Bash tokenizer is deliberately naive: it splits on && || ; | & and
 newlines, then on whitespace, strips quotes and drops redirections. Anything
 it cannot see through ($(...), bash -c, eval, GIT_DIR=..., a command name in a
@@ -23,6 +27,8 @@ it fails closed.
 """
 from __future__ import annotations
 
+import fnmatch
+import glob
 import json
 import os
 import re
@@ -74,6 +80,29 @@ OPERATOR_CONFIRM = "NOT_ME_OPERATOR_CONFIRM"
 # VAR=value prefixes that may sit in front of gh, git or notme; any other one cannot be checked
 _SAFE_ENV = {"LC_ALL", "LANG", "PYTHONUTF8", "PAGER", "GH_PAGER", "NO_COLOR", "TERM"}
 _PAUSE_OK = ([], ["on"], ["status"])
+OPERATOR_TOKEN = "operator-token"  # the human-confirm token file under the global not-me home
+# words that make a forged terminal dangerous: driving the not-me CLI or its human checks through a pty
+_PTY_TRIGGER = re.compile(r"notme|allow-repo|(?<![A-Za-z0-9_-])pause(?![A-Za-z0-9_-])|operator-token|NOT_ME_")
+# words a script file run through a shell may not contain (they drive the not-me CLI where the guard cannot see)
+_SCRIPT_SELF = re.compile(r"notme|allow-repo|operator-token|NOT_ME_")
+_PTY_CODE = re.compile(r"(?<![A-Za-z])pty(?![A-Za-z])|openpty|forkpty|spawn\s*\(")
+# code that forges a terminal or leaves the session's process tree: blocked in inline code and scripts outright
+_PRIMITIVES = re.compile(r"(?<![A-Za-z_])pty(?![A-Za-z_])|openpty|forkpty|os\.fork\b|(?<![A-Za-z_.])fork\s*\(|setsid"
+                         r"|(?<![A-Za-z_])daemon(?!\s*=)|start_new_session\s*=\s*True|detached\s*:\s*true")
+GLOB_LIMIT = 5000  # paths a token-read glob may visit before the guard assumes it reaches the token
+_PTY_PROGS = {"script", "expect", "unbuffer", "socat", "ssh", "tmux", "screen"}
+# running a command outside the session's process tree escapes the CLI's ancestry check
+_ORPHAN_PREFIX = {"nohup", "setsid"}
+_ORPHAN_PROGS = {"disown", "daemon", "start-stop-daemon", "systemd-run", "at", "batch", "cron"}
+_BACKGROUND = re.compile(r"(?<![&<>|])&(?![&>])")  # a lone & (also zsh &! and ( ... ) &), not &&, 2>&1 or &>
+# commands that read, copy or move files: none may reach the operator token through a glob or a directory
+_TOKEN_READERS = {"cat", "head", "tail", "less", "more", "od", "xxd", "base64", "cp", "mv", "ln", "tac", "nl",
+                  "strings", "hexdump", "grep", "egrep", "fgrep", "rg", "sed", "awk", "rsync", "tar", "zip", "scp",
+                  "dd", "install", "diff", "cmp", "sort", "uniq", "cut", "paste", "tee", "file", "stat"}
+_TOKEN_COPIERS = {"cp", "mv", "ln", "rsync", "tar", "zip", "scp", "install"}
+_IN_REDIRECT = re.compile(r"(?<![<\d])\d*<(?![<(&])\s*([^\s;|&<>()]+)")
+_GLOB = re.compile(r"[*?\[]")
+_LOCALHOST = re.compile(r"^(?:[^@]+@)?(?:localhost|127(?:\.\d+){3}|::1|\[::1\]|0\.0\.0\.0)$", re.IGNORECASE)
 _INTERP = re.compile(r"^(python[0-9.]*|pythonw|py|node|nodejs|perl|ruby|php|deno|bun)$")
 _REPO_PATH = re.compile(r"^repos/([^/]+)/([^/?]+)(/|\?|$)")
 _PULL_MERGE = re.compile(r"/pulls/\d+/merge/?$")
@@ -88,7 +117,11 @@ _MCP_WRITE_WORDS = re.compile(
 _PREFILTER = re.compile(
     r"(?<![A-Za-z0-9_-])(gh|git|github|rm|find|xargs|parallel|curl|wget|python[0-9.]*|py|node|nodejs|perl|ruby|"
     r"php|deno|bun|bash|sh|zsh|dash|ksh|fish|source|exec|eval)(?![A-Za-z0-9_-])"
-    r"|(?:^|[\s;|&(])\.(?:\s|$)|\./|\.(?:sh|bash|zsh)\b|\$|`|allow-repo|allowed-repos|GIT_|\.git|notme|NOT_ME_")
+    r"|(?:^|[\s;|&(])\.(?:\s|$)|\./|\.(?:sh|bash|zsh)\b|\$|`|allow-repo|allowed-repos|GIT_|\.git|notme|not-me|NOT_ME_|operator-token"
+    r"|(?<![A-Za-z0-9_-])(?:script|expect|unbuffer|socat|ssh|tmux|screen|pause)(?![A-Za-z0-9_-])"
+    # any file reader, copier or < redirection: its arguments may expand into the not-me home
+    r"|(?<![<\d&])<(?![<(&])|(?<![A-Za-z0-9_-])(?:" + "|".join(sorted(_TOKEN_READERS)) + r")(?![A-Za-z0-9_-])"
+    r"(?=[^;|&\n]*?\s(?![-<>\d])\S)")
 
 _SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
 _KEYWORDS = {"builtin", "{", "}", "if", "then", "else", "elif", "do", "while", "until", "!"}
@@ -104,6 +137,7 @@ _PREFIX_WORDS: Dict[str, Set[str]] = {
     "ionice": {"-c", "-n", "-p"},
     "stdbuf": {"-i", "-o", "-e"},
     "caffeinate": {"-t", "-w"},
+    "setsid": set(),
     "unbuffer": set(),
     "chronic": set(),
 }
@@ -534,6 +568,8 @@ def decide(event: Mapping[str, Any], ctx: GuardContext) -> Decision:
         cands = _bash(str(tin.get("command") or ""), cwd, ctx)
     elif tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
         cands = _file(tool, str(tin.get("file_path") or tin.get("notebook_path") or ""), cwd, ctx)
+    elif tool in _READ_TOOLS:
+        cands = _read_tool(tool, tin, cwd, ctx)
     elif _MCP_TOOL.match(tool):
         cands = _mcp(tool, tin, ctx)
     else:
@@ -566,9 +602,45 @@ def _unknown_target(blk: Blk, why: str, fix: str) -> Block:
     return blk("other_repo", f"could not tell which repo it targets ({why})", fix)
 
 
+_READ_TOOLS = ("Read", "NotebookRead", "LS", "Grep", "Glob")
+
+
+def _read_tool(tool: str, tin: Mapping[str, Any], cwd: str, ctx: GuardContext) -> Iterator[Block]:
+    """Read, NotebookRead, LS, Grep and Glob may not reach the operator token (or list the not-me home)."""
+    if tool in ("Read", "NotebookRead"):
+        yield from _token_file(tool, str(tin.get("file_path") or tin.get("notebook_path") or ""), cwd, ctx)
+        return
+    raw = str(tin.get("path") or "")
+    here = _norm(cwd, os.getcwd())
+    base = _norm(_expand_home(raw, ctx), here) if raw else here
+    home = _norm(str(ctx.home), cwd)
+    token = _norm(_path.join(str(ctx.home), OPERATOR_TOKEN), cwd)
+    pattern = str(tin.get("pattern" if tool == "Glob" else "glob") or "")
+    blk = _blk(_short(f"{tool} {raw} {pattern}".strip()))
+    hit = base in (home, token) or OPERATOR_TOKEN in raw.lower() or OPERATOR_TOKEN in pattern.lower()
+    if not hit and tool != "LS" and _under(token, base):
+        rel = token[len(base):].lstrip(_path.sep).replace(_path.sep, "/")
+        # a missing or matching filter reaches the token (fnmatch's * also crosses "/": an over-approximation)
+        hit = not pattern or any(fnmatch.fnmatch(x, pattern) for x in (rel, OPERATOR_TOKEN))
+    if not hit and tool == "Glob" and pattern:
+        full = _norm(_expand_home(pattern, ctx), base)
+        hit = full in (home, token) or _under(full, home)
+    if hit:
+        yield blk(SELF, "the operator token is the operator's own confirmation", "ask the operator to confirm by hand")
+
+
+def _token_file(tool: str, fpath: str, cwd: str, ctx: GuardContext) -> Iterator[Block]:
+    """The operator-token file is the operator's own: the agent may not read or change it."""
+    if fpath and (_base(fpath).lower() == OPERATOR_TOKEN
+                  or _norm(fpath, cwd) == _norm(_path.join(str(ctx.home), OPERATOR_TOKEN), cwd)):
+        yield _blk(_short(f"{tool} {fpath}"))(SELF, "the operator token is the operator's own confirmation",
+                                              "ask the operator to confirm by hand")
+
+
 def _file(tool: str, fpath: str, cwd: str, ctx: GuardContext) -> Iterator[Block]:
     if not fpath:
         return
+    yield from _token_file(tool, fpath, cwd, ctx)
     blk = _blk(_short(f"{tool} {fpath}"))
     full = _norm(fpath, cwd)
     if full == _norm(str(ctx.allowlist_path), cwd) or _base(fpath) == ALLOWLIST_NAME:
@@ -609,9 +681,11 @@ def _mcp(tool: str, tin: Mapping[str, Any], ctx: GuardContext) -> Iterator[Block
 class _State:
     """Per-call state: the simulated cwd and branch, and memoised git lookups."""
 
-    def __init__(self, cwd: str, text: str):
+    def __init__(self, cwd: str, text: str, raw: str = ""):
         self.dir = cwd
         self.text = text
+        self.raw = raw or text  # with heredoc bodies, for the pty checks
+        self.background = bool(_BACKGROUND.search(text))
         self.switched: Dict[str, str] = {}
         self.memo: Dict[Tuple[str, ...], Any] = {}
 
@@ -647,6 +721,8 @@ def _bash(cmd: str, cwd: str, ctx: GuardContext) -> Iterator[Block]:
     if "allow-repo" in plain and any(m.group(1) or "--everywhere".startswith(m.group(2))
                                      for m in _ALLOW_EDIT.finditer(plain)):
         yield blk(SELF, "only the operator changes the not-me allow list", "ask the operator to run /not-me:allow-repo")
+    if OPERATOR_TOKEN in plain.lower():
+        yield blk(SELF, "the operator token is the operator's own confirmation", "ask the operator to confirm by hand")
     if ALLOWLIST_NAME in cmd.lower() or str(ctx.allowlist_path).lower() in cmd.lower():
         yield blk(SELF, "the not-me allow list is off limits to the agent",
                   "ask the operator to run /not-me:allow-repo, or read it with /not-me:config")
@@ -656,7 +732,7 @@ def _bash(cmd: str, cwd: str, ctx: GuardContext) -> Iterator[Block]:
     if any(has_gh_git(s) for s in substitutions(text)):
         yield blk(OPAQUE, "gh/git inside $(...), backticks or <(...) cannot be checked",
                   "run gh/git directly, not inside $(...)")
-    st = _State(cwd, text)
+    st = _State(cwd, text, cmd)
     for seg in segments(text):
         yield from _command(tokens(seg), seg, st, ctx)
 
@@ -680,8 +756,14 @@ def _command(t: List[str], seg: str, st: _State, ctx: GuardContext) -> Iterator[
     blk = _blk(_short(seg))
     prefixed = chdir = False
     assigned: List[str] = []
+    wrapper = None
+    seen: Set[str] = set()
     while t:
         head = _head(t[0])
+        if head == "unbuffer":
+            wrapper = "unbuffer"
+        if head in _PREFIX_WORDS:
+            seen.add(head)
         if _ASSIGN.match(t[0]):
             assigned.append(t[0].split("=", 1)[0])
             t = t[1:]
@@ -698,6 +780,16 @@ def _command(t: List[str], seg: str, st: _State, ctx: GuardContext) -> Iterator[
         yield blk(SELF, f"{OPERATOR_CONFIRM} is the operator's own confirmation", "ask the operator to confirm")
     if not t:
         return
+    wrapper = wrapper or _pty_wrapper(t, seg, st)
+    if wrapper is not None:
+        yield from _drives_notme(t, st, blk, f"{wrapper} gives its command a pseudo-terminal, which would pass "
+                                 "not-me's human check")
+    yield from _primitives(t, seg, st, blk)
+    orphan = _orphaning(t, seen, st)
+    if orphan is not None:
+        yield from _drives_notme(t, st, blk, f"{orphan} runs it outside this session's process tree, which would "
+                                 "escape not-me's human check")
+    yield from _token_reads(t, seg, st, ctx, blk)
     word, head = t[0], _head(t[0])
     if "$" in word or "`" in word:
         yield blk(OPAQUE, "a command name taken from a variable cannot be checked", "spell out the command")
@@ -730,6 +822,151 @@ def _command(t: List[str], seg: str, st: _State, ctx: GuardContext) -> Iterator[
         yield blk(OPAQUE, f"{head} to GitHub bypasses gh's repo checks", "use gh with --repo owner/name")
     elif prefixed and has_gh_git(seg):
         yield blk(OPAQUE, f"cannot tell what '{word}' runs", "run gh/git directly, without the wrapper")
+
+
+def _pty_wrapper(t: List[str], seg: str, st: _State) -> Optional[str]:
+    """The name of a wrapper that gives its command a pseudo-terminal, or None."""
+    prog, args = _prog(t[0]), t[1:]
+    low = [a.lower() for a in args]
+    if prog in ("script", "expect", "unbuffer"):
+        return prog
+    if prog == "socat" and any("pty" in a for a in low):
+        return "socat pty"
+    if prog == "tmux" and any(a in ("send-keys", "send", "send-key") for a in low):
+        return "tmux send-keys"
+    if prog == "screen" and "-x" in low and "stuff" in low:
+        return "screen -X stuff"
+    if prog == "ssh":
+        flags = _short_flags([a for a in args if a.startswith("-")])
+        dest = next((a for a in _skip_options(args, {"-p", "-l", "-i", "-o", "-F", "-J", "-L", "-R", "-D", "-E",
+                                                      "-b", "-c", "-e", "-m", "-O", "-Q", "-S", "-W", "-w"})), "")
+        if "t" in flags and _LOCALHOST.match(dest):
+            return "ssh -t to this machine"
+    if _INTERP.match(prog):
+        inline = any(a in ("-", "--eval", "--print") or (a.startswith("-") and not a.startswith("--")
+                                                        and set(a[1:]) & set("ceEpr")) for a in args)
+        if (inline or "<<" in seg or len(_positionals(args)) == 0) and _PTY_CODE.search(st.raw):
+            return f"{prog} pty code"
+    return None
+
+
+def _primitives(t: List[str], seg: str, st: _State, blk: Blk) -> Iterator[Block]:
+    """Interpreter code (inline or a script file) that forges a terminal or detaches from the session."""
+    prog, args = _prog(t[0]), t[1:]
+    if not _INTERP.match(prog):
+        return
+    why = "{} can forge a terminal or leave this session's process tree ({}), which would pass not-me's human check"
+    hint = "do this without pty, fork, setsid or daemon code"
+    inline = any(a in ("-", "--eval", "--print") or (a.startswith("-") and not a.startswith("--")
+                                                    and set(a[1:]) & set("ceEpr")) for a in args)
+    pos = _positionals(args)
+    if inline or "<<" in seg or not pos:
+        m = _PRIMITIVES.search(st.raw)
+        if m:
+            yield blk(SELF, why.format(f"{prog} inline code", m.group(0)), hint)
+        return
+    for a in pos:  # the script is the first file among them; option values are rarely files
+        text = _read_script(_norm(a, st.dir))
+        m = _PRIMITIVES.search(text) if text is not None else None
+        if m:
+            yield blk(SELF, why.format(a, m.group(0)), hint)
+            return
+
+
+def _orphaning(t: List[str], seen: Set[str], st: _State) -> Optional[str]:
+    """What detaches this command from the session (nohup, setsid, at, a background &, ...), or None."""
+    prog, low = _prog(t[0]), [a.lower() for a in t[1:]]
+    if seen & _ORPHAN_PREFIX:
+        return sorted(seen & _ORPHAN_PREFIX)[0]
+    if prog in _ORPHAN_PROGS:
+        return prog
+    if prog == "launchctl" and {"submit", "bootstrap"} & set(low):
+        return "launchctl " + next(a for a in low if a in ("submit", "bootstrap"))
+    if prog == "crontab":
+        rest = [a for i, a in enumerate(low) if a != "-u" and not (i and low[i - 1] == "-u")]
+        if rest != ["-l"]:  # anything but listing installs or edits a crontab
+            return "crontab"
+    if st.background:
+        return "a background &"
+    return None
+
+
+def _expand_home(arg: str, ctx: GuardContext) -> str:
+    """arg with $HOME / ${HOME} and $NOT_ME_HOME / ${NOT_ME_HOME} filled in (~ is left to _norm)."""
+    for var in ("${HOME}", "$HOME"):
+        arg = arg.replace(var, ctx.env.get("HOME") or os.path.expanduser("~"))
+    for var in ("${NOT_ME_HOME}", "$NOT_ME_HOME"):
+        arg = arg.replace(var, str(ctx.home))
+    return arg
+
+
+def _reaches_token(pattern: str, base: str, token: str, recursive: bool) -> bool:
+    """True when pattern (a path or glob, relative to base) names the token, or a directory holding it
+    when recursive. Globs are expanded for real; one that visits more than GLOB_LIMIT paths counts as
+    reaching the token when its fixed leading directory holds it."""
+    full = _path.join(base, _path.expanduser(pattern)) if not _path.isabs(_path.expanduser(pattern)) \
+        else _path.expanduser(pattern)
+
+    def hit(path: str) -> bool:
+        n = _norm(path, base)
+        return n == token or (recursive and _under(token, n))
+    if not _GLOB.search(pattern):
+        return hit(full)
+    try:
+        for k, match in enumerate(glob.iglob(full, recursive=True)):
+            if hit(match):
+                return True
+            if k >= GLOB_LIMIT:
+                fixed = _PATH_SEP.split(full)
+                fixed = fixed[:next(i for i, part in enumerate(fixed) if _GLOB.search(part))]
+                return _under(token, _norm(_path.sep.join(fixed) or _path.sep, base))
+    except (OSError, ValueError, re.error):
+        return True  # cannot expand: fail closed
+    return False
+
+
+def _token_reads(t: List[str], seg: str, st: _State, ctx: GuardContext, blk: Blk) -> Iterator[Block]:
+    """Reading or copying commands (and < / $(< operands) whose arguments expand to the operator token."""
+    prog = _prog(t[0])
+    targets = [m.group(1) for m in _IN_REDIRECT.finditer(seg)]
+    if prog in _TOKEN_READERS:
+        targets += [a[3:] if prog == "dd" and a.startswith("if=") else a for a in t[1:] if not a.startswith("-")]
+    if not targets:
+        return
+    token = _norm(_path.join(str(ctx.home), OPERATOR_TOKEN), st.dir)
+    recursive = prog in _TOKEN_COPIERS or (prog in ("grep", "egrep", "fgrep", "rg") and (
+        prog == "rg" or "r" in _short_flags(t[1:]).lower() or "--recursive" in t[1:]))
+    for a in targets:
+        if _reaches_token(_expand_home(a, ctx), st.dir, token, recursive):
+            yield blk(SELF, "the operator token is the operator's own confirmation",
+                      "ask the operator to confirm by hand")
+            return
+
+
+def _drives_notme(t: List[str], st: _State, blk: Blk, why: str) -> Iterator[Block]:
+    """A wrapper that hides the caller (a pty, a detached process) may not drive the not-me CLI or its controls."""
+    hint = "the operator runs this not-me step in their own terminal"
+    if _PTY_TRIGGER.search(_unshell(st.raw)):
+        yield blk(SELF, why, hint)
+        return
+    for a in t:
+        if a.startswith("-"):
+            continue
+        text = _read_script(_norm(a, st.dir))
+        if text is not None and _PTY_TRIGGER.search(text):
+            yield blk(SELF, f"{why} ({a} mentions it)", hint)
+            return
+
+
+def _read_script(path: str) -> Optional[str]:
+    """The start of a regular file as text, or None."""
+    try:
+        if not os.path.isfile(path):
+            return None
+        with open(path, "rb") as fh:
+            return fh.read(SCRIPT_READ_LIMIT).decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return None
 
 
 def _prog(word: str) -> str:
@@ -810,6 +1047,14 @@ def _script(path: str, st: _State, blk: Blk) -> Iterator[Block]:
     except OSError:
         yield blk(OPAQUE, f"cannot read {path} to check what it runs", "run its commands directly")
         return
+    m = _PRIMITIVES.search(text)
+    if m:
+        yield blk(SELF, f"{path} can forge a terminal or leave this session's process tree ({m.group(0)}), which "
+                        "would pass not-me's human check", "do this without pty, fork, setsid or daemon code")
+    m = _SCRIPT_SELF.search(text)
+    if m:
+        yield blk(SELF, f"{path} runs the not-me CLI or touches its controls ({m.group(0)}), which cannot be "
+                        "checked from here", "run the notme command directly")
     if _mentions_github(text):
         yield blk(OPAQUE, f"{path} runs gh/git or calls GitHub, which cannot be checked from here",
                   "run its gh/git commands directly")
