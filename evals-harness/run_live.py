@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 SEED = ROOT / "fixture" / "seed_fixture.py"
+SCAFFOLD = HERE / "scaffold" / "scaffold.py"
 GRADE = HERE / "grade_state.py"
 PLUGIN_DIR = ROOT / "plugins" / "not-me"
 STATE_DIR = ROOT / "evals" / ".state"
@@ -74,29 +75,33 @@ class Plan:
         self.grade_json = out / f"{args.scenario}-{n}.grade.json"
         self.result = out / f"{args.scenario}-{n}.json"
         self.scaffold = out / f"{args.scenario}-{n}.scaffold.json"
-        self.ledger = out / f"{args.scenario}-{n}.ledger.jsonl"
+        self.ledger = Path(args.ledger) if args.ledger else out / f"{args.scenario}-{n}.ledger.jsonl"
+        self.stage_dir = STATE_DIR / rid / f"{args.scenario}.stage"
         self.reset = [py, str(SEED), *flags, "--reset", "--run-id", rid]
         self.seed = [py, str(SEED), *flags, "--scenario", args.scenario, "--run-id", rid]
         self.evaluate = ["claude", "plugin", "eval", str(PLUGIN_DIR.relative_to(ROOT)),
                          "--case", f"{args.skill}-{args.scenario}", "--runs", "1", "--scaffold", "--trust-plugin",
                          "--ablation", "none", "--allow-tools", "Bash,Write,Edit",
                          "--max-cost-usd", f"{args.cap:g}", "--json", str(self.eval_dir), "--no-publish"]
+        if args.keep_temp:
+            self.evaluate.append("--keep-temp")
+        self.prepare = [py, str(SCAFFOLD), "prepare", "--manifest", str(self.manifest),
+                        "--stage-dir", str(self.stage_dir), "--backend", args.backend]
+        self.clean = [py, str(SCAFFOLD), "clean", "--stage-dir", str(self.stage_dir)]
         grade = [py, str(GRADE), "--manifest", str(self.manifest), "--scenario", args.scenario,
                  "--backend", args.backend, "--json", str(self.grade_json)]
         if args.backend == "ledger":
             grade += ["--ledger", str(self.ledger)]
         self.grade = grade
         self.teardown = [py, str(SEED), *flags, "--teardown", rid]
-        self.env_extra = {"NOT_ME_EVAL_RUN_ID": rid, "NOT_ME_EVAL_SCENARIO": args.scenario,
-                          "NOT_ME_EVAL_BACKEND": args.backend, "NOT_ME_EVAL_MANIFEST": str(self.manifest),
-                          "NOT_ME_FIXTURE_REPO": args.repo, "NOT_ME_FIXTURE_OWNER": args.owner}
-        if args.companion:
-            self.env_extra["NOT_ME_FIXTURE_COMPANION"] = args.companion
-        if args.backend == "ledger":
-            self.env_extra["NOT_ME_EVAL_LEDGER"] = str(self.ledger)
+        # The eval sandbox passes through only EVAL_* keys, so these are all the session can see. The fixture
+        # token and repo slugs are staged by `scaffold.py prepare`, not exported here.
+        self.env_extra = {"EVAL_NOT_ME_RUN_ID": rid, "EVAL_NOT_ME_SCENARIO": args.scenario,
+                          "EVAL_NOT_ME_BACKEND": args.backend, "EVAL_NOT_ME_STAGE_DIR": str(self.stage_dir)}
+        self.prepare_env = {"NOT_ME_FIXTURE_OWNER": args.owner}
 
     def commands(self) -> List[List[str]]:
-        return [self.reset, self.seed, self.evaluate, self.grade, self.teardown]
+        return [self.reset, self.seed, self.prepare, self.evaluate, self.grade, self.clean, self.teardown]
 
 
 def merge_result(args: argparse.Namespace, plan: Plan, eval_exit: Optional[int], errors: List[str]) -> dict:
@@ -126,8 +131,10 @@ def run_once(args: argparse.Namespace, n: int, runner: Runner, rid_factory: Call
              out: Path, say: Callable[[str], None]) -> int:
     rid = rid_factory(args.scenario, n)
     plan = Plan(args, rid, n, out)
-    env = dict(os.environ)  # GH_TOKEN and the claude login pass through
-    env.update(plan.env_extra)
+    base = dict(os.environ)
+    prep_env = dict(base, **plan.prepare_env)  # carries NOT_ME_FIXTURE_TOKEN, for `scaffold.py prepare` only
+    env = {k: v for k, v in base.items() if k not in ("NOT_ME_FIXTURE_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")}
+    env.update(plan.env_extra)  # the case's EVAL_* keys
     say(f"# run {n} scenario={args.scenario} run-id={rid}")
     if args.dry_run:
         for cmd in plan.commands():
@@ -143,24 +150,33 @@ def run_once(args: argparse.Namespace, n: int, runner: Runner, rid_factory: Call
         started = True
         for label, cmd in (("reset", plan.reset), ("seed", plan.seed)):
             say("+ " + quote(cmd))
-            if runner(cmd, env) != 0:
+            if runner(cmd, base) != 0:
                 raise RuntimeError(f"{label} failed")
+        say("+ " + quote(plan.prepare))
+        if runner(plan.prepare, prep_env) != 0:
+            raise RuntimeError("prepare failed (is NOT_ME_FIXTURE_TOKEN a dedicated fixture token?)")
         plan.scaffold.write_text(json.dumps(plan.env_extra, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         say("+ " + quote(plan.evaluate))
         eval_exit = runner(plan.evaluate, env)
         if eval_exit != 0:
             errors.append(f"claude plugin eval exited {eval_exit}")
         say("+ " + quote(plan.grade))
-        grade_exit = runner(plan.grade, env)
+        grade_exit = runner(plan.grade, base)
         if grade_exit not in (0, 1):
             errors.append(f"grade_state exited {grade_exit}")
     except (RuntimeError, OSError) as exc:
         errors.append(str(exc))
     finally:
         if started:
+            say("+ " + quote(plan.clean))
+            try:
+                if runner(plan.clean, base) != 0:
+                    errors.append("scaffold clean failed: remove the stage directory by hand, it holds a token")
+            except OSError as exc:
+                errors.append(f"scaffold clean failed: {exc}")
             say("+ " + quote(plan.teardown))
             try:
-                if runner(plan.teardown, env) != 0:
+                if runner(plan.teardown, base) != 0:
                     errors.append("teardown failed: the fixture may need --reset")
             except OSError as exc:
                 errors.append(f"teardown failed: {exc}")
@@ -183,6 +199,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--out", default=str(ROOT / "results" / "evals" / time.strftime("%Y-%m-%d")),
                     help="result directory (default: results/evals/<today>)")
     ap.add_argument("-j", "--jobs", type=int, choices=(1,), default=1, help="always 1: a skill scans the whole repo")
+    ap.add_argument("--keep-temp", action="store_true",
+                    help="pass --keep-temp to claude plugin eval so the run's workspace (and its ledger) survives")
+    ap.add_argument("--ledger", help="ledger JSONL for --backend ledger (default: <out>/<ID>-<n>.ledger.jsonl)")
     ap.add_argument("--dry-run", action="store_true", help="print the commands and run nothing")
     return ap
 
@@ -198,6 +217,14 @@ def main(argv: Optional[Sequence[str]] = None, runner: Runner = subprocess_runne
     missing = [f"--{k}" for k in ("repo", "owner") if not getattr(args, k)]
     if missing:
         print(f"error: {', '.join(missing)} required (or NOT_ME_FIXTURE_REPO / NOT_ME_FIXTURE_OWNER)", file=sys.stderr)
+        return 2
+    if args.backend == "ledger" and not args.keep_temp:
+        print("error: --backend ledger needs --keep-temp so the ledger can be read from the eval workspace",
+              file=sys.stderr)
+        return 2
+    if not args.dry_run and not os.environ.get("NOT_ME_FIXTURE_TOKEN"):
+        print("error: NOT_ME_FIXTURE_TOKEN is not set (a fine-grained token for the fixture repos only; "
+              "see docs/testing.md)", file=sys.stderr)
         return 2
     if args.runs < 1:
         print("error: --runs must be at least 1", file=sys.stderr)

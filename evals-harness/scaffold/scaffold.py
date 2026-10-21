@@ -4,16 +4,19 @@
 `claude plugin eval` runs a case's scaffold with only PATH, HOME (the sandbox home), TMPDIR and TERM set,
 so nothing the harness exports reaches it: no run id, no manifest path, no token. The work is split in two:
 
-    scaffold.py prepare            operator side, before `claude plugin eval`. Reads NOT_ME_EVAL_MANIFEST,
-                                   NOT_ME_EVAL_BACKEND and GH_TOKEN (else `gh auth token`), clones the
-                                   fixture repo (and the companion) at the manifest's SHAs into
-                                   evals/.state/<RID>/<ID>.stage/ and points evals/.state/current-stage.json
-                                   at it.
+    scaffold.py prepare --manifest PATH --stage-dir DIR
+                                   operator side, before `claude plugin eval`. Needs NOT_ME_FIXTURE_TOKEN, a
+                                   dedicated fine-grained token, and refuses without it. It checks that the
+                                   token sees the fixture repo and cannot see this plugin repo, clones the
+                                   fixture repo (and the companion) at the manifest's SHAs into DIR, stages
+                                   the token there (mode 600) and points evals/.state/current-stage.json at
+                                   it. The operator's own gh login is never read.
     scaffold.py stage --case NAME  inside the eval, from the case's scaffold.sh. Copies the staged clones
                                    into the working directory, writes the scenario's config layers, the
                                    pause file and the allow list, signs gh in for the sandbox home and runs
                                    `gh auth setup-git`.
-    scaffold.py clean              operator side, after the run. Removes the stage (and its token copy).
+    scaffold.py clean [--stage-dir DIR]
+                                   operator side, after the run. Removes the stage and its token copy.
 
 Stdlib only. See plugins/not-me/evals/README.md for the contract and the scenario `config` block.
 """
@@ -26,6 +29,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
@@ -52,8 +56,11 @@ class ScaffoldError(Exception):
 
 def run(argv: Sequence[str], cwd: Optional[Path] = None, env: Optional[Mapping[str, str]] = None,
         input_text: Optional[str] = None) -> "subprocess.CompletedProcess[str]":
-    proc = subprocess.run(list(argv), cwd=str(cwd) if cwd else None, env=dict(env) if env is not None else None,
-                          input=input_text, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(list(argv), cwd=str(cwd) if cwd else None, env=dict(env) if env is not None else None,
+                              input=input_text, capture_output=True, text=True)
+    except OSError as exc:
+        raise ScaffoldError(f"{argv[0]} could not run: {exc}")
     if proc.returncode != 0:
         raise ScaffoldError(f"{' '.join(argv[:3])} failed ({proc.returncode}): {proc.stderr.strip()[:300]}")
     return proc
@@ -141,58 +148,132 @@ def layer_files(config: Optional[Mapping[str, Any]], backend: str, values: Mappi
 # --------------------------------------------------------------------------
 # prepare (operator side)
 
+TOKEN_ENV = "NOT_ME_FIXTURE_TOKEN"
+PLUGIN_REPO_ENV = "NOT_ME_PLUGIN_REPO"
 
-def _clone(repo: str, sha: Optional[str], dest: Path, runner: Runner) -> None:
-    runner(["gh", "repo", "clone", repo, str(dest), "--", "--quiet"])
+
+def _clone(repo: str, sha: Optional[str], dest: Path, runner: Runner, env: Mapping[str, str]) -> None:
+    runner(["gh", "repo", "clone", repo, str(dest), "--", "--quiet"], env=env)
     runner(["git", "-C", str(dest), "remote", "set-url", "origin", f"https://github.com/{repo}.git"])
     if sha:
         runner(["git", "-C", str(dest), "checkout", "-q", "-B", "main", sha])
 
 
-def prepare(env: Mapping[str, str], runner: Runner = run, state: Path = STATE) -> Path:
-    manifest_path = env.get("NOT_ME_EVAL_MANIFEST")
+def plugin_repo(env: Mapping[str, str], runner: Runner) -> str:
+    """owner/name of this plugin repo: NOT_ME_PLUGIN_REPO, else the origin remote of this checkout."""
+    if env.get(PLUGIN_REPO_ENV):
+        return env[PLUGIN_REPO_ENV]
+    url = runner(["git", "-C", str(ROOT), "remote", "get-url", "origin"]).stdout.strip()
+    found = re.search(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$", url)
+    if not found:
+        raise ScaffoldError(f"cannot tell which repo is this plugin repo from {url!r}; set {PLUGIN_REPO_ENV}")
+    return found.group(1)
+
+
+def check_token(token: str, repos: Sequence[str], plugin: str, runner: Runner, env: Mapping[str, str]) -> Dict[str, Any]:
+    """Refuse anything but a fine-grained token that can push to the fixture repos and gets an explicit
+    HTTP 404 for the plugin repo. Any other failure on the plugin repo (network, 401, 403, 5xx, gh missing)
+    also refuses, because it proves nothing about visibility. Returns the user."""
+    if not token.startswith("github_pat_"):
+        kind = "a classic or OAuth token" if token.startswith(("ghp_", "gho_", "ghu_", "ghs_")) else \
+            "not a fine-grained token"
+        raise ScaffoldError(f"{TOKEN_ENV} is {kind}. It must be a fine-grained token (github_pat_...) limited "
+                            "to the fixture repos (see docs/testing.md)")
+    header = ["-H", f"Authorization: token {token}"]
+    try:
+        user = json.loads(runner(["gh", "api", "user", *header], env=env).stdout)
+    except (ScaffoldError, ValueError) as exc:
+        raise ScaffoldError(f"{TOKEN_ENV} was rejected by GitHub: {exc}")
+    for repo in repos:
+        try:
+            info = json.loads(runner(["gh", "api", f"repos/{repo}", *header], env=env).stdout)
+        except (ScaffoldError, ValueError) as exc:
+            raise ScaffoldError(f"{TOKEN_ENV} cannot read the fixture repo {repo}: {exc}")
+        if not (info.get("permissions") or {}).get("push") is True:
+            raise ScaffoldError(f"{TOKEN_ENV} cannot push to the fixture repo {repo} (permissions.push is not true)")
+    try:
+        runner(["gh", "api", f"repos/{plugin}", *header], env=env)
+    except ScaffoldError as exc:
+        if re.search(r"HTTP 404\b", str(exc)):
+            return user
+        raise ScaffoldError(f"cannot confirm {TOKEN_ENV} is blind to {plugin}: expected HTTP 404, got: {exc}")
+    raise ScaffoldError(f"{TOKEN_ENV} can see {plugin}, the plugin repo. Refusing: it must be a fine-grained "
+                        "token limited to the fixture repos (see docs/testing.md)")
+
+
+def prepare(manifest_path: Any, stage: Path, env: Mapping[str, str], runner: Runner = run,
+            state: Path = STATE, backend: Optional[str] = None) -> Path:
+    """Clone the fixture at the manifest's SHAs into `stage` and stage the dedicated fixture token.
+
+    The only token used is NOT_ME_FIXTURE_TOKEN. The operator's own gh login is never read, and gh is run
+    with an empty config dir so it cannot fall back to it.
+    """
+    token = (env.get(TOKEN_ENV) or "").strip()
+    if not token:
+        raise ScaffoldError(f"{TOKEN_ENV} is not set. Create a fine-grained token limited to the two fixture "
+                            "repos (docs/testing.md) and export it; the operator's gh login is never used")
     if not manifest_path or not Path(manifest_path).is_file():
-        raise ScaffoldError("NOT_ME_EVAL_MANIFEST must name the manifest the seeder wrote")
+        raise ScaffoldError("--manifest must name the manifest the seeder wrote")
     manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     sid, rid = manifest["scenario"], manifest["run_id"]
     spec = load_scenario(sid)
     problems = check_config(spec.get("config"))
     if problems:
         raise ScaffoldError(f"scenario {sid}: " + "; ".join(problems))
-    backend = env.get("NOT_ME_EVAL_BACKEND") or "github"
-    stage = state / rid / f"{sid}.stage"
-    if stage.exists():
-        shutil.rmtree(str(stage))
-    stage.mkdir(parents=True)
-    _clone(manifest["repo"], (manifest.get("shas") or {}).get("main"), stage / "repo", runner)
     companion = manifest.get("companion")
-    if companion and spec.get("companion") is not None:
-        csha = ((manifest.get("companion_snapshot") or {}).get("branches") or {}).get("main")
-        _clone(companion, csha, stage / "companion", runner)
-    token = env.get("GH_TOKEN") or runner(["gh", "auth", "token"]).stdout.strip()
-    user = json.loads(runner(["gh", "api", "user"]).stdout)
+    with_companion = bool(companion and spec.get("companion") is not None)
+
+    empty_cfg = Path(tempfile.mkdtemp(prefix="not-me-gh-"))
+    gh_env = {"PATH": os.environ.get("PATH", ""), "HOME": str(empty_cfg), "GH_CONFIG_DIR": str(empty_cfg),
+              "GH_TOKEN": token, "GH_PROMPT_DISABLED": "1"}
+    try:
+        user = check_token(token, [manifest["repo"]] + ([companion] if with_companion else []),
+                           plugin_repo(env, runner), runner, gh_env)
+        if stage.exists():
+            shutil.rmtree(str(stage))
+        stage.mkdir(parents=True)
+        _clone(manifest["repo"], (manifest.get("shas") or {}).get("main"), stage / "repo", runner, gh_env)
+        if with_companion:
+            csha = ((manifest.get("companion_snapshot") or {}).get("branches") or {}).get("main")
+            _clone(companion, csha, stage / "companion", runner, gh_env)
+    finally:
+        shutil.rmtree(str(empty_cfg), ignore_errors=True)
     token_file = stage / "gh-token"
-    token_file.write_text(token + "\n", encoding="utf-8")
+    fd = os.open(str(token_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(token + "\n")
     os.chmod(str(token_file), 0o600)
-    info = {"run_id": rid, "scenario": sid, "backend": backend, "repo": manifest["repo"],
-            "companion": companion if (stage / "companion").is_dir() else None,
+    info = {"run_id": rid, "scenario": sid, "backend": backend or env.get("NOT_ME_EVAL_BACKEND") or "github",
+            "repo": manifest["repo"], "companion": companion if with_companion else None,
             "owner": env.get("NOT_ME_FIXTURE_OWNER") or manifest["repo"].split("/")[0],
             "operator": user["login"], "operator_id": str(user.get("id", "")),
             "prepared_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
     (stage / "stage.json").write_text(json.dumps(info, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (state / POINTER).write_text(json.dumps({"run_id": rid, "scenario": sid,
-                                             "stage": stage.relative_to(state).as_posix()}) + "\n", encoding="utf-8")
+    try:
+        where = stage.resolve().relative_to(state.resolve()).as_posix()
+    except ValueError:
+        where = str(stage.resolve())
+    state.mkdir(parents=True, exist_ok=True)
+    (state / POINTER).write_text(json.dumps({"run_id": rid, "scenario": sid, "stage": where}) + "\n",
+                                 encoding="utf-8")
     return stage
 
 
-def clean(state: Path = STATE) -> List[Path]:
+def clean(state: Path = STATE, stage_dir: Optional[Path] = None) -> List[Path]:
+    """Remove the stage (token copy included) and the pointer. Safe to call when nothing was prepared."""
     pointer = state / POINTER
     removed: List[Path] = []
+    stages = [Path(stage_dir)] if stage_dir else []
     if pointer.is_file():
-        stage = state / json.loads(pointer.read_text(encoding="utf-8"))["stage"]
+        try:
+            stages.append(state / json.loads(pointer.read_text(encoding="utf-8"))["stage"])
+        except (ValueError, KeyError):
+            pass
+    for stage in stages:
         if stage.exists():
             shutil.rmtree(str(stage))
             removed.append(stage)
+    if pointer.is_file():
         pointer.unlink()
         removed.append(pointer)
     return removed
@@ -311,22 +392,26 @@ def stage_workspace(case: str, workspace: Path, home: Path, state: Path = STATE,
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("prepare", help="clone the fixture at the manifest's SHAs into a stage (operator side)")
+    pr = sub.add_parser("prepare", help="clone the fixture at the manifest's SHAs into a stage (operator side)")
+    pr.add_argument("--manifest", required=True)
+    pr.add_argument("--stage-dir", required=True)
+    pr.add_argument("--backend", default=None, choices=("github", "ledger"))
     st = sub.add_parser("stage", help="fill the eval workspace and sandbox home (run by a case's scaffold.sh)")
     st.add_argument("--case", required=True)
     st.add_argument("--workspace", default=".", help="default: the current directory")
-    sub.add_parser("clean", help="remove the prepared stage and its token copy")
+    cl = sub.add_parser("clean", help="remove the prepared stage and its token copy")
+    cl.add_argument("--stage-dir", default=None)
     sub.add_parser("check", help="validate every scenario's config block")
     args = ap.parse_args(argv)
     try:
         if args.cmd == "prepare":
-            print(f"stage: {prepare(os.environ)}")
+            print(f"stage: {prepare(args.manifest, Path(args.stage_dir), os.environ, backend=args.backend)}")
         elif args.cmd == "stage":
             home = Path(os.environ.get("HOME") or Path.home())
             record = stage_workspace(args.case, Path(args.workspace).resolve(), home)
             print(json.dumps(record, sort_keys=True))
         elif args.cmd == "clean":
-            for path in clean():
+            for path in clean(stage_dir=Path(args.stage_dir) if args.stage_dir else None):
                 print(f"removed {path}")
         else:
             bad = 0
