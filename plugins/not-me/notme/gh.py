@@ -217,27 +217,57 @@ def _default_runner(argv: Sequence[str]) -> "subprocess.CompletedProcess[str]":
 # --- input file safety -----------------------------------------------------
 
 
+def _under(path: str, root: str) -> Optional[List[str]]:
+    """The components of path below root (case-folded compare), or None when it is not below."""
+    p, r = os.path.normcase(path), os.path.normcase(root)
+    try:
+        if os.path.commonpath([p, r]) != r:
+            return None
+    except ValueError:  # different drives
+        return None
+    return Path(path).relative_to(root).parts if p != r else []
+
+
 def check_input_path(path: Any, project_dir: Optional[Path] = None) -> Path:
-    """The resolved path if it is an allowed input file; else UnsafePath.
+    """The real path if it is an allowed input file; else UnsafePath.
 
     Allowed: inside the project (never under .git/) or inside notme_tmp_dir(); never a secret-looking
-    name, and never a file with several hard links.
+    name, a symlink (or a path through one below the root), or a file with several hard links.
+    os.path.realpath is used because Path.resolve() misses symlinks on some Windows Pythons.
     """
-    resolved = Path(path).resolve()
-    name = resolved.name.lower()
+    given = os.path.abspath(str(path))
+    real = os.path.realpath(given)
+    name = os.path.basename(real).lower()
     if any(fnmatch.fnmatchcase(name, pattern) for pattern in _SECRET_NAMES):
-        raise UnsafePath(f"refusing to read {resolved.name!r}: it looks like a secret")
-    roots = [notme_tmp_dir()] + ([Path(project_dir)] if project_dir else [])
-    if not any(resolved.is_relative_to(root.resolve()) for root in roots):
-        raise UnsafePath(f"input file {resolved.name!r} is outside the project directory and not-me's temp directory")
-    if ".git" in resolved.parts:
+        raise UnsafePath(f"refusing to read {os.path.basename(real)!r}: it looks like a secret")
+    roots = [str(notme_tmp_dir())] + ([str(project_dir)] if project_dir else [])
+    below: Optional[List[str]] = None
+    for root in roots:
+        if _under(real, os.path.realpath(root)) is None:
+            continue
+        for spelling in (os.path.abspath(root), os.path.realpath(root)):
+            below = _under(given, spelling)
+            if below is not None:
+                current = spelling
+                break
+        if below is not None:
+            break
+        raise UnsafePath(f"input file {os.path.basename(real)!r} reaches the project through a symlink")
+    else:
+        raise UnsafePath(f"input file {os.path.basename(real)!r} is outside the project directory and "
+                         "not-me's temp directory")
+    for part in below:
+        current = os.path.join(current, part)
+        if os.path.islink(current):
+            raise UnsafePath(f"refusing {part!r}: symlinks are not followed")
+    if ".git" in Path(real).parts:
         raise UnsafePath("refusing to read from inside a .git directory")
     try:
-        if resolved.stat().st_nlink > 1:
-            raise UnsafePath(f"refusing {resolved.name!r}: it has more than one hard link")
+        if os.stat(real).st_nlink > 1:
+            raise UnsafePath(f"refusing {os.path.basename(real)!r}: it has more than one hard link")
     except OSError:
         pass
-    return resolved
+    return Path(real)
 
 
 # --- argv and target agreement -----------------------------------------------

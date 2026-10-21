@@ -614,6 +614,23 @@ class InputFileSafetyTests(Base):
         with self.assertRaises(UnsafePath):
             self.client().comment_create("acme/app", 1, link)
 
+    def test_check_input_path_refuses_symlinks_directly(self):
+        real = self.body("inside")
+        link = self.project / "link-to-inside.md"
+        symlink_or_skip(self, link, real)
+        with self.assertRaises(UnsafePath):
+            ghmod.check_input_path(link, self.project)
+        # a symlinked directory component below the root is refused too
+        sub = self.project / "sub"
+        sub.mkdir()
+        (sub / "ok.md").write_text("x", encoding="utf-8")
+        dlink = self.project / "dlink"
+        symlink_or_skip(self, dlink, sub)
+        with self.assertRaises(UnsafePath):
+            ghmod.check_input_path(dlink / "ok.md", self.project)
+        self.assertEqual(self.fake.calls, [])
+        ghmod.check_input_path(sub / "ok.md", self.project)
+
     def test_write_payload_path_checked_too(self):
         with self.assertRaises(UnsafePath):
             self.client().write(WriteTarget.repo("acme/app"), ["issue", "comment", "1"], payload_path="/etc/hosts")
