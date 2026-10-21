@@ -39,10 +39,28 @@ class StateMismatch(IllegalTransition):
     """move() was told the item should be in one state and it is in another."""
 
 
+class LabelCollision(ValueError):
+    """Two abstract states map to the same repo label name, so a label could not be read back as one state."""
+
+
+def label_collisions(mapping: Mapping[str, Any]) -> List[str]:
+    """One message per repo label name (case-folded) that more than one abstract state maps to."""
+    seen: Dict[str, List[str]] = {}
+    for abstract, name in mapping.items():
+        seen.setdefault(str(name).lower(), []).append(str(abstract))
+    return [f"labels: {', '.join(sorted(roles))} all map to the label {name!r}; each state needs its own label"
+            for name, roles in sorted(seen.items()) if len(roles) > 1]
+
+
 class Labels:
-    """Abstract state <-> the label names a repo uses (the `labels` map in project.md)."""
+    """Abstract state <-> the label names a repo uses (the `labels` map in project.md).
+
+    LabelCollision when two states share a label name."""
 
     def __init__(self, mapping: Mapping[str, str]):
+        clashes = label_collisions(mapping)
+        if clashes:
+            raise LabelCollision(clashes[0])
         self._by_abstract: Dict[str, str] = {k: str(v) for k, v in mapping.items()}
         self._by_name: Dict[str, str] = {v.lower(): k for k, v in self._by_abstract.items()}
 
@@ -105,3 +123,48 @@ def apply(gh: Any, repo: str, n: int, frm: str, to: str, labels: Labels, kind: s
     new = transition(gh.labels(repo, n), frm, to, labels, kind)
     gh.labels_set(repo, n, new)
     return new
+
+
+# --- creating the labels -------------------------------------------------------
+
+# colour and description for each label role; roles not listed here get NEUTRAL_STYLE
+LABEL_STYLE = {
+    "todo": ("0e8a16", "Ready to be picked up"),
+    "in_progress": ("fbca04", "Claimed and being worked"),
+    "needs_review": ("1d76db", "Pull request waiting for a reviewer"),
+    "needs_work": ("d93f0b", "Reviewer sent it back"),
+    "ready_to_merge": ("2ea44f", "Approved"),
+    "question": ("d876e3", "Waiting on an answer from a person"),
+    "blocked": ("b60205", "Cannot move until something else lands"),
+    "epic": ("5319e7", "Parent issue; not picked up directly"),
+    "needs_help": ("e99695", "Automation gave up and asks for a person"),
+    "needs_human": ("b60205", "A run stopped and needs a person to act"),
+    "paused": ("c5def5", "Skipped until this label is removed"),
+}
+NEUTRAL_STYLE = ("ededed", "not-me label")
+
+
+def ensure_labels(gh: Any, repo: str, mapping: Mapping[str, Any], check: bool = False) -> Dict[str, Any]:
+    """Create the mapped labels the repo lacks (only report them with check=True).
+
+    Returns {repo, ok (nothing missing), present, missing, created}. ValueError for a name starting with a dash.
+    """
+    from .writes import WriteTarget
+
+    have = {x.get("name", "").lower() for x in
+            gh.read(["label", "list", "-R", repo, "--json", "name", "--limit", "500"]) or []}
+    wanted = {role: str(name) for role, name in mapping.items()}
+    present = sorted(n for n in wanted.values() if n.lower() in have)
+    missing = [(role, name) for role, name in wanted.items() if name.lower() not in have]
+    created: List[str] = []
+    if not check:
+        for role, name in missing:
+            if name.startswith("-"):
+                raise ValueError(f"label name {name!r} must not start with a dash")
+            color, description = LABEL_STYLE.get(role, NEUTRAL_STYLE)
+            gh.write(WriteTarget.repo(repo),
+                     ["label", "create", name, "-R", repo, "--color", color, "--description", description],
+                     description=f"create label {name} on {repo}")
+            created.append(name)
+    return {"repo": repo, "ok": not missing, "present": present, "missing": [name for _, name in missing],
+            "created": created}

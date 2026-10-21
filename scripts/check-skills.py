@@ -175,7 +175,7 @@ class Linter:
         for base in (self.root / "scripts", HERE):
             fallback = base / "known-commands.txt"
             if fallback.is_file():
-                return {ln.strip() for ln in read(fallback).splitlines()
+                return {ln.split()[0] for ln in read(fallback).splitlines()
                         if ln.strip() and not ln.strip().startswith("#")}
         self.notices.append("R3 skipped: plugins/not-me/notme/cli.py and scripts/known-commands.txt are both absent")
         return None

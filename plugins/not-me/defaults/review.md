@@ -6,6 +6,7 @@ checks: verify                   # run the verify gate as part of review
 approve_label: ready_to_merge    # labels key applied on approval
 changes_label: needs_work        # labels key applied when changes are requested
 reviewer_profile: null           # path to a reviewer profile doc; null = none
+auto_approve: false              # true lets review-post send APPROVE; read from the default and global layers only
 ---
 # Review
 

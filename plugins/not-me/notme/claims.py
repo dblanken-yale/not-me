@@ -89,8 +89,11 @@ def is_released(marker: Dict[str, str]) -> bool:
 # --- local lock ------------------------------------------------------------
 
 
-def lock_path(claims_dir: Union[str, Path], number: int) -> Path:
-    return Path(claims_dir) / f"issue-{int(number)}.lock"
+def lock_path(claims_dir: Union[str, Path], number: int, kind: str = "issue") -> Path:
+    """<claims_dir>/<kind>-<n>.lock; kind is issue or pr."""
+    if kind not in ("issue", "pr"):
+        raise ValueError(f"lock kind must be issue or pr, got {kind!r}")
+    return Path(claims_dir) / f"{kind}-{int(number)}.lock"
 
 
 def read_lock(path: Path) -> Optional[Dict[str, Any]]:
@@ -124,10 +127,11 @@ def acquire_lock(path: Path, run_id: str, stale_hours: float, now: Optional[date
     raise ClaimLost(f"could not take {path.name}")
 
 
-def release_lock(path: Path, run_id: str) -> bool:
-    """Remove the lock if it is ours (or unreadable). True when a file was removed."""
+def release_lock(path: Path, run_id: Optional[str]) -> bool:
+    """Remove the lock if it is ours (or unreadable); run_id None removes it whoever holds it.
+    True when a file was removed."""
     held = read_lock(path)
-    if held is not None and held.get("run_id") != run_id:
+    if run_id is not None and held is not None and held.get("run_id") != run_id:
         return False
     try:
         path.unlink()

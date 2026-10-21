@@ -12,11 +12,13 @@ import re
 import stat
 import subprocess
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 
 from . import writes
 from .dryrun import Ledger
+from .redact import redact
 from .writes import Decision, GuardContext, WriteTarget
 
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
@@ -40,7 +42,7 @@ class GhError(Exception):
     def __init__(self, argv: Sequence[str], returncode: int, stderr: str = ""):
         self.argv = list(argv)
         self.returncode = returncode
-        self.stderr = stderr
+        self.stderr = redact(stderr)
         super().__init__(f"gh {' '.join(self.argv[:3])} failed (exit {returncode})")
 
 
@@ -106,6 +108,21 @@ def _login(value: str) -> str:
     return value
 
 
+def names_of(items: Any) -> List[str]:
+    """Names from a list of {name} objects or plain strings (labels as gh returns them)."""
+    return [x.get("name") if isinstance(x, dict) else str(x) for x in items or []]
+
+
+def login_of(value: Any) -> str:
+    """The login from a {login} object or a plain string; "" when absent."""
+    return (value.get("login") if isinstance(value, dict) else value) or ""
+
+
+def csv(value: Optional[str]) -> List[str]:
+    """The non-empty, stripped parts of a comma-separated option value."""
+    return [part.strip() for part in (value or "").split(",") if part.strip()]
+
+
 def tmp_dir_name() -> str:
     """not-me-<uid>, or not-me-<user name> where there are no uids (Windows)."""
     getuid = getattr(os, "getuid", None)
@@ -151,6 +168,21 @@ def notme_tmp_dir() -> Path:
 
 
 # --- classification --------------------------------------------------------
+
+
+@contextmanager
+def tmp_text_file(text: str, prefix: str = "not-me-", suffix: str = ".md") -> Iterator[Path]:
+    """A private temp file holding text, under notme_tmp_dir(), removed on exit."""
+    fd, name = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=str(notme_tmp_dir()))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        yield Path(name)
+    finally:
+        try:
+            os.unlink(name)
+        except OSError:
+            pass
 
 
 def is_denied(argv: Sequence[str]) -> bool:
@@ -466,6 +498,11 @@ class GhClient:
                 "number,title,headRefName,baseRefName,isDraft,author,labels,assignees,url"]
         argv += _repeat("--label", [label] if label else []) + _repeat("--assignee", [assignee] if assignee else [])
         return self.read(argv) or []
+
+    def reviews(self, repo: str, n: int) -> List[Dict[str, Any]]:
+        """The PR's submitted and pending reviews as the REST API returns them."""
+        self._repo(repo)
+        return self.read(["api", f"repos/{repo}/pulls/{_num(n)}/reviews?per_page=100"]) or []
 
     def review_threads(self, repo: str, n: int) -> List[Dict[str, Any]]:
         owner, _, name = self._repo(repo).slug.partition("/")

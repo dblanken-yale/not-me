@@ -380,6 +380,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `approve_label` | `ready_to_merge` | The `labels` key applied on approval |
 | `changes_label` | `needs_work` | The `labels` key applied when changes are requested |
 | `reviewer_profile` | `null` | Path to a reviewer profile doc. `null` means none |
+| `auto_approve` | `false` | `true` lets the review skill send an APPROVE event. Read from the default and global layers only; the repo layer cannot turn it on |
 
 ### prove.md
 
@@ -389,6 +390,8 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `target.strategy` | `[deployments, bot-comment, url-template, local]` | How to find the URL to test, tried in order |
 | `target.url_template` | `null` | URL pattern for the `url-template` strategy |
 | `target.bot_comment_regex` | `null` | Pattern that finds the URL in a bot comment, for the `bot-comment` strategy |
+| `target.hosts` | `null` | Host suffixes a proof URL may use. `null` means the built-in preview hosts. Read from the default and global layers only |
+| `target.bots` | `[]` | Bot logins whose preview comments are read. Read from the default and global layers only |
 | `steps_heading` | `(Functional )?[Tt]esting steps` | Regex for the PR heading that holds the testing steps |
 | `fail_label` | `needs_work` | The `labels` key applied when proof fails |
 | `give_up_after` | `3` | Attempts before asking for a person |

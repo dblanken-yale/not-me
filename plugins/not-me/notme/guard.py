@@ -1290,15 +1290,34 @@ def log_block(ctx: GuardContext, block: Block) -> None:
             "tool": block.tool, "rule": block.rule, "reason": block.reason, "target": block.target})
 
 
-def selftest(hook_cmd: List[str], ctx: GuardContext, env: Optional[Mapping[str, str]] = None) -> bool:
-    """Pipe a canned always-blocked event (a write to the allow list) through the hook; True iff it exits 2."""
+# Variables a Windows child process needs to start at all: Python before 3.11 cannot seed its hash randomisation
+# without SYSTEMROOT and dies with exit 1. Copied from this process when the given environment lacks them.
+_OS_ENV = ("SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP")
+
+
+def selftest_run(hook_cmd: List[str], ctx: GuardContext,
+                 env: Optional[Mapping[str, str]] = None) -> Tuple[bool, str]:
+    """Pipe a canned always-blocked event (a write to the allow list) through the hook.
+
+    Returns (blocked, stderr): blocked is True iff the hook exits 2; stderr is the hook's (or the launch error's)
+    text, for diagnosing a failure."""
     event = {"hook_event_name": "PreToolUse", "tool_name": "Write", "cwd": ctx.cwd,
              "tool_input": {"file_path": str(ctx.allowlist_path), "content": "{}"}}
     run_env = dict(os.environ if env is None else env)
+    for key in _OS_ENV:
+        if key not in run_env and key in os.environ:
+            run_env[key] = os.environ[key]
     run_env["NOT_ME_HOME"] = str(Path(ctx.allowlist_path).parent)
     try:
         proc = subprocess.run(hook_cmd, input=json.dumps(event), capture_output=True, text=True, timeout=30,
                               cwd=ctx.cwd, env=run_env)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return proc.returncode == 2
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"{exc.__class__.__name__}: {exc}"
+    if proc.returncode == 2:
+        return True, proc.stderr or ""
+    return False, f"exit {proc.returncode}: {proc.stderr or ''}"
+
+
+def selftest(hook_cmd: List[str], ctx: GuardContext, env: Optional[Mapping[str, str]] = None) -> bool:
+    """True iff the hook blocks the canned always-blocked event (see selftest_run)."""
+    return selftest_run(hook_cmd, ctx, env)[0]

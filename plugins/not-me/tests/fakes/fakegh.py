@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 VALUE_FLAGS = {"-X", "--method", "-R", "--json", "-f", "-F", "--input", "--body-file", "--head", "--base",
                "--title", "--limit", "--label", "--reviewer", "--assignee", "--state", "--add-assignee",
-               "--remove-assignee"}
+               "--remove-assignee", "--color", "--description"}
 
 Result = Tuple[int, str, str]
 
@@ -212,6 +212,13 @@ class FakeGitHub:
             return f"https://github.com/{repo_flag}/issues/{pos[2]}\n"
         if head == "issue" and verb == "comment":
             return self._comment(repo_flag, pos[2], _read(flags["--body-file"][0]))
+        if head == "label" and verb == "list":
+            defs = self._repo(repo_flag).get("label_defs", {})
+            return [{"name": n, **d} for n, d in defs.items()][:int((flags.get("--limit") or ["30"])[0])]
+        if head == "label" and verb == "create":
+            self._repo(repo_flag).setdefault("label_defs", {})[pos[2]] = {
+                "color": (flags.get("--color") or [""])[0], "description": (flags.get("--description") or [""])[0]}
+            return f"https://github.com/{repo_flag}/labels/{pos[2]}\n"
         if head == "pr" and verb == "view":
             return self._view(self._thing(repo_flag, pos[2]), fields)
         if head == "pr" and verb == "list":
@@ -305,6 +312,8 @@ class FakeGitHub:
             ("GET", r + r"/pulls/(\d+)/reviews", self._r_reviews),
             ("POST", r + r"/pulls/(\d+)/reviews", self._r_review),
             ("POST", r + r"/pulls/(\d+)/requested_reviewers", self._r_request_review),
+            ("GET", r + r"/deployments", self._r_deployments),
+            ("GET", r + r"/deployments/(\d+)/statuses", self._r_deployment_statuses),
         ]
 
     def _api(self, pos: List[str], flags: Dict[str, List[str]]) -> Any:
@@ -377,15 +386,28 @@ class FakeGitHub:
     def _r_review(self, g, flags):
         data = json.loads(_read(flags["--input"][0]))
         rid = self._id()
-        self._thing(*g)["reviews"].append({**data, "id": rid})
+        self._thing(*g)["reviews"].append({**data, "id": rid, "commit_id": self._thing(*g).get("headRefOid"),
+                                           "submitted_at": "2026-01-01T00:00:00Z"})
         self._event(g[0], g[1], "reviewed", state=data.get("event"))
         return {"id": rid, "state": data.get("event")}
 
     def _r_reviews(self, g, flags):
         states = {"APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED", "COMMENT": "COMMENTED"}
-        return [{"id": r["id"], "user": {"login": self.state["user"]}, "body": r.get("body", ""),
-                 "state": self.review_state_override or states.get(r.get("event"), r.get("event"))}
+        return [{"id": r["id"], "user": {"login": r.get("user") or self.state["user"]}, "body": r.get("body", ""),
+                 "commit_id": r.get("commit_id"), "submitted_at": r.get("submitted_at"),
+                 "state": self.review_state_override or r.get("state") or states.get(r.get("event"), r.get("event"))}
                 for r in self._thing(*g)["reviews"]]
+
+    def _r_deployments(self, g, flags):
+        sha = getattr(self, "_query", {}).get("sha")
+        return [{"id": d["id"], "sha": d["sha"]} for d in self.state.get("deployments", [])
+                if d["repo"] == g[0] and sha in (None, d["sha"])]
+
+    def _r_deployment_statuses(self, g, flags):
+        for d in self.state.get("deployments", []):
+            if d["repo"] == g[0] and d["id"] == int(g[1]):
+                return list(d["statuses"])
+        return []
 
     def _r_request_review(self, g, flags):
         pr = self._thing(*g)

@@ -145,8 +145,10 @@ def _owned_by(marker: dict, run_id: str) -> bool:
 
 
 def log_root(project_dir: Optional[PathLike], config_root: Optional[PathLike] = None,
-             env: Optional[Mapping[str, str]] = None) -> Path:
-    """The log directory, created: config value, else $NOT_ME_LOG_ROOT, else <git-common-dir>/not-me/logs.
+             env: Optional[Mapping[str, str]] = None, create: bool = True) -> Path:
+    """The log directory: config value, else $NOT_ME_LOG_ROOT, else <git-common-dir>/not-me/logs.
+
+    create=False only computes the path (read-only commands must not leave directories behind).
 
     A linked worktree shares the main checkout's root because the git common
     dir is shared. Outside git with nothing configured, falls back to
@@ -165,8 +167,19 @@ def log_root(project_dir: Optional[PathLike], config_root: Optional[PathLike] = 
             chosen = Path(project_dir) / ".not-me" / "logs"
     if chosen is None:
         raise ValueError("cannot resolve a log root: no config value, no $NOT_ME_LOG_ROOT, no project")
-    chosen.mkdir(parents=True, exist_ok=True)
+    if create:
+        chosen.mkdir(parents=True, exist_ok=True)
     return chosen
+
+
+def is_run_log(path: PathLike) -> bool:
+    """True when the file's first line is a run-log title line (`# not-me:<skill> <ref>   run=<id>`)."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            first = handle.readline(4096)
+    except (OSError, UnicodeDecodeError):
+        return False
+    return _TITLE_RE.match(first.rstrip("\r\n")) is not None
 
 
 def marker_path_in(common_dir: PathLike) -> Path:
