@@ -141,7 +141,8 @@ class TokenizerTests(unittest.TestCase):
         for cmd in ("ls -la", "npm test", "cat <<EOF\ngit push\nEOF", "echo hello > out.txt"):
             self.assertFalse(bash(cmd), cmd)
         for cmd in ("git status", "g''h pr list", "g\\it log", "${X} y", "./run", "make.sh", "python3 -c 1",
-                    "find . -name x", "cat ~/.claude/not-me/allowed-repos.json", "sh <<EOF\ngh pr merge 1\nEOF"):
+                    "find . -name x", "cat ~/.claude/not-me/allowed-repos.json", "sh <<EOF\ngh pr merge 1\nEOF",
+                    "cp -r /some/home x", "wc < /some/home/op*", "cat -n notes"):
             self.assertTrue(bash(cmd), cmd)
         self.assertTrue(guard.needs_check({"tool_name": "Write", "tool_input": {"file_path": "x"}}))
 
@@ -350,7 +351,8 @@ class HooksJsonTests(unittest.TestCase):
     def test_declares_pre_tool_use(self):
         data = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
         entry = data["hooks"]["PreToolUse"][0]
-        self.assertEqual(entry["matcher"], "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|mcp__.*github.*")
+        self.assertEqual(entry["matcher"],
+                         "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|NotebookRead|Grep|Glob|LS|mcp__.*github.*")
         hook = entry["hooks"][0]
         self.assertEqual((hook["type"], hook["timeout"]), ("command", 10))
         self.assertIn('bin/notme-python" "${CLAUDE_PLUGIN_ROOT}/hooks/repo_guard.py"', hook["command"])

@@ -31,6 +31,9 @@ SCRIPTS = {
     "unpause.sh": "#!/bin/sh\nnotme pause off\n",
     "drive.exp": "spawn notme allow-repo add acme/other\nexpect eof\n",
     "plain.exp": "spawn ls\nexpect eof\n",
+    "fork.py": "import os\nif os.fork() == 0:\n    os.setsid()\n",
+    "bg.sh": "#!/bin/sh\nsetsid make serve\n",
+    "tool.py": "print('ok')\n",
 }
 
 # --- fixtures --------------------------------------------------------------
@@ -116,6 +119,8 @@ def build_fixtures(root: Path) -> Dict[str, str]:
         home = root / "homes" / f"g-{repo_name}"
         home.mkdir(parents=True, exist_ok=True)
         (home / "project.md").write_text(f"---\nschema: 1\n{front}\n---\n# Project\n", encoding="utf-8")
+    for home in (root / "homes").iterdir():  # a real token, so globs that expand to it are caught for real
+        (home / "operator-token").write_text("fixture-token\n", encoding="utf-8")
     for name, (origin, branch, front, extra) in REPOS.items():
         repo = root / name
         repo.mkdir(parents=True, exist_ok=True)
@@ -656,6 +661,37 @@ bash(B, SP, "ln -s {H}/operator-token x", "alloff")
 bash(A, None, "cat README.md")
 bash(A, None, "grep -r x scripts")
 bash(A, None, "cp -r scripts {F}/app/scripts-copy")
+# Glob arguments are expanded for real against the fixture token.
+bash(B, SP, "cat {H}/*")
+bash(B, SP, "head {H}/**/operator*", "alloff")
+bash(B, SP, "cp -r {H}/.. {F}/app/homes-copy")
+bash(A, None, "cat {H}/*.md")
+bash(A, None, "cat scripts/*")
+# Read-like tools may not reach the token or list the not-me home.
+mcp(B, SP, "NotebookRead", {"notebook_path": "{H}/operator-token"})
+mcp(B, SP, "Grep", {"pattern": "x", "path": "{H}"})
+mcp(B, SP, "Grep", {"pattern": "x", "path": "{H}/.."}, "alloff")
+mcp(B, SP, "Glob", {"pattern": "{H}/*"})
+mcp(B, SP, "Glob", {"pattern": "**/*", "path": "{H}/.."})
+mcp(B, SP, "LS", {"path": "{H}"})
+mcp(A, None, "Grep", {"pattern": "x"})
+mcp(A, None, "Grep", {"pattern": "x", "path": "{H}/..", "glob": "*.md"})
+mcp(A, None, "Glob", {"pattern": "**/*.py"})
+mcp(A, None, "LS", {"path": "{F}/app"})
+# Terminal-forging and detaching primitives in interpreter code or scripts, whatever they run.
+bash(B, SP, 'python3 -c "import os; os.fork()"')
+bash(B, SP, "python3 -c \"import pty; pty.spawn('/bin/sh')\"", "alloff")
+bash(B, SP, "python3 -c \"import subprocess; subprocess.Popen(['make'], start_new_session=True)\"")
+bash(B, SP, "node -e \"require('child_process').spawn('make', [], {detached: true})\"")
+bash(B, SP, "perl -e 'use POSIX; POSIX::setsid()'")
+bash(B, SP, "ruby -e 'Process.daemon'")
+bash(B, SP, "python3 scripts/fork.py")
+bash(B, SP, "python3 -W ignore scripts/fork.py")
+bash(B, SP, "bash scripts/bg.sh")
+bash(B, SP, "python3 - <<'EOF'\nimport os\nos.openpty()\nEOF")
+bash(A, None, "python3 scripts/tool.py")
+bash(A, None, "python3 -c \"import threading; threading.Thread(target=print, daemon=True).start()\"")
+bash(A, None, "node -e \"require('child_process').spawn('ls')\"")
 
 # Substrings a block message must contain, by case id.
 MESSAGE_CHECKS: Dict[str, List[str]] = {
