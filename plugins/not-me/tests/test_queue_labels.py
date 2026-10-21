@@ -51,6 +51,9 @@ def add_issue(fake, number, labels=("to do",), author="octocat", assignees=(), b
         "created_at": created}
 
 
+TRUST = lambda login: login in ("octocat", "hubot")  # noqa: E731
+
+
 class QueueTestCase(unittest.TestCase):
     cfg_overrides: dict = {}
 
@@ -252,6 +255,45 @@ class ClaimTests(QueueTestCase):
         self.assertEqual(self.q.claim(1).now, "in_progress")
         self.assertEqual(self.thing(1)["assignees"], ["octocat"])
 
+    def test_forged_marker_is_ignored(self):
+        # hubot writes a comment that claims to be octocat's, and an older "foreign" one by an untrusted user
+        self.fake.post_comment(REPO, 1, "hubot", claims.marker_body("octocat", "run-x", claims.iso(NOW)))
+        self.fake.post_comment(REPO, 1, "mallory",
+                               claims.marker_body("mallory", "run-m", claims.iso(NOW - timedelta(minutes=1))))
+        self.assertEqual(self.q.marker_comments(1), [])
+        got = self.q.claim(1)
+        self.assertEqual(self.thing(1)["assignees"], ["octocat"])
+        mine = [c for c in self.marker_comments(1) if c["user"] == "octocat"]
+        self.assertEqual(len(mine), 1)  # a new comment of our own, not an edit of hubot's
+        self.assertEqual(got.marker_comment_id, mine[0]["id"])
+        forged = [c for c in self.marker_comments(1) if c["user"] == "hubot"][0]
+        self.assertFalse(claims.is_released(claims.parse_marker(forged["body"])))
+
+    def test_long_timeline_is_read_across_pages(self):
+        for _ in range(150):
+            self.fake._event(REPO, 1, "labeled")
+        self.assertEqual(self.q.claim(1).now, "in_progress")
+        events = [e for e in self.fake.state["timeline"] if e["number"] == 1]
+        self.assertGreater(events.index([e for e in events if e["event"] == "assigned"][0]), 100)
+        pages = [c for c in self.fake.calls if "timeline" in " ".join(c)]
+        self.assertEqual(len(pages), 2)
+
+    def test_foreign_assignment_on_page_two_is_seen(self):
+        for _ in range(99):
+            self.fake._event(REPO, 1, "labeled")
+        self.fake.race_assignee = "hubot"
+        with self.assertRaises(claims.ClaimLost):
+            self.q.claim(1)
+
+    def test_missing_own_assignment_fails_closed(self):
+        self.fake._r_timeline = lambda g, flags: []
+        with self.assertRaises(claims.ClaimLost):
+            self.q.claim(1)
+        self.assertEqual(self.thing(1)["assignees"], [])
+        self.assertEqual(self.thing(1)["labels"], ["to do"])
+        self.assertTrue(claims.is_released(claims.parse_marker(self.marker_comments(1)[0]["body"])))
+        self.assertFalse((self.claims_dir / "issue-1.lock").exists())
+
     def test_stale_or_released_foreign_markers_do_not_block(self):
         self.fake.post_comment(REPO, 1, "hubot", claims.marker_body("hubot", "r", claims.iso(NOW - timedelta(days=2))))
         self.fake.post_comment(REPO, 1, "monalisa", claims.marker_body("monalisa", "r", claims.iso(NOW - timedelta(minutes=1)),
@@ -338,27 +380,35 @@ class ReleaseAndMoveTests(QueueTestCase):
 class StaleTests(QueueTestCase):
     def issue_with_marker(self, age_hours, labels=("in progress",), released=False):
         body = claims.marker_body("octocat", "run-1", claims.iso(NOW - timedelta(hours=age_hours)), released=released)
-        return {"number": 12, "labels": [{"name": n} for n in labels], "comments": [{"body": body}]}
+        return {"number": 12, "labels": [{"name": n} for n in labels], "comments": [{"author": {"login": "octocat"}, "body": body}]}
 
     def test_old_marker_without_a_branch_is_stale(self):
-        self.assertTrue(is_stale(self.issue_with_marker(9), 8, [], "in progress", NOW))
+        self.assertTrue(is_stale(self.issue_with_marker(9), 8, [], "in progress", NOW, is_trusted=TRUST))
 
     def test_fresh_marker_is_not_stale(self):
-        self.assertFalse(is_stale(self.issue_with_marker(1), 8, [], "in progress", NOW))
+        self.assertFalse(is_stale(self.issue_with_marker(1), 8, [], "in progress", NOW, is_trusted=TRUST))
 
     def test_a_branch_for_the_issue_keeps_it_alive(self):
         issue = self.issue_with_marker(30)
-        self.assertFalse(is_stale(issue, 8, ["feat/12-widget"], "in progress", NOW))
-        self.assertFalse(is_stale(issue, 8, ["12-widget"], "in progress", NOW))
-        self.assertTrue(is_stale(issue, 8, ["feat/123-other", "112-x"], "in progress", NOW))
+        self.assertFalse(is_stale(issue, 8, ["feat/12-widget"], "in progress", NOW, is_trusted=TRUST))
+        self.assertFalse(is_stale(issue, 8, ["12-widget"], "in progress", NOW, is_trusted=TRUST))
+        self.assertTrue(is_stale(issue, 8, ["feat/123-other", "112-x"], "in progress", NOW, is_trusted=TRUST))
 
     def test_only_in_progress_issues_can_be_stale(self):
-        self.assertFalse(is_stale(self.issue_with_marker(30, labels=("to do",)), 8, [], "in progress", NOW))
+        self.assertFalse(is_stale(self.issue_with_marker(30, labels=("to do",)), 8, [], "in progress", NOW, is_trusted=TRUST))
 
     def test_no_marker_or_released_marker_is_not_reported(self):
         self.assertFalse(is_stale({"number": 12, "labels": [{"name": "in progress"}], "comments": []}, 8, [],
-                                  "in progress", NOW))
-        self.assertFalse(is_stale(self.issue_with_marker(30, released=True), 8, [], "in progress", NOW))
+                                  "in progress", NOW, is_trusted=TRUST))
+        self.assertFalse(is_stale(self.issue_with_marker(30, released=True), 8, [], "in progress", NOW, is_trusted=TRUST))
+
+    def test_marker_written_by_someone_else_or_untrusted_is_ignored(self):
+        issue = self.issue_with_marker(30)
+        issue["comments"][0]["author"] = {"login": "hubot"}  # hubot forging octocat's marker
+        self.assertFalse(is_stale(issue, 8, [], "in progress", NOW, is_trusted=TRUST))
+        issue["comments"][0]["author"] = {"login": "octocat"}
+        self.assertTrue(is_stale(issue, 8, [], "in progress", NOW, is_trusted=TRUST))
+        self.assertFalse(is_stale(issue, 8, [], "in progress", NOW, is_trusted=lambda login: False))
 
     def test_queue_stale_reads_the_issue_and_never_releases_it(self):
         self.q.claim(1)

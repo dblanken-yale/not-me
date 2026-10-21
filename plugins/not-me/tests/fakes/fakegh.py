@@ -288,6 +288,7 @@ class FakeGitHub:
         if not pos:
             return None
         endpoint = pos[0].split("?")[0].strip("/")
+        self._query = dict(kv.split("=", 1) for kv in pos[0].partition("?")[2].split("&") if "=" in kv)
         method = (flags.get("-X") or flags.get("--method") or ["GET"])[0].upper()
         if endpoint == "graphql":
             return self._graphql(self._fields(flags))
@@ -325,7 +326,12 @@ class FakeGitHub:
                 for c in self._thing(*g)["comments"]]
 
     def _r_timeline(self, g, flags):
-        return [e for e in self.state["timeline"] if e["repo"] == g[0] and e["number"] == int(g[1])]
+        events = [e for e in self.state["timeline"] if e["repo"] == g[0] and e["number"] == int(g[1])]
+        query = getattr(self, "_query", {})
+        if "per_page" in query:
+            size, page = int(query["per_page"]), int(query.get("page", 1))
+            return events[(page - 1) * size:page * size]
+        return events
 
     def _r_comment_edit(self, g, flags):
         thing, comment = self._find_comment(g[0], int(g[1]))

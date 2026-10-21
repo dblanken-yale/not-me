@@ -77,6 +77,11 @@ def parse_marker(body: Optional[str]) -> Optional[Dict[str, str]]:
     return found if found.get("login") and found.get("ts") else None
 
 
+def author_matches(author: Any, marker: Dict[str, str]) -> bool:
+    """A marker counts only when the comment's real author is the login the marker names."""
+    return isinstance(author, str) and author.lower() == marker.get("login", "").lower()
+
+
 def is_released(marker: Dict[str, str]) -> bool:
     return marker.get("state") == "released"
 

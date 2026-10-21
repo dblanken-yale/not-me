@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from .. import claims, states
 from ..gh import _num
@@ -11,6 +11,8 @@ from . import BaseQueue, Candidate, Claim
 
 _LIST_FIELDS = "number,title,body,state,labels,assignees,author,createdAt,url"
 _TASK_RE = re.compile(r"^\s*[-*]\s*\[ \]\s*(?:([A-Za-z0-9][\w.-]*/[\w.-]+))?#(\d+)\b", re.M)
+_PAGE = 100
+_MAX_TIMELINE_PAGES = 50
 _EXCLUDED = ("paused", "blocked", "epic")
 
 
@@ -38,16 +40,27 @@ def task_list_numbers(body: Optional[str], tracker: str) -> List[int]:
     return out
 
 
+def _comment_author(comment: Dict[str, Any]) -> Optional[str]:
+    a = comment.get("author")
+    return a.get("login") if isinstance(a, dict) else a
+
+
 def is_stale(issue: Dict[str, Any], claim_stale_hours: float, branches: Sequence[str] = (),
-             in_progress_label: str = "in progress", now: Optional[datetime] = None) -> bool:
+             in_progress_label: str = "in progress", now: Optional[datetime] = None, *,
+             is_trusted: Callable[[Optional[str]], bool]) -> bool:
     """An in-progress issue whose newest live claim marker is older than the limit and has no `<n>-` branch.
 
     Only reports; nothing is ever released automatically. No marker means we cannot tell, so not stale.
+    A marker counts only when its comment author is the login it names and is_trusted(login) is true.
     """
     if in_progress_label.lower() not in {n.lower() for n in _names(issue)}:
         return False
-    markers = [m for m in (claims.parse_marker(c.get("body")) for c in issue.get("comments") or [])
-               if m and not claims.is_released(m)]
+    markers = []
+    for comment in issue.get("comments") or []:
+        m = claims.parse_marker(comment.get("body"))
+        if m and not claims.is_released(m) and claims.author_matches(_comment_author(comment), m) \
+                and is_trusted(m["login"]):
+            markers.append(m)
     stamps = [(claims.parse_ts(m["ts"]), m) for m in markers]
     stamps = [(t, m) for t, m in stamps if t is not None]
     if not stamps:
@@ -110,7 +123,7 @@ class LabelQueue(BaseQueue):
     def stale(self, n: int, branches: Sequence[str] = ()) -> bool:
         """Whether issue n holds a stale claim. `branches` are the branch names on origin (caller supplies them)."""
         return is_stale(self.gh.issue(self.tracker, _num(n)), self.stale_hours, branches,
-                        self.labels.name("in_progress"), self.now())
+                        self.labels.name("in_progress"), self.now(), is_trusted=self.marker_trusted)
 
     # --- claiming ---
 
@@ -148,11 +161,32 @@ class LabelQueue(BaseQueue):
         return Claim(number=n, previous="todo", now="in_progress", marker_comment_id=marker_id, run_id=self.run_id)
 
     def _check_timeline(self, n: int) -> None:
-        events = self.gh.read(["api", f"repos/{self.tracker}/issues/{n}/timeline?per_page=100"]) or []
+        events = self._timeline(n)
+        if not self._has_own_assignment(events):  # cannot prove we are first, so do not keep the claim
+            self._back_out(n)
+            raise claims.ClaimLost(f"{self.tracker}#{n}: our assignment is not in the timeline; claim released")
         winner = self._older_assignee(events) or self._older_marker(n)
         if winner:
             self._back_out(n)
             raise claims.ClaimLost(f"{self.tracker}#{n} was claimed first by {winner}")
+
+    def _timeline(self, n: int) -> List[Dict[str, Any]]:
+        """Every timeline event, read page by page until a page comes back short."""
+        events: List[Dict[str, Any]] = []
+        for page in range(1, _MAX_TIMELINE_PAGES + 1):
+            batch = self.gh.read(["api", f"repos/{self.tracker}/issues/{n}/timeline?per_page={_PAGE}&page={page}"]) or []
+            events += batch
+            if len(batch) < _PAGE:
+                break
+        return events
+
+    def _has_own_assignment(self, events: List[Dict[str, Any]]) -> bool:
+        last = None
+        for e in events:
+            if e.get("event") in ("assigned", "unassigned") \
+                    and ((e.get("assignee") or {}).get("login") or "").lower() == self.operator.lower():
+                last = e
+        return bool(last and last["event"] == "assigned")
 
     def _older_assignee(self, events: List[Dict[str, Any]]) -> Optional[str]:
         """A login that is still assigned and was assigned before us (ties go to the lower login)."""

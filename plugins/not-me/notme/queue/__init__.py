@@ -121,11 +121,17 @@ class BaseQueue:
             except OSError:
                 pass
 
+    def marker_trusted(self, login: Optional[str]) -> bool:
+        """Whose claim markers are believed: the operator and anyone the roster trusts."""
+        return self._is_me(login) or self.trusted(login)
+
     def marker_comments(self, n: int) -> List[Tuple[Dict[str, Any], Dict[str, str]]]:
+        """Claim markers on the issue that were really written by the login they name, and a trusted one."""
         out = []
         for comment in self.gh.comments(self.tracker, n):
             marker = claims.parse_marker(comment.get("body"))
-            if marker:
+            if marker and claims.author_matches(comment.get("author"), marker) \
+                    and self.marker_trusted(marker["login"]):
                 out.append((comment, marker))
         return out
 
