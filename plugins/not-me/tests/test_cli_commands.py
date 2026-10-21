@@ -1,6 +1,7 @@
 """Behaviour of individual notme subcommands, over a fake GitHub and (for git) a real scratch repository."""
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -11,6 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 from notme import claims
+from notme import feedback as feedback_mod
 from notme import git as git_mod
 from tests import PLUGIN_ROOT, TempCase
 from tests import test_cli_contract as base
@@ -372,6 +374,139 @@ class PullRequestTests(base.CliCase):
         pr["labels"] = ["needs work", "needs human"]
         self.assertEqual(self.ok("pick-needs-work"), {"none": True})
 
+    def add_pr(self, number, **fields):
+        pr = dict(things(self.fake)["3"], number=number, title=f"PR {number}", comments=[], threads=[], reviews=[],
+                  labels=[], assignees=[], reviewRequests=[], headRefName=f"feat/p{number}", baseRefName="main")
+        pr.update(fields)
+        things(self.fake)[str(number)] = pr
+        return pr
+
+    def test_pick_needs_work_exclude_skips_numbers(self):
+        things(self.fake)["3"].update({"labels": ["needs work"], "assignees": ["octocat"], "author": "octocat"})
+        self.add_pr(5, labels=["needs work"], assignees=["octocat"], author="octocat")
+        self.assertEqual(self.ok("pick-needs-work")["others"], [5])
+        payload = self.ok("pick-needs-work", "--exclude", "3")
+        self.assertEqual((payload["number"], payload["others"]), (5, []))
+        self.assertEqual(self.ok("pick-needs-work", "--exclude", "3", "--exclude", "5"), {"none": True})
+
+    def test_pick_needs_work_include_answered(self):
+        self.add_pr(5, labels=["question"], assignees=["octocat"], author="octocat")
+        self.assertEqual(self.ok("pick-needs-work", "--include-answered"), {"none": True})  # nobody answered
+        self.fake.post_comment(REPO, 5, "octocat", "Question: A or B?", created_at="2026-01-01T00:00:00Z")
+        self.assertEqual(self.ok("pick-needs-work", "--include-answered"), {"none": True})  # the operator's own
+        self.fake.post_comment(REPO, 5, "octocat", feedback_mod.MARKER_UPDATE + "\nsummary",
+                               created_at="2026-01-01T00:00:00Z")
+        self.fake.post_comment(REPO, 5, "mallory", "use the other one", created_at="2026-01-03T00:00:00Z")
+        self.assertEqual(self.ok("pick-needs-work", "--include-answered"), {"none": True})  # untrusted answer
+        self.fake.post_comment(REPO, 5, "hubot", "Go with option B.", created_at="2026-01-02T00:00:00Z")
+        payload = self.ok("pick-needs-work", "--include-answered")
+        self.assertEqual((payload["number"], payload["answered"]), (5, True))
+        self.assertEqual(self.ok("pick-needs-work"), {"none": True})  # off by default
+        self.assertEqual(self.ok("pick-needs-work", "--include-answered", "--exclude", "5"), {"none": True})
+
+    def test_pick_needs_work_answered_must_be_newer_than_the_marker(self):
+        self.add_pr(5, labels=["question"], assignees=["octocat"], author="octocat")
+        self.fake.post_comment(REPO, 5, "hubot", "Option B.", created_at="2026-01-01T00:00:00Z")
+        self.fake.post_comment(REPO, 5, "octocat", feedback_mod.MARKER_UPDATE + "\nsummary",
+                               created_at="2026-01-02T00:00:00Z")
+        self.assertEqual(self.ok("pick-needs-work", "--include-answered"), {"none": True})
+
+    def test_pick_needs_work_include_answered_orders_by_number_and_flags_only_answered(self):
+        things(self.fake)["3"].update({"labels": ["needs work"], "assignees": ["octocat"], "author": "octocat"})
+        self.add_pr(2, labels=["question"], assignees=["octocat"], author="octocat")
+        self.fake.post_comment(REPO, 2, "hubot", "Do it.", created_at="2026-01-02T00:00:00Z")
+        payload = self.ok("pick-needs-work", "--include-answered")
+        self.assertEqual((payload["number"], payload["answered"], payload["others"]), (2, True, [3]))
+        payload = self.ok("pick-needs-work", "--include-answered", "--exclude", "2")
+        self.assertEqual(payload["number"], 3)
+        self.assertNotIn("answered", payload)
+
+    def test_pr_children_lists_stacked_prs_and_skips_untrusted_and_forks(self):
+        self.add_pr(5, baseRefName="feat/widget", author="hubot")
+        self.add_pr(6, baseRefName="feat/widget", author="mallory")
+        self.add_pr(7, baseRefName="feat/widget", author="hubot", isCrossRepository=True)
+        self.add_pr(8, baseRefName="main", author="hubot")
+        payload = self.ok("pr-children", "3")
+        self.assertEqual((payload["head"], [c["number"] for c in payload["children"]]), ("feat/widget", [5]))
+        self.assertEqual(payload["children"][0]["base"], "feat/widget")
+        self.assertEqual(payload["children"][0]["head"], "feat/p5")
+        self.assertEqual(payload["children"][0]["author"], "hubot")
+        self.assertIn("url", payload["children"][0])
+        self.assertEqual({s["number"]: s["reason"] for s in payload["skipped"]},
+                         {6: "author not trusted", 7: "cross-repository (fork) PR"})
+        self.assertEqual(self.ok("pr-children", "8")["children"], [])
+        self.assertEqual(self.fake.writes_made(), [])
+
+    def test_pr_children_accepts_a_full_ref(self):
+        self.add_pr(5, baseRefName="feat/widget", author="hubot")
+        self.assertEqual([c["number"] for c in self.ok("pr-children", f"{REPO}#3")["children"]], [5])
+
+    def test_pr_by_head_finds_open_same_repo_prs_from_trusted_authors(self):
+        self.add_pr(5, headRefName="feat/dup", author="hubot")
+        self.add_pr(6, headRefName="feat/dup", author="mallory")
+        self.add_pr(7, headRefName="feat/dup", author="hubot", state="CLOSED")
+        self.add_pr(8, headRefName="feat/dup", author="hubot", isCrossRepository=True)
+        payload = self.ok("pr-by-head", "feat/dup")
+        self.assertEqual([p["number"] for p in payload["prs"]], [5])
+        self.assertEqual({s["number"] for s in payload["skipped"]}, {6, 8})
+        self.assertEqual(self.ok("pr-by-head", "feat/missing")["prs"], [])
+        argv = [c for c in self.fake.calls if c[:2] == ["pr", "list"]][0]
+        self.assertEqual(argv[argv.index("--head") + 1], "feat/dup")
+        self.assertEqual(argv[argv.index("--limit") + 1], "200")
+
+    def test_pr_by_head_honours_repo_option(self):
+        things(self.fake, "acme/other")["1"] = dict(things(self.fake)["3"], number=1, headRefName="feat/o",
+                                                    author="hubot")
+        payload = self.ok("pr-by-head", "feat/o", "--repo", "acme/other", repo=False)
+        self.assertEqual((payload["repo"], [p["number"] for p in payload["prs"]]), ("acme/other", [1]))
+
+    def test_followup_honours_repo_and_defaults_to_the_tracker(self):
+        title, body = self.write_file("t.txt", "Follow up\n"), self.write_file("b.md", "Do more\n")
+        made = self.ok("followup", "--title-file", title, "--body-file", body)
+        self.assertEqual(made["number"], 4)  # acme/app is the tracker
+        other = self.ok("followup", "--title-file", title, "--body-file", body, "--repo", "acme/other", repo=False)
+        self.assertEqual(other["number"], 1)
+        self.assertEqual(things(self.fake, "acme/other")["1"]["title"], "Follow up")
+        self.assertEqual(len(things(self.fake)), 4)
+
+    def test_followup_in_a_repo_off_the_allow_list_is_blocked(self):
+        self.tc.write("global", "project", base.NO_OTHERS_PROJECT)
+        title, body = self.write_file("t.txt", "Follow up\n"), self.write_file("b.md", "Do more\n")
+        code, payload, _ = self.cli("followup", "--title-file", title, "--body-file", body, "--repo", "acme/other",
+                                    repo=False)
+        self.assertEqual((code, payload["blocked"]), (6, True))
+        self.assertEqual(self.fake.writes_made(), [])
+
+    def test_issue_edit_body(self):
+        body = self.write_file("b.md", "New body\n")
+        payload = self.ok("issue-edit-body", "1", "--body-file", body)
+        self.assertEqual(payload, {"repo": REPO, "number": 1, "updated": True})
+        self.assertEqual(things(self.fake)["1"]["body"], "New body\n")
+
+    def test_issue_edit_body_full_ref_blocked_and_unsafe_file(self):
+        body = self.write_file("b.md", "New body\n")
+        things(self.fake, "acme/other")["1"] = dict(things(self.fake)["1"], number=1)
+        self.ok("issue-edit-body", "acme/other#1", "--body-file", body)
+        self.assertEqual(things(self.fake, "acme/other")["1"]["body"], "New body\n")
+        self.tc.write("global", "project", base.NO_OTHERS_PROJECT)
+        code, payload, _ = self.cli("issue-edit-body", "acme/app-ui#1", "--body-file", body)
+        self.assertEqual((code, payload["blocked"]), (6, True))
+        outside = TempCase()
+        self.addCleanup(outside.cleanup)
+        path = outside.root / "b.md"
+        path.write_text("x", encoding="utf-8")
+        code, payload, _ = self.cli("issue-edit-body", "1", "--body-file", str(path))
+        self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
+        self.assertEqual(things(self.fake)["1"]["body"], "Body of First issue")
+
+    def test_labels_sync_takes_a_full_ref_for_a_companion_pr(self):
+        things(self.fake, "acme/app-ui")["1"] = dict(things(self.fake)["3"], number=1, labels=["needs review"])
+        payload = self.ok("labels-sync", "acme/app-ui#1", "--add", "extra")
+        self.assertEqual((payload["repo"], payload["number"]), ("acme/app-ui", 1))
+        self.assertEqual(things(self.fake, "acme/app-ui")["1"]["labels"], ["needs review", "extra"])
+        self.ok("labels-sync", "1", "--add", "tracker-side")  # a bare number is still the tracker's item
+        self.assertEqual(things(self.fake)["1"]["labels"], ["to do", "tracker-side"])
+
     def test_claim_pr_and_release(self):
         claim = self.ok("claim-pr", "3")
         self.assertEqual(claim["number"], 3)
@@ -519,6 +654,105 @@ class DoctorAndPreflightTests(base.CliCase):
         self.assertIn("push check failed", payload["blockers"])
 
 
+class WaitChecksTests(base.CliCase):
+    """wait-checks over a fake clock: sleep advances the clock and may change the checks."""
+
+    def setUp(self):
+        super().setUp()
+        add_pr_state(self.fake)
+        self.now = 1000.0
+        self.sleeps = []
+        self.on_sleep = lambda: None
+
+    def clock(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+        self.on_sleep()
+
+    def run_cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        code = base.cli.main(["--project-dir", str(self.project), "--repo", REPO, "wait-checks", "3", *argv],
+                             runner=self.fake, env=self.env, stdin=base.TtyIO(""), stdout=out, stderr=err,
+                             sleep=self.sleep, clock=self.clock)
+        self.assertEqual(out.getvalue().count("\n"), 1)
+        return code, json.loads(out.getvalue())
+
+    @staticmethod
+    def checks(*buckets):
+        return [{"name": f"c{i}", "state": b.upper(), "bucket": b, "workflow": "ci"} for i, b in enumerate(buckets)]
+
+    def test_no_checks_is_none_without_waiting(self):
+        code, payload = self.run_cli()
+        self.assertEqual((code, payload["state"], payload["checks"], payload["waited_s"]), (0, "none", [], 0))
+        self.assertEqual(self.sleeps, [])
+
+    def test_all_passing_returns_at_once(self):
+        things(self.fake)["3"]["checks"] = self.checks("pass", "skipping")
+        code, payload = self.run_cli()
+        self.assertEqual((code, payload["state"], payload["waited_s"]), (0, "success", 0))
+        self.assertEqual(len(payload["checks"]), 2)
+        self.assertEqual(self.sleeps, [])
+
+    def test_polls_every_30_seconds_until_checks_finish(self):
+        things(self.fake)["3"]["checks"] = self.checks("pass", "pending")
+        polls = []
+
+        def finish():
+            polls.append(self.now)
+            if len(polls) == 3:
+                things(self.fake)["3"]["checks"] = self.checks("pass", "pass")
+
+        self.on_sleep = finish
+        code, payload = self.run_cli("--minutes", "10")
+        self.assertEqual((code, payload["state"], payload["waited_s"]), (0, "success", 90))
+        self.assertEqual(self.sleeps, [30, 30, 30])
+
+    def test_failure_exits_zero_and_waits_for_the_rest(self):
+        things(self.fake)["3"]["checks"] = self.checks("fail", "pending")
+
+        def finish():
+            things(self.fake)["3"]["checks"] = self.checks("fail", "pass")
+
+        self.on_sleep = finish
+        code, payload = self.run_cli()
+        self.assertEqual((code, payload["state"], payload["waited_s"]), (0, "failure", 30))
+
+    def test_deadline_returns_pending(self):
+        things(self.fake)["3"]["checks"] = self.checks("pass", "pending")
+        code, payload = self.run_cli("--minutes", "1.5")
+        self.assertEqual((code, payload["state"], payload["waited_s"]), (0, "pending", 90))
+        self.assertEqual(self.sleeps, [30, 30, 30])
+
+    def test_deadline_with_a_failure_is_failure(self):
+        things(self.fake)["3"]["checks"] = self.checks("fail", "pending")
+        code, payload = self.run_cli("--minutes", "0")
+        self.assertEqual((code, payload["state"], payload["waited_s"]), (0, "failure", 0))
+
+    def test_default_minutes_come_from_limits_ci_wait_minutes(self):
+        self.tc.write("global", "project", base.GLOBAL_PROJECT.replace("operator: octocat", "operator: octocat\n"
+                                                                         "limits: {ci_wait_minutes: 2}"))
+        things(self.fake)["3"]["checks"] = self.checks("pending")
+        code, payload = self.run_cli()
+        self.assertEqual((code, payload["state"], payload["waited_s"]), (0, "pending", 120))
+
+    def test_rollup_conclusions_are_understood(self):
+        things(self.fake)["3"]["statusCheckRollup"] = [
+            {"name": "a", "conclusion": "SUCCESS", "status": "COMPLETED"},
+            {"name": "b", "conclusion": "", "status": "IN_PROGRESS"}]
+        code, payload = self.run_cli("--minutes", "0")
+        self.assertEqual((code, payload["state"]), (0, "pending"))
+        things(self.fake)["3"]["statusCheckRollup"][1].update(conclusion="FAILURE", status="COMPLETED")
+        self.assertEqual(self.run_cli("--minutes", "0")[1]["state"], "failure")
+
+    def test_makes_no_writes(self):
+        things(self.fake)["3"]["checks"] = self.checks("pass")
+        self.run_cli()
+        self.assertEqual(self.fake.writes_made(), [])
+
+
 def git(cwd, *args):
     env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.test", GIT_COMMITTER_NAME="t",
                GIT_COMMITTER_EMAIL="t@example.test", GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
@@ -538,6 +772,87 @@ class GitTests(base.CliCase):
     def setUp(self):
         super().setUp()
         init_repo(self.project)
+
+    def test_retro_save_reviewed_and_is_reviewed(self):
+        audit = self.write_file("audit.md", "# Audit\nall fine\n")
+        common = self.project / ".git" / "not-me" / "retro"
+        self.assertEqual(self.ok("retro", "reviewed"), {"reviewed": []})
+        self.assertEqual(self.ok("retro", "is-reviewed", "run-1"), {"run_id": "run-1", "reviewed": False})
+        saved = self.ok("retro", "save", "--run-id", "run-1", "--audit-file", audit)
+        self.assertEqual((saved["run_id"], saved["reviewed"]), ("run-1", False))
+        self.assertEqual((common / "run-1.md").read_text(encoding="utf-8"), "# Audit\nall fine\n")
+        self.assertFalse((common / "reviewed.txt").exists())
+        self.assertTrue(self.ok("retro", "save", "--run-id", "run-1", "--audit-file", audit, "--reviewed")["reviewed"])
+        self.ok("retro", "save", "--run-id", "run-1", "--audit-file", audit, "--reviewed")  # once only
+        self.ok("retro", "save", "--run-id", "run-2", "--audit-file", audit, "--reviewed")
+        self.assertEqual(self.ok("retro", "reviewed"), {"reviewed": ["run-1", "run-2"]})
+        self.assertTrue(self.ok("retro", "is-reviewed", "run-2")["reviewed"])
+        self.assertFalse(self.ok("retro", "is-reviewed", "run-3")["reviewed"])
+        self.assertEqual(self.fake.calls, [])
+
+    def test_retro_save_refuses_bad_run_ids_and_unsafe_files(self):
+        audit = self.write_file("audit.md", "x\n")
+        for rid in ("../evil", "a/b", "", "-x", "a b"):
+            with self.subTest(rid=rid):
+                code, payload, _ = self.cli("retro", "save", "--run-id", rid, "--audit-file", audit)
+                self.assertEqual((code, payload["kind"]), (2, "usage"))
+        code, payload, _ = self.cli("retro", "is-reviewed", "../x")
+        self.assertEqual(code, 2)
+        outside = TempCase()
+        self.addCleanup(outside.cleanup)
+        path = outside.root / "audit.md"
+        path.write_text("x", encoding="utf-8")
+        code, payload, _ = self.cli("retro", "save", "--run-id", "r", "--audit-file", str(path))
+        self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
+        self.assertFalse((self.project / ".git" / "not-me" / "retro" / "r.md").exists())
+
+    def test_log_list_newest_first_with_filters(self):
+        self.assertEqual(self.ok("log", "list"), {"logs": []})
+        first = self.ok("log", "start", "--skill", "new", "--ref", "1")
+        listed = self.ok("log", "list")["logs"]
+        self.assertEqual(len(listed), 1)
+        self.assertEqual((listed[0]["skill"], listed[0]["ref"], listed[0]["path"]), ("new", "1", first["path"]))
+        self.assertEqual(set(listed[0]), {"path", "run_id", "skill", "ref", "status"})
+
+    def test_log_list_orders_by_timestamp_and_limits(self):
+        root = Path(self.ok("log", "start", "--skill", "new", "--ref", "1")["path"]).parent.parent
+        for skill, stamp, ref in (("new", "20260102-000000", "2"), ("update", "20260103-000000", "3"),
+                                  ("new", "20260101-000000", "4")):
+            folder = root / skill
+            folder.mkdir(exist_ok=True)
+            (folder / f"{stamp}-x.md").write_text(f"# {skill} run: {ref} ({stamp}-x)\n", encoding="utf-8")
+        every = self.ok("log", "list")["logs"]
+        names = [Path(e["path"]).name for e in every]
+        self.assertEqual(names, sorted(names, reverse=True))
+        self.assertEqual(len(every), 4)
+        self.assertEqual(len(self.ok("log", "list", "--limit", "2")["logs"]), 2)
+        self.assertEqual({e["skill"] for e in self.ok("log", "list", "--skill", "update")["logs"]}, {"update"})
+        code, payload, _ = self.cli("log", "list", "--limit", "0")
+        self.assertEqual(code, 2)
+
+    def test_remote_branch_exists(self):
+        origin = self.tc.root / "origin.git"
+        git(self.tc.root, "init", "-q", "--bare", "-b", "main", str(origin))
+        git(self.project, "remote", "add", "origin", str(origin))
+        git(self.project, "push", "-q", "origin", "main")
+        git(self.project, "branch", "feat/x/y")
+        git(self.project, "push", "-q", "origin", "feat/x/y")
+        sha = git(self.project, "rev-parse", "main").strip()
+        self.assertEqual(self.ok("git", "remote-branch-exists", "main"), {"exists": True, "sha": sha})
+        self.assertEqual(self.ok("git", "remote-branch-exists", "feat/x/y")["exists"], True)
+        self.assertEqual(self.ok("git", "remote-branch-exists", "feat/x"), {"exists": False, "sha": None})
+        self.assertEqual(self.ok("git", "remote-branch-exists", "y"), {"exists": False, "sha": None})  # no suffix match
+        self.assertEqual(self.ok("git", "remote-branch-exists", "nope"), {"exists": False, "sha": None})
+
+    def test_remote_branch_exists_without_origin_is_a_git_error(self):
+        code, payload, _ = self.cli("git", "remote-branch-exists", "main")
+        self.assertEqual((code, payload["kind"]), (1, "git_error"))
+
+    def test_remote_branch_exists_rejects_bad_names(self):
+        for name in ("a..b", "--upload-pack=x", "a:b", "a b"):
+            with self.subTest(name=name):
+                code, payload, _ = self.cli("git", "remote-branch-exists", name)
+                self.assertEqual((code, payload["kind"]), (2, "usage"))
 
     def test_status_and_branch_create(self):
         status = self.ok("git", "status")

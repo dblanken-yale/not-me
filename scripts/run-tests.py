@@ -11,6 +11,8 @@ FIXTURE = ROOT / "fixture"
 SCRIPT_TESTS = ROOT / "scripts" / "tests"
 DOC_TESTS = ROOT / "docs" / "tests"
 FIXTURE_TESTS = FIXTURE / "tests"
+HARNESS = ROOT / "evals-harness"
+HARNESS_TESTS = HARNESS / "tests"
 
 # (start_dir, top_level_dir, extra sys.path entry)
 SUITES = [
@@ -18,6 +20,7 @@ SUITES = [
     (SCRIPT_TESTS, SCRIPT_TESTS, None),
     (DOC_TESTS, DOC_TESTS, None),
     (FIXTURE_TESTS, FIXTURE_TESTS, FIXTURE),
+    (HARNESS_TESTS, HARNESS_TESTS, HARNESS),
 ]
 
 
