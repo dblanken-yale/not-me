@@ -83,7 +83,7 @@ A `--bg` run ends with exactly one line:
 <VERB> <ref|-> <status>[ <sep> note]  log=<path>
 ```
 
-`<sep>` is the em dash character, U+2014, with one space on each side. VERB is one of:
+`<sep>` is a plain hyphen with one space on each side (` - `). VERB is one of:
 
 | VERB | Meaning |
 |------|---------|
