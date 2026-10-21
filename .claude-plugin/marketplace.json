@@ -1,0 +1,8 @@
+{
+  "name": "not-me",
+  "description": "Project-agnostic autonomous dev loop for Claude Code",
+  "owner": {"name": "David Blankenship"},
+  "plugins": [
+    {"name": "not-me", "source": "./plugins/not-me", "description": "Pick up issues, rework reviewed PRs, review PRs, prove PRs. Configured per repo by markdown docs.", "category": "development", "homepage": "https://github.com/dblanken-yale/not-me"}
+  ]
+}

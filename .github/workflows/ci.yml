@@ -1,0 +1,67 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Validate plugin
+        run: claude plugin validate --strict plugins/not-me
+      - name: Validate plugin layout
+        run: bash scripts/validate-plugins.sh
+      - name: Check skills
+        run: |
+          if [ -f scripts/check-skills.py ]; then python3 scripts/check-skills.py; else echo "no check-skills.py yet"; fi
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Shellcheck
+        run: |
+          files=$(git ls-files '*.sh')
+          if [ -n "$files" ]; then shellcheck $files; fi
+
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.9", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests
+        run: python scripts/run-tests.py
+
+  hook:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Guard hook cases
+        run: |
+          if [ -f plugins/not-me/tests/run_guard_cases.py ]; then
+            python plugins/not-me/tests/run_guard_cases.py
+          else
+            echo "run_guard_cases.py not present yet; skipping"
+          fi

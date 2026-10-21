@@ -1,0 +1,41 @@
+name: health
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * 1"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  latest-claude-code:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install latest Claude Code
+        run: npm install -g @anthropic-ai/claude-code@latest
+      - name: Validate plugin
+        id: validate
+        run: claude plugin validate --strict plugins/not-me
+      - name: Unit tests
+        id: tests
+        run: python scripts/run-tests.py
+      # TODO: eval smoke subset (run a small set of skill evals against the latest Claude Code).
+      - name: Open or update health issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="health: validation failed against latest Claude Code"
+          body="Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          existing=$(gh issue list --state open --search "\"$title\" in:title" --json number,title --jq "[.[] | select(.title == \"$title\")][0].number // empty")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

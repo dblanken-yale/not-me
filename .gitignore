@@ -1,0 +1,7 @@
+.spike/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+evals/.state/
+results/
