@@ -1,0 +1,12 @@
+# One token per line, matched case-insensitively. Used by scripts/check-skills.py (rule R5).
+yalesites
+miketullo95
+dblanken-yale
+alan-scrimenti
+YaleSites-Internal
+lando
+pantheon
+multidev
+YDS-Web-Component
+palliative
+yale

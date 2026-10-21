@@ -78,7 +78,7 @@ class ExplainTests(unittest.TestCase):
     def test_union_lists_contributors(self):
         entry = self.out["keys"]["project.protected_branches"]
         self.assertEqual([c["layer"] for c in entry["contributors"]], ["default", "global", "repo"])
-        self.assertEqual(entry["value"], ["main", "master", "develop", "trunk", "hotfix"])
+        self.assertEqual(entry["value"], ["main", "master", "develop", "release", "trunk", "hotfix"])
 
     def test_bodies_section(self):
         self.assertEqual(self.out["bodies"]["standards"], {"layers_used": ["global", "repo"],
@@ -164,16 +164,15 @@ class WorktreeTrustTests(unittest.TestCase):
         tc = TempCase()
         self.addCleanup(tc.cleanup)
         self.git(tc.project, "init", "-q")
-        tc.write("repo", "project", "---\nmode: live\n---\n")
+        tc.write("repo", "project", "---\ntracker: acme/real\n---\n")
         self.git(tc.project, "add", ".")
         self.git(tc.project, "commit", "-q", "-m", "init")
         wt = tc.root / "wt"
         self.git(tc.project, "worktree", "add", "-q", str(wt))
-        (wt / ".claude" / "not-me" / "project.md").write_text("---\nmode: dry-run\ntracker: acme/evil\n---\n")
+        (wt / ".claude" / "not-me" / "project.md").write_text("---\ntracker: acme/evil\n---\n")
         self.assertTrue((wt / ".git").is_file())
         cfg = config.load(project_dir=str(wt), home=str(tc.home), plugin_root=str(PLUGIN_ROOT))
-        self.assertEqual(cfg.meta["project"]["mode"], "live")
-        self.assertEqual(cfg.meta["project"]["tracker"], "auto")
+        self.assertEqual(cfg.meta["project"]["tracker"], "acme/real")
         self.assertEqual(paths.git_common_dir(wt), (tc.project / ".git").resolve())
 
     def test_submodule_repo_layer_read_from_its_own_checkout(self):
@@ -183,7 +182,7 @@ class WorktreeTrustTests(unittest.TestCase):
         lib.mkdir()
         self.git(lib, "init", "-q")
         (lib / ".claude" / "not-me").mkdir(parents=True)
-        (lib / ".claude" / "not-me" / "project.md").write_text("---\nmode: live\n---\n")
+        (lib / ".claude" / "not-me" / "project.md").write_text("---\ntracker: acme/sub\n---\n")
         self.git(lib, "add", ".")
         self.git(lib, "commit", "-q", "-m", "init")
         self.git(tc.project, "init", "-q")
@@ -192,8 +191,8 @@ class WorktreeTrustTests(unittest.TestCase):
         self.assertTrue((sub / ".git").is_file())
         self.assertEqual(paths.main_checkout(sub), sub.resolve())
         cfg = config.load(project_dir=str(sub), home=str(tc.home), plugin_root=str(PLUGIN_ROOT))
-        self.assertEqual(cfg.meta["project"]["mode"], "live")
-        self.assertEqual(cfg.sources["project.mode"]["layer"], "repo")
+        self.assertEqual(cfg.meta["project"]["tracker"], "acme/sub")
+        self.assertEqual(cfg.sources["project.tracker"]["layer"], "repo")
         # A linked worktree of the submodule maps back to the submodule checkout.
         sub_wt = tc.root / "sub-wt"
         self.git(sub, "worktree", "add", "-q", str(sub_wt))

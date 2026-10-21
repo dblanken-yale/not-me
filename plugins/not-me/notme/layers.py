@@ -48,20 +48,26 @@ class KeySpec:
     values: Optional[type] = None  # every value of this map must be this type
     item_key: Optional[str] = None  # every list item must be a map with this key
     confirm: Optional[Confirm] = None
+    # Security keys the repo layer (committed, so untrusted) may only tighten:
+    #   "on": may set on, never off | "dry-run": may set dry-run, never live | "false": may set false, never
+    #   true over a lower false | "no-bang": union list where "!value" removals from the repo are dropped |
+    #   "ignore": every repo entry is dropped (extend it with the global allow list instead)
+    tighten_only: str = ""
 
 
 Schema = Mapping[str, KeySpec]
 
 SCHEMA: Dict[str, Dict[str, KeySpec]] = {
     "project": {
-        "protected_branches": KeySpec(merge="union"),
-        "allow_repos": KeySpec(merge="union"),
+        "protected_branches": KeySpec(merge="union", tighten_only="no-bang"),
+        "allow_repos": KeySpec(merge="union", tighten_only="ignore"),
+        "enabled": KeySpec(tighten_only="false"),
         "markers.legacy": KeySpec(merge="union"),
-        "mode": KeySpec(enum=("dry-run", "live")),
+        "mode": KeySpec(enum=("dry-run", "live"), tighten_only="dry-run"),
         "models.strategy": KeySpec(enum=("orchestrate", "single")),
         "labels": KeySpec(values=str),
         "repos": KeySpec(item_key="name"),
-        "guard.*": KeySpec(enum=("on", "off"), confirm=Confirm("off", "confirm_guard_off")),
+        "guard.*": KeySpec(enum=("on", "off"), confirm=Confirm("off", "confirm_guard_off"), tighten_only="on"),
     },
 }
 
@@ -170,6 +176,37 @@ class _Pass:
     warnings: List[str]
 
 
+REPO_TIGHTEN_REASON = "repo layer may only tighten"
+
+
+def _loosens(spec: KeySpec, value: Any, current: Any) -> bool:
+    """True when a repo-layer scalar value would loosen a security key."""
+    if spec.tighten_only == "on":
+        return value != "on"
+    if spec.tighten_only == "dry-run":
+        return value != "dry-run"
+    if spec.tighten_only == "false":
+        return value is not False and current is False
+    return False
+
+
+def _tighten_union(spec: KeySpec, value: Any) -> Tuple[Any, List[Any]]:
+    """(allowed items, dropped items) of a repo-layer union value."""
+    items = value if isinstance(value, list) else [value]
+    if spec.tighten_only == "ignore":
+        return [], items
+    if spec.tighten_only == "no-bang":
+        dropped = [i for i in items if isinstance(i, str) and i.startswith("!")]
+        return [i for i in items if i not in dropped], dropped
+    return items, []
+
+
+def _ignore_loosening(sources: Dict[str, dict], name: str, value: Any, p: "_Pass", line: Optional[int]) -> None:
+    src = sources.setdefault(name, _source(None, None, None, []))
+    src.setdefault("ignored", []).append({"layer": p.layer, "value": value, "reason": REPO_TIGHTEN_REASON})
+    p.warnings.append(f"{p.layer} {p.path}:{line or 1}: {name} = {value!r} is ignored: {REPO_TIGHTEN_REASON}")
+
+
 def _apply(target: Dict[str, Any], sources: Dict[str, dict], meta: Mapping[str, Any], prefix: KeyPath,
            p: _Pass) -> None:
     for key, value in meta.items():
@@ -180,6 +217,15 @@ def _apply(target: Dict[str, Any], sources: Dict[str, dict], meta: Mapping[str, 
         if not confirmed(spec, value, key, p.root):
             src = sources.setdefault(name, _source(None, None, None, []))
             src.setdefault("ignored", []).append({"layer": p.layer, "value": value, "reason": "not confirmed"})
+        elif p.layer == "repo" and spec.tighten_only and spec.merge != "union" and not isinstance(value, dict) \
+                and _loosens(spec, value, target.get(key)):
+            _ignore_loosening(sources, name, value, p, line)
+        elif spec.merge == "union" and value is not None and p.layer == "repo" and spec.tighten_only \
+                and _tighten_union(spec, value)[1]:
+            allowed, dropped = _tighten_union(spec, value)
+            _ignore_loosening(sources, name, dropped, p, line)
+            if allowed:
+                _apply_union(target, sources, key, name, allowed, p.layer, p.path, line)
         elif spec.merge == "union" and value is None:
             p.warnings.append(f"{p.layer} {p.path}:{line or 1}: {name} is null, but null cannot clear a union list; "
                               "use !value to remove an entry")

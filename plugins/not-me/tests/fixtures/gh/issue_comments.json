@@ -1,0 +1,22 @@
+[
+  {
+    "id": 1001,
+    "node_id": "IC_1",
+    "html_url": "https://github.com/acme/app/issues/42#issuecomment-1001",
+    "user": {"login": "octocat", "id": 583231, "type": "User"},
+    "author_association": "OWNER",
+    "body": "Picking this up.",
+    "created_at": "2026-01-02T10:00:00Z",
+    "updated_at": "2026-01-02T10:05:00Z"
+  },
+  {
+    "id": 1002,
+    "node_id": "IC_2",
+    "html_url": "https://github.com/acme/app/issues/42#issuecomment-1002",
+    "user": {"login": "stranger", "id": 99, "type": "User"},
+    "author_association": "NONE",
+    "body": "Same here.",
+    "created_at": "2026-01-03T09:00:00Z",
+    "updated_at": "2026-01-03T09:00:00Z"
+  }
+]

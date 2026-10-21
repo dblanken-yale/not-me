@@ -89,6 +89,10 @@ class ContextTests(_Fixtures):
         self.assertTrue(self.ctx("offnoconfirm").rules["other_repo"])
         self.assertEqual(ctx.protected_branches, {"main", "master", "develop"})
 
+    def test_repo_layer_cannot_loosen(self):
+        self.assertTrue(self.ctx("repooff").rules["other_repo"])
+        self.assertEqual(self.ctx("repoallow").allowed_repos, {"acme/app"})
+
     def test_not_a_git_checkout(self):
         empty = self.root / "plain"
         empty.mkdir(exist_ok=True)
