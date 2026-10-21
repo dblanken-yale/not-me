@@ -235,6 +235,7 @@ class ExitCodeTests(CliCase):
         self.assertEqual(code, 8)
         self.assertIn("boom", payload["guard"]["selftest_stderr"])
 
+    @unittest.skipIf(os.name == "nt", "a fake SYSTEMROOT would stop the child interpreter on Windows")
     def test_selftest_passes_windows_startup_variables_through(self):
         from notme import guard
         hook = [sys.executable, "-c", "import os, sys; sys.exit(2 if os.environ.get('SYSTEMROOT') == 'X' else 1)"]
