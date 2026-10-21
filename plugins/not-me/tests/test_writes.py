@@ -71,6 +71,45 @@ class OriginParseTests(unittest.TestCase):
             with self.subTest(url=url):
                 self.assertIsNone(writes.parse_origin(url))
 
+    def test_allow_path_takes_web_urls_only_when_asked(self):
+        for url in ("https://github.com/acme/app/pull/3", "https://token@github.com/acme/app.git/x",
+                    "https://github.com/acme/app?tab=x", "https://github.com/acme/app#readme"):
+            with self.subTest(url=url):
+                self.assertIsNone(writes.parse_origin(url))
+                self.assertEqual(writes.parse_origin(url, allow_path=True), "acme/app")
+        # git resolves /../ in what it fetches or pushes, so the strict form must not read the first two parts
+        self.assertIsNone(writes.parse_origin("https://github.com/acme/app/../other"))
+        for url in ("https://example.com/acme/app/pull/3", "git@github.com:acme/app/x", "origin"):
+            with self.subTest(url=url):
+                self.assertIsNone(writes.parse_origin(url, allow_path=True))
+
+
+    def test_userinfo_cannot_smuggle_the_host(self):
+        # git and curl would contact evil.example here; the github.com after "@" is not the host
+        for url in ("https://evil.example#@github.com/acme/app", "https://evil.example?x@github.com/acme/app",
+                    "https://evil.example\\@github.com/acme/app", "ssh://evil.example#@github.com/acme/app",
+                    "x#@github.com:acme/app", "x?@github.com:acme/app", "a@b@github.com:acme/app",
+                    "https://github.com/acme/app?x", "https://github.com/acme/app#x", "https://github.com:x/acme/app",
+                    "https://github.com /acme/app"):
+            with self.subTest(url=url):
+                self.assertIsNone(writes.parse_origin(url))
+        for url in ("https://evil.example#@github.com/acme/app", "https://evil.example?x@github.com/acme/app"):
+            with self.subTest(url=url, allow_path=True):
+                self.assertIsNone(writes.parse_origin(url, allow_path=True))
+
+    def test_userinfo_and_port_forms(self):
+        self.assertEqual(writes.parse_origin("https://user:pass@github.com/acme/app.git"), "acme/app")
+        self.assertEqual(writes.parse_origin("https://github.com:443/acme/app"), "acme/app")
+        self.assertEqual(writes.parse_origin("https://github.com:443/acme/app/pull/1", allow_path=True), "acme/app")
+
+
+class SlugTests(unittest.TestCase):
+    def test_valid_slug(self):
+        for slug in ("acme/app", "acme/app.js", "Acme/App_2", "acme/.github"):
+            self.assertTrue(writes.valid_slug(slug), slug)
+        for slug in ("evil/acme/app", "{owner}/{repo}", "-x/app", "acme/..", "acme", "", None, "acme/ app"):
+            self.assertFalse(writes.valid_slug(slug), slug)
+
 
 class CheckWriteTests(unittest.TestCase):
     def test_blocked_names_target_and_allow_cmd(self):
@@ -196,6 +235,24 @@ class FromConfigTests(unittest.TestCase):
         ctx = self.ctx()
         self.assertEqual(ctx.board, ("acme", 9))
         self.assertFalse(any("board" in w and "not confirmed" in w for w in ctx.warnings))
+
+    def test_allow_list_project_key_is_case_insensitive(self):
+        writes.allowlist_add(self.tc.home, "ACME/App", "acme/app-ui")
+        writes.allowlist_add(self.tc.home, "Acme/APP", board="acme/6")
+        ctx = self.ctx()
+        self.assertIn("acme/app-ui", ctx.allowed_repos)
+        self.assertEqual(ctx.board, ("acme", 6))
+
+    def test_loose_item_forms_and_guard_values(self):
+        self.tc.write("global", "project", "---\nschema: 1\nallow_repos: [acme/extra]\nguard: {force_push: off}\n"
+                                           "confirm_guard_off: [force_push]\nprotected_branches: [main, release]\n---\n")
+        self.tc.write("repo", "project", "---\nschema: 1\n---\n")
+        ctx = self.ctx()
+        self.assertIn("acme/extra", ctx.allowed_repos)
+        self.assertFalse(ctx.rules["force_push"])
+        self.assertTrue(ctx.rules["other_repo"])
+        self.assertTrue({"main", "release"} <= set(ctx.protected_branches))
+        self.assertFalse(any(b.startswith("!") for b in ctx.protected_branches))
 
     def test_global_allow_list_per_project_and_everywhere(self):
         writes.allowlist_add(self.tc.home, "acme/app", "acme/per-project")

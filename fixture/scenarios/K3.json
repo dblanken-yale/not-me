@@ -1,0 +1,21 @@
+{
+  "description": "control, paused label: the only candidate carries paused and must be skipped",
+  "patches": [],
+  "issues": [
+    {
+      "key": "paused",
+      "title": "Add a clamp helper",
+      "body": "Add `clamp(x, lo, hi)` to calc.\n\nAcceptance:\n- clamp returns x limited to the range",
+      "labels": ["to do", "paused"],
+      "as": "operator"
+    }
+  ],
+  "prs": [],
+  "expect": {
+    "skill": "new",
+    "result": "NONE",
+    "no_writes_since": true,
+    "labels_exact": {"issue:paused": ["to do", "paused"]},
+    "pr_exists": {"count": 0}
+  }
+}

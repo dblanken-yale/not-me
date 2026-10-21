@@ -216,7 +216,7 @@ class Deps:
 
 
 def _toplevel(path: Any) -> Optional[Path]:
-    top = paths._git(["rev-parse", "--show-toplevel"], path)
+    top = paths.run_git(["rev-parse", "--show-toplevel"], path)
     return Path(top).resolve() if top else None
 
 
@@ -471,7 +471,7 @@ class Context:
         if root is None or root not in real.parents or real.suffix != ".md" or not real.is_file() \
                 or not runlog.is_run_log(real):
             raise fail(ExitCode.USAGE, "usage", "the log path must be an existing run log under the log root")
-        return runlog.RunLog.open(real)
+        return runlog.RunLog.open(real, marker_path=runlog.default_marker_path(self.work_dir))
 
     @property
     def run_id(self) -> str:
@@ -479,7 +479,7 @@ class Context:
             run = self.env.get("NOT_ME_RUN_ID")
             if not run:
                 try:
-                    active = runlog.active_run(runlog.default_marker_path(self.log_root()))
+                    active = runlog.active_run(runlog.default_marker_path(self.work_dir))
                 except (ValueError, OSError):
                     active = None
                 run = (active or {}).get("run_id")
@@ -489,7 +489,7 @@ class Context:
 
     def active_run(self) -> Optional[Dict[str, Any]]:
         try:
-            marker = runlog.active_run(runlog.default_marker_path(self.log_root()))
+            marker = runlog.active_run(runlog.default_marker_path(self.work_dir))
         except (ValueError, OSError):
             return None
         return {k: marker.get(k) for k in ("run_id", "skill", "ref", "started")} if marker else None
@@ -1091,7 +1091,7 @@ def cmd_log_start(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     Output: path, run_id, skill, ref
     """
     try:
-        log = runlog.RunLog.start(ctx.log_root(create=True), args.skill, args.ref, force=args.force)
+        log = runlog.RunLog.start(ctx.log_root(create=True), args.skill, args.ref, force=args.force, project_dir=ctx.work_dir)
     except runlog.ActiveRunError as exc:
         raise fail(ExitCode.ERROR, "active_run", f"another run is active: {exc.existing.get('run_id')}",
                    existing=exc.existing) from None
@@ -1395,7 +1395,7 @@ def cmd_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
         out["repo"], out["tracker"] = ctx.repo, ctx.tracker
         out["operator"] = ctx.operator
         out["items"] = _status_items(ctx)
-        branches = (paths._git(["branch", "-a", "--format=%(refname:short)"], ctx.work_dir) or "").split() \
+        branches = (paths.run_git(["branch", "-a", "--format=%(refname:short)"], ctx.work_dir) or "").split() \
             if ctx.work_dir else []
         roster, operator = ctx.roster, ctx.operator.lower()
         out["stale_claims"] = stale_claims(

@@ -9,8 +9,10 @@ root out of version control (the default root sits inside the git common dir,
 which git never tracks; a configured or env root inside the repo needs a
 gitignore entry).
 
-The active-run marker is a small JSON file saying a run is in progress. Other
-commands read it to find the current run; a marker older than ``stale_hours``
+The active-run marker is a small JSON file saying a run is in progress. It
+always lives at ``<git common dir>/not-me/active-run`` (``<project>/.not-me/active-run``
+outside git), wherever the log root is, so the guard finds it without config.
+Other commands read it to find the current run; a marker older than ``stale_hours``
 is ignored (not deleted), so a crashed run cannot block anything for long.
 """
 from __future__ import annotations
@@ -21,7 +23,7 @@ import re
 import secrets
 import tempfile
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -33,6 +35,7 @@ KINDS = ("ACTION", "REFUSED", "IGNORED", "CHECK", "GATE", "WARN", "DELEGATE", "A
 ALL_KINDS = KINDS + ("QUESTION",)
 IN_PROGRESS = "(run in progress)"
 MARKER_NAME = "active-run"
+GUARD_LOG_NAME = "guard.jsonl"
 LOG_ROOT_ENV = "NOT_ME_LOG_ROOT"
 CREATE_ATTEMPTS = 20
 
@@ -179,8 +182,36 @@ def is_run_log(path: PathLike) -> bool:
     return _TITLE_RE.match(first.rstrip("\r\n")) is not None
 
 
-def default_marker_path(root: PathLike) -> Path:
-    return Path(root).parent / MARKER_NAME
+def marker_path_in(common_dir: PathLike) -> Path:
+    """The marker for a known git common dir (no git call)."""
+    return Path(common_dir) / "not-me" / MARKER_NAME
+
+
+def default_marker_path(project_dir: Optional[PathLike] = None, env: Optional[Mapping[str, str]] = None) -> Path:
+    """The marker for a project, independent of the log root.
+
+    The project defaults to $CLAUDE_PROJECT_DIR, else the checkout around cwd, else cwd.
+    """
+    project = Path(project_dir) if project_dir else (paths.project_dir(env=env) or Path(os.getcwd()))
+    common = paths.git_common_dir(project)
+    return marker_path_in(common) if common is not None else project / ".not-me" / MARKER_NAME
+
+
+def guard_log_path(root: PathLike) -> Path:
+    """The guard's block log under a log root: one JSON line per blocked tool call."""
+    return Path(root) / GUARD_LOG_NAME
+
+
+def guard_log_append(path: PathLike, fields: Mapping[str, Any]) -> None:
+    """Append one JSON line (fields plus a UTC "ts"). Logging never breaks the guard."""
+    entry = dict(fields, ts=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    try:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, sort_keys=True) + "\n")
+    except OSError:
+        pass
 
 
 class RunLog:
@@ -202,9 +233,10 @@ class RunLog:
 
     @classmethod
     def start(cls, root: PathLike, skill: str, ref: str, *, now: Optional[datetime] = None,
-              marker_path: Optional[PathLike] = None, force: bool = False) -> "RunLog":
+              marker_path: Optional[PathLike] = None, project_dir: Optional[PathLike] = None,
+              force: bool = False) -> "RunLog":
         root = Path(root)
-        marker = Path(marker_path) if marker_path else default_marker_path(root)
+        marker = Path(marker_path) if marker_path else default_marker_path(project_dir)
         existing = active_run(marker, now=now)
         if existing and not force:
             raise ActiveRunError(existing)
@@ -233,12 +265,13 @@ class RunLog:
         return cls(path, skill_slug, ref, run_id, marker)
 
     @classmethod
-    def open(cls, path: PathLike, marker_path: Optional[PathLike] = None) -> "RunLog":
+    def open(cls, path: PathLike, marker_path: Optional[PathLike] = None,
+             project_dir: Optional[PathLike] = None) -> "RunLog":
         path = Path(path)
         head, summary, timeline = _split(path.read_text(encoding="utf-8"))
         title = _TITLE_RE.match(head.strip())
         skill, ref, run_id = title.groups() if title else (path.parent.name, "", path.stem)
-        log = cls(path, skill, ref, run_id, marker_path or default_marker_path(path.parent.parent))
+        log = cls(path, skill, ref, run_id, marker_path or default_marker_path(project_dir))
         found = _STATUS_RE.search(summary)
         log.status = found.group(1).strip() if found else None
         for line in timeline.splitlines():

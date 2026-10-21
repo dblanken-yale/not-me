@@ -56,7 +56,7 @@ def is_clean(cwd: Any = None) -> bool:
 
 def origin_url(cwd: Any = None) -> Optional[str]:
     """The origin remote URL, or None when there is no origin (or git fails)."""
-    return paths._git(["remote", "get-url", "origin"], cwd or os.getcwd())
+    return paths.run_git(["remote", "get-url", "origin"], cwd or os.getcwd())
 
 
 def default_branch(gh: Any = None, origin_slug: Optional[str] = None, cwd: Any = None) -> str:
