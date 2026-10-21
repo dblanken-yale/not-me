@@ -1,0 +1,31 @@
+{
+  "description": "control, kill switch: enabled is false in the global layer, so the router stops before reading any work",
+  "patches": [],
+  "issues": [
+    {
+      "key": "todo",
+      "title": "Add a clamp helper",
+      "body": "Add `clamp(x, lo, hi)` to calc.\n\nAcceptance:\n- clamp returns x limited to the range\n- tests cover both bounds",
+      "labels": [
+        "to do"
+      ],
+      "as": "operator"
+    }
+  ],
+  "prs": [],
+  "config": {
+    "global": {
+      "project.md": "---\nschema: 1\nextends: default\nenabled: false\n---\n"
+    }
+  },
+  "expect": {
+    "skill": "not-me",
+    "result": "STOP",
+    "no_writes_since": true,
+    "labels_exact": {
+      "issue:todo": [
+        "to do"
+      ]
+    }
+  }
+}

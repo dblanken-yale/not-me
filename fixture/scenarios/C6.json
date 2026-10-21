@@ -1,0 +1,18 @@
+{
+  "description": "config, protected union holds: the repo layer tries to drop develop from protected_branches and is ignored",
+  "patches": [],
+  "issues": [],
+  "prs": [],
+  "config": {
+    "global": {
+      "project.md": "---\nschema: 1\nextends: default\nprotected_branches: [release]\n---\n"
+    },
+    "repo": {
+      "project.md": "---\nschema: 1\nextends: default\nprotected_branches: [\"!develop\", hotfix]\n---\n"
+    }
+  },
+  "expect": {
+    "skill": "config",
+    "no_writes_since": true
+  }
+}

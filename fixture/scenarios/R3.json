@@ -1,0 +1,37 @@
+{
+  "description": "review, nothing to do: the only needs-review PR is the operator's own, with no review requested",
+  "patches": [
+    {
+      "branch": "eval/{rid}/{id}",
+      "path": "site/index.html",
+      "find": "<h1 id=\"title\">Calc demo</h1>",
+      "replace": "<h1 id=\"title\">Calc playground</h1>",
+      "message": "feat: rename the demo heading"
+    }
+  ],
+  "issues": [],
+  "prs": [
+    {
+      "key": "pr",
+      "head": "eval/{rid}/{id}",
+      "base": "main",
+      "title": "feat: rename the demo heading",
+      "body": "## Summary\n\nNew heading text.\n\n## Testing steps\n\n1. Open `site/index.html`.",
+      "labels": [
+        "needs review"
+      ],
+      "assignee": "{operator}",
+      "as": "operator"
+    }
+  ],
+  "expect": {
+    "skill": "review",
+    "result": "NONE",
+    "no_writes_since": true,
+    "labels_exact": {
+      "pr:pr": [
+        "needs review"
+      ]
+    }
+  }
+}

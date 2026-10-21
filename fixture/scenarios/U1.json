@@ -32,7 +32,7 @@
   ],
   "expect": {
     "skill": "update",
-    "result": "DONE",
+    "result": "PUSHED",
     "labels_exact": {"pr:pr": ["needs review"]},
     "threads_replied_not_resolved": true,
     "no_force_push": true,

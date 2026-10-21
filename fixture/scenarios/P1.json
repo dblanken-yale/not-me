@@ -24,7 +24,7 @@
   ],
   "expect": {
     "skill": "prove",
-    "result": "PASS",
+    "result": "PROVED",
     "proof_comment": 1,
     "labels_exact": {"pr:pr": ["needs review"]},
     "only_paths": [],

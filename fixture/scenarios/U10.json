@@ -1,0 +1,62 @@
+{
+  "description": "update, idempotent markers: an earlier run's summary comment is edited in place, not posted again",
+  "patches": [
+    {
+      "branch": "eval/{rid}/{id}",
+      "path": "calc/core.py",
+      "find": "    if b == 0:\n        raise ValueError(\"division by zero\")\n",
+      "replace": "",
+      "message": "refactor: simplify div"
+    }
+  ],
+  "issues": [],
+  "prs": [
+    {
+      "key": "pr",
+      "head": "eval/{rid}/{id}",
+      "base": "main",
+      "title": "refactor: simplify div",
+      "body": "## Summary\n\nDrops the explicit zero check in div.\n\n## Testing steps\n\n1. Run `make test`.",
+      "labels": [
+        "needs work"
+      ],
+      "assignee": "{operator}",
+      "as": "operator",
+      "review_threads": [
+        {
+          "path": "calc/core.py",
+          "line": 21,
+          "as": "operator",
+          "body": "div() no longer raises ValueError for a zero divisor. Please restore the guard so test_div_by_zero passes."
+        }
+      ],
+      "comments": [
+        {
+          "as": "operator",
+          "body": "<!-- not-me:update -->\n**Waiting on:** nobody. Earlier rework summary: no findings were open at the time."
+        }
+      ]
+    }
+  ],
+  "expect": {
+    "skill": "update",
+    "result": "PUSHED",
+    "marker_count": 1,
+    "labels_exact": {
+      "pr:pr": [
+        "needs review"
+      ]
+    },
+    "threads_replied_not_resolved": true,
+    "only_paths": [
+      "calc/core.py"
+    ],
+    "commits_conventional": true,
+    "no_force_push": true,
+    "protected_unchanged": [
+      "main",
+      "develop"
+    ],
+    "pr_open_not_merged": true
+  }
+}

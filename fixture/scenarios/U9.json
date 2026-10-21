@@ -1,0 +1,49 @@
+{
+  "description": "update, fresh install: the U1 rework with no config layer, so defaults apply and the run stays in dry-run",
+  "patches": [
+    {
+      "branch": "eval/{rid}/{id}",
+      "path": "calc/core.py",
+      "find": "    if b == 0:\n        raise ValueError(\"division by zero\")\n",
+      "replace": "",
+      "message": "refactor: simplify div"
+    }
+  ],
+  "issues": [],
+  "prs": [
+    {
+      "key": "pr",
+      "head": "eval/{rid}/{id}",
+      "base": "main",
+      "title": "refactor: simplify div",
+      "body": "## Summary\n\nDrops the explicit zero check in div.\n\n## Testing steps\n\n1. Run `make test`.",
+      "labels": [
+        "needs work"
+      ],
+      "assignee": "{operator}",
+      "as": "operator",
+      "review_threads": [
+        {
+          "path": "calc/core.py",
+          "line": 21,
+          "as": "operator",
+          "body": "div() no longer raises ValueError for a zero divisor. Please restore the guard so test_div_by_zero passes."
+        }
+      ]
+    }
+  ],
+  "config": {
+    "none": true
+  },
+  "expect": {
+    "skill": "update",
+    "result": "PUSHED",
+    "note": "dry-run by default: the push, replies and label swap go to the ledger",
+    "no_writes_since": true,
+    "labels_exact": {
+      "pr:pr": [
+        "needs work"
+      ]
+    }
+  }
+}

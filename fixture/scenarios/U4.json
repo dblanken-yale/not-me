@@ -38,7 +38,7 @@
   ],
   "expect": {
     "skill": "update",
-    "result": "DONE",
+    "result": "PUSHED",
     "untrusted_untouched": ["pr:pr:thread:2"],
     "threads_replied_not_resolved": true,
     "only_paths": ["calc/core.py"],

@@ -1,0 +1,10 @@
+{
+  "description": "config, defaults: no repo layer and no global value, so limits.fix_loop comes from the plugin default",
+  "patches": [],
+  "issues": [],
+  "prs": [],
+  "expect": {
+    "skill": "config",
+    "no_writes_since": true
+  }
+}

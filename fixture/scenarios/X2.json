@@ -1,0 +1,26 @@
+{
+  "description": "router, nothing to do: no needs-work PR and no ready issue",
+  "patches": [],
+  "issues": [
+    {
+      "key": "asking",
+      "title": "Should div round its result?",
+      "body": "Waiting on a decision.",
+      "labels": [
+        "question"
+      ],
+      "as": "operator"
+    }
+  ],
+  "prs": [],
+  "expect": {
+    "skill": "not-me",
+    "result": "NONE",
+    "no_writes_since": true,
+    "labels_exact": {
+      "issue:asking": [
+        "question"
+      ]
+    }
+  }
+}

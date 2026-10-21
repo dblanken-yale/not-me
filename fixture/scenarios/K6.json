@@ -1,0 +1,35 @@
+{
+  "description": "control, needs human on HELD: the reported bug does not reproduce, so the issue is held for a person",
+  "patches": [],
+  "issues": [
+    {
+      "key": "noisy",
+      "title": "div() truncates",
+      "body": "`calc.div(7, 2)` returns 3 instead of 3.5.\n\nAcceptance:\n- div returns the true quotient\n- make test passes",
+      "labels": [
+        "to do"
+      ],
+      "as": "operator"
+    }
+  ],
+  "prs": [],
+  "expect": {
+    "skill": "new",
+    "result": "HELD",
+    "pr_exists": {
+      "count": 0
+    },
+    "labels_exact": {
+      "issue:noisy": [
+        "in progress",
+        "question",
+        "needs human"
+      ]
+    },
+    "no_force_push": true,
+    "protected_unchanged": [
+      "main",
+      "develop"
+    ]
+  }
+}

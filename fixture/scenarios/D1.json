@@ -1,0 +1,52 @@
+{
+  "description": "delegation: the implementation is dispatched to the implement model and audited before the push",
+  "patches": [
+    {
+      "path": "calc/core.py",
+      "find": "    \"\"\"Return a - b.\"\"\"\n    return a - b",
+      "replace": "    \"\"\"Return a - b.\"\"\"\n    return a + b",
+      "on_main": true,
+      "message": "chore(eval): seed D1 bug"
+    }
+  ],
+  "issues": [
+    {
+      "key": "bug",
+      "title": "sub() adds instead of subtracting",
+      "body": "`calc.sub(5, 3)` returns 8 instead of 2.\n\n`make test` shows `test_sub` failing.\n\nAcceptance:\n- sub returns the difference of its arguments\n- make test passes",
+      "labels": [
+        "to do"
+      ],
+      "as": "operator",
+      "assignee": "{operator}"
+    }
+  ],
+  "prs": [],
+  "expect": {
+    "skill": "new",
+    "result": "PR",
+    "pr_exists": {
+      "count": 1,
+      "base": "main"
+    },
+    "labels_exact": {
+      "issue:bug": [
+        "needs review"
+      ]
+    },
+    "log_lines": [
+      "DELEGATE",
+      "AUDIT"
+    ],
+    "only_paths": [
+      "calc/core.py",
+      "tests/test_core.py"
+    ],
+    "no_force_push": true,
+    "protected_unchanged": [
+      "main",
+      "develop"
+    ],
+    "pr_open_not_merged": true
+  }
+}

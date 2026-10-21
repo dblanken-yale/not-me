@@ -1,0 +1,40 @@
+{
+  "description": "review, off-roster author: a bot PR requests the operator's review but its author is not on the roster, so it is skipped",
+  "patches": [
+    {
+      "branch": "eval/{rid}/{id}",
+      "path": "calc/core.py",
+      "find": "    \"\"\"Return a + b.\"\"\"",
+      "replace": "    \"\"\"Return the sum a + b.\"\"\"",
+      "message": "docs: clarify add docstring"
+    }
+  ],
+  "issues": [],
+  "prs": [
+    {
+      "key": "pr",
+      "head": "eval/{rid}/{id}",
+      "base": "main",
+      "title": "docs: clarify add docstring",
+      "body": "## Summary\n\nDocstring wording only.\n\n## Testing steps\n\n1. Run `make test`.",
+      "labels": [
+        "needs review"
+      ],
+      "reviewers": [
+        "{operator}"
+      ],
+      "as": "bot"
+    }
+  ],
+  "expect": {
+    "skill": "review",
+    "result": "NONE",
+    "no_writes_since": true,
+    "labels_exact": {
+      "pr:pr": [
+        "needs review"
+      ]
+    },
+    "pr_open_not_merged": true
+  }
+}

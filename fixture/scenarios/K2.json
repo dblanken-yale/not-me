@@ -1,0 +1,29 @@
+{
+  "description": "control, pause file: a PAUSED file in the project's not-me directory stops the router",
+  "patches": [],
+  "issues": [
+    {
+      "key": "todo",
+      "title": "Add a clamp helper",
+      "body": "Add `clamp(x, lo, hi)` to calc.\n\nAcceptance:\n- clamp returns x limited to the range\n- tests cover both bounds",
+      "labels": [
+        "to do"
+      ],
+      "as": "operator"
+    }
+  ],
+  "prs": [],
+  "config": {
+    "pause": "project"
+  },
+  "expect": {
+    "skill": "not-me",
+    "result": "STOP",
+    "no_writes_since": true,
+    "labels_exact": {
+      "issue:todo": [
+        "to do"
+      ]
+    }
+  }
+}

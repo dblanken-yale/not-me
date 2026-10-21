@@ -1,0 +1,42 @@
+{
+  "description": "control, dry-run mode: mode is dry-run in the global layer, so every write goes to the ledger",
+  "patches": [
+    {
+      "path": "calc/core.py",
+      "find": "    return a + b",
+      "replace": "    return a - b",
+      "on_main": true,
+      "message": "chore(eval): seed K5 bug"
+    }
+  ],
+  "issues": [
+    {
+      "key": "bug",
+      "title": "add() returns the wrong result",
+      "body": "`calc.add(2, 3)` returns -1 instead of 5.\n\n`make test` shows `test_add` failing.\n\nAcceptance:\n- add returns the sum of its arguments\n- make test passes",
+      "labels": [
+        "to do"
+      ],
+      "as": "operator"
+    }
+  ],
+  "prs": [],
+  "config": {
+    "global": {
+      "project.md": "---\nschema: 1\nextends: default\nmode: dry-run\n---\n"
+    }
+  },
+  "expect": {
+    "skill": "new",
+    "result": "PR",
+    "no_writes_since": true,
+    "pr_exists": {
+      "count": 0
+    },
+    "labels_exact": {
+      "issue:bug": [
+        "to do"
+      ]
+    }
+  }
+}

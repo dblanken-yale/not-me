@@ -1,0 +1,15 @@
+{
+  "description": "setup, fresh repo from an answers file: writes the repo layer, asks nothing, creates no labels",
+  "patches": [],
+  "issues": [],
+  "prs": [],
+  "config": {
+    "files": {
+      ".not-me-eval/answers.json": "{\n  \"layer\": \"repo\",\n  \"docs\": [\n    \"project\",\n    \"standards\",\n    \"verify\",\n    \"review\",\n    \"prove\"\n  ],\n  \"body\": \"extend\",\n  \"tracker\": \"{repo}\",\n  \"roster\": [\n    {\n      \"login\": \"fixture-lead\",\n      \"name\": \"Fixture Lead\",\n      \"tier\": \"lead\",\n      \"assignable\": true,\n      \"reviewer\": true\n    }\n  ],\n  \"reviewers\": {\n    \"default\": []\n  },\n  \"repos\": [\n    {\n      \"name\": \"{repo}\",\n      \"role\": \"primary\"\n    }\n  ],\n  \"companion_docs\": false,\n  \"labels\": {\n    \"todo\": \"to do\",\n    \"in_progress\": \"in progress\",\n    \"needs_review\": \"needs review\",\n    \"needs_work\": \"needs work\",\n    \"ready_to_merge\": \"ready to merge\",\n    \"question\": \"question\",\n    \"blocked\": \"blocked\",\n    \"epic\": \"epic\",\n    \"needs_help\": \"needs help\",\n    \"needs_human\": \"needs human\",\n    \"paused\": \"paused\"\n  },\n  \"create_labels\": false,\n  \"protected_branches\": [\n    \"release\"\n  ],\n  \"models\": {\n    \"strategy\": \"orchestrate\"\n  },\n  \"verify\": {\n    \"tests\": \"make test\",\n    \"lint\": \"make lint\",\n    \"build\": null,\n    \"gate_additions\": []\n  },\n  \"delegation\": [],\n  \"ticket_format\": \"keep\",\n  \"prove\": {\n    \"strategy\": [\n      \"local\"\n    ]\n  },\n  \"notify\": {\n    \"command\": null\n  },\n  \"mode_live\": false\n}\n"
+    }
+  },
+  "expect": {
+    "skill": "setup",
+    "no_writes_since": true
+  }
+}

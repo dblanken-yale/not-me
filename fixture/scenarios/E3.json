@@ -1,0 +1,20 @@
+{
+  "description": "retro, clean run: the newest run log has no warning or failure, so there are zero lessons and zero edits",
+  "patches": [],
+  "issues": [],
+  "prs": [],
+  "config": {
+    "repo": {
+      "verify.md": "---\nschema: 1\nextends: default\n---\n# Verify\n\n## Tests\n\nmake test\n\n## Lint\n\nNone. The project has no linter.\n"
+    },
+    "commit_repo_layer": true,
+    "git_files": {
+      "not-me/logs/new/20260101-130000-run-d4e5f6.md": "# not-me:new -   run=20260101-130000-run-d4e5f6\n\n## Summary\n\nStatus: idle\n\nRefused / failures first:\nnone\n\nQuestions and decisions:\nnone\n\nCounts: ACTION 1, REFUSED 0, IGNORED 0, CHECK 0, GATE 0, WARN 0, DELEGATE 0, AUDIT 0, QUESTION 0\n\n## Timeline\n\n- 2026-01-01T13:00:02+00:00  ACTION  pick-issue: nothing to do\n"
+    }
+  },
+  "expect": {
+    "skill": "retro",
+    "result": "RETRO",
+    "no_writes_since": true
+  }
+}
