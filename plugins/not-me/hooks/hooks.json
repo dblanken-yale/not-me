@@ -2,7 +2,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|mcp__.*github.*",
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|mcp__.*github.*",
         "hooks": [
           {
             "type": "command",

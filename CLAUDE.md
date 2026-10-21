@@ -64,10 +64,15 @@ the owner's say-so, not a cleanup.
    `/not-me:allow-repo owner/name` command.
 
 4. **The CLI's trust anchor is the checkout it runs in.** Restricted mode is
-   the default; the only signal that relaxes it is an interactive terminal
-   (something a model cannot forge), plus an operator confirmation for
-   allow-list changes and turning the pause off. Env vars never relax
-   anything; `NOT_ME_DRY_RUN` can only turn dry-run on.
+   the default. It relaxes only when all of these hold: stdin is a terminal,
+   no ancestor process is Claude Code (the desktop app's terminal panel
+   counts as Claude Code), and, for allow-list changes and turning the pause
+   off, `NOT_ME_OPERATOR_CONFIRM` equals the random token in
+   `~/.claude/not-me/operator-token` that `notme doctor --init-token` creates
+   for a person. Env vars never relax anything; `NOT_ME_DRY_RUN` can only
+   turn dry-run on. The guard blocks pseudo-terminal wrappers, detached
+   processes and reads of the token so these checks cannot be spoofed from
+   a session; the CLI checks are the second layer, the guard is the first.
 
 5. **Untrusted text never reaches the model as instructions.** Authors are
    filtered by login against the roster before any body is read; only counts,

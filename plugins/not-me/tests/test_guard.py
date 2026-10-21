@@ -350,7 +350,7 @@ class HooksJsonTests(unittest.TestCase):
     def test_declares_pre_tool_use(self):
         data = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
         entry = data["hooks"]["PreToolUse"][0]
-        self.assertEqual(entry["matcher"], "Bash|Write|Edit|MultiEdit|NotebookEdit|mcp__.*github.*")
+        self.assertEqual(entry["matcher"], "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|mcp__.*github.*")
         hook = entry["hooks"][0]
         self.assertEqual((hook["type"], hook["timeout"]), ("command", 10))
         self.assertIn('bin/notme-python" "${CLAUDE_PLUGIN_ROOT}/hooks/repo_guard.py"', hook["command"])

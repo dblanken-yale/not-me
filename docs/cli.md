@@ -13,9 +13,12 @@ directory. The global flags are also accepted after the subcommand.
 
 Trust anchor: the session project is the main checkout of the git toplevel of the working directory. Restricted
 mode is the default: a --project-dir or CLAUDE_PROJECT_DIR naming another checkout is refused and NOT_ME_HOME is
-ignored. Only a person at a terminal (stdin is a tty) with neither CLAUDECODE nor CLAUDE_PROJECT_DIR set gets
-those honoured. NOT_ME_DRY_RUN can only turn dry-run on. `allow-repo add|remove` and `pause off` need a terminal
-and NOT_ME_OPERATOR_CONFIRM set to the gh login, everywhere.
+ignored. Only a person gets those honoured: stdin is a terminal, neither CLAUDECODE nor CLAUDE_PROJECT_DIR is set,
+and no ancestor process is Claude Code (the CLI or the desktop app; the app's own terminal panel is a child of it,
+so use a separate terminal application). When the process ancestry cannot be read, the CLI stays restricted.
+NOT_ME_DRY_RUN can only turn dry-run on. `allow-repo add|remove` and `pause off` also need NOT_ME_OPERATOR_CONFIRM
+set to the private operator token in <not-me home>/operator-token (create it with `notme doctor --init-token`).
+The PreToolUse guard is the enforcement; this check is a second layer.
 
 --dry-run, NOT_ME_DRY_RUN=1 or `mode: dry-run` send every write to the intended-writes ledger instead of
 GitHub; write commands then carry "dry_run": true. Write commands take --log PATH (an existing run log under
@@ -595,7 +598,7 @@ Output: path, skill, ref, run_id, status, entries; or none
 
 ### `notme allow-repo add`
 
-Allow a repo (or, with --board, a project board) for this project or everywhere. Only a person may do this: stdin must be a terminal and NOT_ME_OPERATOR_CONFIRM the gh login; otherwise the refusal (kind human_only) carries the command to run.
+Allow a repo (or, with --board, a project board) for this project or everywhere. Only a person may do this: it must run from a terminal Claude Code did not start, with NOT_ME_OPERATOR_CONFIRM set to the operator token; otherwise the refusal (kind human_only) carries the command to run. The guard is the enforcement; this check is a second layer.
 
 ```
 notme allow-repo add SLUG [--board OWNER/NUMBER] [--everywhere]
@@ -801,10 +804,14 @@ Output: paused, scope
 
 ### `notme doctor`
 
-Check the tools and setup: python, git and gh versions, gh auth and scopes, config, guard self-test, spawn depth. Exit 7 when the only failed required checks are gh, gh auth or gh scopes; exit 1 when another required check fails.
+Check the tools and setup: python, git and gh versions, gh auth and scopes, config, guard self-test, spawn depth. Exit 7 when the only failed required checks are gh, gh auth or gh scopes; exit 1 when another required check fails. --init-token instead creates <not-me home>/operator-token (random, mode 0600) and shows it once; only a person may run it (kind human_only otherwise), and an existing token is never replaced (kind token_exists: delete the file to make a new one).
 
 ```
-notme doctor
+notme doctor [--init-token]
 ```
 
-Output: ok, checks (name, ok, detail, required)
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `--init-token` | optional | create the operator token (a person only; shown once) |
+
+Output: ok, checks (name, ok, detail, required); with --init-token token, path

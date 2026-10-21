@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from notme import claims, cli, runlog, states
+from notme import claims, cli, humans, runlog, states
 from notme.redact import redact
 from tests import PLUGIN_ROOT, TempCase
 from tests import test_cli_contract as base
@@ -57,12 +57,17 @@ class UnderClaudeCase(unittest.TestCase):
         (self.home / "project.md").write_text(base.GLOBAL_PROJECT, encoding="utf-8")
         self.fake = FakeRunner()
         self.env = {"CLAUDECODE": "1", "PATH": os.environ.get("PATH", ""), "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT)}
+        self.token = humans.create_token(self.home)
+        # a person: no Claude Code variable, the operator token, and (with stdin=TtyIO()) a terminal
+        self.human_env = {k: v for k, v in self.env.items() if k not in cli.CLAUDE_ENV}
+        self.human_env["NOT_ME_OPERATOR_CONFIRM"] = self.token
+        self.claude_ancestor = False  # the injected process-tree check
 
     def cli(self, *argv, env=None, cwd=None, stdin=None, repo=True):
         out, err = io.StringIO(), io.StringIO()
         args = (["--repo", REPO] if repo else []) + list(argv)
         code = cli.main(args, runner=self.fake, env=env or self.env, stdin=stdin or io.StringIO(""), stdout=out,
-                        stderr=err, cwd=str(cwd or self.session))
+                        stderr=err, cwd=str(cwd or self.session), process_check=lambda: self.claude_ancestor)
         return code, json.loads(out.getvalue()), err.getvalue()
 
     def ok(self, *argv, **kw):
@@ -169,18 +174,62 @@ class HumanOnlyTests(UnderClaudeCase):
         self.assertEqual(self.entries(), [])
 
     def test_allow_repo_confirmation_needs_a_terminal(self):
-        env = dict(self.env, NOT_ME_OPERATOR_CONFIRM="octocat")
-        code, payload, _ = self.cli("allow-repo", "add", "evil/repo", "--everywhere", env=env)
+        code, payload, _ = self.cli("allow-repo", "add", "evil/repo", "--everywhere", env=self.human_env)
         self.assertEqual((code, payload["kind"]), (1, "human_only"))
         self.assertEqual(self.entries(), [])
 
-    def test_allow_repo_confirmation_must_be_the_gh_login(self):
-        env = dict(self.env, NOT_ME_OPERATOR_CONFIRM="mallory")
-        code, payload, _ = self.cli("allow-repo", "remove", "acme/app-ui", "--everywhere", env=env, stdin=TtyIO())
-        self.assertEqual((code, payload["kind"]), (1, "human_only"))
-        env = dict(self.env, NOT_ME_OPERATOR_CONFIRM="octocat")
-        self.assertTrue(self.ok("allow-repo", "add", "acme/extra", "--everywhere", env=env, stdin=TtyIO())["added"])
+    def test_refusals_say_the_guard_is_the_enforcement(self):
+        code, payload, _ = self.cli("allow-repo", "add", "evil/repo")
+        self.assertEqual(payload["note"], humans.SECOND_LAYER)
+        self.assertIn("the PreToolUse guard is the enforcement; this check is a second layer", payload["error"])
+
+    def test_confirmation_must_be_the_operator_token_not_the_gh_login(self):
+        for wrong in ("octocat", "mallory", self.token + "x", ""):
+            with self.subTest(wrong=wrong):
+                env = dict(self.human_env, NOT_ME_OPERATOR_CONFIRM=wrong)
+                code, payload, _ = self.cli("allow-repo", "add", "evil/repo", "--everywhere", env=env, stdin=TtyIO())
+                self.assertEqual((code, payload["kind"]), (1, "human_only"))
+        self.assertEqual(self.entries(), [])
+        self.assertTrue(self.ok("allow-repo", "add", "acme/extra", "--everywhere", env=self.human_env,
+                                stdin=TtyIO())["added"])
         self.assertEqual([e["repo"] for e in self.entries()], ["acme/extra"])
+
+    def test_a_token_readable_by_others_does_not_count(self):
+        if os.name != "posix":
+            self.skipTest("POSIX permissions")
+        humans.token_path(self.home).chmod(0o644)
+        code, payload, _ = self.cli("allow-repo", "add", "acme/extra", "--everywhere", env=self.human_env,
+                                    stdin=TtyIO())
+        self.assertEqual((code, payload["kind"]), (1, "human_only"))
+
+    def test_pty_spoof_under_a_claude_ancestor_is_refused(self):
+        """A pty wrapper makes stdin a tty and the token may have leaked; the Claude Code ancestor still refuses."""
+        self.claude_ancestor = True
+        code, payload, _ = self.cli("allow-repo", "add", "evil/repo", "--everywhere", env=self.human_env,
+                                    stdin=TtyIO())
+        self.assertEqual((code, payload["kind"]), (1, "human_only"))
+        self.ok("pause", "on")
+        code, payload, _ = self.cli("pause", "off", env=self.human_env, stdin=TtyIO())
+        self.assertEqual((code, payload["kind"]), (1, "human_only"))
+        code, payload, _ = self.cli("--project-dir", str(self.other), "git", "status", env=self.human_env,
+                                    stdin=TtyIO())
+        self.assertEqual((code, payload["kind"]), (1, "project_override_refused"))
+        code, payload, _ = self.cli("doctor", "--init-token", env=self.human_env, stdin=TtyIO())
+        self.assertEqual((code, payload["kind"]), (1, "human_only"))
+        self.assertEqual(self.entries(), [])
+
+    def test_init_token_is_for_a_person_and_never_replaces_a_token(self):
+        humans.token_path(self.home).unlink()
+        code, payload, _ = self.cli("doctor", "--init-token")
+        self.assertEqual((code, payload["kind"]), (1, "human_only"))
+        self.assertFalse(humans.token_path(self.home).exists())
+        made = self.ok("doctor", "--init-token", env=self.human_env, stdin=TtyIO())
+        self.assertEqual(humans.read_token(self.home), made["token"])
+        if os.name == "posix":
+            self.assertEqual(humans.token_path(self.home).stat().st_mode & 0o777, 0o600)
+        code, payload, _ = self.cli("doctor", "--init-token", env=self.human_env, stdin=TtyIO())
+        self.assertEqual((code, payload["kind"]), (1, "token_exists"))
+        self.assertEqual(humans.read_token(self.home), made["token"])
 
     def test_pause_off_is_refused_and_the_pause_stays(self):
         self.ok("pause", "on")
@@ -188,8 +237,7 @@ class HumanOnlyTests(UnderClaudeCase):
         self.assertEqual((code, payload["kind"]), (1, "human_only"))
         self.assertIn("pause off", payload["terminal_cmd"])
         self.assertTrue(self.ok("status")["paused"]["project"])
-        env = dict(self.env, NOT_ME_OPERATOR_CONFIRM="octocat")
-        self.assertFalse(self.ok("pause", "off", env=env, stdin=TtyIO())["paused"])
+        self.assertFalse(self.ok("pause", "off", env=self.human_env, stdin=TtyIO())["paused"])
 
     def test_repo_layer_cannot_enable_auto_approve(self):
         add_pr_state(self.fake)
@@ -342,6 +390,52 @@ class CorrectnessTests(UnderClaudeCase):
         (self.home / "project.md").write_text(base.GLOBAL_PROJECT, encoding="utf-8")
         self.fake = no_gh
         self.assertEqual(self.cli("doctor")[0], 7)
+
+
+class AncestryTests(unittest.TestCase):
+    """humans.under_claude_process_tree over injected process tables: pid -> (ppid, comm, args)."""
+
+    SHELL = {1: (0, "launchd", "/sbin/launchd"), 50: (1, "Terminal", "/System/Applications/Terminal.app/x"),
+             60: (50, "-zsh", "-zsh"), 70: (60, "python3", "python3 cli/notme.py pause off")}
+
+    def check(self, table, pid=70):
+        return humans.under_claude_process_tree(table=table, pid=pid)
+
+    def test_a_plain_shell_is_human(self):
+        self.assertFalse(self.check(self.SHELL))
+
+    def test_claude_ancestors_restrict(self):
+        claude_like = [(80, "claude", "claude --resume"),
+                       (80, "node", "node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"),
+                       (80, "node", "node /opt/claude-code/dist/cli.js"),
+                       (80, "/Applications/Claude.app/Contents/MacOS/Claude", "/Applications/Claude.app/x"),
+                       (80, "claude.exe", "C:\\Users\\me\\AppData\\Local\\AnthropicClaude\\claude.exe")]
+        for row in claude_like:
+            with self.subTest(row=row):
+                table = dict(self.SHELL)
+                table[80] = (1, row[1], row[2])
+                table[50] = (80, "Terminal", "terminal panel")  # the shell was started by Claude Code
+                self.assertTrue(self.check(table))
+
+    def test_unreadable_ancestry_fails_closed(self):
+        self.assertTrue(humans.under_claude_process_tree(reader=lambda: None, pid=70))
+        self.assertTrue(self.check({}))
+        self.assertTrue(self.check({70: (60, "python3", "x")}))  # gap: the parent cannot be read
+        loop = {70: (71, "python3", "x"), 71: (70, "sh", "sh")}
+        self.assertTrue(self.check(loop))  # a cycle never reaches the root
+
+    def test_names_that_merely_mention_claude_do_not_restrict(self):
+        table = dict(self.SHELL)
+        table[60] = (50, "vim", "vim CLAUDE.md")
+        self.assertFalse(self.check(table))
+
+    def test_windows_explorer_is_a_session_root(self):
+        table = {70: (60, "python.exe", "python notme.py"), 60: (40, "cmd.exe", "cmd"),
+                 40: (9999, "explorer.exe", "C:\\Windows\\explorer.exe")}
+        self.assertFalse(self.check(table))
+
+    def test_the_real_table_reads_or_fails_closed(self):
+        self.assertIsInstance(humans.under_claude_process_tree(), bool)
 
 
 class RedactTests(unittest.TestCase):

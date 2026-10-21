@@ -11,7 +11,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from notme import claims, cli
+from notme import claims, cli, humans
 from tests import PLUGIN_ROOT, TempCase
 from tests.fakes.fakegh import FakeRunner
 
@@ -56,7 +56,8 @@ def things(fake, repo=REPO):
 
 class CliCase(unittest.TestCase):
     """A temp project, a global config in live mode, and a fake GitHub behind the injected runner. Runs as a person
-    at a terminal (a tty stdin, NOT_ME_OPERATOR_CONFIRM set), so --project-dir and NOT_ME_HOME are honoured."""
+    at a terminal (a tty stdin, no Claude Code ancestor, NOT_ME_OPERATOR_CONFIRM set to the operator token), so
+    --project-dir and NOT_ME_HOME are honoured."""
 
     global_project = GLOBAL_PROJECT
 
@@ -66,7 +67,8 @@ class CliCase(unittest.TestCase):
         self.tc.write("global", "project", self.global_project)
         self.fake = FakeRunner()
         self.env = {"NOT_ME_HOME": str(self.tc.home), "PATH": os.environ.get("PATH", ""),
-                    "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT), "NOT_ME_OPERATOR_CONFIRM": "octocat"}
+                    "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
+                    "NOT_ME_OPERATOR_CONFIRM": humans.create_token(self.tc.home)}
 
     @property
     def project(self) -> Path:
@@ -86,7 +88,7 @@ class CliCase(unittest.TestCase):
         if repo:
             args = ["--repo", REPO] + args
         code = cli.main(args, runner=runner or self.fake, env=env or self.env, stdin=TtyIO(stdin), stdout=out,
-                        stderr=err, hook_cmd=hook_cmd)
+                        stderr=err, hook_cmd=hook_cmd, process_check=lambda: False)
         text = out.getvalue()
         self.assertEqual(text.count("\n"), 1, f"stdout must be one line, got {text!r}")
         payload = json.loads(text)
