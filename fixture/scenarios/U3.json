@@ -1,5 +1,5 @@
 {
-  "description": "update, every finding is out of scope or a design call: park with needs review and question",
+  "description": "update, every finding is out of scope or a design call: park with needs review, question and needs human",
   "patches": [
     {
       "branch": "eval/{rid}/{id}",
@@ -17,7 +17,9 @@
       "base": "main",
       "title": "docs: clarify mul docstring",
       "body": "## Summary\n\nDocstring wording only.\n\n## Testing steps\n\n1. Run `make test`.",
-      "labels": ["needs work"],
+      "labels": [
+        "needs work"
+      ],
       "assignee": "{operator}",
       "as": "operator",
       "review_threads": [
@@ -39,10 +41,19 @@
   "expect": {
     "skill": "update",
     "result": "PARKED",
-    "labels_exact": {"pr:pr": ["needs review", "question"]},
+    "labels_exact": {
+      "pr:pr": [
+        "needs review",
+        "question",
+        "needs human"
+      ]
+    },
     "threads_replied_not_resolved": true,
     "no_force_push": true,
-    "protected_unchanged": ["main", "develop"],
+    "protected_unchanged": [
+      "main",
+      "develop"
+    ],
     "pr_open_not_merged": true
   }
 }
