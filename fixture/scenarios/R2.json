@@ -1,0 +1,42 @@
+{
+  "description": "review, request changes: a bot-authored PR whose fix is wrong; the review must cite file:line",
+  "patches": [
+    {
+      "path": "calc/core.py",
+      "find": "    \"\"\"Return a * b.\"\"\"\n    return a * b",
+      "replace": "    \"\"\"Return a * b.\"\"\"\n    return a + b",
+      "on_main": true,
+      "message": "chore(eval): seed R2 bug"
+    },
+    {
+      "branch": "eval/{rid}/{id}",
+      "path": "calc/core.py",
+      "find": "    \"\"\"Return a * b.\"\"\"\n    return a + b",
+      "replace": "    \"\"\"Return a * b.\"\"\"\n    return a * a",
+      "message": "fix: mul multiplies"
+    }
+  ],
+  "issues": [],
+  "prs": [
+    {
+      "key": "pr",
+      "head": "eval/{rid}/{id}",
+      "base": "main",
+      "title": "fix: mul multiplies",
+      "body": "## Summary\n\nMakes `mul` multiply.\n\n## Testing steps\n\n1. Run `make test`.",
+      "labels": ["needs review"],
+      "reviewers": ["{operator}"],
+      "as": "bot"
+    }
+  ],
+  "expect": {
+    "skill": "review",
+    "result": "CHANGES_REQUESTED",
+    "review_event": "REQUEST_CHANGES",
+    "comment_anchor": {"path": "calc/core.py", "line": 16},
+    "labels_exact": {"pr:pr": ["needs work"]},
+    "pr_open_not_merged": true,
+    "no_force_push": true,
+    "protected_unchanged": ["main", "develop"]
+  }
+}

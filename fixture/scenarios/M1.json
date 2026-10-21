@@ -1,0 +1,29 @@
+{
+  "description": "companions, push order: one issue needs a change in both the main and the companion repo",
+  "patches": [],
+  "issues": [
+    {
+      "key": "both",
+      "title": "Show the mean as a percentage",
+      "body": "Add `mean_percent(values)` to calc (the mean times 100) and use `ui.percent` in the companion repo to format it.\n\nAcceptance:\n- calc.mean_percent exists with a test\n- the companion repo gets a matching change\n- both PRs link each other",
+      "labels": ["to do"],
+      "as": "operator"
+    }
+  ],
+  "prs": [],
+  "companion": {
+    "patches": [],
+    "issues": [],
+    "prs": []
+  },
+  "expect": {
+    "skill": "new",
+    "result": "DONE",
+    "pr_exists": {"count": 1, "repos": ["main", "companion"]},
+    "push_order": ["companion", "main"],
+    "pr_body_contains": "## Companion PRs",
+    "labels_exact": {"issue:both": ["needs review"]},
+    "pr_open_not_merged": true,
+    "no_force_push": true
+  }
+}

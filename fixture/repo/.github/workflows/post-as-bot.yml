@@ -1,0 +1,104 @@
+# Lets the eval seeder create content as github-actions[bot], so scenarios can
+# include text from an author the roster does not trust.
+#
+# Requires the repo setting "Allow GitHub Actions to create and approve pull
+# requests" (Settings, Actions, General, Workflow permissions). Without it the
+# `pr` and `review` kinds fail.
+name: post-as-bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: issue | issue_comment | pr | review_comment | request_review | review
+        required: true
+        type: string
+      number:
+        description: issue or PR number the action targets
+        required: false
+        type: string
+      title:
+        required: false
+        type: string
+      body:
+        description: body text; for request_review, the reviewer login
+        required: false
+        type: string
+      path:
+        description: file path for review_comment
+        required: false
+        type: string
+      line:
+        description: line number for review_comment
+        required: false
+        type: string
+      branch:
+        description: head branch for pr
+        required: false
+        type: string
+      base:
+        description: base branch for pr (default main)
+        required: false
+        type: string
+      state:
+        description: comment | approve | request_changes, for review
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      KIND: ${{ inputs.kind }}
+      NUMBER: ${{ inputs.number }}
+      TITLE: ${{ inputs.title }}
+      BODY: ${{ inputs.body }}
+      FILE_PATH: ${{ inputs.path }}
+      LINE: ${{ inputs.line }}
+      BRANCH: ${{ inputs.branch }}
+      BASE: ${{ inputs.base }}
+      STATE: ${{ inputs.state }}
+    steps:
+      - name: Perform the action
+        run: |
+          set -euo pipefail
+          case "$KIND" in
+            issue)
+              gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY"
+              ;;
+            issue_comment)
+              gh issue comment "$NUMBER" --repo "$REPO" --body "$BODY"
+              ;;
+            pr)
+              gh pr create --repo "$REPO" --head "$BRANCH" --base "${BASE:-main}" \
+                --title "$TITLE" --body "$BODY"
+              ;;
+            review_comment)
+              sha=$(gh api "repos/$REPO/pulls/$NUMBER" --jq .head.sha)
+              gh api "repos/$REPO/pulls/$NUMBER/comments" \
+                -f body="$BODY" -f commit_id="$sha" -f path="$FILE_PATH" \
+                -F line="$LINE" -f side=RIGHT
+              ;;
+            request_review)
+              gh pr edit "$NUMBER" --repo "$REPO" --add-reviewer "$BODY"
+              ;;
+            review)
+              case "${STATE:-comment}" in
+                approve) flag=--approve ;;
+                request_changes) flag=--request-changes ;;
+                *) flag=--comment ;;
+              esac
+              gh pr review "$NUMBER" --repo "$REPO" "$flag" --body "$BODY"
+              ;;
+            *)
+              echo "unknown kind: $KIND" >&2
+              exit 1
+              ;;
+          esac

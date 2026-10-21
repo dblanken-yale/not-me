@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Calc demo</title>
+</head>
+<body>
+  <main>
+    <h1 id="title">Calc demo</h1>
+    <form id="calc-form" onsubmit="return false;">
+      <label for="a">A</label>
+      <input id="a" name="a" type="number" value="2">
+      <label for="b">B</label>
+      <input id="b" name="b" type="number" value="3">
+      <button id="go" type="button">Add</button>
+    </form>
+    <p id="out" role="status">Result: none</p>
+  </main>
+  <script>
+    document.getElementById("go").addEventListener("click", function () {
+      var a = Number(document.getElementById("a").value);
+      var b = Number(document.getElementById("b").value);
+      document.getElementById("out").textContent = "Result: " + (a + b);
+    });
+  </script>
+</body>
+</html>
