@@ -8,10 +8,11 @@ ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = ROOT / "plugins" / "not-me"
 TESTS = PLUGIN / "tests"
 SCRIPT_TESTS = ROOT / "scripts" / "tests"
+DOC_TESTS = ROOT / "docs" / "tests"
 
 
 def main() -> int:
-    if not TESTS.is_dir() and not SCRIPT_TESTS.is_dir():
+    if not TESTS.is_dir() and not SCRIPT_TESTS.is_dir() and not DOC_TESTS.is_dir():
         print("no tests yet")
         return 0
     sys.path.insert(0, str(PLUGIN))
@@ -23,6 +24,10 @@ def main() -> int:
     if SCRIPT_TESTS.is_dir():
         suite.addTests(unittest.defaultTestLoader.discover(
             start_dir=str(SCRIPT_TESTS), top_level_dir=str(SCRIPT_TESTS)
+        ))
+    if DOC_TESTS.is_dir():
+        suite.addTests(unittest.defaultTestLoader.discover(
+            start_dir=str(DOC_TESTS), top_level_dir=str(DOC_TESTS)
         ))
     result = unittest.TextTestRunner(verbosity=1).run(suite)
     print(f"ran {result.testsRun} tests")
