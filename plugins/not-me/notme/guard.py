@@ -1,0 +1,1257 @@
+"""PreToolUse guard: decide whether a tool call may run.
+
+`decide(event, ctx)` returns None (allow) or a Block. It reads git state in the
+working directory (push URLs, current branch, aliases) lazily through
+`ctx.git`, and loads not-me config only when a rule needs it. Building the
+context (`GuardContext.from_project`) and the inactive path start no
+processes: the checkout is found by walking up for `.git`.
+
+Rule groups, each switched by `guard.<rule>` in project.md:
+  other_repo          writes may only target allowed repos
+  protected_branches  no commits, pushes, merges or resets on protected branches
+  force_push          no history rewrites or remote branch deletion
+  destructive_git     shown as "destructive": hard resets, forced branch deletes,
+                      clean -x, rm -rf .git, and GitHub settings, secrets and deletions
+Self-protection (the allow list, the plugin's own files, and not-me config
+during a run) is always on.
+
+The Bash tokenizer is deliberately naive: it splits on && || ; | & and
+newlines, then on whitespace, strips quotes and drops redirections. Anything
+it cannot see through ($(...), bash -c, eval, GIT_DIR=..., a command name in a
+variable, inline interpreter code, scripts that mention gh/git) is blocked, so
+it fails closed.
+"""
+from __future__ import annotations
+
+import datetime as _dt
+import json
+import os
+import re
+import subprocess
+import time
+from dataclasses import dataclass, field
+from functools import cached_property
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Set, Tuple
+
+from . import paths
+
+RULES = ("other_repo", "protected_branches", "force_push", "destructive_git")
+RULE_LABEL = {"destructive_git": "destructive"}
+SELF = "self_protect"
+OPAQUE = "opaque"  # cannot be checked: reported under the first enabled rule
+
+ALLOWLIST_NAME = "allowed-repos.json"
+BOARD_MARKER = "--not-me-board"
+ACTIVE_RUN_MAX_AGE = 6 * 3600
+CONFIG_HINT = ".claude/not-me/project.md"
+PLUGIN_PROTECTED_DIRS = ("hooks", "bin", "notme", "cli", "skills")
+SCRIPT_READ_LIMIT = 1 << 20
+SCRIPT_SUFFIXES = (".sh", ".bash", ".zsh")
+
+GitFn = Callable[[List[str], str], Optional[str]]
+
+# --- patterns --------------------------------------------------------------
+
+_SLUG = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+_URL = re.compile(r"^(?:git@|ssh://git@|https?://(?:[^@/]+@)?)github\.com[:/]+([^/]+)/([^/?# ]+)")
+_HOST_SLUG = re.compile(r"^github\.com/([^/]+/[^/]+)$")
+_GH_GIT = re.compile(r"(^|[^A-Za-z0-9_.-])(gh|git)([^A-Za-z0-9_.-]|$)")
+_GITHUB = re.compile(r"github\.com", re.IGNORECASE)
+_SPLIT = re.compile(r"&&|\|\||[;|\n]|(?<![<>])&(?!>)")
+_REDIRECT = re.compile(r"^(\d*[<>]{1,2}&?|&>>?)(\S*)$")
+_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+_WORD_SPLIT = re.compile(r"[\s;|&()]+")
+_PATH_SEP = re.compile(r"[/\\]")
+_SCP_REMOTE = re.compile(r"^[^/]*@[^/]*:")
+_ALLOW_EDIT = re.compile(r"(^|[^A-Za-z0-9_-])(add|remove)([^A-Za-z0-9_-]|$)|--everywhere")
+_INTERP = re.compile(r"^(python[0-9.]*|pythonw|py|node|nodejs|perl|ruby|php|deno|bun)$")
+_REPO_PATH = re.compile(r"^repos/([^/]+)/([^/?]+)(/|\?|$)")
+_PULL_MERGE = re.compile(r"/pulls/\d+/merge/?$")
+_PROTECTION = re.compile(r"/branches/[^/]+/protection(/|$)")
+_SECRETS = re.compile(r"/(actions|dependabot|codespaces)/(secrets|variables)(/|$)")
+_MCP_TOOL = re.compile(r"^mcp__.*github.*", re.IGNORECASE)
+_READ_MCP_PREFIX = re.compile(r"^(get|list|search)_[a-z0-9_]+$")
+_MCP_WRITE_WORDS = re.compile(
+    r"(^|_)(merge|create|update|delete|add|remove|set|write|push|run|rerun|dismiss|request|submit|assign|close|"
+    r"reopen|fork|edit|lock|unlock|cancel|enable|disable|trigger|mark|star|approve|comment|upload|transfer)(_|$)")
+# Bash commands that cannot matter to any rule skip the full check (applied with quotes/backslashes removed).
+_PREFILTER = re.compile(
+    r"(?<![A-Za-z0-9_-])(gh|git|github|rm|find|xargs|parallel|curl|wget|python[0-9.]*|py|node|nodejs|perl|ruby|"
+    r"php|deno|bun|bash|sh|zsh|dash|ksh|fish|source|exec|eval)(?![A-Za-z0-9_-])"
+    r"|(?:^|[\s;|&(])\.(?:\s|$)|\./|\.(?:sh|bash|zsh)\b|\$|`|allow-repo|allowed-repos|GIT_|\.git")
+
+_SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
+_KEYWORDS = {"builtin", "{", "}", "if", "then", "else", "elif", "do", "while", "until", "!"}
+# prefix words that run the rest of the line, with their options that take a value
+_PREFIX_WORDS: Dict[str, Set[str]] = {
+    "env": {"-u", "--unset", "-C", "--chdir"},
+    "time": set(),
+    "nohup": set(),
+    "command": set(),
+    "exec": {"-a"},
+    "nice": {"-n", "--adjustment"},
+    "timeout": {"-s", "-k", "--signal", "--kill-after"},
+    "ionice": {"-c", "-n", "-p"},
+    "stdbuf": {"-i", "-o", "-e"},
+    "caffeinate": {"-t", "-w"},
+    "unbuffer": set(),
+    "chronic": set(),
+}
+_HTTP_CLIENTS = {"curl", "wget", "http", "https", "xh"}
+_GIT_READ = {"", "status", "log", "diff", "show", "fetch", "pull", "add", "restore", "stash", "tag", "rev-parse",
+             "ls-files", "worktree", "init", "clone", "cherry-pick", "revert", "mv", "rm", "grep", "blame",
+             "describe", "shortlog", "ls-remote"}
+_GIT_CONFIG_KEYS = ("remote.", "url.", "branch.", "alias.", "include.", "includeif.", "credential.")
+_GH_READ_VERBS = {"view", "list", "diff", "checks", "search", "browse", "clone", "download", "watch", "checkout",
+                  "status", ""}
+_GH_READ_GROUPS = {"config", "help", "completion", "search", "version", "status"}
+_GH_GROUPS = {"pr", "issue", "repo", "release", "label", "run", "workflow", "secret", "variable", "cache",
+              "project", "ruleset", "browse", "codespace", "org", "attestation", "gpg-key", "ssh-key"}
+# group -> write verbs that are always blocked (None = every verb): settings, secrets and deletion are human actions
+_GH_DESTRUCTIVE: Dict[str, Optional[Set[str]]] = {
+    "secret": {"set", "delete", "remove"},
+    "variable": {"set", "delete", "remove"},
+    "issue": {"delete", "transfer"},
+    "repo": {"edit", "delete", "rename", "archive", "unarchive"},
+    "release": {"delete", "delete-asset"},
+    "label": {"delete"},
+    "workflow": {"disable"},
+    "ruleset": None,
+}
+# gh api flags that take a value -> what the value is (None = ignored)
+_API_VALUE_FLAGS: Dict[str, Optional[str]] = {
+    "-X": "method", "--method": "method", "-f": "field", "-F": "field", "--field": "field",
+    "--raw-field": "field", "--input": "input", "-H": None, "--header": None, "-q": None, "--jq": None,
+    "-t": None, "--template": None, "--hostname": None, "--cache": None, "-p": None, "--preview": None,
+}
+_XARGS_VALUE = {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a", "--max-args", "--max-procs", "--delimiter",
+                "--arg-file", "--replace", "--max-lines", "--eof", "--max-chars"}
+_PARALLEL_VALUE = {"-j", "-S", "-P", "-I", "-a", "--jobs", "--sshlogin", "--arg-file"}
+_SUDO_VALUE = {"-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t", "--user", "--group"}
+_FIND_EXEC = {"-exec", "-execdir", "-ok", "-okdir"}
+_READ_MCP = {
+    "get_me", "get_file_contents", "get_commit", "list_commits", "list_branches", "list_tags", "get_tag",
+    "list_releases", "get_latest_release", "get_release_by_tag", "get_issue", "get_issue_comments", "issue_read",
+    "list_issues", "search_issues", "list_issue_types", "list_sub_issues", "get_label", "list_label",
+    "get_pull_request", "get_pull_request_files", "get_pull_request_diff", "get_pull_request_status",
+    "get_pull_request_comments", "get_pull_request_reviews", "get_pull_request_review_comments",
+    "pull_request_read", "list_pull_requests", "search_pull_requests", "search_code", "search_repositories",
+    "search_users", "search_orgs", "list_workflows", "list_workflow_runs", "get_workflow_run",
+    "get_workflow_run_logs", "list_workflow_jobs", "get_job_logs", "list_workflow_run_artifacts",
+    "get_code_scanning_alert", "list_code_scanning_alerts", "get_secret_scanning_alert",
+    "list_secret_scanning_alerts", "get_dependabot_alert", "list_dependabot_alerts", "list_discussions",
+    "get_discussion", "get_discussion_comments", "list_discussion_categories", "list_notifications",
+    "get_notification_details",
+}
+
+# --- results ---------------------------------------------------------------
+
+
+@dataclass
+class Block:
+    rule: str
+    reason: str
+    target: Optional[str] = None
+    command: str = ""
+    hint: Optional[str] = None  # what to do instead
+    suggest_allow: bool = False  # target is a real owner/name the operator could allow
+    tool: str = ""
+    message: str = ""
+
+
+Decision = Optional[Block]  # None = allow
+
+# --- helpers ---------------------------------------------------------------
+
+
+def run_git(args: List[str], cwd: str) -> Optional[str]:
+    """stdout of `git <args>` in cwd (stripped), or None on any failure or empty output."""
+    try:
+        proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=10,
+                              stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def is_slug(s: str) -> bool:
+    return bool(_SLUG.match(s))
+
+
+def parse_url(url: str) -> Optional[str]:
+    """owner/name for a github.com https, ssh or ssh:// URL; None otherwise."""
+    m = _URL.match(url.strip())
+    if not m:
+        return None
+    name = m.group(2)
+    return f"{m.group(1)}/{name[:-4] if name.endswith('.git') else name}"
+
+
+def repo_slug(value: Any) -> Optional[str]:
+    """owner/name from a slug, a github URL or github.com/owner/name; None otherwise."""
+    if not isinstance(value, str) or not value:
+        return None
+    if is_slug(value):
+        return value
+    m = _HOST_SLUG.match(value)
+    return m.group(1) if m else parse_url(value)
+
+
+def has_gh_git(text: str) -> bool:
+    return bool(_GH_GIT.search(text))
+
+
+def _mentions_github(text: str) -> bool:
+    return has_gh_git(text) or bool(_GITHUB.search(text))
+
+
+def _base(word: str) -> str:
+    return _PATH_SEP.split(word)[-1]
+
+
+def _head(word: str) -> str:
+    """Command name: basename, with gh/git recognised through backslashes, case and .exe."""
+    for cand in (_base(word), _base(word.replace("\\", ""))):
+        low = cand.lower()
+        low = low[:-4] if low.endswith(".exe") else low
+        if low in ("gh", "git"):
+            return low
+    return _base(word)
+
+
+def _short(text: str, limit: int = 100) -> str:
+    one = " ".join(text.split()).replace("`", "'")
+    return one if len(one) <= limit else one[: limit - 3] + "..."
+
+
+def _norm(p: str, base: str) -> str:
+    """The single path normaliser: unquote, expand ~, make absolute against base, resolve, normcase."""
+    p = os.path.expanduser(p.replace('"', "").replace("'", ""))
+    if not os.path.isabs(p):
+        p = os.path.join(base, p)
+    try:
+        p = os.path.realpath(p)
+    except (OSError, ValueError):
+        p = os.path.normpath(p)
+    return os.path.normcase(p)
+
+
+def _under(path: str, base: str) -> bool:
+    return path == base or path.startswith(base.rstrip(os.sep) + os.sep)
+
+
+def _short_flags(args: List[str]) -> str:
+    return "".join(a[1:] for a in args if a.startswith("-") and not a.startswith("--") and len(a) > 1)
+
+
+def _positionals(args: List[str]) -> List[str]:
+    out, after = [], False
+    for a in args:
+        if after or not a.startswith("-"):
+            out.append(a)
+        elif a == "--":
+            after = True
+    return out
+
+
+def _skip_options(args: List[str], takes_value: Set[str]) -> List[str]:
+    """args after the leading options (and their values) of a wrapper like xargs or sudo."""
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        i += 2 if args[i] in takes_value else 1
+    return args[i:]
+
+
+def strip_heredocs(cmd: str) -> Tuple[str, Optional[str]]:
+    """Drop heredoc bodies (they are data). Returns (text, opaque reason or None).
+
+    A heredoc fed to a shell that mentions gh/git cannot be checked.
+    """
+    lines = cmd.split("\n")
+    out: List[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        for m in _HEREDOC.finditer(line):
+            body: List[str] = []
+            while i < len(lines) and lines[i].strip() != m.group(2):
+                body.append(lines[i])
+                i += 1
+            i += 1  # terminator
+            words = {_base(w) for w in _WORD_SPLIT.split(line[: m.start()]) if w}
+            if words & (_SHELLS | {"eval", "xargs", "sudo", "source", "."}) and has_gh_git("\n".join(body)):
+                return cmd, "a heredoc fed to a shell runs gh/git that cannot be checked"
+    return "\n".join(out), None
+
+
+def substitutions(cmd: str) -> List[str]:
+    """Bodies of $(...), <(...), >(...) and backtick substitutions (naive nesting)."""
+    found: List[str] = []
+    for opener in ("$(", "<(", ">("):
+        start = cmd.find(opener)
+        while start != -1:
+            depth, j = 1, start + 2
+            while j < len(cmd) and depth:
+                depth += {"(": 1, ")": -1}.get(cmd[j], 0)
+                j += 1
+            found.append(cmd[start + 2: j - 1] if depth == 0 else cmd[start + 2:])
+            start = cmd.find(opener, start + 2)
+    found.extend(cmd.split("`")[1::2])
+    return found
+
+
+def tokens(segment: str) -> List[str]:
+    """Whitespace tokens with quotes stripped and redirections (2>&1, >file, > file) dropped."""
+    out: List[str] = []
+    skip_next = False
+    for w in segment.split():
+        w = w.replace('"', "").replace("'", "")
+        if skip_next:
+            skip_next = False
+            continue
+        m = _REDIRECT.match(w)
+        if m:
+            skip_next = not m.group(2)
+            continue
+        if w.startswith("("):
+            w = w[1:]
+        if w:
+            out.append(w)
+    return out
+
+
+def segments(cmd: str) -> List[str]:
+    return _SPLIT.split(cmd)
+
+
+def needs_check(event: Mapping[str, Any]) -> bool:
+    """False for Bash commands that no rule can care about (cheap, no processes)."""
+    if event.get("tool_name") != "Bash":
+        return True
+    tin = event.get("tool_input")
+    if not isinstance(tin, dict):
+        return True
+    text, opaque = strip_heredocs(str(tin.get("command") or ""))
+    if opaque:
+        return True
+    return bool(_PREFILTER.search(text.replace("'", "").replace('"', "").replace("\\", "")))
+
+
+# --- finding the checkout without git ------------------------------------------
+
+
+class _Ambiguous(Exception):
+    pass
+
+
+def find_checkout(start: str) -> Optional[Tuple[str, Path, Path]]:
+    """(toplevel, git dir, common dir) by walking up for .git; None outside git.
+
+    Raises _Ambiguous when a .git file cannot be read as `gitdir: <path>`.
+    """
+    here = Path(os.path.realpath(os.path.abspath(start)))
+    for d in (here, *here.parents):
+        g = d / ".git"
+        if g.is_dir():
+            return str(d), g, g
+        if g.is_file():
+            try:
+                text = g.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError) as exc:
+                raise _Ambiguous(str(exc)) from exc
+            if not text.startswith("gitdir:"):
+                raise _Ambiguous(f"{g} is not a gitdir file")
+            gd = Path(text[len("gitdir:"):].strip())
+            gd = gd if gd.is_absolute() else d / gd
+            common = gd
+            try:
+                c = Path((gd / "commondir").read_text(encoding="utf-8").strip())
+                common = c if c.is_absolute() else gd / c
+            except OSError:
+                pass
+            return str(d), Path(os.path.realpath(gd)), Path(os.path.realpath(common))
+    return None
+
+
+def head_branch(git_dir: Path) -> Optional[str]:
+    """Current branch from <git dir>/HEAD; None when detached or unreadable."""
+    try:
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return head[len("ref: refs/heads/"):] if head.startswith("ref: refs/heads/") else None
+
+
+def _fresh(marker: Path) -> bool:
+    try:
+        return time.time() - marker.stat().st_mtime < ACTIVE_RUN_MAX_AGE
+    except OSError:
+        return False
+
+
+def read_allowlist(path: Path, origin: Optional[str]) -> Set[str]:
+    """Repos the global allow list grants to this origin and to every project ("*")."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    projects = data.get("projects") if isinstance(data, dict) else None
+    if not isinstance(projects, dict):
+        return set()
+    out: Set[str] = set()
+    for key, entry in projects.items():
+        if not isinstance(key, str) or (key != "*" and key.lower() != (origin or "")):
+            continue
+        allow = entry.get("allow") if isinstance(entry, dict) else None
+        for item in allow if isinstance(allow, list) else []:
+            name = item.get("repo") if isinstance(item, dict) else item
+            if isinstance(name, str) and is_slug(name):
+                out.add(name.lower())
+    return out
+
+
+# --- context ---------------------------------------------------------------
+
+_LAZY = ("origin_repo", "allowed_repos", "rules", "protected_branches", "board")
+
+
+class GuardContext:
+    """Where the call runs. Config-derived values load on first use; pass them as keywords to fix them."""
+
+    def __init__(self, *, cwd: str = ".", root: Optional[str] = None, git_dir: Optional[Path] = None,
+                 common_dir: Optional[Path] = None, config_dir: Optional[Path] = None,
+                 allowlist_path: Optional[Path] = None, active_run: bool = False,
+                 plugin_root: Optional[Path] = None, home: Optional[Path] = None,
+                 env: Optional[Mapping[str, str]] = None, git: GitFn = run_git, **known: Any):
+        unknown = set(known) - set(_LAZY)
+        if unknown:
+            raise TypeError(f"unknown GuardContext fields: {', '.join(sorted(unknown))}")
+        self.env = os.environ if env is None else env
+        self.cwd = str(cwd)
+        self.root = root
+        self.git_dir = git_dir
+        self.common_dir = common_dir
+        self.config_dir = Path(config_dir) if config_dir else Path(root or self.cwd) / ".claude" / "not-me"
+        self.home = Path(home) if home else paths.home_dir(self.env)
+        self.allowlist_path = Path(allowlist_path) if allowlist_path else self.home / ALLOWLIST_NAME
+        self.active_run = active_run
+        self.plugin_root = Path(plugin_root) if plugin_root else paths.plugin_root(self.env)
+        self.git = git
+        self.__dict__.update(known)  # shadows the cached properties below
+
+    @classmethod
+    def from_project(cls, project_dir: Any, home: Optional[Any] = None, env: Optional[Mapping[str, str]] = None,
+                     git: GitFn = run_git) -> "GuardContext":
+        """Build the context for a checkout without starting a process (git only if the walk is ambiguous)."""
+        env = os.environ if env is None else env
+        cwd = str(project_dir)
+        ambiguous = False
+        try:
+            found = find_checkout(cwd)
+        except _Ambiguous:
+            found, ambiguous = None, True
+        if found is None and (ambiguous or env.get("GIT_DIR")):
+            out = git(["rev-parse", "--show-toplevel", "--git-dir", "--git-common-dir"], cwd)
+            parts = out.splitlines() if out else []
+            if len(parts) == 3:
+                abs_ = [Path(p) if os.path.isabs(p) else Path(cwd) / p for p in parts]
+                found = (str(abs_[0]), abs_[1].resolve(), abs_[2].resolve())
+        root, git_dir, common = found if found else (None, None, None)
+        config_dir = Path(root or cwd) / ".claude" / "not-me"
+        if not config_dir.is_dir() and git_dir is not None and git_dir != common and common.name == ".git":
+            main = common.parent / ".claude" / "not-me"
+            if main.is_dir():
+                config_dir = main
+        active = _fresh(common / "not-me" / "active-run") if common else False
+        return cls(cwd=cwd, root=root, git_dir=git_dir, common_dir=common, config_dir=config_dir,
+                   home=Path(home) if home else None, env=env, active_run=active, git=git)
+
+    @cached_property
+    def _project(self) -> Dict[str, Any]:
+        from . import config  # deferred: most calls never need config
+
+        base = self.root or self.cwd
+        project = config.load(project_dir=str(base), home=str(self.home), env=self.env).meta.get("project", {})
+        return project if isinstance(project, dict) else {}
+
+    @cached_property
+    def origin_repo(self) -> Optional[str]:
+        url = self.git(["remote", "get-url", "origin"], self.root or self.cwd)
+        slug = parse_url(url) if url else None
+        return slug.lower() if slug else None
+
+    @cached_property
+    def rules(self) -> Dict[str, bool]:
+        guard = self._project.get("guard")
+        guard = guard if isinstance(guard, dict) else {}
+        return {r: guard.get(r, "on") not in ("off", False) for r in RULES}
+
+    @cached_property
+    def protected_branches(self) -> Set[str]:
+        return {b for b in self._project.get("protected_branches") or []
+                if isinstance(b, str) and b and not b.startswith("!")}
+
+    @cached_property
+    def allowed_repos(self) -> Set[str]:
+        p = self._project
+        allowed: Set[str] = {self.origin_repo} if self.origin_repo else set()
+        names: List[Any] = [p.get("tracker")]
+        names += [i.get("name") if isinstance(i, dict) else i for i in p.get("repos") or []]
+        names += [i.get("repo") if isinstance(i, dict) else i for i in p.get("allow_repos") or []]
+        allowed |= {n.lower() for n in names if isinstance(n, str) and is_slug(n)}
+        return allowed | read_allowlist(self.allowlist_path, self.origin_repo)
+
+    @cached_property
+    def board(self) -> Optional[Tuple[str, int]]:
+        board = (self._project.get("queue") or {}).get("board") or {}
+        if isinstance(board, dict) and board.get("owner") and isinstance(board.get("number"), int):
+            return str(board["owner"]), board["number"]
+        return None
+
+
+def is_active(ctx: GuardContext) -> bool:
+    """The guard applies in a not-me project, or anywhere a not-me run is active."""
+    return ctx.active_run or Path(ctx.config_dir).is_dir()
+
+
+# --- message ---------------------------------------------------------------
+
+
+def render(block: Block, ctx: GuardContext) -> str:
+    label = RULE_LABEL.get(block.rule, block.rule)
+    head = f"not-me guard [{label}]: blocked `{block.command}`"
+    lines = [head + (f": targeting {block.target}." if block.target else ".")]
+    if block.suggest_allow and block.target:
+        t = block.target
+        allowed = ", ".join(sorted(ctx.allowed_repos)) or "nothing (no origin found)"
+        lines += [f"This repo ({ctx.origin_repo or 'unknown origin'}) may write only to: {allowed}.",
+                  f"If {t} is intended, the operator runs:  /not-me:allow-repo {t}",
+                  f"  (all projects: /not-me:allow-repo {t} --everywhere; team-wide: add it to allow_repos "
+                  f"in {CONFIG_HINT})"]
+    else:
+        lines.append(f"Why: {block.reason}.")
+        if block.hint:
+            lines.append(f"Instead: {block.hint}.")
+    lines.append("Autonomous runs: do not retry; log a QUESTION naming the operator and continue.")
+    if block.rule in RULES:
+        lines.append(f"Relax this rule (not recommended): set guard.{block.rule}: off and "
+                     f"confirm_guard_off: [{block.rule}] in {CONFIG_HINT}")
+    lines.append("See effective config: /not-me:config")
+    return "\n".join(lines)
+
+
+# --- decision --------------------------------------------------------------
+
+Blk = Callable[..., Block]
+
+
+def _blk(shown: str) -> Blk:
+    def blk(rule: str, reason: str, hint: Optional[str] = None, target: Optional[str] = None,
+            suggest: bool = False) -> Block:
+        return Block(rule, reason, target=target, command=shown, hint=hint, suggest_allow=suggest)
+    return blk
+
+
+def decide(event: Mapping[str, Any], ctx: GuardContext) -> Decision:
+    tool = event.get("tool_name") or ""
+    tin = event.get("tool_input") or {}
+    if not isinstance(tool, str) or not isinstance(tin, dict):
+        raise TypeError("tool_name must be a string and tool_input an object")
+    cwd = str(event.get("cwd") or ctx.cwd)
+    if tool == "Bash":
+        cands = _bash(str(tin.get("command") or ""), cwd, ctx)
+    elif tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+        cands = _file(tool, str(tin.get("file_path") or tin.get("notebook_path") or ""), cwd, ctx)
+    elif _MCP_TOOL.match(tool):
+        cands = _mcp(tool, tin, ctx)
+    else:
+        return None
+    for block in cands:
+        if block.rule == OPAQUE:
+            enabled = [r for r in RULES if ctx.rules.get(r, True)]
+            if not enabled:
+                continue
+            block.rule = enabled[0]
+        elif block.rule != SELF and not ctx.rules.get(block.rule, True):
+            continue
+        block.tool = tool
+        block.message = render(block, ctx)
+        return block
+    return None
+
+
+def _check_target(ctx: GuardContext, target: str, blk: Blk) -> Iterator[Block]:
+    """Block unless target (a named repo) is allowed."""
+    if target.lower() in ctx.allowed_repos:
+        return
+    if not is_slug(target):
+        yield blk("other_repo", f"cannot read repo '{target}'", "spell out the repo as owner/name")
+    else:
+        yield blk("other_repo", f"{target} is not an allowed repo", target=target, suggest=True)
+
+
+def _unknown_target(blk: Blk, why: str, fix: str) -> Block:
+    return blk("other_repo", f"could not tell which repo it targets ({why})", fix)
+
+
+def _file(tool: str, fpath: str, cwd: str, ctx: GuardContext) -> Iterator[Block]:
+    if not fpath:
+        return
+    blk = _blk(_short(f"{tool} {fpath}"))
+    full = _norm(fpath, cwd)
+    if full == _norm(str(ctx.allowlist_path), cwd) or _base(fpath) == ALLOWLIST_NAME:
+        yield blk(SELF, "only the operator changes the not-me allow list", "ask the operator to run /not-me:allow-repo")
+    plugin = _norm(str(ctx.plugin_root), cwd)
+    if any(_under(full, os.path.join(plugin, d)) for d in PLUGIN_PROTECTED_DIRS):
+        yield blk(SELF, "the not-me plugin's own code is off limits to the agent",
+                  "describe the change in a QUESTION for the operator")
+    if ctx.active_run:
+        home = _norm(str(ctx.home), cwd)
+        if _under(full, _norm(str(ctx.config_dir), cwd)) or (os.path.dirname(full) == home and full.endswith(".md")):
+            yield blk(SELF, "not-me config is read-only while a not-me run is active",
+                      "log a QUESTION proposing the config change for the operator")
+    low = fpath.replace("\\", "/").lower()
+    parts = low.split("/")
+    if ".git" in parts or parts[-1] == ".gitconfig" or "/.config/git/" in low or low.startswith(".config/git/"):
+        yield blk("other_repo", "git config and hooks can change where git pushes",
+                  "change git settings by hand, outside the agent")
+
+
+def _mcp(tool: str, tin: Mapping[str, Any], ctx: GuardContext) -> Iterator[Block]:
+    name = tool.split("__")[-1]
+    if name in _READ_MCP or (_READ_MCP_PREFIX.match(name) and not _MCP_WRITE_WORDS.search(name)):
+        return
+    blk = _blk(_short(tool))
+    owner, repo = tin.get("owner"), tin.get("repo")
+    if isinstance(owner, str) and owner and isinstance(repo, str) and repo:
+        target: Optional[str] = f"{owner}/{repo}"
+    else:
+        target = repo_slug(repo)
+    if target:
+        yield from _check_target(ctx, target, blk)
+    else:
+        yield _unknown_target(blk, "not a known read-only tool and names no owner/repo",
+                              "pass owner and repo naming an allowed repo")
+
+
+class _State:
+    """Per-call state: the simulated cwd and branch, and memoised git lookups."""
+
+    def __init__(self, cwd: str, text: str):
+        self.dir = cwd
+        self.text = text
+        self.switched: Dict[str, str] = {}
+        self.memo: Dict[Tuple[str, ...], Any] = {}
+
+    def once(self, key: Tuple[str, ...], fn: Callable[[], Any]) -> Any:
+        if key not in self.memo:
+            self.memo[key] = fn()
+        return self.memo[key]
+
+
+def _branch(ctx: GuardContext, st: _State, d: str) -> Optional[str]:
+    if d in st.switched:
+        return st.switched[d]
+
+    def read() -> Optional[str]:
+        try:
+            found = find_checkout(d)
+        except _Ambiguous:
+            found = None
+        if found:
+            return head_branch(found[1])
+        b = ctx.git(["branch", "--show-current"], d)
+        return None if b in (None, "HEAD") else b
+    return st.once(("branch", d), read)
+
+
+def _git_config(ctx: GuardContext, st: _State, d: str, key: str) -> Optional[str]:
+    return st.once(("config", d, key), lambda: ctx.git(["config", "--get", key], d))
+
+
+def _bash(cmd: str, cwd: str, ctx: GuardContext) -> Iterator[Block]:
+    blk = _blk(_short(cmd))
+    if "allow-repo" in cmd and _ALLOW_EDIT.search(cmd):
+        yield blk(SELF, "only the operator changes the not-me allow list", "ask the operator to run /not-me:allow-repo")
+    if ALLOWLIST_NAME in cmd.lower() or str(ctx.allowlist_path).lower() in cmd.lower():
+        yield blk(SELF, "the not-me allow list is off limits to the agent",
+                  "ask the operator to run /not-me:allow-repo, or read it with /not-me:config")
+    text, opaque = strip_heredocs(cmd)
+    if opaque:
+        yield blk(OPAQUE, opaque, "run gh/git directly")
+    if any(has_gh_git(s) for s in substitutions(text)):
+        yield blk(OPAQUE, "gh/git inside $(...), backticks or <(...) cannot be checked",
+                  "run gh/git directly, not inside $(...)")
+    st = _State(cwd, text)
+    for seg in segments(text):
+        yield from _command(tokens(seg), seg, st, ctx)
+
+
+def _drop_prefix(word: str, rest: List[str]) -> List[str]:
+    """The command after a prefix word such as env, time, nice or timeout, without its options."""
+    takes_value = _PREFIX_WORDS[word]
+    while rest and rest[0].startswith("-") and rest[0] != "-":
+        a = rest[0]
+        if word == "env" and a.startswith("-S") and len(a) > 2:
+            rest = [a[2:]] + rest[1:]
+        else:
+            rest = rest[2:] if a in takes_value else rest[1:]
+    if word == "timeout" and rest:
+        rest = rest[1:]  # the duration
+    return rest
+
+
+def _command(t: List[str], seg: str, st: _State, ctx: GuardContext) -> Iterator[Block]:
+    """Check one simple command given as tokens."""
+    blk = _blk(_short(seg))
+    gitenv = prefixed = False
+    while t:
+        head = _head(t[0])
+        if _ASSIGN.match(t[0]):
+            gitenv = gitenv or t[0].startswith("GIT_")
+            t = t[1:]
+        elif head in _PREFIX_WORDS:
+            t = _drop_prefix(head, t[1:])
+            prefixed = True
+        elif head in _KEYWORDS:
+            t = t[1:]
+        else:
+            break
+    if not t:
+        return
+    word, head = t[0], _head(t[0])
+    if "$" in word or "`" in word:
+        yield blk(OPAQUE, "a command name taken from a variable cannot be checked", "spell out the command")
+        return
+    handler = _COMMANDS.get(head)
+    if handler is not None:
+        yield from handler(t, seg, st, ctx, blk, gitenv)
+    elif word.startswith(("./", "../", ".\\", "..\\")) or word.endswith(SCRIPT_SUFFIXES):
+        yield from _script(word, st, blk)
+    elif _INTERP.match(head):
+        inline = any(a in ("--eval", "--print") or (a.startswith("-") and not a.startswith("--")
+                                                     and set(a[1:]) & set("ceEpr")) for a in t[1:])
+        if inline and _mentions_github(st.text):
+            yield blk(OPAQUE, f"{head} inline code that runs gh/git or calls GitHub cannot be checked",
+                      "run gh/git directly")
+    elif head in _HTTP_CLIENTS and _GITHUB.search(seg):
+        yield blk(OPAQUE, f"{head} to GitHub bypasses gh's repo checks", "use gh with --repo owner/name")
+    elif prefixed and has_gh_git(seg):
+        yield blk(OPAQUE, f"cannot tell what '{word}' runs", "run gh/git directly, without the wrapper")
+
+
+def _script(path: str, st: _State, blk: Blk) -> Iterator[Block]:
+    try:
+        with open(_norm(path, st.dir), "rb") as fh:
+            text = fh.read(SCRIPT_READ_LIMIT).decode("utf-8", "replace")
+    except OSError:
+        yield blk(OPAQUE, f"cannot read {path} to check what it runs", "run its commands directly")
+        return
+    if _mentions_github(text):
+        yield blk(OPAQUE, f"{path} runs gh/git or calls GitHub, which cannot be checked from here",
+                  "run its gh/git commands directly")
+
+
+def _cmd_cd(t, seg, st, ctx, blk, gitenv):
+    if len(t) > 1 and t[1] != "-":
+        st.dir = _norm(t[1], st.dir)
+    return iter(())
+
+
+def _cmd_shell(t, seg, st, ctx, blk, gitenv):
+    head = _head(t[0])
+    args = t[1:]
+    if head in _SHELLS and any(a.startswith("-") and not a.startswith("--") and "c" in a[1:] for a in args):
+        if has_gh_git(seg):
+            yield blk(OPAQUE, f"{head} -c wrapping gh/git cannot be checked", "run gh/git directly")
+        return
+    i = 0
+    while i < len(args) and args[i].startswith(("-", "+")):
+        i += 2 if args[i] in ("-o", "+o", "-O", "+O") else 1
+    if i < len(args):
+        yield from _script(args[i], st, blk)
+
+
+def _cmd_eval(t, seg, st, ctx, blk, gitenv):
+    if has_gh_git(seg):
+        yield blk(OPAQUE, "eval wrapping gh/git cannot be checked", "run gh/git directly")
+
+
+def _wrapped(takes_value: Set[str], stop: Tuple[str, ...] = ()):
+    """Handler for xargs, parallel and sudo: check the command they run."""
+    def handler(t, seg, st, ctx, blk, gitenv):
+        rest = _skip_options(t[1:], takes_value)
+        for k, a in enumerate(rest):
+            if a in stop:
+                rest = rest[:k]
+                break
+        if rest:
+            yield from _command(rest, " ".join(rest), st, ctx)
+    return handler
+
+
+def _cmd_find(t, seg, st, ctx, blk, gitenv):
+    for k, a in enumerate(t):
+        if a in _FIND_EXEC:
+            sub: List[str] = []
+            for w in t[k + 1:]:
+                if w in (";", "\\;", "+", "\\"):
+                    break
+                sub.append(w)
+            if sub:
+                yield from _command(sub, " ".join(sub), st, ctx)
+
+
+def _cmd_export(t, seg, st, ctx, blk, gitenv):
+    for w in t[1:]:
+        if w.startswith("GIT_"):
+            yield blk(OPAQUE, f"{t[0]} {w} changes where git reads its repo or config", "do not set GIT_* variables")
+
+
+def _cmd_rm(t, seg, st, ctx, blk, gitenv):
+    args = t[1:]
+    flags = _short_flags(args)
+    if not ("r" in flags or "R" in flags or "--recursive" in args):
+        return
+    root = _norm(ctx.root, "/") if ctx.root else None
+    for target in _positionals(args):
+        full = _norm(target, st.dir)
+        hits_root = root is not None and (_under(root, full) or (target in ("*", ".*") and st.dir == root))
+        if ".git" in [p.lower() for p in _PATH_SEP.split(target)] or hits_root:
+            yield blk("destructive_git", f"rm -r on {target} would delete the checkout or its git data",
+                      "delete specific files instead; ask the operator to remove a checkout")
+
+
+# --- git -------------------------------------------------------------------
+
+
+@dataclass
+class _GitCall:
+    ctx: GuardContext
+    st: _State
+    blk: Blk
+    d: str
+    sub: str
+    args: List[str] = field(default_factory=list)
+    has_c: bool = False
+
+
+def _cmd_git(t, seg, st, ctx, blk, gitenv):
+    if gitenv:
+        yield blk(OPAQUE, "GIT_* variables change where git reads its repo or config",
+                  "run git without GIT_* variables")
+    d = st.dir
+    c_values: List[str] = []
+    i = 1
+    while i < len(t) and t[i].startswith("-"):
+        a = t[i]
+        if a == "-C":
+            d = _norm(t[i + 1] if i + 1 < len(t) else ".", d)
+            i += 2
+        elif a == "-c":
+            c_values.append(t[i + 1] if i + 1 < len(t) else "")
+            i += 2
+        else:
+            if a.split("=")[0] in ("--git-dir", "--work-tree", "--config-env", "--namespace", "--exec-path",
+                                   "--super-prefix"):
+                yield blk(OPAQUE, f"git {a.split('=')[0]} cannot be checked", "cd into the checkout and run git there")
+            i += 1
+    sub = t[i] if i < len(t) else ""
+    known = sub in _GIT_READ or sub in _GIT_RULES
+    if any(v.lower().startswith("alias.") for v in c_values) or (c_values and not known):
+        yield blk(OPAQUE, "git -c defining or calling an alias cannot be checked", "run the git command directly")
+    if not known:
+        alias = _git_config(ctx, st, d, f"alias.{sub}")
+        if alias and ("push" in alias or alias.startswith("!") or "send-pack" in alias):
+            yield blk("other_repo", f"git alias '{sub}' runs '{alias}'", "run the underlying git command directly")
+    handler = _GIT_RULES.get(sub)
+    if handler is not None:
+        yield from handler(_GitCall(ctx, st, blk, d, sub, t[i + 1:], bool(c_values)))
+
+
+def _git_switch(c: _GitCall) -> Iterator[Block]:
+    """Track the branch a checkout/switch moves to; unknown outcomes fall back to reading HEAD."""
+    c.st.switched.pop(c.d, None)
+    c.st.memo.pop(("branch", c.d), None)
+    new = [c.args[k + 1] for k, a in enumerate(c.args[:-1]) if a in ("-b", "-B", "-c", "-C")]
+    pos = _positionals(c.args)
+    if new:
+        c.st.switched[c.d] = new[0]
+    elif c.sub == "switch" and pos:
+        c.st.switched[c.d] = pos[0]
+    elif len(pos) == 1 and "--" not in c.args and not os.path.exists(os.path.join(c.d, pos[0])):
+        c.st.switched[c.d] = pos[0]
+    return iter(())
+
+
+def _git_send_pack(c: _GitCall) -> Iterator[Block]:
+    yield c.blk("other_repo", "git send-pack cannot be checked", "use git push")
+
+
+def _git_subtree(c: _GitCall) -> Iterator[Block]:
+    if "push" in c.args:
+        yield c.blk("other_repo", "git subtree push cannot be checked", "push the subtree repo from its own checkout")
+
+
+def _git_commit(c: _GitCall) -> Iterator[Block]:
+    b = _branch(c.ctx, c.st, c.d)
+    if b in c.ctx.protected_branches:
+        yield c.blk("protected_branches", f"commits on the protected branch {b} are not allowed",
+                    "create a feature branch first (git switch -c <type>/<topic>) and commit there")
+    origin = c.st.once(("origin", c.d), lambda: c.ctx.git(["remote", "get-url", "origin"], c.d))
+    slug = parse_url(origin) if origin else None
+    if slug:
+        yield from _check_target(c.ctx, slug, c.blk)
+    else:
+        yield _unknown_target(c.blk, "the checkout has no github origin", "commit in a checkout of an allowed repo")
+
+
+def _git_remote(c: _GitCall) -> Iterator[Block]:
+    if c.args and c.args[0] in ("add", "set-url", "rename"):
+        yield c.blk("other_repo", f"git remote {c.args[0]} can redirect pushes", "ask the operator to change remotes")
+
+
+def _git_config_cmd(c: _GitCall) -> Iterator[Block]:
+    for a in c.args:
+        k = a.lower()
+        if k.startswith(_GIT_CONFIG_KEYS) or k == "core.sshcommand":
+            yield c.blk("other_repo", f"git config {a} can redirect pushes", "ask the operator to change git config")
+
+
+def _git_move(c: _GitCall) -> Iterator[Block]:
+    """merge, rebase and reset while on a protected branch."""
+    if any(a in ("--abort", "--quit") for a in c.args):
+        return
+    b = _branch(c.ctx, c.st, c.d)
+    if b not in c.ctx.protected_branches:
+        return
+    if c.sub != "reset":
+        yield c.blk("protected_branches", f"git {c.sub} on the protected branch {b}",
+                    "switch to a feature branch first; merging into it is a human action")
+        return
+    if "--hard" in c.args:
+        yield c.blk("destructive_git", f"git reset --hard on the protected branch {b} discards work",
+                    "ask the operator to reset protected branches by hand")
+    modes = {"--hard", "--soft", "--mixed", "--keep", "--merge"} & set(c.args)
+    pos = [a for a in c.args if not a.startswith("-")]
+    if modes or (pos and "--" not in c.args):
+        yield c.blk("protected_branches", f"git reset on the protected branch {b}", "switch to a feature branch first")
+
+
+def _git_branch(c: _GitCall) -> Iterator[Block]:
+    flags = _short_flags(c.args)
+    delete = "D" in flags or "d" in flags or "--delete" in c.args
+    force = "D" in flags or "f" in flags or "--force" in c.args
+    names = _positionals(c.args)
+    if force and any(n in c.ctx.protected_branches for n in (names if delete else names[:1])):
+        what = "force-deletes" if delete else "force-moves"
+        yield c.blk("destructive_git", f"git branch {what} a protected branch", "leave protected branches alone")
+
+
+def _git_clean(c: _GitCall) -> Iterator[Block]:
+    flags = _short_flags(c.args) + ("f" if "--force" in c.args else "")
+    if "f" in flags and ("x" in flags or "X" in flags):
+        yield c.blk("destructive_git", "git clean -x deletes ignored files such as local config and caches",
+                    "use git clean -fd, or delete specific files")
+
+
+def _git_rewrite(c: _GitCall) -> Iterator[Block]:
+    yield c.blk("destructive_git", f"git {c.sub} rewrites history", "ask the operator to rewrite history by hand")
+
+
+def _git_update_ref(c: _GitCall) -> Iterator[Block]:
+    if "-d" in c.args or "--delete" in c.args:
+        yield c.blk("destructive_git", "git update-ref -d deletes a ref", "ask the operator to delete refs by hand")
+
+
+def _git_push(c: _GitCall) -> Iterator[Block]:
+    ctx, st, blk, d = c.ctx, c.st, c.blk, c.d
+    force = delete = mirror = all_ = False
+    positional: List[str] = []
+    repo_opt: Optional[str] = None
+    for a in c.args:
+        if a.startswith("--repo="):
+            repo_opt = a[len("--repo="):]
+        elif a in ("-o", "--push-option", "--receive-pack", "--exec", "--repo") or \
+                a.startswith(("--receive-pack=", "--exec=")):
+            yield blk("other_repo", f"git push {a.split('=')[0]}: option not supported by the guard",
+                      "push without that option")
+            return
+        elif a.startswith("--force"):
+            force = True
+        elif a == "--delete":
+            delete = True
+        elif a == "--mirror":
+            mirror = True
+        elif a in ("--all", "--branches"):
+            all_ = True
+        elif a.startswith("--"):
+            continue
+        elif a.startswith("-") and len(a) > 1:
+            force = force or "f" in a[1:]
+            delete = delete or "d" in a[1:]
+        else:
+            positional.append(a)
+    remote = repo_opt if repo_opt is not None else (positional[0] if positional else None)
+    refspecs = positional if repo_opt is not None else positional[1:]
+
+    if force or any(r.startswith("+") for r in refspecs):
+        yield blk("force_push", "force pushes rewrite published history",
+                  "push new commits on top instead; ask the operator if a rewrite is really needed")
+    if delete or any(r.startswith(":") for r in refspecs):
+        yield blk("force_push", "this push deletes a remote branch", "leave remote branches for a person to delete")
+    if mirror:
+        yield blk("destructive_git", "git push --mirror overwrites every remote ref", "push one feature branch")
+    if all_ and ctx.protected_branches:
+        yield blk("protected_branches", "git push --all would push protected branches", "push one feature branch")
+    current = _branch(ctx, st, d)
+    for r in refspecs or [""]:
+        s = r.lstrip("+")
+        dst = s.split(":", 1)[1] if ":" in s else s
+        dst = (current or "") if dst in ("", "HEAD", "@") else dst
+        dst = dst[len("refs/heads/"):] if dst.startswith("refs/heads/") else dst
+        if dst in ctx.protected_branches:
+            yield blk("protected_branches", f"pushes to the protected branch {dst} are not allowed",
+                      "push a feature branch and open a pull request")
+            break
+
+    if c.has_c:
+        yield blk("other_repo", "git -c with push can rewrite the push URL", "push without -c")
+        return
+    if remote is not None:
+        url_repo = parse_url(remote)
+        if url_repo:
+            yield from _check_target(ctx, url_repo, blk)
+            return
+        if "://" in remote or _SCP_REMOTE.match(remote) or remote.startswith(("/", "./", "../")):
+            yield blk("other_repo", f"git push to {remote} cannot be checked",
+                      "push to a named remote that points at an allowed github repo")
+            return
+    else:
+        b = current
+        remote = (b and _git_config(ctx, st, d, f"branch.{b}.pushRemote")) \
+            or _git_config(ctx, st, d, "remote.pushDefault") \
+            or (b and _git_config(ctx, st, d, f"branch.{b}.remote")) or "origin"
+    out = st.once(("push-urls", d, remote), lambda: ctx.git(["remote", "get-url", "--push", "--all", remote], d))
+    urls = [u.strip() for u in (out or "").splitlines() if u.strip()]
+    if not urls:
+        yield blk("other_repo", f"remote '{remote}' has no push URL here",
+                  "push to a remote that exists and points at an allowed repo")
+    for url in urls:
+        slug = parse_url(url)
+        if slug:
+            yield from _check_target(ctx, slug, blk)
+        else:
+            yield _unknown_target(blk, f"push URL {url} is not a github repo",
+                                  "push to a remote that points at an allowed github repo")
+
+
+_GIT_RULES: Dict[str, Callable[[_GitCall], Iterator[Block]]] = {
+    "checkout": _git_switch, "switch": _git_switch, "send-pack": _git_send_pack, "subtree": _git_subtree,
+    "push": _git_push, "commit": _git_commit, "remote": _git_remote, "config": _git_config_cmd,
+    "merge": _git_move, "rebase": _git_move, "reset": _git_move, "branch": _git_branch, "clean": _git_clean,
+    "filter-branch": _git_rewrite, "filter-repo": _git_rewrite, "update-ref": _git_update_ref,
+}
+
+# --- gh --------------------------------------------------------------------
+
+
+def _cmd_gh(t, seg, st, ctx, blk, gitenv):
+    group = t[1] if len(t) > 1 else ""
+    if group in ("--version", "--help", "-h", "") or group in _GH_READ_GROUPS:
+        return
+    if group.startswith("-"):
+        yield blk("other_repo", f"gh {group}: flags before the subcommand cannot be checked",
+                  "put flags after the subcommand, e.g. gh pr create --repo owner/name")
+        return
+    handler = _GH_RULES.get(group)
+    if handler is not None:
+        yield from handler(t, seg, ctx, blk)
+    elif group in _GH_GROUPS:
+        yield from _gh_write(t, ctx, blk)
+    else:
+        yield blk("other_repo", f"gh {group}: unknown command (a gh alias or extension cannot be checked)",
+                  "use a built-in gh command")
+
+
+def _gh_auth(t, seg, ctx, blk):
+    verb = t[2] if len(t) > 2 else ""
+    if verb != "status":
+        yield blk("other_repo", f"gh auth {verb} changes or exposes credentials", "ask the operator to manage gh auth")
+
+
+def _gh_alias(t, seg, ctx, blk):
+    verb = t[2] if len(t) > 2 else ""
+    if verb not in ("list", "ls", ""):
+        yield blk("other_repo", f"gh {t[1]} {verb} can hide commands from the guard",
+                  "ask the operator to manage gh aliases and extensions")
+
+
+def _gh_gist(t, seg, ctx, blk):
+    verb = t[2] if len(t) > 2 else ""
+    if verb not in ("view", "list", "clone", ""):
+        yield blk("other_repo", f"gh gist {verb} publishes outside the repo",
+                  "put the content in an issue or PR comment on an allowed repo")
+
+
+def _gh_write(t: List[str], ctx: GuardContext, blk: Blk) -> Iterator[Block]:
+    group, verb = t[1], (t[2] if len(t) > 2 else "")
+    what = f"gh {group} {verb}".strip()
+    if group in _GH_DESTRUCTIVE and (_GH_DESTRUCTIVE[group] is None or verb in _GH_DESTRUCTIVE[group]):
+        yield blk("destructive_git", f"{what} changes settings, secrets or deletes data; that is a human action",
+                  "ask the operator to do this by hand")
+    if group == "pr" and verb == "merge":
+        if "--admin" in t:
+            yield blk("force_push", "gh pr merge --admin bypasses branch protection", "leave merging to a person")
+        yield blk("protected_branches", "merging a pull request is a human action",
+                  "leave the PR ready for review; a person merges it")
+    if verb in _GH_READ_VERBS:
+        return
+    n_repo = 0
+    targets: List[str] = []
+    for j in range(2, len(t)):
+        a = t[j]
+        raw: Optional[str] = None
+        if a in ("-R", "--repo"):
+            raw = t[j + 1] if j + 1 < len(t) else ""
+            n_repo += 1
+        elif a.startswith("--repo=") or (a.startswith("-R") and len(a) > 2):
+            raw = a[len("--repo="):] if a.startswith("--repo=") else a[2:]
+            n_repo += 1
+        elif j >= 3:
+            raw = parse_url(a)
+        if raw is None:
+            continue
+        repo = repo_slug(raw)
+        if not repo:
+            yield blk("other_repo", f"{what}: cannot read repo '{raw}'", "pass --repo owner/name")
+            return
+        yield from _check_target(ctx, repo, blk)
+        targets.append(repo.lower())
+    if n_repo > 1:
+        yield blk("other_repo", f"{what}: more than one --repo", "pass --repo once")
+    if len(set(targets)) > 1:
+        yield blk("other_repo", f"{what}: the URL and --repo name different repos", "name one repo")
+    if group == "repo":
+        for a in t[3:]:
+            if not a.startswith("-") and is_slug(a):
+                yield from _check_target(ctx, a, blk)
+                targets.append(a.lower())
+        if verb in ("create", "fork") and not targets:
+            yield blk("other_repo", f"gh repo {verb} without an allowed owner/name", "name the repo explicitly")
+            return
+    if not targets:
+        yield _unknown_target(blk, f"{what} names no repo, and gh's default repo is not always origin",
+                              f"pass --repo {ctx.origin_repo or 'owner/name'}")
+
+
+def _gh_api(t, seg, ctx, blk):
+    values: Dict[str, List[str]] = {"method": [], "field": [], "input": []}
+    endpoint: Optional[str] = None
+    i = 2
+    while i < len(t):
+        a = t[i]
+        i += 1
+        flag, val = None, None
+        if a.startswith("--"):
+            name, eq, v = a.partition("=")
+            if name in _API_VALUE_FLAGS:
+                flag, val = name, (v if eq else None)
+        elif a.startswith("-") and len(a) > 1:
+            for k in range(1, len(a)):  # short cluster such as -iXPOST or -ifbody=x
+                if "-" + a[k] in _API_VALUE_FLAGS:
+                    flag, rest = "-" + a[k], a[k + 1:]
+                    val = (rest[1:] if rest.startswith("=") else rest) or None
+                    break
+        elif endpoint is None:
+            endpoint = a
+        if flag is None:
+            continue
+        if val is None:
+            val = t[i] if i < len(t) else ""
+            i += 1
+        kind = _API_VALUE_FLAGS[flag]
+        if kind:
+            values[kind].append(val)
+    fields, inputs = values["field"], values["input"]
+    mutation = any("mutation" in a.lower() for a in t[2:])
+    ep = (endpoint or "").lstrip("/")
+    if ep == "graphql":
+        atfile = any("@" in f for f in fields)
+        if (mutation or atfile or inputs) and BOARD_MARKER not in seg:
+            why = "a mutation" if mutation else ("an @file field" if atfile else "--input")
+            yield blk("other_repo", f"gh api graphql with {why} cannot be checked",
+                      "use gh pr/issue commands with --repo, or the REST API under repos/owner/name")
+        return
+    method = (values["method"][-1] if values["method"] else ("POST" if fields or inputs else "GET")).upper()
+    if method in ("GET", "HEAD"):
+        return
+    m = _REPO_PATH.match(ep)
+    repo_root = bool(m) and not ep[m.end():].strip("/")
+    if method == "DELETE" or (repo_root and method == "PATCH") or _PROTECTION.search(ep) or _SECRETS.search(ep):
+        yield blk("destructive_git", f"gh api {method} {ep}: settings, secrets and deletion are human actions",
+                  "ask the operator to do this by hand")
+    if m and _PULL_MERGE.search(ep):
+        yield blk("protected_branches", "merging a pull request is a human action",
+                  "leave the PR ready for review; a person merges it")
+    if not m:
+        yield _unknown_target(blk, f"gh api {method} {ep or '(no endpoint)'}",
+                              "use an endpoint under repos/owner/name for an allowed repo")
+        return
+    repo = f"{m.group(1)}/{m.group(2)}"
+    if "{" in repo or repo.startswith(":") or "/:" in repo:
+        yield blk("other_repo", f"gh api {repo}: placeholders are filled from gh's default repo",
+                  f"spell out repos/{ctx.origin_repo or 'owner/name'}")
+        return
+    yield from _check_target(ctx, repo, blk)
+
+
+_GH_RULES = {"api": _gh_api, "auth": _gh_auth, "alias": _gh_alias, "extension": _gh_alias, "ext": _gh_alias,
+             "extensions": _gh_alias, "gist": _gh_gist}
+
+_COMMANDS: Dict[str, Callable[..., Iterator[Block]]] = {
+    "cd": _cmd_cd, "export": _cmd_export, "declare": _cmd_export, "typeset": _cmd_export, "set": _cmd_export,
+    "rm": _cmd_rm, "git": _cmd_git, "gh": _cmd_gh, "find": _cmd_find, "eval": _cmd_eval,
+    "xargs": _wrapped(_XARGS_VALUE), "parallel": _wrapped(_PARALLEL_VALUE, (":::", "::::")),
+    "sudo": _wrapped(_SUDO_VALUE), "doas": _wrapped(_SUDO_VALUE),
+    **{s: _cmd_shell for s in (*_SHELLS, "source", ".")},
+}
+
+# --- log and self-test -----------------------------------------------------
+
+
+def blocklog_path(ctx: GuardContext) -> Optional[Path]:
+    return ctx.common_dir / "not-me" / "logs" / "guard.jsonl" if ctx.common_dir else None
+
+
+def blocklog_append(path: Any, block: Block) -> None:
+    """Append one JSON line describing a block. Logging never breaks the guard."""
+    entry = {"ts": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "tool": block.tool,
+             "rule": block.rule, "reason": block.reason, "target": block.target}
+    try:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, sort_keys=True) + "\n")
+    except OSError:
+        pass
+
+
+def selftest(hook_cmd: List[str], ctx: GuardContext, env: Optional[Mapping[str, str]] = None) -> bool:
+    """Pipe a canned always-blocked event (a write to the allow list) through the hook; True iff it exits 2."""
+    event = {"hook_event_name": "PreToolUse", "tool_name": "Write", "cwd": ctx.cwd,
+             "tool_input": {"file_path": str(ctx.allowlist_path), "content": "{}"}}
+    run_env = dict(os.environ if env is None else env)
+    run_env["NOT_ME_HOME"] = str(Path(ctx.allowlist_path).parent)
+    try:
+        proc = subprocess.run(hook_cmd, input=json.dumps(event), capture_output=True, text=True, timeout=30,
+                              cwd=ctx.cwd, env=run_env)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 2
