@@ -629,6 +629,52 @@ class InputFileSafetyTests(Base):
         self.client().comment_create("acme/app", 1, path)
         self.assertEqual(len(self.fake.calls), 1)
 
+    def fake_tmp(self):
+        """Point the system temp dir at a scratch directory for one test."""
+        scratch = self.dir / "systmp"
+        scratch.mkdir()
+        patcher = mock.patch("tempfile.gettempdir", return_value=str(scratch))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher2 = mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": ""})
+        patcher2.start()
+        self.addCleanup(patcher2.stop)
+        return scratch / f"not-me-{os.getuid()}"
+
+    def test_tmp_dir_planted_symlink_refused(self):
+        target = self.fake_tmp()
+        elsewhere = self.dir / "attacker"
+        elsewhere.mkdir()
+        target.symlink_to(elsewhere)
+        with self.assertRaises(RuntimeError):
+            ghmod.notme_tmp_dir()
+        with self.assertRaises(RuntimeError):
+            self.client().labels_set("acme/app", 1, ["bug"])
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_tmp_dir_wrong_mode_refused_not_repaired(self):
+        target = self.fake_tmp()
+        target.mkdir(mode=0o755)
+        os.chmod(target, 0o755)
+        with self.assertRaises(RuntimeError):
+            ghmod.notme_tmp_dir()
+        self.assertEqual(target.stat().st_mode & 0o777, 0o755)
+
+    def test_tmp_dir_created_private_and_reused(self):
+        target = self.fake_tmp()
+        self.assertEqual(ghmod.notme_tmp_dir(), target)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(ghmod.notme_tmp_dir(), target)
+
+    def test_tmp_dir_prefers_owned_runtime_dir(self):
+        self.fake_tmp()
+        runtime = self.dir / "run"
+        runtime.mkdir()
+        with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(runtime)}):
+            self.assertEqual(ghmod.notme_tmp_dir(), runtime / f"not-me-{os.getuid()}")
+        with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(self.dir / "missing")}):
+            self.assertEqual(ghmod.notme_tmp_dir().parent, self.dir / "systmp")
+
     def test_bare_system_tmp_file_refused(self):
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, dir=tempfile.gettempdir()) as fh:
             fh.write("x")

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from notme.dryrun import Ledger
+from notme.dryrun import Ledger, LedgerError
 
 
 class LedgerTests(unittest.TestCase):
@@ -54,6 +54,36 @@ class LedgerTests(unittest.TestCase):
             self.skipTest("no symlinks")
         self.ledger.append("a", "t", ["x"], payload_bytes=b"payload")
         self.assertEqual(target.read_text(), "keep me")
+
+    def test_symlinked_ledger_file_is_refused(self):
+        victim = self.dir / "victim.log"
+        victim.write_text("keep", encoding="utf-8")
+        self.ledger.path.parent.mkdir(parents=True)
+        try:
+            self.ledger.path.symlink_to(victim)
+        except OSError:
+            self.skipTest("no symlinks")
+        with self.assertRaises(LedgerError):
+            self.ledger.append("a", "t", ["x"])
+        self.assertEqual(victim.read_text(), "keep")
+
+    def test_symlinked_ledger_dir_is_refused(self):
+        real = self.dir / "elsewhere"
+        real.mkdir()
+        link = self.dir / "linked"
+        try:
+            link.symlink_to(real)
+        except OSError:
+            self.skipTest("no symlinks")
+        with self.assertRaises(LedgerError):
+            Ledger(link / "intended-writes.jsonl").append("a", "t", ["x"], payload_bytes=b"p")
+        self.assertEqual(list(real.iterdir()), [])
+
+    def test_ledger_file_is_private_and_appends(self):
+        self.ledger.append("a", "t", ["x"])
+        self.ledger.append("b", "t", ["y"])
+        self.assertEqual(self.ledger.path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(len(self.ledger.read()), 2)
 
     def test_append_without_payload(self):
         entry = self.ledger.append("gh api", "acme/app", ["api", "x"])

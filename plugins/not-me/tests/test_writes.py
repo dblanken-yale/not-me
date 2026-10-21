@@ -117,6 +117,7 @@ class FromConfigTests(unittest.TestCase):
 
     def test_allowed_set_from_config(self):
         writes.allowlist_add(self.tc.home, "acme/app", "acme/app-ui")  # confirms the repo-layer companion
+        writes.allowlist_add(self.tc.home, "acme/app", board="acme/6")  # and the repo-layer board
         ctx = self.ctx()
         self.assertEqual(ctx.origin_repo, "acme/app")
         self.assertEqual(set(ctx.allowed_repos), {"acme/app", "acme/app-ui", "acme/extra"})
@@ -166,6 +167,35 @@ class FromConfigTests(unittest.TestCase):
         ctx = self.ctx()
         self.assertTrue(check_write(WriteTarget.repo("acme/glob"), ctx).ok)
         self.assertFalse(any("not confirmed" in w for w in ctx.warnings))
+
+    def test_unconfirmed_repo_layer_board_is_dropped_with_a_warning(self):
+        ctx = self.ctx()
+        self.assertIsNone(ctx.board)
+        self.assertIn("board acme/6 is listed in .claude/not-me/project.md but not confirmed; "
+                      "run /not-me:allow-repo --board acme/6", ctx.warnings)
+        self.assertFalse(check_write(WriteTarget.board("acme", 6), ctx).ok)
+
+    def test_repo_layer_board_confirmed_per_project_or_everywhere(self):
+        writes.allowlist_add(self.tc.home, "acme/app", board="acme/6")
+        ctx = self.ctx()
+        self.assertEqual(ctx.board, ("acme", 6))
+        self.assertTrue(check_write(WriteTarget.board("acme", 6), ctx).ok)
+        self.assertFalse(any("board acme/6" in w for w in ctx.warnings))
+        writes.allowlist_remove(self.tc.home, "acme/app", board="acme/6")
+        self.assertIsNone(self.ctx().board)
+        writes.allowlist_add(self.tc.home, None, board="ACME/6", everywhere=True)
+        self.assertEqual(self.ctx().board, ("acme", 6))
+
+    def test_a_different_confirmed_board_does_not_confirm_this_one(self):
+        writes.allowlist_add(self.tc.home, "acme/app", board="acme/7")
+        self.assertIsNone(self.ctx().board)
+
+    def test_global_layer_board_is_trusted(self):
+        self.tc.write("global", "project", "---\nschema: 1\nqueue:\n  board: {owner: acme, number: 9}\n---\n")
+        self.tc.repo_dir.joinpath("project.md").unlink()
+        ctx = self.ctx()
+        self.assertEqual(ctx.board, ("acme", 9))
+        self.assertFalse(any("board" in w and "not confirmed" in w for w in ctx.warnings))
 
     def test_global_allow_list_per_project_and_everywhere(self):
         writes.allowlist_add(self.tc.home, "acme/app", "acme/per-project")
@@ -233,6 +263,22 @@ class AllowlistTests(unittest.TestCase):
                     writes.allowlist_add(self.home, "acme/app", bad)
         with self.assertRaises(ValueError):
             writes.allowlist_add(self.home, "not a slug", "acme/ok")
+
+    def test_board_entries_add_list_remove_and_validate(self):
+        self.assertTrue(writes.allowlist_add(self.home, "acme/app", board="acme/6"))
+        self.assertFalse(writes.allowlist_add(self.home, "acme/app", board="Acme/6"))
+        self.assertTrue(writes.allowlist_add(self.home, "acme/app", "acme/other"))
+        rows = writes.allowlist_list(self.home, "acme/app")
+        self.assertEqual([(r.get("repo"), r.get("board")) for r in rows], [(None, "acme/6"), ("acme/other", None)])
+        self.assertTrue(writes.allowlist_remove(self.home, "acme/app", board="acme/6"))
+        self.assertEqual([r.get("repo") for r in writes.allowlist_list(self.home)], ["acme/other"])
+        for bad in ("acme", "acme/x", "acme/6/7", "-acme/6", "acme/6\n", "https://x/6"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                writes.allowlist_add(self.home, "acme/app", board=bad)
+        with self.assertRaises(ValueError):
+            writes.allowlist_add(self.home, "acme/app")
+        with self.assertRaises(ValueError):
+            writes.allowlist_add(self.home, "acme/app", "acme/x", board="acme/6")
 
     def test_slug_must_start_alphanumeric_and_not_end_in_newline(self):
         for bad in ("-acme/app", "acme/-app", "acme/app\n", "_acme/app", ".acme/app", "acme/app "):

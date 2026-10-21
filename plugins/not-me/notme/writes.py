@@ -150,31 +150,50 @@ def _load_for_edit(home: Any) -> Dict[str, Any]:
     return data
 
 
-def allowlist_add(home: Any, project: Optional[str], repo: str, everywhere: bool = False) -> bool:
-    """Allow repo for one project (or all with everywhere). True if it was newly added."""
+BOARD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[0-9]+")
+
+
+def _entry_key(repo: Optional[str], board: Optional[str]) -> Tuple[str, str]:
+    """("repo", slug) or ("board", owner/number); exactly one must be given and valid."""
+    if (repo is None) == (board is None):
+        raise ValueError("give exactly one of repo or board")
+    if board is not None:
+        if not isinstance(board, str) or not BOARD_RE.fullmatch(board):
+            raise ValueError(f"invalid board {board!r}: expected owner/number")
+        return "board", board
     if not valid_slug(repo):
         raise ValueError(f"invalid repo {repo!r}: expected owner/name, no URLs or wildcards")
+    return "repo", str(repo)
+
+
+def allowlist_add(home: Any, project: Optional[str], repo: Optional[str] = None, everywhere: bool = False,
+                  board: Optional[str] = None) -> bool:
+    """Allow a repo (or, with board="owner/number", a project board) for one project or all (everywhere).
+
+    True if it was newly added.
+    """
+    key, value = _entry_key(repo, board)
     scope = _scope(project, everywhere)
     data = _load_for_edit(home)
     block = data["projects"].setdefault(scope, {"allow": []})
     allow = block.setdefault("allow", [])
-    if any(isinstance(e, dict) and str(e.get("repo", "")).lower() == repo.lower() for e in allow):
+    if any(isinstance(e, dict) and str(e.get(key, "")).lower() == value.lower() for e in allow):
         return False
-    allow.append({"repo": repo, "added": utc_now()})
+    allow.append({key: value, "added": utc_now()})
     _write_allowlist(home, data)
     return True
 
 
-def allowlist_remove(home: Any, project: Optional[str], repo: str, everywhere: bool = False) -> bool:
-    if not valid_slug(repo):
-        raise ValueError(f"invalid repo {repo!r}: expected owner/name")
+def allowlist_remove(home: Any, project: Optional[str], repo: Optional[str] = None, everywhere: bool = False,
+                     board: Optional[str] = None) -> bool:
+    key, value = _entry_key(repo, board)
     scope = _scope(project, everywhere)
     data = _load_for_edit(home)
     block = data["projects"].get(scope)
     allow = block.get("allow") if isinstance(block, dict) else None
     if not isinstance(allow, list):
         return False
-    kept = [e for e in allow if not (isinstance(e, dict) and str(e.get("repo", "")).lower() == repo.lower())]
+    kept = [e for e in allow if not (isinstance(e, dict) and str(e.get(key, "")).lower() == value.lower())]
     if len(kept) == len(allow):
         return False
     block["allow"] = kept
@@ -182,12 +201,28 @@ def allowlist_remove(home: Any, project: Optional[str], repo: str, everywhere: b
     return True
 
 
+def _board_entries(data: Mapping[str, Any], scope: str) -> List[str]:
+    block = data.get("projects", {}).get(scope)
+    allow = block.get("allow") if isinstance(block, dict) else None
+    return [e["board"] for e in allow if isinstance(e, dict) and isinstance(e.get("board"), str)
+            and BOARD_RE.fullmatch(e["board"])] if isinstance(allow, list) else []
+
+
 def allowlist_list(home: Any, project: Optional[str] = None) -> List[Dict[str, str]]:
-    """Entries as {scope, repo, added}; for a project: its own plus the "*" ones. Bad file = empty."""
+    """Entries as {scope, repo|board, added}; for a project: its own plus the "*" ones. Bad file = empty."""
     data, _ = _read_allowlist(home)
-    scopes = [s for s in data["projects"] if project is None or s in (project, "*")]
-    return [{"scope": s, "repo": e["repo"], "added": str(e.get("added", ""))}
-            for s in sorted(scopes) for e in _entries(data, s)]
+    out: List[Dict[str, str]] = []
+    for scope in sorted(s for s in data["projects"] if project is None or s in (project, "*")):
+        block = data["projects"][scope]
+        allow = block.get("allow") if isinstance(block, dict) else None
+        for e in allow if isinstance(allow, list) else []:
+            if not isinstance(e, dict):
+                continue
+            if valid_slug(e.get("repo")):
+                out.append({"scope": scope, "repo": e["repo"], "added": str(e.get("added", ""))})
+            elif isinstance(e.get("board"), str) and BOARD_RE.fullmatch(e["board"]):
+                out.append({"scope": scope, "board": e["board"], "added": str(e.get("added", ""))})
+    return out
 
 
 # --- guard context ---------------------------------------------------------
@@ -256,7 +291,19 @@ class GuardContext:
 
         board_meta = (meta.get("queue") or {}).get("board") or {}
         owner, number = board_meta.get("owner"), board_meta.get("number")
-        board = (str(owner), int(number)) if owner and isinstance(number, int) else None
+        board = (str(owner), int(number)) if owner and isinstance(number, int) and not isinstance(number, bool) \
+            else None
+        if board is not None and any(
+                (getattr(cfg, "sources", {}).get(f"project.queue.board.{k}") or {}).get("layer") == "repo"
+                for k in ("owner", "number")):
+            confirmed_boards = {b.lower() for scope in ([origin] if origin else []) + ["*"]
+                                for b in _board_entries(data, scope)}
+            label = f"{board[0]}/{board[1]}"
+            if label.lower() not in confirmed_boards:
+                where = (cfg.sources.get("project.queue.board.owner") or {}).get("path") or ".claude/not-me/project.md"
+                warnings.append(f"board {label} is listed in {where} but not confirmed; "
+                                f"run /not-me:allow-repo --board {label}")
+                board = None
 
         guard = meta.get("guard") or {}
         rules = {r: guard.get(r, "on") != "off" for r in GUARD_RULES}

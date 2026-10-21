@@ -9,6 +9,7 @@ import fnmatch
 import json as _json
 import os
 import re
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -106,11 +107,34 @@ def _login(value: str) -> str:
 
 
 def notme_tmp_dir() -> Path:
-    """<tempdir>/not-me-<uid>/, created private (0700). The only temp place input files may live."""
-    uid = getattr(os, "getuid", lambda: 0)()
-    path = Path(tempfile.gettempdir()) / f"not-me-{uid}"
-    path.mkdir(mode=0o700, exist_ok=True)
-    path.chmod(0o700)
+    """<runtime or temp dir>/not-me-<uid>/, private (0700) and ours. The only temp place input files may live.
+
+    Prefers $XDG_RUNTIME_DIR when it is a directory we own, else the system temp dir. An existing path is
+    never repaired: a symlink, another owner or a mode other than 0700 raises RuntimeError.
+    """
+    uid = getattr(os, "getuid", None)
+    me = uid() if uid else None
+    base = Path(tempfile.gettempdir())
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime and me is not None:
+        try:
+            st = os.stat(runtime)
+            if stat.S_ISDIR(st.st_mode) and st.st_uid == me:
+                base = Path(runtime)
+        except OSError:
+            pass
+    path = base / f"not-me-{me if me is not None else 0}"
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    st = os.lstat(path)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        raise RuntimeError(f"{path.name} in the temp directory is not a plain directory; refusing to use it")
+    if me is not None and st.st_uid != me:
+        raise RuntimeError(f"{path.name} in the temp directory is owned by someone else; refusing to use it")
+    if me is not None and stat.S_IMODE(st.st_mode) != 0o700:
+        raise RuntimeError(f"{path.name} in the temp directory is not mode 0700; refusing to use it")
     return path
 
 

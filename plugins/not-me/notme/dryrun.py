@@ -4,11 +4,23 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from . import paths
+
+
+class LedgerError(RuntimeError):
+    pass
+
+
+def _real_dir(path: Path, mode: int = 0o777) -> None:
+    """Create path if needed, then insist it is a real directory and not a symlink."""
+    path.mkdir(mode=mode, parents=True, exist_ok=True)
+    if stat.S_ISLNK(os.lstat(path).st_mode):
+        raise LedgerError(f"{path.name} is a symlink; refusing to write the ledger through it")
 
 
 def _write_new(dest: Path, data: bytes) -> None:
@@ -43,16 +55,21 @@ class Ledger:
         copied = None
         if payload_bytes is None and payload_path is not None:
             payload_bytes = Path(payload_path).read_bytes()
+        _real_dir(self.path.parent)
         if payload_bytes is not None:
             sha = hashlib.sha256(payload_bytes).hexdigest()
             dest = self.path.parent / "payloads" / f"{sha}.md"
-            dest.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            _real_dir(dest.parent, 0o700)
             _write_new(dest, payload_bytes)
             copied = f"payloads/{sha}.md"
         entry = {"ts": utc_now(), "op": op, "target": target,
                  "argv": list(argv), "payload_sha256": sha, "payload_path": copied, "description": description}
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "a", encoding="utf-8") as fh:
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(str(self.path), flags, 0o600)
+        except OSError as exc:
+            raise LedgerError(f"cannot open the ledger {self.path.name} safely ({exc.strerror})") from exc
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, sort_keys=True) + "\n")
         return entry
 
