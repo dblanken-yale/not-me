@@ -82,6 +82,7 @@ class FakeGitHub:
         self.drop_adds = False  # PUT labels silently drops labels that were not already there
         self.fail_next: Optional[str] = None  # stderr text for the next call, which then exits 1
         self.rate_limit = False  # every call fails with a rate limit error
+        self.review_state_override: Optional[str] = None  # reviews read back with this state instead of the real one
 
     # --- plumbing ---
 
@@ -176,6 +177,11 @@ class FakeGitHub:
             return [self._view(t, fields) for t in wanted]
         if head == "pr" and verb == "create":
             return self._pr_create(repo_flag, flags)
+        if head == "issue" and verb == "create":
+            return self._issue_create(repo_flag, flags)
+        if head == "issue" and verb == "edit":
+            self._thing(repo_flag, pos[2])["body"] = _read(flags["--body-file"][0])
+            return f"https://github.com/{repo_flag}/issues/{pos[2]}\n"
         if head == "pr" and verb == "edit":
             thing = self._thing(repo_flag, pos[2])
             thing["body"] = _read(flags["--body-file"][0])
@@ -189,6 +195,17 @@ class FakeGitHub:
                                   "created_at": "2026-01-01T00:00:00Z"})
         self._event(slug, n, "commented", id=cid)
         return f"https://github.com/{slug}/issues/{n}#issuecomment-{cid}\n"
+
+    def _issue_create(self, slug: str, flags: Dict[str, List[str]]) -> str:
+        repo = self._repo(slug)
+        number = repo["next_number"]
+        repo["next_number"] += 1
+        repo["things"][str(number)] = {
+            "number": number, "title": flags["--title"][0], "body": _read(flags["--body-file"][0]),
+            "state": "OPEN", "labels": list(flags.get("--label", [])), "assignees": [],
+            "author": self.state["user"], "comments": [], "kind": "issue"}
+        self._event(slug, number, "issue_created")
+        return f"https://github.com/{slug}/issues/{number}\n"
 
     def _pr_create(self, slug: str, flags: Dict[str, List[str]]) -> str:
         repo = self._repo(slug)
@@ -235,6 +252,7 @@ class FakeGitHub:
             ("GET", r + r"/issues/(\d+)/timeline", self._r_timeline),
             ("PATCH", r + r"/issues/comments/(\d+)", self._r_comment_edit),
             ("POST", r + r"/pulls/(\d+)/comments/(\d+)/replies", self._r_reply),
+            ("GET", r + r"/pulls/(\d+)/reviews", self._r_reviews),
             ("POST", r + r"/pulls/(\d+)/reviews", self._r_review),
             ("POST", r + r"/pulls/(\d+)/requested_reviewers", self._r_request_review),
         ]
@@ -302,9 +320,16 @@ class FakeGitHub:
 
     def _r_review(self, g, flags):
         data = json.loads(_read(flags["--input"][0]))
-        self._thing(*g)["reviews"].append(data)
+        rid = self._id()
+        self._thing(*g)["reviews"].append({**data, "id": rid})
         self._event(g[0], g[1], "reviewed", state=data.get("event"))
-        return {"id": self._id(), "state": data.get("event")}
+        return {"id": rid, "state": data.get("event")}
+
+    def _r_reviews(self, g, flags):
+        states = {"APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED", "COMMENT": "COMMENTED"}
+        return [{"id": r["id"], "user": {"login": self.state["user"]}, "body": r.get("body", ""),
+                 "state": self.review_state_override or states.get(r.get("event"), r.get("event"))}
+                for r in self._thing(*g)["reviews"]]
 
     def _r_request_review(self, g, flags):
         pr = self._thing(*g)
