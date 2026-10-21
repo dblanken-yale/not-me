@@ -10,10 +10,11 @@ Change-request heuristic (`is_change_request`): a trusted issue comment is kept 
 text contains, as whole words, any of: please, could you, should, needs, change, fix, instead; or a "?"
 anywhere. It is a net, not a verdict: the model decides finally what is actually being asked.
 
-Endorsement rule (`endorsement`): a trusted comment that quotes (a line starting with ">") or
-@-mentions an untrusted suggestion carries `endorses: {login, url}` only if it holds both an agreement
-word (correct, agree, yes, right) and a do-it word (do it, please implement, go ahead, apply). The
-untrusted body itself is still never returned.
+Endorsement (`endorsement`): a trusted comment whose own text (quote lines removed) holds both an
+agreement word (correct, agree, yes, right) and a do-it word (do it, please implement, go ahead, apply)
+gets `endorsement: true` and a fixed `endorsement_note`. Nothing is bound to an untrusted item: the
+trusted author must restate the request in their own words, and quoted or untrusted text is never used.
+Quote lines (`> ...`) are removed from every trusted body that is returned.
 """
 from __future__ import annotations
 
@@ -26,12 +27,12 @@ from .roster import Roster
 
 MARKER_UPDATE = "<!-- not-me:update -->"
 MARKER_NEW = "<!-- not-me:new -->"
+ENDORSEMENT_NOTE = "trusted author must restate the request; quoted or untrusted text is never used"
 
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _CHANGE_RE = re.compile(r"\b(?:please|could you|should|needs|change|fix|instead)\b", re.IGNORECASE)
 _AGREE_RE = re.compile(r"\b(?:correct|agree|yes|right)\b", re.IGNORECASE)
 _DOIT_RE = re.compile(r"\b(?:do it|please implement|go ahead|apply)\b", re.IGNORECASE)
-_MENTION_RE = re.compile(r"@([A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?)")
 _QUOTE_RE = re.compile(r"^\s*>")
 _SAFE_BRANCH_RE = re.compile(r"^[0-9]+-[a-z0-9._/-]{0,100}$")
 _CONCLUSION_RE = re.compile(r"^[A-Za-z_]{1,30}$")
@@ -128,17 +129,6 @@ def strip_quotes(text: Optional[str]) -> "tuple[str, int]":
         else:
             kept.append(line)
     return "\n".join(kept).strip(), removed
-
-
-def quoted_lines(text: Optional[str]) -> List[str]:
-    """The non-empty quoted lines of text, markers removed and whitespace normalised."""
-    out = []
-    for line in (text or "").splitlines():
-        if _QUOTE_RE.match(line):
-            q = _norm(re.sub(r"^\s*(?:>\s*)+", "", line))
-            if q:
-                out.append(q)
-    return out
 
 
 def _clean(item: Dict[str, Any], key: str = "body") -> Dict[str, Any]:
@@ -341,7 +331,7 @@ def _threads(gh: GhClient, repo: str, n: int):
     return (_dig(pull, "reviewThreads", "nodes") or []), (_dig(pull, "reviews", "nodes") or [])
 
 
-def _thread_findings(fb: Feedback, roster: Roster, threads: Sequence[Dict[str, Any]], targets: List[Dict[str, Any]]):
+def _thread_findings(fb: Feedback, roster: Roster, threads: Sequence[Dict[str, Any]]):
     for t in threads:
         if t.get("isResolved"):
             continue
@@ -353,16 +343,18 @@ def _thread_findings(fb: Feedback, roster: Roster, threads: Sequence[Dict[str, A
         # Decide on the login only; the body is read after this check.
         if not trusted(roster, login, _dig(root, "author", "__typename")):
             fb._ignore(login, root.get("url"), "thread")
-            targets.append({"login": login, "url": root.get("url"), "created_at": None, "norm_body": ""})
             for reply in comments[1:]:
                 rlogin = _dig(reply, "author", "login")
-                if trusted(roster, rlogin, _dig(reply, "author", "__typename")) \
-                        and endorsement(strip_quotes(reply.get("body"))[0]):
+                if not trusted(roster, rlogin, _dig(reply, "author", "__typename")):
+                    continue
+                cleaned = _clean(reply)
+                endorsed = endorsement(cleaned["body"])
+                if is_change_request(cleaned["body"]) or endorsed:
                     fb.findings.append({
-                        "kind": "endorsement", "id": reply.get("databaseId"), "thread_id": t.get("id"),
+                        "kind": "comment", "id": reply.get("databaseId"), "thread_id": t.get("id"),
                         **_who(roster, rlogin, reply.get("authorAssociation")), "url": reply.get("url"),
-                        "path": reply.get("path"), "line": reply.get("line"), **_clean(reply),
-                        "reply_to": root.get("databaseId"), "endorses": {"login": login, "url": root.get("url")}})
+                        "thread_url": root.get("url"), "path": reply.get("path"), "line": reply.get("line"),
+                        **cleaned, **_endorsed(endorsed)})
             continue
         replies = []
         for reply in comments[1:]:
@@ -378,6 +370,10 @@ def _thread_findings(fb: Feedback, roster: Roster, threads: Sequence[Dict[str, A
             "path": root.get("path"), "line": root.get("line"), **_clean(root),
             "reply_to": root.get("databaseId"), "replies": replies, "is_outdated": bool(t.get("isOutdated")),
             "review_id": _dig(root, "pullRequestReview", "databaseId")})
+
+
+def _endorsed(flag: bool) -> Dict[str, Any]:
+    return {"endorsement": flag, **({"endorsement_note": ENDORSEMENT_NOTE} if flag else {})}
 
 
 def _review_findings(fb: Feedback, roster: Roster, reviews: Sequence[Dict[str, Any]]):
@@ -400,27 +396,6 @@ def _review_findings(fb: Feedback, roster: Roster, reviews: Sequence[Dict[str, A
                             "url": r.get("url"), "thread_ids": threads})
 
 
-def _target_for(raw: str, text: str, created_at: Optional[str],
-                targets: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """The untrusted comment a trusted comment answers. Only comments with a known timestamp strictly
-    earlier than this one can be bound, so a later post can never be endorsed in advance.
-    An @-mention binds to the latest such comment by that login. A quote binds to the latest such comment
-    whose body contains every quoted line (compared in memory only; the body is never returned)."""
-    if not created_at:
-        return None
-    earlier = [t for t in targets if t["created_at"] and t["created_at"] < created_at and t["login"]]
-    for login in reversed(_MENTION_RE.findall(text)):
-        match = [t for t in earlier if t["login"].lower() == login.lower()]
-        if match:
-            return match[-1]
-    lines = quoted_lines(raw)
-    if lines:
-        for t in reversed(earlier):
-            if all(q in t["norm_body"] for q in lines):
-                return t
-    return None
-
-
 def _marker_kind(text: str, legacy: Sequence[str]) -> Optional[str]:
     if MARKER_UPDATE in text:
         return "update"
@@ -432,14 +407,12 @@ def _marker_kind(text: str, legacy: Sequence[str]) -> Optional[str]:
 
 
 def _comment_findings(fb: Feedback, roster: Roster, comments: Sequence[Dict[str, Any]],
-                      targets: List[Dict[str, Any]], legacy: Sequence[str], since_marker: Optional[str]):
+                      legacy: Sequence[str], since_marker: Optional[str]):
     mine: List[Dict[str, Any]] = []
     for c in comments:
         login = c.get("author")
         if not trusted(roster, login):
             fb._ignore(login, c.get("url"), "comment")
-            targets.append({"login": login, "url": c.get("url"), "created_at": c.get("created_at"),
-                            "norm_body": _norm(c.get("body") or "")})  # in memory, for quote matching only
             continue
         text = c.get("body") or ""
         marker = _marker_kind(text, legacy)
@@ -454,19 +427,14 @@ def _comment_findings(fb: Feedback, roster: Roster, comments: Sequence[Dict[str,
     for c in mine:
         login = c.get("author")
         text, quoted = strip_quotes(c.get("body"))
-        raw = c.get("body") or ""
         who = _who(roster, login, c.get("association"))
         if cutoff is None or (c.get("created_at") or "") > cutoff:
             fb.answered_since_marker.append({"id": c.get("id"), **who, "body": text, "quoted_lines_removed": quoted,
                                              "url": c.get("url"), "created_at": c.get("created_at")})
         endorsed = endorsement(text)
-        endorses = _target_for(raw, text, c.get("created_at"), targets) if endorsed else None
         if is_change_request(text) or endorsed:
-            finding = {"kind": "comment", "id": c.get("id"), **who, "body": text, "quoted_lines_removed": quoted,
-                       "url": c.get("url")}
-            if endorses:
-                finding["endorses"] = {"login": endorses["login"], "url": endorses["url"]}
-            fb.findings.append(finding)
+            fb.findings.append({"kind": "comment", "id": c.get("id"), **who, "body": text,
+                                "quoted_lines_removed": quoted, "url": c.get("url"), **_endorsed(endorsed)})
 
 
 def _dedupe(fb: Feedback) -> None:
@@ -494,9 +462,8 @@ def feedback(gh: GhClient, repo: str, n: int, roster: Roster, *, since_marker: O
     fb = Feedback(repo=repo, number=int(n))
     threads, reviews = _threads(gh, repo, n)
     comments = gh.comments(repo, n)
-    targets: List[Dict[str, Any]] = []
-    _thread_findings(fb, roster, threads, targets)
+    _thread_findings(fb, roster, threads)
     _review_findings(fb, roster, reviews)
-    _comment_findings(fb, roster, comments, targets, list(legacy_markers), since_marker)
+    _comment_findings(fb, roster, comments, list(legacy_markers), since_marker)
     _dedupe(fb)
     return fb

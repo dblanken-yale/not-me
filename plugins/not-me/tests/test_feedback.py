@@ -140,19 +140,23 @@ class ThreadTests(Base):
         self.thread("T1", [tcomment(1, "hubot", "Old.")], resolved=True)
         self.assertEqual(self.run_feedback().findings, [])
 
-    def test_trusted_reply_in_untrusted_thread_endorsing(self):
+    def test_trusted_reply_in_untrusted_thread_is_comment_finding(self):
         self.thread("T1", [tcomment(1, "stranger", SENTINEL),
-                           tcomment(2, "octocat", "Yes, that is correct, please go ahead.")])
+                           tcomment(2, "octocat", "Yes, that is correct, please go ahead."),
+                           tcomment(3, "octocat", "Could you also add a test?"),
+                           tcomment(4, "octocat", "Thanks."),
+                           tcomment(5, "other", SENTINEL)])
         fb = self.run_feedback()
-        [f] = fb.findings
-        self.assertEqual(f["kind"], "endorsement")
-        self.assertEqual(f["endorses"], {"login": "stranger", "url": f"{URL}#discussion_r1"})
-        self.assertEqual(f["reply_to"], 1)
+        a, b = fb.findings
+        self.assertEqual((a["kind"], a["endorsement"], a["endorsement_note"], a["thread_url"]),
+                         ("comment", True, fbmod.ENDORSEMENT_NOTE, f"{URL}#discussion_r1"))
+        self.assertEqual((b["kind"], b["endorsement"]), ("comment", False))
+        self.assertNotIn("endorsement_note", b)
+        for f in fb.findings:
+            for key in ("endorses", "reply_to"):
+                self.assertNotIn(key, f)
         self.assertNotIn(SENTINEL, json.dumps(fb.to_dict()))
-
-    def test_trusted_reply_in_untrusted_thread_without_endorsement_dropped(self):
-        self.thread("T1", [tcomment(1, "stranger", SENTINEL), tcomment(2, "octocat", "Thanks.")])
-        self.assertEqual(self.run_feedback().findings, [])
+        self.assertEqual((fb.ignored_count, fb.ignored[0]["kind"]), (1, "thread"))
 
 
 class ReviewTests(Base):
@@ -248,33 +252,26 @@ class CommentTests(Base):
         fb = self.run_feedback()
         self.assertEqual([a["id"] for a in fb.answered_since_marker], [2])
 
-    def test_endorsement_by_mention(self):
+    def test_endorsement_flag_on_comment(self):
+        self.comment(1, "hubot", "I agree, please go ahead.")
+        self.comment(2, "hubot", "Could you rename it?")
+        a, b = self.run_feedback().findings
+        self.assertEqual((a["endorsement"], a["endorsement_note"]), (True, fbmod.ENDORSEMENT_NOTE))
+        self.assertEqual(b["endorsement"], False)
+        self.assertNotIn("endorses", a)
+
+    def test_no_binding_to_untrusted_items(self):
         self.comment(1, "stranger", SENTINEL, at="2026-02-01T00:00:00Z")
-        self.comment(2, "hubot", "@stranger is correct, please go ahead and do it.", at="2026-02-02T00:00:00Z")
+        self.comment(2, "hubot", "@stranger is correct, please go ahead.\n> " + SENTINEL, at="2026-02-02T00:00:00Z")
         fb = self.run_feedback()
         [f] = fb.findings
-        self.assertEqual(f["endorses"], {"login": "stranger", "url": f"https://github.com/acme/app/issues/3#issuecomment-1"})
+        self.assertTrue(f["endorsement"])
+        self.assertNotIn("endorses", f)
         self.assertNotIn(SENTINEL, json.dumps(fb.to_dict()))
 
-    def test_endorsement_by_quote_picks_latest_earlier_untrusted(self):
-        self.comment(1, "first", "Rename it to gadget.", at="2026-02-01T00:00:00Z")
-        self.comment(2, "second", "Rename it to gadget please.", at="2026-02-02T00:00:00Z")
-        self.comment(3, "hubot", "> rename it  to GADGET\nI agree, apply it.", at="2026-02-03T00:00:00Z")
-        [f] = self.run_feedback().findings
-        self.assertEqual(f["endorses"]["login"], "second")
-
-    def test_endorsement_needs_a_target(self):
-        self.comment(1, "hubot", "I agree, apply it.")
-        [f] = self.run_feedback().findings
-        self.assertNotIn("endorses", f)
-
     def test_no_endorsement_without_both_words(self):
-        self.comment(1, "stranger", SENTINEL, at="2026-02-01T00:00:00Z")
-        self.comment(2, "hubot", "@stranger is correct.", at="2026-02-02T00:00:00Z")
+        self.comment(2, "hubot", "That is correct.", at="2026-02-02T00:00:00Z")
         self.assertEqual(self.run_feedback().findings, [])
-        self.comment(3, "hubot", "> x\nPlease implement that.", at="2026-02-03T00:00:00Z")
-        [f] = self.run_feedback().findings
-        self.assertNotIn("endorses", f)
 
 
 class QuoteTests(Base):
@@ -297,7 +294,7 @@ class QuoteTests(Base):
         self.assertEqual(by[("thread", 10)]["replies"][0]["quoted_lines_removed"], 1)
         self.assertEqual(by[("thread", 10)]["quoted_lines_removed"], 1)
         self.assertEqual(by[("review", 20)]["quoted_lines_removed"], 1)
-        self.assertEqual(by[("endorsement", 13)]["quoted_lines_removed"], 1)
+        self.assertEqual(by[("comment", 13)]["quoted_lines_removed"], 1)
         self.assertEqual([a["quoted_lines_removed"] for a in fb.answered_since_marker], [1, 1])
 
     def test_quoted_words_do_not_trigger_endorsement(self):
@@ -320,40 +317,6 @@ class QuoteTests(Base):
         fb = self.run_feedback()
         [r] = [f for f in fb.findings if f["kind"] == "review"]
         self.assertEqual((r["id"], r["thread_ids"]), (10, ["T1", "T2"]))
-
-
-class BindingTests(Base):
-    def test_later_untrusted_comment_cannot_be_bound(self):
-        self.comment(1, "hubot", "@stranger is right, go ahead.", at="2026-02-01T00:00:00Z")
-        self.comment(2, "stranger", SENTINEL, at="2026-02-02T00:00:00Z")
-        [f] = self.run_feedback().findings
-        self.assertNotIn("endorses", f)
-
-    def test_mention_binds_latest_earlier_by_login(self):
-        self.comment(1, "stranger", "one", at="2026-02-01T00:00:00Z")
-        self.comment(2, "stranger", "two", at="2026-02-02T00:00:00Z")
-        self.comment(3, "hubot", "@stranger is right, go ahead.", at="2026-02-03T00:00:00Z")
-        self.comment(4, "stranger", "three", at="2026-02-04T00:00:00Z")
-        [f] = self.run_feedback().findings
-        self.assertTrue(f["endorses"]["url"].endswith("#issuecomment-2"))
-
-    def test_same_timestamp_is_not_earlier(self):
-        self.comment(1, "stranger", "one", at="2026-02-01T00:00:00Z")
-        self.comment(2, "hubot", "@stranger is right, go ahead.", at="2026-02-01T00:00:00Z")
-        [f] = self.run_feedback().findings
-        self.assertNotIn("endorses", f)
-
-    def test_mismatched_quote_yields_no_endorses(self):
-        self.comment(1, "stranger", "Rename it to gadget.", at="2026-02-01T00:00:00Z")
-        self.comment(2, "hubot", "> delete everything\nI agree, apply it.", at="2026-02-02T00:00:00Z")
-        [f] = self.run_feedback().findings
-        self.assertNotIn("endorses", f)
-
-    def test_thread_roots_without_timestamp_never_bound(self):
-        self.thread("T1", [tcomment(1, "stranger", "Rename it.")])
-        self.comment(2, "hubot", "@stranger is right, go ahead.", at="2026-02-02T00:00:00Z")
-        [f] = self.run_feedback().findings
-        self.assertNotIn("endorses", f)
 
 
 class OutputTests(Base):
