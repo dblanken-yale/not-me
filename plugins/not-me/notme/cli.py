@@ -448,10 +448,13 @@ class Context:
         return [sys.executable, str(paths.plugin_root(self.env) / "hooks" / "repo_guard.py")]
 
     def guard_state(self) -> Dict[str, Any]:
-        """{active, selftest}: selftest is None when the guard is not active in this project."""
-        active = guard_mod.is_active(self.hook_guard)
-        return {"active": active,
-                "selftest": guard_mod.selftest(self.hook_cmd(), self.hook_guard, env=self.env) if active else None}
+        """{active, selftest[, selftest_stderr]}: selftest is None when the guard is not active in this project; a
+        failed self-test carries the hook's stderr (redacted, first 500 characters). The hook always runs as
+        [sys.executable, <plugin>/hooks/repo_guard.py], never through the bash launcher."""
+        if not guard_mod.is_active(self.hook_guard):
+            return {"active": False, "selftest": None}
+        ok, stderr = guard_mod.selftest_run(self.hook_cmd(), self.hook_guard, env=self.env)
+        return {"active": True, "selftest": ok, **({} if ok else {"selftest_stderr": redact(stderr)[:500]})}
 
     # --- run log ---
 
@@ -1248,7 +1251,7 @@ def cmd_guard_selftest(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]
     state = ctx.guard_state()
     if state["active"] and not state["selftest"]:
         raise fail(ExitCode.GUARD, "guard_broken", "the guard is enabled but its self-test failed", ok=False,
-                   active=True)
+                   active=True, selftest_stderr=state.get("selftest_stderr", ""))
     return {"ok": True, "active": state["active"]}
 
 

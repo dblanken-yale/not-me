@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from notme import claims, cli
@@ -221,6 +222,29 @@ class ExitCodeTests(CliCase):
         self.assertEqual(payload["kind"], "guard_broken")
         code, payload, _ = self.cli("preflight", hook_cmd=[sys.executable, "-c", "pass"])
         self.assertEqual(code, 8)
+
+    def test_failed_selftest_reports_the_hook_stderr(self):
+        (self.project / ".claude" / "not-me").mkdir(parents=True)
+        hook = [sys.executable, "-c", "import sys; sys.stderr.write('boom ghp_abcdefghijklmnopqrstuvwxyz0123'); "
+                                      "sys.exit(1)"]
+        code, payload, _ = self.cli("guard", "selftest", hook_cmd=hook)
+        self.assertEqual(code, 8)
+        self.assertIn("exit 1: boom", payload["selftest_stderr"])
+        self.assertNotIn("ghp_abcdefghijkl", payload["selftest_stderr"])
+        code, payload, _ = self.cli("preflight", hook_cmd=hook)
+        self.assertEqual(code, 8)
+        self.assertIn("boom", payload["guard"]["selftest_stderr"])
+
+    def test_selftest_passes_windows_startup_variables_through(self):
+        from notme import guard
+        hook = [sys.executable, "-c", "import os, sys; sys.exit(2 if os.environ.get('SYSTEMROOT') == 'X' else 1)"]
+        ctx = guard.GuardContext.from_project(str(self.project), home=str(self.tc.home), env=self.env)
+        with mock.patch.dict(os.environ, {"SYSTEMROOT": "X"}):
+            self.assertEqual(guard.selftest_run(hook, ctx, env={"PATH": os.environ.get("PATH", "")}), (True, ""))
+
+    def test_default_hook_command_runs_the_hook_with_this_interpreter(self):
+        (self.project / ".claude" / "not-me").mkdir(parents=True)
+        self.assertEqual(self.ok("guard", "selftest"), {"ok": True, "active": True})
 
     def test_guard_selftest_passes_with_the_real_hook(self):
         (self.project / ".claude" / "not-me").mkdir(parents=True)
