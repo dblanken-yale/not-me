@@ -28,6 +28,7 @@ companion-prs
 testing-steps
 review-post
 resolve-threads
+issue-edit-body
 followup
 check-text
 log start
@@ -35,6 +36,10 @@ log action
 log question
 log finish
 log last
+log list
+retro save
+retro reviewed
+retro is-reviewed
 allow-repo add
 allow-repo remove
 allow-repo list

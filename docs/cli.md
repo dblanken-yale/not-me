@@ -529,9 +529,26 @@ Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
 Output: repo, number, resolved
 
+### `notme issue-edit-body`
+
+Replace an issue's body with a file's text (no attribution is added). The file must pass the input-path checks; the target repository goes through the write gate.
+
+```
+notme issue-edit-body N|REF --body-file F
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `N|REF` | required | a number (in the tracker), #N, owner/name#N or a URL |
+| `--body-file F` | required |  |
+
+Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
+
+Output: repo, number, updated
+
 ### `notme followup`
 
-Create a follow-up issue in the tracker; --parent also ticks it into that issue's task list.
+Create a follow-up issue in the tracker, or in --repo when given (the allow list decides whether that repo may be written); --parent also ticks it into that issue's task list, which must be in the same repo.
 
 ```
 notme followup --title-file F --body-file F [--source N] [--parent N] [--labels a,b]
@@ -640,6 +657,61 @@ notme log last [--skill S]
 | `--skill S` | optional |  |
 
 Output: path, skill, ref, run_id, status, entries; or none
+
+### `notme log list`
+
+Run logs under the log root, newest first (by file name, which starts with a timestamp), optionally of one skill.
+
+```
+notme log list [--skill S] [--limit N]
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `--skill S` | optional |  |
+| `--limit N` | optional | at most N logs (default 20) (default 20) |
+
+Output: logs ([{path, run_id, skill, ref, status}])
+
+### `notme retro save`
+
+Copy an audit markdown file (an allowed input file) to <git-common-dir>/not-me/retro/<RID>.md. With --reviewed, also add RID to reviewed.txt there (once). Local files only: nothing is sent to GitHub.
+
+```
+notme retro save --run-id RID --audit-file F [--reviewed]
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `--run-id RID` | required |  |
+| `--audit-file F` | required |  |
+| `--reviewed` | optional | also mark the run as reviewed |
+
+Output: run_id, path, reviewed
+
+### `notme retro reviewed`
+
+The run ids marked reviewed, oldest first.
+
+```
+notme retro reviewed
+```
+
+Output: reviewed ([run ids])
+
+### `notme retro is-reviewed`
+
+Whether the run id is in the reviewed list.
+
+```
+notme retro is-reviewed RID
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `RID` | required |  |
+
+Output: run_id, reviewed
 
 ### `notme allow-repo add`
 

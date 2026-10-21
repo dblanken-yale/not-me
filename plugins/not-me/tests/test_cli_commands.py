@@ -460,6 +460,45 @@ class PullRequestTests(base.CliCase):
         payload = self.ok("pr-by-head", "feat/o", "--repo", "acme/other", repo=False)
         self.assertEqual((payload["repo"], [p["number"] for p in payload["prs"]]), ("acme/other", [1]))
 
+    def test_followup_honours_repo_and_defaults_to_the_tracker(self):
+        title, body = self.write_file("t.txt", "Follow up\n"), self.write_file("b.md", "Do more\n")
+        made = self.ok("followup", "--title-file", title, "--body-file", body)
+        self.assertEqual(made["number"], 4)  # acme/app is the tracker
+        other = self.ok("followup", "--title-file", title, "--body-file", body, "--repo", "acme/other", repo=False)
+        self.assertEqual(other["number"], 1)
+        self.assertEqual(things(self.fake, "acme/other")["1"]["title"], "Follow up")
+        self.assertEqual(len(things(self.fake)), 4)
+
+    def test_followup_in_a_repo_off_the_allow_list_is_blocked(self):
+        self.tc.write("global", "project", base.NO_OTHERS_PROJECT)
+        title, body = self.write_file("t.txt", "Follow up\n"), self.write_file("b.md", "Do more\n")
+        code, payload, _ = self.cli("followup", "--title-file", title, "--body-file", body, "--repo", "acme/other",
+                                    repo=False)
+        self.assertEqual((code, payload["blocked"]), (6, True))
+        self.assertEqual(self.fake.writes_made(), [])
+
+    def test_issue_edit_body(self):
+        body = self.write_file("b.md", "New body\n")
+        payload = self.ok("issue-edit-body", "1", "--body-file", body)
+        self.assertEqual(payload, {"repo": REPO, "number": 1, "updated": True})
+        self.assertEqual(things(self.fake)["1"]["body"], "New body\n")
+
+    def test_issue_edit_body_full_ref_blocked_and_unsafe_file(self):
+        body = self.write_file("b.md", "New body\n")
+        things(self.fake, "acme/other")["1"] = dict(things(self.fake)["1"], number=1)
+        self.ok("issue-edit-body", "acme/other#1", "--body-file", body)
+        self.assertEqual(things(self.fake, "acme/other")["1"]["body"], "New body\n")
+        self.tc.write("global", "project", base.NO_OTHERS_PROJECT)
+        code, payload, _ = self.cli("issue-edit-body", "acme/app-ui#1", "--body-file", body)
+        self.assertEqual((code, payload["blocked"]), (6, True))
+        outside = TempCase()
+        self.addCleanup(outside.cleanup)
+        path = outside.root / "b.md"
+        path.write_text("x", encoding="utf-8")
+        code, payload, _ = self.cli("issue-edit-body", "1", "--body-file", str(path))
+        self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
+        self.assertEqual(things(self.fake)["1"]["body"], "Body of First issue")
+
     def test_labels_sync_takes_a_full_ref_for_a_companion_pr(self):
         things(self.fake, "acme/app-ui")["1"] = dict(things(self.fake)["3"], number=1, labels=["needs review"])
         payload = self.ok("labels-sync", "acme/app-ui#1", "--add", "extra")
@@ -733,6 +772,63 @@ class GitTests(base.CliCase):
     def setUp(self):
         super().setUp()
         init_repo(self.project)
+
+    def test_retro_save_reviewed_and_is_reviewed(self):
+        audit = self.write_file("audit.md", "# Audit\nall fine\n")
+        common = self.project / ".git" / "not-me" / "retro"
+        self.assertEqual(self.ok("retro", "reviewed"), {"reviewed": []})
+        self.assertEqual(self.ok("retro", "is-reviewed", "run-1"), {"run_id": "run-1", "reviewed": False})
+        saved = self.ok("retro", "save", "--run-id", "run-1", "--audit-file", audit)
+        self.assertEqual((saved["run_id"], saved["reviewed"]), ("run-1", False))
+        self.assertEqual((common / "run-1.md").read_text(encoding="utf-8"), "# Audit\nall fine\n")
+        self.assertFalse((common / "reviewed.txt").exists())
+        self.assertTrue(self.ok("retro", "save", "--run-id", "run-1", "--audit-file", audit, "--reviewed")["reviewed"])
+        self.ok("retro", "save", "--run-id", "run-1", "--audit-file", audit, "--reviewed")  # once only
+        self.ok("retro", "save", "--run-id", "run-2", "--audit-file", audit, "--reviewed")
+        self.assertEqual(self.ok("retro", "reviewed"), {"reviewed": ["run-1", "run-2"]})
+        self.assertTrue(self.ok("retro", "is-reviewed", "run-2")["reviewed"])
+        self.assertFalse(self.ok("retro", "is-reviewed", "run-3")["reviewed"])
+        self.assertEqual(self.fake.calls, [])
+
+    def test_retro_save_refuses_bad_run_ids_and_unsafe_files(self):
+        audit = self.write_file("audit.md", "x\n")
+        for rid in ("../evil", "a/b", "", "-x", "a b"):
+            with self.subTest(rid=rid):
+                code, payload, _ = self.cli("retro", "save", "--run-id", rid, "--audit-file", audit)
+                self.assertEqual((code, payload["kind"]), (2, "usage"))
+        code, payload, _ = self.cli("retro", "is-reviewed", "../x")
+        self.assertEqual(code, 2)
+        outside = TempCase()
+        self.addCleanup(outside.cleanup)
+        path = outside.root / "audit.md"
+        path.write_text("x", encoding="utf-8")
+        code, payload, _ = self.cli("retro", "save", "--run-id", "r", "--audit-file", str(path))
+        self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
+        self.assertFalse((self.project / ".git" / "not-me" / "retro" / "r.md").exists())
+
+    def test_log_list_newest_first_with_filters(self):
+        self.assertEqual(self.ok("log", "list"), {"logs": []})
+        first = self.ok("log", "start", "--skill", "new", "--ref", "1")
+        listed = self.ok("log", "list")["logs"]
+        self.assertEqual(len(listed), 1)
+        self.assertEqual((listed[0]["skill"], listed[0]["ref"], listed[0]["path"]), ("new", "1", first["path"]))
+        self.assertEqual(set(listed[0]), {"path", "run_id", "skill", "ref", "status"})
+
+    def test_log_list_orders_by_timestamp_and_limits(self):
+        root = Path(self.ok("log", "start", "--skill", "new", "--ref", "1")["path"]).parent.parent
+        for skill, stamp, ref in (("new", "20260102-000000", "2"), ("update", "20260103-000000", "3"),
+                                  ("new", "20260101-000000", "4")):
+            folder = root / skill
+            folder.mkdir(exist_ok=True)
+            (folder / f"{stamp}-x.md").write_text(f"# {skill} run: {ref} ({stamp}-x)\n", encoding="utf-8")
+        every = self.ok("log", "list")["logs"]
+        names = [Path(e["path"]).name for e in every]
+        self.assertEqual(names, sorted(names, reverse=True))
+        self.assertEqual(len(every), 4)
+        self.assertEqual(len(self.ok("log", "list", "--limit", "2")["logs"]), 2)
+        self.assertEqual({e["skill"] for e in self.ok("log", "list", "--skill", "update")["logs"]}, {"update"})
+        code, payload, _ = self.cli("log", "list", "--limit", "0")
+        self.assertEqual(code, 2)
 
     def test_remote_branch_exists(self):
         origin = self.tc.root / "origin.git"

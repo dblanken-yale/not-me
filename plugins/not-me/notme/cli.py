@@ -575,7 +575,7 @@ class Command:
 
 
 COMMANDS: List[Command] = []
-GROUPS = {"log": "run logs", "allow-repo": "the global allow list of repos and boards", "guard": "the write guard",
+GROUPS = {"log": "run logs", "retro": "retro audits kept in the git directory", "allow-repo": "the global allow list of repos and boards", "guard": "the write guard",
           "git": "git operations behind the write gate"}
 GLOBAL_FLAGS: List[Arg] = [
     arg("--project-dir", metavar="P", help="project directory (default: the git toplevel of the working "
@@ -1100,16 +1100,31 @@ def cmd_resolve_threads(ctx: Context, args: argparse.Namespace, repo: str, n: in
     return {"repo": repo, "number": n, "resolved": writeback.resolve_fixed_threads(ctx.gh, repo, n, ids)}
 
 
+@command("issue-edit-body", "replace an issue's body", writes=True, ref="tracker", args=[
+    arg("number", metavar="N|REF", help="a number (in the tracker), #N, owner/name#N or a URL"), body_file_arg])
+def cmd_issue_edit_body(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
+    """Replace an issue's body with a file's text (no attribution is added). The file must pass the input-path
+    checks; the target repository goes through the write gate.
+
+    Output: repo, number, updated
+    """
+    with gh_mod.tmp_text_file(ctx.read_input(args.body_file), prefix="not-me-cli-") as path:
+        ctx.gh.issue_edit_body(repo, n, path)
+    return {"repo": repo, "number": n, "updated": True}
+
+
 @command("followup", "create a follow-up issue", writes=True, args=[
     title_file_arg, body_file_arg, arg("--source", type=int, metavar="N"), arg("--parent", type=int, metavar="N"),
     labels_arg])
 def cmd_followup(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Create a follow-up issue in the tracker; --parent also ticks it into that issue's task list.
+    """Create a follow-up issue in the tracker, or in --repo when given (the allow list decides whether that repo
+    may be written); --parent also ticks it into that issue's task list, which must be in the same repo.
 
     Output: number, url (both null in a dry run), parent
     """
     return writeback.followup(ctx.gh, ctx.cfg, ctx.read_line(args.title_file), ctx.read_input(args.body_file),
-                              args.source, args.parent, csv(args.labels), source_repo=ctx.repo)
+                              args.source, args.parent, csv(args.labels), source_repo=ctx.repo,
+                              repo=ctx.repo if getattr(args, "repo", None) else None)
 
 
 @command("check-text", "lint a text bound for GitHub", args=[
@@ -1209,6 +1224,101 @@ def cmd_log_last(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
         return {"none": True}
     return {"path": str(log.path), "skill": log.skill, "ref": log.ref, "run_id": log.run_id, "status": log.status,
             "entries": len(log.entries)}
+
+
+@command("log list", "recent run logs, newest first", args=[
+    arg("--skill", metavar="S"), arg("--limit", type=int, default=20, metavar="N", help="at most N logs (default 20)")])
+def cmd_log_list(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """Run logs under the log root, newest first (by file name, which starts with a timestamp), optionally of one
+    skill.
+
+    Output: logs ([{path, run_id, skill, ref, status}])
+    """
+    if args.limit < 1:
+        raise fail(ExitCode.USAGE, "usage", "--limit must be at least 1")
+    root = ctx.log_root()
+    if not root.is_dir():
+        return {"logs": []}
+    folders = [root / runlog._slug(args.skill)] if args.skill else [p for p in root.iterdir() if p.is_dir()]
+    files = sorted((f for folder in folders if folder.is_dir() for f in folder.glob("*.md")),
+                   key=lambda f: (f.name, str(f)), reverse=True)
+    out: List[Dict[str, Any]] = []
+    for file in files:
+        if len(out) >= args.limit:
+            break
+        try:
+            log = runlog.RunLog.open(file)
+        except (OSError, ValueError):
+            continue
+        out.append({"path": str(file), "run_id": log.run_id, "skill": log.skill, "ref": log.ref,
+                    "status": log.status})
+    return {"logs": out}
+
+
+# --- handlers: retro audits -------------------------------------------------------
+
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+REVIEWED_FILE = "reviewed.txt"
+
+
+def _retro_dir(ctx: Context) -> Path:
+    common = paths.git_common_dir(ctx.need_work_dir())
+    if common is None:
+        raise fail(ExitCode.ERROR, "git_error", "the project is not a git checkout, so there is no retro directory")
+    return common / "not-me" / "retro"
+
+
+def _run_id(value: str) -> str:
+    if not _RUN_ID_RE.match(value or ""):
+        raise fail(ExitCode.USAGE, "usage", f"invalid run id {value!r}: letters, digits, dot, dash, underscore")
+    return value
+
+
+def _reviewed_ids(retro: Path) -> List[str]:
+    try:
+        lines = (retro / REVIEWED_FILE).read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    return [ln.strip() for ln in lines if ln.strip()]
+
+
+@command("retro save", "keep a retro audit in the git directory", args=[
+    arg("--run-id", required=True, metavar="RID"), arg("--audit-file", required=True, metavar="F"),
+    arg("--reviewed", action="store_true", help="also mark the run as reviewed")])
+def cmd_retro_save(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """Copy an audit markdown file (an allowed input file) to <git-common-dir>/not-me/retro/<RID>.md. With
+    --reviewed, also add RID to reviewed.txt there (once). Local files only: nothing is sent to GitHub.
+
+    Output: run_id, path, reviewed
+    """
+    rid = _run_id(args.run_id)
+    text = ctx.read_input(args.audit_file)
+    retro = _retro_dir(ctx)
+    target = retro / f"{rid}.md"
+    runlog._atomic_write(target, text)
+    if args.reviewed and rid not in _reviewed_ids(retro):
+        with open(retro / REVIEWED_FILE, "a", encoding="utf-8", newline="\n") as handle:
+            handle.write(rid + "\n")
+    return {"run_id": rid, "path": str(target), "reviewed": rid in _reviewed_ids(retro)}
+
+
+@command("retro reviewed", "list the reviewed runs")
+def cmd_retro_reviewed(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """The run ids marked reviewed, oldest first.
+
+    Output: reviewed ([run ids])
+    """
+    return {"reviewed": _reviewed_ids(_retro_dir(ctx))}
+
+
+@command("retro is-reviewed", "has a run been reviewed", args=[arg("run_id", metavar="RID")])
+def cmd_retro_is_reviewed(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """Whether the run id is in the reviewed list.
+
+    Output: run_id, reviewed
+    """
+    rid = _run_id(args.run_id)
+    return {"run_id": rid, "reviewed": rid in _reviewed_ids(_retro_dir(ctx))}
 
 
 # --- handlers: allow list, guard, git ----------------------------------------------
