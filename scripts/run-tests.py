@@ -7,16 +7,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = ROOT / "plugins" / "not-me"
 TESTS = PLUGIN / "tests"
+SCRIPT_TESTS = ROOT / "scripts" / "tests"
 
 
 def main() -> int:
-    if not TESTS.is_dir():
+    if not TESTS.is_dir() and not SCRIPT_TESTS.is_dir():
         print("no tests yet")
         return 0
     sys.path.insert(0, str(PLUGIN))
-    suite = unittest.defaultTestLoader.discover(
-        start_dir=str(TESTS), top_level_dir=str(PLUGIN)
-    )
+    suite = unittest.TestSuite()
+    if TESTS.is_dir():
+        suite.addTests(unittest.defaultTestLoader.discover(
+            start_dir=str(TESTS), top_level_dir=str(PLUGIN)
+        ))
+    if SCRIPT_TESTS.is_dir():
+        suite.addTests(unittest.defaultTestLoader.discover(
+            start_dir=str(SCRIPT_TESTS), top_level_dir=str(SCRIPT_TESTS)
+        ))
     result = unittest.TextTestRunner(verbosity=1).run(suite)
     print(f"ran {result.testsRun} tests")
     if result.testsRun == 0:
