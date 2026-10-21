@@ -1,0 +1,38 @@
+{
+  "description": "new, lost race: the first issue is already claimed by another run, so the second must be picked",
+  "patches": [
+    {
+      "path": "calc/core.py",
+      "find": "    return sum(values) / len(values)",
+      "replace": "    return sum(values) / (len(values) + 1)",
+      "on_main": true,
+      "message": "chore(eval): seed N3 bug"
+    }
+  ],
+  "issues": [
+    {
+      "key": "claimed",
+      "title": "mean() is off",
+      "body": "mean([1, 2, 3]) should be 2. Another run already claimed this issue.",
+      "labels": ["to do", "in progress"],
+      "assignee": "{operator}",
+      "as": "operator"
+    },
+    {
+      "key": "free",
+      "title": "mean() ignores the number of values",
+      "body": "mean([2, 4]) returns 2.0 instead of 3.0.\n\nAcceptance:\n- mean returns the arithmetic mean\n- make test passes",
+      "labels": ["to do"],
+      "as": "operator"
+    }
+  ],
+  "prs": [],
+  "expect": {
+    "skill": "new",
+    "result": "DONE",
+    "note": "The claimed issue is untouched; the run falls through to the free one. A true simultaneous race is covered by K4.",
+    "labels_exact": {"issue:claimed": ["to do", "in progress"], "issue:free": ["needs review"]},
+    "pr_exists": {"count": 1},
+    "marker_count": 1
+  }
+}

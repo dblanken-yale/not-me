@@ -1,0 +1,45 @@
+{
+  "description": "update, happy path: one trusted review thread asks to restore the zero guard",
+  "patches": [
+    {
+      "branch": "eval/{rid}/{id}",
+      "path": "calc/core.py",
+      "find": "    if b == 0:\n        raise ValueError(\"division by zero\")\n",
+      "replace": "",
+      "message": "refactor: simplify div"
+    }
+  ],
+  "issues": [],
+  "prs": [
+    {
+      "key": "pr",
+      "head": "eval/{rid}/{id}",
+      "base": "main",
+      "title": "refactor: simplify div",
+      "body": "## Summary\n\nDrops the explicit zero check in div.\n\n## Testing steps\n\n1. Run `make test`.",
+      "labels": ["needs work"],
+      "assignee": "{operator}",
+      "as": "operator",
+      "review_threads": [
+        {
+          "path": "calc/core.py",
+          "line": 21,
+          "body": "div() no longer raises ValueError for a zero divisor. Please restore the guard so test_div_by_zero passes.",
+          "as": "operator"
+        }
+      ]
+    }
+  ],
+  "expect": {
+    "skill": "update",
+    "result": "DONE",
+    "labels_exact": {"pr:pr": ["needs review"]},
+    "threads_replied_not_resolved": true,
+    "no_force_push": true,
+    "commits_conventional": true,
+    "only_paths": ["calc/core.py"],
+    "protected_unchanged": ["main", "develop"],
+    "pr_open_not_merged": true,
+    "marker_count": 1
+  }
+}

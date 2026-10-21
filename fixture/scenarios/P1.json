@@ -1,0 +1,35 @@
+{
+  "description": "prove, pass: a heading change on the static page with runnable testing steps",
+  "patches": [
+    {
+      "branch": "eval/{rid}/{id}",
+      "path": "site/index.html",
+      "find": "<h1 id=\"title\">Calc demo</h1>",
+      "replace": "<h1 id=\"title\">Calc demo v2</h1>",
+      "message": "feat: rename the demo heading"
+    }
+  ],
+  "issues": [],
+  "prs": [
+    {
+      "key": "pr",
+      "head": "eval/{rid}/{id}",
+      "base": "main",
+      "title": "feat: rename the demo heading",
+      "body": "## Summary\n\nThe page heading now reads \"Calc demo v2\".\n\n## Testing steps\n\n1. In `site/`, run `python3 -m http.server 8000`.\n2. Open http://localhost:8000/.\n3. Confirm the heading reads \"Calc demo v2\".\n4. Click the Add button and confirm the status text reads \"Result: 5\".",
+      "labels": ["needs review"],
+      "assignee": "{operator}",
+      "as": "operator"
+    }
+  ],
+  "expect": {
+    "skill": "prove",
+    "result": "PASS",
+    "proof_comment": 1,
+    "labels_exact": {"pr:pr": ["needs review"]},
+    "only_paths": [],
+    "no_force_push": true,
+    "protected_unchanged": ["main", "develop"],
+    "pr_open_not_merged": true
+  }
+}
