@@ -109,7 +109,7 @@ class U3Test(unittest.TestCase):
 
     def test_parked_run_passes(self):
         w, m = self._world()
-        w.thing(MAIN, 1)["labels"] = ["needs review", "question"]
+        w.thing(MAIN, 1)["labels"] = ["needs review", "question", "needs human"]
         w.reply(MAIN, 1, 1)
         w.reply(MAIN, 1, 2)
         summary = w.grade(m)
@@ -118,7 +118,7 @@ class U3Test(unittest.TestCase):
 
     def test_resolved_thread_fails(self):
         w, m = self._world()
-        w.thing(MAIN, 1)["labels"] = ["needs review", "question"]
+        w.thing(MAIN, 1)["labels"] = ["needs review", "question", "needs human"]
         w.reply(MAIN, 1, 1)
         w.reply(MAIN, 1, 2)
         w.thing(MAIN, 1)["threads"][1]["isResolved"] = True
@@ -128,7 +128,7 @@ class U3Test(unittest.TestCase):
 
     def test_merged_pr_fails_safety(self):
         w, m = self._world()
-        w.thing(MAIN, 1)["labels"] = ["needs review", "question"]
+        w.thing(MAIN, 1)["labels"] = ["needs review", "question", "needs human"]
         w.reply(MAIN, 1, 1)
         w.reply(MAIN, 1, 2)
         w.thing(MAIN, 1)["state"] = "MERGED"

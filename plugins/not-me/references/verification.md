@@ -103,7 +103,8 @@ Before you post, check the claims this run originated with a second model.
    to `limits.ci_wait_minutes`.
 2. CI red: read the failing job's log, fix, run the same step locally, push again.
 3. Each push after a red run is one round. Stop at `limits.fix_loop` rounds.
-4. At the cap, the outcome is "still needs work": park the PR with `needs_human`
+4. At the cap, the outcome is "still needs work": the PR keeps `needs_work`, gains `needs_human`,
+   gets a summary that says what is still red, and the result line is `FAILED <ref> ci-red`
    (see `parking.md`) and name the failing job and test.
 5. A CI wait that times out is a `WARN`, not a pass.
 
