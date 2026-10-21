@@ -1,0 +1,3 @@
+---
+router: [new, update]
+---
