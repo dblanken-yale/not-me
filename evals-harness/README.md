@@ -26,21 +26,35 @@ write to them, and `claude` on the path.
 
 Drop `--dry-run` to run. Per run, in order:
 
-1. `seed_fixture.py --reset --run-id RID`, then `--scenario ID --run-id RID`. The manifest lands in
-   `evals/.state/RID/ID.json`.
-2. `claude plugin eval plugins/not-me --case <skill>-<ID> --runs 1 --scaffold --trust-plugin --ablation none
-   --allow-tools Bash,Write,Edit --max-cost-usd CAP --json <out>/<ID>-<n>.eval --no-publish`.
-   The case is named `<skill>-<ID>`, for example `new-N1`. The command gets these variables:
-   `NOT_ME_EVAL_RUN_ID`, `NOT_ME_EVAL_SCENARIO`, `NOT_ME_EVAL_BACKEND`, `NOT_ME_EVAL_MANIFEST`,
-   `NOT_ME_FIXTURE_REPO`, `NOT_ME_FIXTURE_COMPANION`, `NOT_ME_FIXTURE_OWNER`, and with `--backend ledger`
-   `NOT_ME_EVAL_LEDGER` (where the run writes its ledger). `GH_TOKEN` and the claude login pass through from
-   your environment. The same values are saved in `<out>/<ID>-<n>.scaffold.json` (no secrets).
-3. `grade_state.py --manifest ... --scenario ID --backend B --json <out>/<ID>-<n>.grade.json`.
-4. The eval aggregate and the grade are merged into `<out>/<ID>-<n>.json` (the file `gate_report.py` reads).
-5. `seed_fixture.py --teardown RID`, also when a step failed.
+Setup first: export `NOT_ME_FIXTURE_TOKEN`, a dedicated fine-grained token for the two fixture repos only
+(`docs/testing.md` says how to make it). `run_live.py` refuses to start without it.
+
+Per run, in order:
+
+1. `seed_fixture.py --reset --run-id RID`, then `--scenario ID --run-id RID`, with your own `gh` login. The
+   manifest lands in `evals/.state/RID/ID.json`.
+2. **Prepare (operator side)**: `scaffold/scaffold.py prepare --manifest ... --stage-dir evals/.state/RID/ID.stage`.
+   It checks the token (sees the fixture repo, cannot see the plugin repo), clones the fixture at the manifest's
+   SHAs and stages the token there, mode 600.
+3. `claude plugin eval plugins/not-me --case <skill>-<ID> --runs 1 --scaffold --trust-plugin --ablation none
+   --allow-tools Bash,Write,Edit --max-cost-usd CAP --json <out>/<ID>-<n>.eval --no-publish [--keep-temp]`.
+   The sandbox passes through only `EVAL_*` keys, so the command gets `EVAL_NOT_ME_RUN_ID`,
+   `EVAL_NOT_ME_SCENARIO`, `EVAL_NOT_ME_BACKEND` and `EVAL_NOT_ME_STAGE_DIR`, and `GH_TOKEN`,
+   `GITHUB_TOKEN` and `NOT_ME_FIXTURE_TOKEN` are removed from its environment. Nothing from your shell reaches
+   the case's scaffold. **Stage (inside the eval)**: the case's `scaffold.sh` runs `scaffold.py stage`, which
+   copies the prepared clone into the workspace, writes the config layers and signs `gh` in for the sandbox
+   home with the staged token. The same `EVAL_*` values are saved in `<out>/<ID>-<n>.scaffold.json`.
+4. `grade_state.py --manifest ... --scenario ID --backend B --json <out>/<ID>-<n>.grade.json`.
+5. `scaffold.py clean --stage-dir ...` removes the stage and the token copy.
+6. The eval aggregate and the grade are merged into `<out>/<ID>-<n>.json` (the file `gate_report.py` reads).
+7. `seed_fixture.py --teardown RID`.
+
+Steps 5 and 7 also run when an earlier step failed.
 
 `--out` defaults to `results/evals/<today>`. A second invocation on the same day adds runs (`N1-2.json`) instead
 of overwriting. `-j` is always 1, because a skill scans the whole fixture repo and parallel runs would see each other.
+`--keep-temp` is passed on to the eval so its workspace survives; `--backend ledger` needs it, plus
+`--ledger <workspace>/.git/not-me/logs/intended-writes.jsonl` (see `docs/testing.md`).
 Exit code: 0 when the grade passed and nothing errored, 1 otherwise, 2 for a usage error.
 
 Grade a finished run by hand:

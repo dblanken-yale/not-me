@@ -34,18 +34,20 @@ directory and refuses `..` or an absolute path, so each case carries its own `sc
 
 The session itself gets the operator's environment filtered to an allow list: standard variables, proxies,
 `ANTHROPIC_*`, most `CLAUDE_CODE_*`, cloud SDK prefixes and `EVAL_*`. A case's `env` may set only `EVAL_*` keys.
-`GH_TOKEN` and the `NOT_ME_*` variables the harness sets do not reach the scaffold or the session. The skills need
+`GH_TOKEN` and the `NOT_ME_*` variables do not reach the scaffold or the session; `run_live.py` passes the run
+as `EVAL_NOT_ME_RUN_ID`, `EVAL_NOT_ME_SCENARIO`, `EVAL_NOT_ME_BACKEND` and `EVAL_NOT_ME_STAGE_DIR`. The skills need
 none of the `NOT_ME_EVAL_*` values; what they do need (gh auth, git identity, config) the scaffold writes into the
 workspace and the sandbox home. `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` passes through, so export it in your shell
 for the `--bg` cases.
 
 So staging has two halves, both in `evals-harness/scaffold/scaffold.py`:
 
-1. `scaffold.py prepare`, operator side, after seeding and before `claude plugin eval`. It reads
-   `NOT_ME_EVAL_MANIFEST`, `NOT_ME_EVAL_BACKEND`, `NOT_ME_FIXTURE_OWNER` and `GH_TOKEN` (else `gh auth token`),
-   clones the fixture repo, and the companion when the scenario has one, at the manifest's `main` SHAs into
-   `evals/.state/<RID>/<ID>.stage/`, keeps a copy of the token there (mode 600), and writes
-   `evals/.state/current-stage.json`.
+1. `scaffold.py prepare --manifest PATH --stage-dir DIR`, operator side, after seeding and before
+   `claude plugin eval`. It needs `NOT_ME_FIXTURE_TOKEN`, a dedicated fine-grained token for the fixture repos
+   only, and refuses without it; it never reads `gh auth token` or `hosts.yml`. It checks that the token sees
+   the fixture repo and cannot see the plugin repo, clones the fixture repo, and the companion when the scenario
+   has one, at the manifest's `main` SHAs into `DIR` (`evals/.state/<RID>/<ID>.stage/`), keeps a copy of the
+   token there (mode 600), and writes `evals/.state/current-stage.json`. See `docs/testing.md`.
 2. `scaffold.py stage --case <name>`, run by `scaffold.sh` inside the eval. It refuses a stage prepared for
    another scenario, then:
    - copies the clone into the working directory; a companion goes to `.not-me-companion/<name>/`;
@@ -55,7 +57,8 @@ So staging has two halves, both in `evals-harness/scaffold/scaffold.py`:
    - writes the config layers, pause file, allow list and extra files from the scenario's `config` block;
    - writes `~/.config/gh/hosts.yml` for the sandbox home and runs `gh auth setup-git`;
    - records what it wrote, and the `NOT_ME_*` values for the record, in `~/.not-me-eval.json`.
-3. `scaffold.py clean`, operator side, after grading. It removes the stage and the token copy.
+3. `scaffold.py clean --stage-dir DIR`, operator side, after grading and after any failure. It removes the stage
+   and the token copy.
 
 `scaffold.py check` validates every scenario's `config` block.
 
@@ -88,18 +91,18 @@ So staging has two halves, both in `evals-harness/scaffold/scaffold.py`:
 ## Run one case
 
 You need what `evals-harness/README.md` lists (fixture repos, `gh` logged in, `claude` on the path).
-`run_live.py` does not call `prepare` and `clean` yet, so for now run the steps by hand:
+`run_live.py` runs all of this (see `evals-harness/README.md`). By hand:
 
     export NOT_ME_FIXTURE_OWNER=OWNER NOT_ME_FIXTURE_REPO=OWNER/not-me-fixture
-    export NOT_ME_FIXTURE_COMPANION=OWNER/not-me-fixture-companion
+    export NOT_ME_FIXTURE_COMPANION=OWNER/not-me-fixture-companion NOT_ME_FIXTURE_TOKEN=github_pat_...
     python3 fixture/seed_fixture.py --reset --run-id RID
     python3 fixture/seed_fixture.py --scenario N1 --run-id RID
-    NOT_ME_EVAL_MANIFEST=evals/.state/RID/N1.json NOT_ME_EVAL_BACKEND=github \
-        python3 evals-harness/scaffold/scaffold.py prepare
+    python3 evals-harness/scaffold/scaffold.py prepare --manifest evals/.state/RID/N1.json \
+        --stage-dir evals/.state/RID/N1.stage
     claude plugin eval plugins/not-me --case new-N1 --runs 1 --scaffold --trust-plugin --ablation none \
         --allow-tools Bash,Write,Edit --max-cost-usd 6 --no-publish
     python3 evals-harness/grade_state.py --manifest evals/.state/RID/N1.json --scenario N1
-    python3 evals-harness/scaffold/scaffold.py clean
+    python3 evals-harness/scaffold/scaffold.py clean --stage-dir evals/.state/RID/N1.stage
     python3 fixture/seed_fixture.py --teardown RID
 
 Add `--keep-temp` to keep the run's workspace and `trace.jsonl`. Static checks with no cost:
@@ -112,7 +115,8 @@ Add `--keep-temp` to keep the run's workspace and `trace.jsonl`. Static checks w
 - `file_exists` matches only files the run created (the harness compares the workspace before and after), so
   edits to existing files are checked with a regex grader on the file.
 - The dry-run ledger stays in the run's workspace (`.git/not-me/logs/intended-writes.jsonl`). The ledger backend
-  of `grade_state.py` needs it copied out (`--keep-temp`).
+  of `grade_state.py` needs it copied out (`--keep-temp`, then `--ledger <workspace>/.git/not-me/logs/intended-writes.jsonl`; see
+  `docs/testing.md`).
 - T1 creates an issue; no `expect` key reads issues the run created, so the case checks it from the trace.
 
 ## Cost
