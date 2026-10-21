@@ -12,7 +12,8 @@ import subprocess
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 VALUE_FLAGS = {"-X", "--method", "-R", "--json", "-f", "-F", "--input", "--body-file", "--head", "--base",
-               "--title", "--label", "--reviewer", "--assignee", "--state"}
+               "--title", "--limit", "--label", "--reviewer", "--assignee", "--state", "--add-assignee",
+               "--remove-assignee"}
 
 Result = Tuple[int, str, str]
 
@@ -82,6 +83,8 @@ class FakeGitHub:
         self.drop_adds = False  # PUT labels silently drops labels that were not already there
         self.fail_next: Optional[str] = None  # stderr text for the next call, which then exits 1
         self.rate_limit = False  # every call fails with a rate limit error
+        self._tick = 0  # timeline timestamps count up one second per event
+        self.review_state_override: Optional[str] = None  # reviews read back with this state instead of the real one
 
     # --- plumbing ---
 
@@ -102,7 +105,30 @@ class FakeGitHub:
         return thing
 
     def _event(self, slug: str, n: Any, event: str, **extra: Any) -> None:
-        self.state["timeline"].append({"repo": slug, "number": int(n), "event": event, **extra})
+        self._tick += 1
+        stamp = f"2026-01-01T{self._tick // 3600:02d}:{self._tick // 60 % 60:02d}:{self._tick % 60:02d}Z"
+        entry = {"repo": slug, "number": int(n), "event": event, "created_at": stamp}
+        entry.update(extra)
+        self.state["timeline"].append(entry)
+
+    # --- helpers for tests ---
+
+    def add_assignee(self, slug: str, n: Any, login: str, created_at: Optional[str] = None) -> None:
+        """Assign login and record an `assigned` timeline event (optionally with a chosen timestamp)."""
+        thing = self._thing(slug, n)
+        if login not in thing["assignees"]:
+            thing["assignees"].append(login)
+        self._event(slug, n, "assigned", assignee={"login": login})
+        if created_at:
+            self.state["timeline"][-1]["created_at"] = created_at
+
+    def post_comment(self, slug: str, n: Any, user: str, body: str, created_at: str = "2026-01-01T00:00:00Z") -> int:
+        thing = self._thing(slug, n)
+        cid = self._id()
+        thing["comments"].append({"id": cid, "user": user, "assoc": "MEMBER", "body": body,
+                                  "created_at": created_at})
+        self._event(slug, n, "commented", id=cid)
+        return cid
 
     def serve(self, argv: Sequence[str]) -> Result:
         if self.rate_limit:
@@ -126,6 +152,7 @@ class FakeGitHub:
             "number": thing["number"], "title": thing["title"], "body": thing["body"], "state": thing["state"],
             "labels": [{"name": n} for n in thing["labels"]], "assignees": [{"login": a} for a in thing["assignees"]],
             "author": {"login": thing["author"]}, "url": f"https://github.com/acme/app/issues/{thing['number']}",
+            "createdAt": thing.get("created_at", f"2026-01-01T00:00:{thing['number'] % 60:02d}Z"),
             "comments": [{"id": c["id"], "author": {"login": c["user"]}, "authorAssociation": c["assoc"],
                           "body": c["body"]} for c in thing["comments"]],
         }
@@ -134,6 +161,7 @@ class FakeGitHub:
                       "reviewDecision", "mergeable"):
                 full[k] = thing[k]
             full["reviewRequests"] = [{"login": r} for r in thing["reviewRequests"]]
+            full["statusCheckRollup"] = thing.get("statusCheckRollup", [])
         unknown = [f for f in fields if f not in full]
         if unknown:
             raise KeyError(f"Unknown JSON field: {unknown[0]!r}")
@@ -158,9 +186,30 @@ class FakeGitHub:
             out = self._view(thing, fields)
             if self.race_assignee:
                 login = "hubot" if self.race_assignee is True else self.race_assignee
-                thing["assignees"].append(login)
                 self.race_assignee = None
+                self.add_assignee(repo_flag, pos[2], login)
             return out
+        if head == "issue" and verb == "list":
+            wanted = [t for t in self._repo(repo_flag)["things"].values() if t["kind"] == "issue"]
+            state = (flags.get("--state") or ["open"])[0].upper()
+            wanted = [t for t in wanted if state == "ALL" or t["state"] == state]
+            for label in flags.get("--label", []):
+                wanted = [t for t in wanted if label in t["labels"]]
+            for who in flags.get("--assignee", []):
+                wanted = [t for t in wanted if who in t["assignees"]]
+            limit = int((flags.get("--limit") or ["30"])[0])
+            return [self._view(t, fields) for t in wanted[:limit]]
+        if head == "issue" and verb == "edit":
+            thing = self._thing(repo_flag, pos[2])
+            if "--body-file" in flags:
+                thing["body"] = _read(flags["--body-file"][0])
+            for login in flags.get("--add-assignee", []):
+                self.add_assignee(repo_flag, pos[2], login)
+            for login in flags.get("--remove-assignee", []):
+                if login in thing["assignees"]:
+                    thing["assignees"].remove(login)
+                    self._event(repo_flag, pos[2], "unassigned", assignee={"login": login})
+            return f"https://github.com/{repo_flag}/issues/{pos[2]}\n"
         if head == "issue" and verb == "comment":
             return self._comment(repo_flag, pos[2], _read(flags["--body-file"][0]))
         if head == "pr" and verb == "view":
@@ -169,13 +218,20 @@ class FakeGitHub:
             wanted = [t for t in self._repo(repo_flag)["things"].values() if t["kind"] == "pr"]
             state = (flags.get("--state") or ["open"])[0].upper()
             wanted = [t for t in wanted if state == "ALL" or t["state"] == state]
+            for head_ref in flags.get("--head", []):
+                wanted = [t for t in wanted if t["headRefName"] == head_ref]
             for label in flags.get("--label", []):
                 wanted = [t for t in wanted if label in t["labels"]]
             for who in flags.get("--assignee", []):
                 wanted = [t for t in wanted if who in t["assignees"]]
             return [self._view(t, fields) for t in wanted]
+        if head == "pr" and verb == "checks":
+            thing = self._thing(repo_flag, pos[2])
+            return thing["checks"] if "checks" in thing else None  # no "checks" key: unsupported, exits 1
         if head == "pr" and verb == "create":
             return self._pr_create(repo_flag, flags)
+        if head == "issue" and verb == "create":
+            return self._issue_create(repo_flag, flags)
         if head == "pr" and verb == "edit":
             thing = self._thing(repo_flag, pos[2])
             thing["body"] = _read(flags["--body-file"][0])
@@ -189,6 +245,17 @@ class FakeGitHub:
                                   "created_at": "2026-01-01T00:00:00Z"})
         self._event(slug, n, "commented", id=cid)
         return f"https://github.com/{slug}/issues/{n}#issuecomment-{cid}\n"
+
+    def _issue_create(self, slug: str, flags: Dict[str, List[str]]) -> str:
+        repo = self._repo(slug)
+        number = repo["next_number"]
+        repo["next_number"] += 1
+        repo["things"][str(number)] = {
+            "number": number, "title": flags["--title"][0], "body": _read(flags["--body-file"][0]),
+            "state": "OPEN", "labels": list(flags.get("--label", [])), "assignees": [],
+            "author": self.state["user"], "comments": [], "kind": "issue"}
+        self._event(slug, number, "issue_created")
+        return f"https://github.com/{slug}/issues/{number}\n"
 
     def _pr_create(self, slug: str, flags: Dict[str, List[str]]) -> str:
         repo = self._repo(slug)
@@ -235,6 +302,7 @@ class FakeGitHub:
             ("GET", r + r"/issues/(\d+)/timeline", self._r_timeline),
             ("PATCH", r + r"/issues/comments/(\d+)", self._r_comment_edit),
             ("POST", r + r"/pulls/(\d+)/comments/(\d+)/replies", self._r_reply),
+            ("GET", r + r"/pulls/(\d+)/reviews", self._r_reviews),
             ("POST", r + r"/pulls/(\d+)/reviews", self._r_review),
             ("POST", r + r"/pulls/(\d+)/requested_reviewers", self._r_request_review),
         ]
@@ -243,6 +311,7 @@ class FakeGitHub:
         if not pos:
             return None
         endpoint = pos[0].split("?")[0].strip("/")
+        self._query = dict(kv.split("=", 1) for kv in pos[0].partition("?")[2].split("&") if "=" in kv)
         method = (flags.get("-X") or flags.get("--method") or ["GET"])[0].upper()
         if endpoint == "graphql":
             return self._graphql(self._fields(flags))
@@ -280,7 +349,12 @@ class FakeGitHub:
                 for c in self._thing(*g)["comments"]]
 
     def _r_timeline(self, g, flags):
-        return [e for e in self.state["timeline"] if e["repo"] == g[0] and e["number"] == int(g[1])]
+        events = [e for e in self.state["timeline"] if e["repo"] == g[0] and e["number"] == int(g[1])]
+        query = getattr(self, "_query", {})
+        if "per_page" in query:
+            size, page = int(query["per_page"]), int(query.get("page", 1))
+            return events[(page - 1) * size:page * size]
+        return events
 
     def _r_comment_edit(self, g, flags):
         thing, comment = self._find_comment(g[0], int(g[1]))
@@ -302,9 +376,16 @@ class FakeGitHub:
 
     def _r_review(self, g, flags):
         data = json.loads(_read(flags["--input"][0]))
-        self._thing(*g)["reviews"].append(data)
+        rid = self._id()
+        self._thing(*g)["reviews"].append({**data, "id": rid})
         self._event(g[0], g[1], "reviewed", state=data.get("event"))
-        return {"id": self._id(), "state": data.get("event")}
+        return {"id": rid, "state": data.get("event")}
+
+    def _r_reviews(self, g, flags):
+        states = {"APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED", "COMMENT": "COMMENTED"}
+        return [{"id": r["id"], "user": {"login": self.state["user"]}, "body": r.get("body", ""),
+                 "state": self.review_state_override or states.get(r.get("event"), r.get("event"))}
+                for r in self._thing(*g)["reviews"]]
 
     def _r_request_review(self, g, flags):
         pr = self._thing(*g)
@@ -331,9 +412,16 @@ class FakeGitHub:
         if "reviewThreads" in query:
             number = re.search(r"pullRequest\(number:(\d+)\)", query).group(1)
             pr = self._thing(f"{variables['owner']}/{variables['name']}", number)
-            nodes = [{"id": t["id"], "isResolved": t["isResolved"], "comments": {"nodes": [
-                {**c, "author": {"login": c["author"]}} for c in t["comments"]]}} for t in pr.get("threads", [])]
-            return {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}}
+            def author(c: Dict[str, Any]) -> Any:  # a dict (with __typename) passes through; None stays null
+                a = c["author"]
+                return a if isinstance(a, dict) or a is None else {"login": a}
+
+            nodes = [{"id": t["id"], "isResolved": t["isResolved"], "isOutdated": t.get("isOutdated", False),
+                      "comments": {"nodes": [{**c, "author": author(c)} for c in t["comments"]]}}
+                     for t in pr.get("threads", [])]
+            reviews = [{**r, "author": author(r)} for r in pr.get("review_nodes", [])]
+            return {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes},
+                                                            "reviews": {"nodes": reviews}}}}}
         board = self.state["board"]
         if "updateProjectV2ItemFieldValue" in query:
             names = {o["id"]: o["name"] for o in board["status_field"]["options"]}
@@ -349,7 +437,10 @@ class FakeGitHub:
             if variables.get("owner") != board["owner"] or number != board["number"]:
                 return {"data": {"repositoryOwner": {"projectV2": None}}}
             project: Dict[str, Any] = {"id": board["id"]}
-            if "items(" in query:
+            if "createdAt" in query:  # the rich board query: item content and priority fields
+                project["field"] = board["status_field"]
+                project["items"] = {"nodes": [self._rich_item(i, query) for i in board["items"]]}
+            elif "items(" in query:
                 project["field"] = board["status_field"]
                 project["items"] = {"nodes": [
                     {"id": i["id"], "fieldValueByName": {"name": i["status"]},
@@ -357,6 +448,24 @@ class FakeGitHub:
                     for i in board["items"]]}
             return {"data": {"repositoryOwner": {"projectV2": project}}}
         return None
+
+
+    def _rich_item(self, item: Dict[str, Any], query: str) -> Dict[str, Any]:
+        """A board item with issue content and one aliased value per `pN:fieldValueByName(name:"X")`."""
+        node: Dict[str, Any] = {"id": item["id"], "fieldValueByName": {"name": item["status"]}}
+        for alias, field_name in re.findall(r'(p\d+):fieldValueByName\(name:"([^"]+)"\)', query):
+            value = (item.get("fields") or {}).get(field_name)
+            node[alias] = {"name": value} if value else None
+        thing = self._repo(item["repo"])["things"].get(str(item["number"]))
+        if thing is not None:
+            view = self._view(thing, ["number", "title", "url", "state", "createdAt"])
+            node["content"] = {**view, "author": {"login": thing["author"]},
+                               "labels": {"nodes": [{"name": n} for n in thing["labels"]]},
+                               "assignees": {"nodes": [{"login": a} for a in thing["assignees"]]},
+                               "repository": {"nameWithOwner": item["repo"]}}
+        else:
+            node["content"] = None
+        return node
 
 
 class FakeRunner(FakeGitHub):

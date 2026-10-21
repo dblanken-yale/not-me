@@ -527,6 +527,11 @@ class GhClient:
         return self._write_body(repo, ["pr", "edit", str(n), "-R", repo, "--body-file", ""], -1, body_file,
                                 f"edit PR body {repo}#{n}")
 
+    def issue_edit_body(self, repo: str, n: int, body_file: Any) -> Any:
+        n = _num(n)
+        return self._write_body(repo, ["issue", "edit", str(n), "-R", repo, "--body-file", ""], -1, body_file,
+                                f"edit issue body {repo}#{n}")
+
     def review_post(self, repo: str, n: int, event: str, body_file: Any, comments_json: Any = None,
                     allow_approve: bool = False) -> Any:
         """Post a review. APPROVE is refused unless the caller passes allow_approve=True."""
