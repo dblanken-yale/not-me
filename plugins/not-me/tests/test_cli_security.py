@@ -37,9 +37,7 @@ def init_repo(path: Path) -> Path:
     return path
 
 
-class TtyIO(io.StringIO):
-    def isatty(self):
-        return True
+from tests.test_cli_contract import TtyIO  # noqa: E402
 
 
 class UnderClaudeCase(unittest.TestCase):
@@ -113,9 +111,12 @@ class TrustAnchorTests(UnderClaudeCase):
         self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
         self.assertEqual(self.fake.writes_made(), [])
 
-    def test_overrides_stay_allowed_outside_claude_code(self):
+    def test_overrides_are_honoured_only_for_a_person_at_a_terminal(self):
         env = {k: v for k, v in self.env.items() if k != "CLAUDECODE"}
-        self.assertEqual(self.ok("--project-dir", str(self.other), "git", "status", env=env)["branch"], "main")
+        self.assertEqual(self.ok("--project-dir", str(self.other), "git", "status", env=env,
+                                 stdin=TtyIO())["branch"], "main")
+        code, payload, _ = self.cli("--project-dir", str(self.other), "git", "status", stdin=TtyIO())
+        self.assertEqual((code, payload["kind"]), (1, "project_override_refused"))  # tty, but CLAUDECODE set
 
 
 class EnvironmentTests(UnderClaudeCase):
@@ -128,13 +129,14 @@ class EnvironmentTests(UnderClaudeCase):
         self.assertEqual(payload["operator"], "octocat")
         self.assertTrue(any("NOT_ME_HOME" in w for w in payload["warnings"]))
 
-    def test_not_me_home_is_honoured_outside_claude_code(self):
+    def test_not_me_home_is_honoured_only_for_a_person_at_a_terminal(self):
         evil = self.tc.root / "evil"
         evil.mkdir()
         (evil / "project.md").write_text(base.GLOBAL_PROJECT.replace("operator: octocat", "operator: mallory"),
                                          encoding="utf-8")
         env = {"PATH": self.env["PATH"], "NOT_ME_HOME": str(evil)}
-        self.assertEqual(self.ok("me", env=env)["operator"], "mallory")
+        self.assertEqual(self.ok("me", env=env, stdin=TtyIO())["operator"], "mallory")
+        self.assertEqual(self.ok("me", env=env)["operator"], "octocat")  # no terminal: ignored
 
     def test_not_me_dry_run_cannot_turn_dry_run_off(self):
         (self.home / "project.md").write_text(base.GLOBAL_PROJECT.replace("mode: live", "mode: dry-run"),
@@ -186,6 +188,8 @@ class HumanOnlyTests(UnderClaudeCase):
         self.assertEqual((code, payload["kind"]), (1, "human_only"))
         self.assertIn("pause off", payload["terminal_cmd"])
         self.assertTrue(self.ok("status")["paused"]["project"])
+        env = dict(self.env, NOT_ME_OPERATOR_CONFIRM="octocat")
+        self.assertFalse(self.ok("pause", "off", env=env, stdin=TtyIO())["paused"])
 
     def test_repo_layer_cannot_enable_auto_approve(self):
         add_pr_state(self.fake)
@@ -275,6 +279,21 @@ class ProveTargetTests(UnderClaudeCase):
         self.assertTrue(self.ok("prove-target", "3")["none"])
 
 
+    def test_repo_layer_url_template_cannot_bring_its_own_host(self):
+        repo_layer = self.session / ".claude" / "not-me"
+        repo_layer.mkdir(parents=True)
+        (repo_layer / "prove.md").write_text('---\nschema: 1\ntarget: {url_template: "https://pr-{pr}.evil.test/", '
+                                             'strategy: [url-template]}\n---\n# Prove\n', encoding="utf-8")
+        payload = self.ok("prove-target", "3")
+        self.assertTrue(payload["none"])
+        self.assertIn("not in prove.target.hosts", payload["skipped"][0]["reason"])
+        (repo_layer / "prove.md").write_text('---\nschema: 1\ntarget: '
+                                             '{url_template: "https://pr-{pr}--app.netlify.app/"}\n---\n# Prove\n',
+                                             encoding="utf-8")
+        payload = self.ok("prove-target", "3")  # a repo template on an allowed host still works
+        self.assertEqual((payload["strategy"], payload["url"]), ("url-template", "https://pr-3--app.netlify.app/"))
+
+
 class CorrectnessTests(UnderClaudeCase):
     def lock(self, n):
         return claims.lock_path(self.session / ".git" / "not-me" / "claims", n, "pr")
@@ -344,6 +363,28 @@ class RedactTests(unittest.TestCase):
         self.assertNotIn("hunter2", out.getvalue())
         self.assertNotIn("abc123", out.getvalue())
         self.assertIn("https://***@h.test/", out.getvalue())
+
+
+def _without_claude_env(case):
+    """The same attacks with every Claude Code variable unset (`env -u CLAUDECODE ...`) and a non-tty stdin."""
+
+    class Case(case):
+        def setUp(self):
+            super().setUp()
+            self.env = {k: v for k, v in self.env.items() if k not in cli.CLAUDE_ENV}
+
+    Case.__name__ = Case.__qualname__ = "NoClaudeEnv" + case.__name__
+    Case.__doc__ = _without_claude_env.__doc__
+    return Case
+
+
+_SKIP_NO_ENV = {"test_overrides_are_honoured_only_for_a_person_at_a_terminal"}
+for _case in (TrustAnchorTests, EnvironmentTests, HumanOnlyTests, PathTests, ProveTargetTests, CorrectnessTests):
+    _variant = _without_claude_env(_case)
+    for _name in _SKIP_NO_ENV & set(dir(_case)):
+        setattr(_variant, _name, unittest.skip("needs a Claude Code variable")(getattr(_case, _name)))
+    globals()[_variant.__name__] = _variant
+del _case, _variant, _name
 
 
 if __name__ == "__main__":

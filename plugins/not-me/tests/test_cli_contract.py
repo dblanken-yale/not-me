@@ -42,12 +42,20 @@ operator: octocat
 """
 
 
+class TtyIO(io.StringIO):
+    """stdin that reports a terminal: a person running notme, which relaxes the trust anchor."""
+
+    def isatty(self):
+        return True
+
+
 def things(fake, repo=REPO):
     return fake.state["repos"][repo]["things"]
 
 
 class CliCase(unittest.TestCase):
-    """A temp project, a global config in live mode, and a fake GitHub behind the injected runner."""
+    """A temp project, a global config in live mode, and a fake GitHub behind the injected runner. Runs as a person
+    at a terminal (a tty stdin, NOT_ME_OPERATOR_CONFIRM set), so --project-dir and NOT_ME_HOME are honoured."""
 
     global_project = GLOBAL_PROJECT
 
@@ -57,7 +65,7 @@ class CliCase(unittest.TestCase):
         self.tc.write("global", "project", self.global_project)
         self.fake = FakeRunner()
         self.env = {"NOT_ME_HOME": str(self.tc.home), "PATH": os.environ.get("PATH", ""),
-                    "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT)}
+                    "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT), "NOT_ME_OPERATOR_CONFIRM": "octocat"}
 
     @property
     def project(self) -> Path:
@@ -76,7 +84,7 @@ class CliCase(unittest.TestCase):
             args = ["--project-dir", str(self.project)] + args
         if repo:
             args = ["--repo", REPO] + args
-        code = cli.main(args, runner=runner or self.fake, env=env or self.env, stdin=io.StringIO(stdin), stdout=out,
+        code = cli.main(args, runner=runner or self.fake, env=env or self.env, stdin=TtyIO(stdin), stdout=out,
                         stderr=err, hook_cmd=hook_cmd)
         text = out.getvalue()
         self.assertEqual(text.count("\n"), 1, f"stdout must be one line, got {text!r}")

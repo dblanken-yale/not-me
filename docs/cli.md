@@ -11,10 +11,11 @@ stderr is chatter. Credentials in URLs and token-shaped strings are redacted fro
 file paths (--body-file, --title-file, ...) of at most 1 MB, inside the session project or not-me's temp
 directory. The global flags are also accepted after the subcommand.
 
-Trust anchor: the session project is the main checkout of the git toplevel of the working directory. Under
-Claude Code (CLAUDECODE or CLAUDE_PROJECT_DIR set) a --project-dir or CLAUDE_PROJECT_DIR naming another checkout
-is refused, NOT_ME_HOME is ignored, NOT_ME_DRY_RUN can only turn dry-run on, and the allow list and `pause off`
-are left to a person at a terminal.
+Trust anchor: the session project is the main checkout of the git toplevel of the working directory. Restricted
+mode is the default: a --project-dir or CLAUDE_PROJECT_DIR naming another checkout is refused and NOT_ME_HOME is
+ignored. Only a person at a terminal (stdin is a tty) with neither CLAUDECODE nor CLAUDE_PROJECT_DIR set gets
+those honoured. NOT_ME_DRY_RUN can only turn dry-run on. `allow-repo add|remove` and `pause off` need a terminal
+and NOT_ME_OPERATOR_CONFIRM set to the gh login, everywhere.
 
 --dry-run, NOT_ME_DRY_RUN=1 or `mode: dry-run` send every write to the intended-writes ledger instead of
 GitHub; write commands then carry "dry_run": true. Write commands take --log PATH (an existing run log under
@@ -26,7 +27,7 @@ the log root) and append an ACTION line to it.
 
 | Flag | Meaning |
 |------|---------|
-| `--project-dir` | project directory (default: the git toplevel of the working directory; under Claude Code only another worktree of that project) |
+| `--project-dir` | project directory (default: the git toplevel of the working directory; unless a person runs it at a terminal, only another worktree of that project) |
 | `--repo` | repository REFs resolve to (default: origin) |
 | `--dry-run` | record writes in the ledger, send nothing |
 | `--json` | accepted; output is always JSON |
@@ -594,7 +595,7 @@ Output: path, skill, ref, run_id, status, entries; or none
 
 ### `notme allow-repo add`
 
-Allow a repo (or, with --board, a project board) for this project or everywhere. Under Claude Code only a person may do this: NOT_ME_OPERATOR_CONFIRM must be the gh login and stdin a terminal; otherwise the refusal (kind human_only) carries the command to run.
+Allow a repo (or, with --board, a project board) for this project or everywhere. Only a person may do this: stdin must be a terminal and NOT_ME_OPERATOR_CONFIRM the gh login; otherwise the refusal (kind human_only) carries the command to run.
 
 ```
 notme allow-repo add SLUG [--board OWNER/NUMBER] [--everywhere]
@@ -610,7 +611,7 @@ Output: added, scope, repo or board
 
 ### `notme allow-repo remove`
 
-Remove a repo (or --board) from the allow list. Under Claude Code the same person check as add applies.
+Remove a repo (or --board) from the allow list. The same person check as add applies.
 
 ```
 notme allow-repo remove SLUG [--board OWNER/NUMBER] [--everywhere]
@@ -785,7 +786,7 @@ Output: enabled, paused (global, project), mode, repo, tracker, operator, active
 
 ### `notme pause`
 
-Turn not-me off or on for this project (or for every project with --global) by writing or removing the PAUSED file. Pick and claim commands then report paused. Under Claude Code `pause off` is refused (kind human_only, with the command for a person to run).
+Turn not-me off or on for this project (or for every project with --global) by writing or removing the PAUSED file. Pick and claim commands then report paused. `pause off` needs the same person check as allow-repo add (else kind human_only, with the command for a person to run).
 
 ```
 notme pause state [--global]

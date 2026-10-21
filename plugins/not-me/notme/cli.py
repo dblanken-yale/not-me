@@ -8,10 +8,11 @@ stderr is chatter. Credentials in URLs and token-shaped strings are redacted fro
 file paths (--body-file, --title-file, ...) of at most 1 MB, inside the session project or not-me's temp
 directory. The global flags are also accepted after the subcommand.
 
-Trust anchor: the session project is the main checkout of the git toplevel of the working directory. Under
-Claude Code (CLAUDECODE or CLAUDE_PROJECT_DIR set) a --project-dir or CLAUDE_PROJECT_DIR naming another checkout
-is refused, NOT_ME_HOME is ignored, NOT_ME_DRY_RUN can only turn dry-run on, and the allow list and `pause off`
-are left to a person at a terminal.
+Trust anchor: the session project is the main checkout of the git toplevel of the working directory. Restricted
+mode is the default: a --project-dir or CLAUDE_PROJECT_DIR naming another checkout is refused and NOT_ME_HOME is
+ignored. Only a person at a terminal (stdin is a tty) with neither CLAUDECODE nor CLAUDE_PROJECT_DIR set gets
+those honoured. NOT_ME_DRY_RUN can only turn dry-run on. `allow-repo add|remove` and `pause off` need a terminal
+and NOT_ME_OPERATOR_CONFIRM set to the gh login, everywhere.
 
 --dry-run, NOT_ME_DRY_RUN=1 or `mode: dry-run` send every write to the intended-writes ledger instead of
 GitHub; write commands then carry "dry_run": true. Write commands take --log PATH (an existing run log under
@@ -71,7 +72,7 @@ class ExitCode(IntEnum):
 
 PAUSED_FILE = "PAUSED"
 MAX_INPUT_BYTES = 1024 * 1024
-CLAUDE_ENV = ("CLAUDECODE", "CLAUDE_PROJECT_DIR")  # either one means we run under Claude Code
+CLAUDE_ENV = ("CLAUDECODE", "CLAUDE_PROJECT_DIR")  # either one keeps the CLI restricted; never a reason to relax
 CONFIRM_ENV = "NOT_ME_OPERATOR_CONFIRM"
 _AUTH_RE = re.compile(r"(?i)gh auth login|not logged in|bad credentials|http 401|requires?\b.*\bscopes?\b|"
                       r"missing\b.*\bscopes?\b|token has not been granted|authentication required")
@@ -203,6 +204,13 @@ class Deps:
         self.cwd = cwd
         self.argv = list(argv)
 
+    def isatty(self) -> bool:
+        """True only when stdin is a real terminal (a person typing, not a model's tool call)."""
+        try:
+            return bool(self.stdin.isatty())
+        except (AttributeError, ValueError, OSError):
+            return False
+
     def chatter(self, text: str) -> None:
         print(redact(text), file=self.stderr)
 
@@ -218,7 +226,9 @@ class Context:
     def __init__(self, args: argparse.Namespace, deps: Deps):
         self.args, self.deps = args, deps
         self.warnings: List[str] = []
-        self.under_claude = any(deps.env.get(k) for k in CLAUDE_ENV)
+        # Restricted is the default. Only a person at a terminal (stdin a tty, which a model's Bash call cannot
+        # fake) with no Claude Code variables set gets overrides honoured; the Claude variables can only restrict.
+        self.restricted = any(deps.env.get(k) for k in CLAUDE_ENV) or not deps.isatty()
         self.session_project, self.work_dir = self._anchor()
         self.env = self._trusted_env()
         self._cfg: Optional[config_mod.Config] = None
@@ -231,12 +241,12 @@ class Context:
     # --- where: the trust anchor ---
 
     def _anchor(self) -> Tuple[Optional[Path], Optional[Path]]:
-        """(session project, work dir). The session project is the main checkout of the cwd's git toplevel under
-        Claude Code; outside it, an override is believed. The work dir is the override (a linked worktree stays
-        itself) or the cwd's toplevel; None when there is none."""
+        """(session project, work dir). The session project is the main checkout of the cwd's git toplevel when
+        restricted (the default); for a person at a terminal an override is believed. The work dir is the
+        override (a linked worktree stays itself) or the cwd's toplevel; None when there is none."""
         requested = getattr(self.args, "project_dir", None) or self.deps.env.get("CLAUDE_PROJECT_DIR")
         cwd_top = _toplevel(self.deps.cwd or os.getcwd())
-        if not self.under_claude:
+        if not self.restricted:
             if requested:
                 work = Path(requested).resolve() if Path(requested).is_dir() else None
             else:
@@ -264,9 +274,9 @@ class Context:
             env["CLAUDE_PROJECT_DIR"] = str(self.work_dir)
         else:
             env.pop("CLAUDE_PROJECT_DIR", None)
-        if self.under_claude:
+        if self.restricted:
             if env.pop("NOT_ME_HOME", None):
-                self.warn("NOT_ME_HOME is ignored under Claude Code; using the default global layer")
+                self.warn("NOT_ME_HOME is honoured only for a person at a terminal; using the default global layer")
             env["CLAUDE_PLUGIN_ROOT"] = _PLUGIN_DIR
         return env
 
@@ -279,18 +289,16 @@ class Context:
             raise fail(ExitCode.USAGE, "usage", "no project directory: run inside a clone (or pass --project-dir)")
         return self.work_dir
 
-    def require_human(self, what: str, confirm: bool) -> None:
-        """Under Claude Code, refuse `what` unless (with confirm) NOT_ME_OPERATOR_CONFIRM is the gh login and stdin
-        is a terminal. The refusal carries the command a person can run in their own terminal."""
-        if not self.under_claude:
-            return
+    def require_human(self, what: str) -> None:
+        """Refuse `what` unless stdin is a terminal and NOT_ME_OPERATOR_CONFIRM is the gh login. The refusal carries
+        the command a person can run in their own terminal."""
         given = self.deps.env.get(CONFIRM_ENV)
-        if confirm and given and self.deps.stdin.isatty() and given.lower() == self.gh.me().lower():
+        if self.deps.isatty() and given and given.lower() == self.gh.me().lower():
             return
-        command = " ".join(shlex.quote(a) for a in [str(Path(_PLUGIN_DIR) / "bin" / "notme"), *self.deps.argv])
-        how = (f"; inside a Claude Code shell prefix {CONFIRM_ENV}=<your gh login>" if confirm else "")
-        raise fail(ExitCode.ERROR, "human_only", f"{what} is for a person: run it in your own terminal{how}",
-                   terminal_cmd=command)
+        notme = [str(Path(_PLUGIN_DIR) / "bin" / "notme"), *self.deps.argv]
+        command = f"{CONFIRM_ENV}=<your-gh-login> " + " ".join(shlex.quote(a) for a in notme)
+        raise fail(ExitCode.ERROR, "human_only", f"{what} is for a person: run it in your own terminal with "
+                                                f"{CONFIRM_ENV} set to your gh login", terminal_cmd=command)
 
     # --- config ---
 
@@ -564,7 +572,8 @@ GROUPS = {"log": "run logs", "allow-repo": "the global allow list of repos and b
           "git": "git operations behind the write gate"}
 GLOBAL_FLAGS: List[Arg] = [
     arg("--project-dir", metavar="P", help="project directory (default: the git toplevel of the working "
-                                           "directory; under Claude Code only another worktree of that project)"),
+                                           "directory; unless a person runs it at a terminal, only another "
+                                           "worktree of that project)"),
     arg("--repo", metavar="O/N", help="repository REFs resolve to (default: origin)"),
     arg("--dry-run", action="store_true", help="record writes in the ledger, send nothing"),
     arg("--json", action="store_true", help="accepted; output is always JSON"),
@@ -1155,7 +1164,7 @@ def _origin(ctx: Context) -> Optional[str]:
 
 
 def _allow_change(ctx: Context, args: argparse.Namespace, add: bool) -> Dict[str, Any]:
-    ctx.require_human(f"allow-repo {'add' if add else 'remove'}", confirm=True)
+    ctx.require_human(f"allow-repo {'add' if add else 'remove'}")
     scope = None
     if not args.everywhere:
         scope = _origin(ctx)
@@ -1175,9 +1184,9 @@ _ALLOW_ARGS = [arg("slug", nargs="?", metavar="SLUG"), arg("--board", metavar="O
 
 @command("allow-repo add", "allow a repo or board", args=_ALLOW_ARGS)
 def cmd_allow_repo_add(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Allow a repo (or, with --board, a project board) for this project or everywhere. Under Claude Code only a
-    person may do this: NOT_ME_OPERATOR_CONFIRM must be the gh login and stdin a terminal; otherwise the
-    refusal (kind human_only) carries the command to run.
+    """Allow a repo (or, with --board, a project board) for this project or everywhere. Only a person may do this:
+    stdin must be a terminal and NOT_ME_OPERATOR_CONFIRM the gh login; otherwise the refusal (kind human_only)
+    carries the command to run.
 
     Output: added, scope, repo or board
     """
@@ -1186,7 +1195,7 @@ def cmd_allow_repo_add(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]
 
 @command("allow-repo remove", "remove an entry", args=_ALLOW_ARGS)
 def cmd_allow_repo_remove(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Remove a repo (or --board) from the allow list. Under Claude Code the same person check as add applies.
+    """Remove a repo (or --board) from the allow list. The same person check as add applies.
 
     Output: removed, scope, repo or board
     """
@@ -1418,13 +1427,13 @@ def _status_items(ctx: Context) -> List[Dict[str, Any]]:
     arg("--global", dest="global_", action="store_true", help="for every project")])
 def cmd_pause(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """Turn not-me off or on for this project (or for every project with --global) by writing or removing the
-    PAUSED file. Pick and claim commands then report paused. Under Claude Code `pause off` is refused (kind
-    human_only, with the command for a person to run).
+    PAUSED file. Pick and claim commands then report paused. `pause off` needs the same person check as allow-repo
+    add (else kind human_only, with the command for a person to run).
 
     Output: paused, scope
     """
     if args.state == "off":
-        ctx.require_human("pause off", confirm=False)
+        ctx.require_human("pause off")
     scope = "global" if args.global_ else "project"
     files = ctx.pause_files()
     if scope not in files:

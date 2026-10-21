@@ -81,14 +81,18 @@ def find_target(gh: GhClient, repo: str, n: int, target: Dict[str, Any], trusted
                 roster: Any) -> Dict[str, Any]:
     """{url, strategy, head_sha, tried[, skipped]} for the first strategy with an allowed URL, else
     {none, tried[, skipped]}. target is the merged prove.target; trusted_target is the same map from the default
-    and global layers only (hosts and bots are read from it)."""
-    order = target.get("strategy") or list(DEFAULT_STRATEGY)
+    and global layers only. strategy, hosts, bots and the url_template whose host is allowed come from
+    trusted_target; a repo-layer url_template is still tried, but only passes when its host is already allowed."""
+    order = trusted_target.get("strategy") or list(DEFAULT_STRATEGY)
     hosts = list(trusted_target.get("hosts") or DEFAULT_HOSTS)
     owner, _, name = repo.partition("/")
+    values = dict(pr=n, repo=repo, owner=owner, name=name)
+    trusted_template = str(trusted_target.get("url_template") or "")
+    trusted_url = _template_url(trusted_template, **values) if trusted_template else None
+    if trusted_url and host_of(trusted_url):
+        hosts.append(str(host_of(trusted_url)))
     template = str(target.get("url_template") or "")
-    template_url = _template_url(template, pr=n, repo=repo, owner=owner, name=name) if template else None
-    if template_url and host_of(template_url):
-        hosts.append(str(host_of(template_url)))
+    template_url = _template_url(template, **values) if template else None
     bots = trusted_target.get("bots") or []
     sha = gh.pr(repo, n).get("headRefOid") or ""
     tried: List[str] = []
