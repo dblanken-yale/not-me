@@ -220,7 +220,7 @@ Create a fine-grained personal access token:
 5. Export it for the run: `export NOT_ME_FIXTURE_TOKEN=github_pat_...`
 
 Before staging anything, `prepare` refuses any token that does not start with `github_pat_` (classic `ghp_` and
-OAuth `gho_` tokens are out), then checks the token with `gh api user -H "Authorization: token ..."`. The token
+OAuth `gho_` tokens are out), then checks the token with `gh api user`. The token is handed to `gh` only as `GH_TOKEN` in a scrubbed environment (empty `GH_CONFIG_DIR`), never on a command line, so it does not show in the process list or in `--dry-run` output. The token
 must get a 200 with `permissions.push` true for the fixture repo (and the companion when the scenario has one), and
 must get an explicit HTTP 404 for this plugin repo. Any other failure there (network, 401, 403, 5xx, `gh` missing)
 also refuses, because it does not prove the repo is hidden. A broad token is refused. The plugin repo is taken

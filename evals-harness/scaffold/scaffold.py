@@ -6,7 +6,8 @@ so nothing the harness exports reaches it: no run id, no manifest path, no token
 
     scaffold.py prepare --manifest PATH --stage-dir DIR
                                    operator side, before `claude plugin eval`. Needs NOT_ME_FIXTURE_TOKEN, a
-                                   dedicated fine-grained token, and refuses without it. It checks that the
+                                   dedicated fine-grained token, and refuses without it. The token goes to
+                                   gh only as GH_TOKEN in a scrubbed environment, never on a command line. It checks that the
                                    token sees the fixture repo and cannot see this plugin repo, clones the
                                    fixture repo (and the companion) at the manifest's SHAs into DIR, stages
                                    the token there (mode 600) and points evals/.state/current-stage.json at
@@ -50,8 +51,19 @@ CASE_ID = re.compile(r"(?:^|-)([A-Z]\d+)$")
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 
+TOKEN_RE = re.compile(r"(?:github_pat|gh[pousr])_[A-Za-z0-9_]+")
+
+
+def redact(text: Any) -> str:
+    """Hide anything that looks like a GitHub token."""
+    return TOKEN_RE.sub("<redacted-token>", str(text))
+
+
 class ScaffoldError(Exception):
-    pass
+    """An error whose message never carries a token."""
+
+    def __init__(self, message: Any = ""):
+        super().__init__(redact(message))
 
 
 def run(argv: Sequence[str], cwd: Optional[Path] = None, env: Optional[Mapping[str, str]] = None,
@@ -179,20 +191,20 @@ def check_token(token: str, repos: Sequence[str], plugin: str, runner: Runner, e
             "not a fine-grained token"
         raise ScaffoldError(f"{TOKEN_ENV} is {kind}. It must be a fine-grained token (github_pat_...) limited "
                             "to the fixture repos (see docs/testing.md)")
-    header = ["-H", f"Authorization: token {token}"]
+    # The token reaches gh only through GH_TOKEN in `env`, never in argv (argv shows in the process list).
     try:
-        user = json.loads(runner(["gh", "api", "user", *header], env=env).stdout)
+        user = json.loads(runner(["gh", "api", "user"], env=env).stdout)
     except (ScaffoldError, ValueError) as exc:
         raise ScaffoldError(f"{TOKEN_ENV} was rejected by GitHub: {exc}")
     for repo in repos:
         try:
-            info = json.loads(runner(["gh", "api", f"repos/{repo}", *header], env=env).stdout)
+            info = json.loads(runner(["gh", "api", f"repos/{repo}"], env=env).stdout)
         except (ScaffoldError, ValueError) as exc:
             raise ScaffoldError(f"{TOKEN_ENV} cannot read the fixture repo {repo}: {exc}")
         if not (info.get("permissions") or {}).get("push") is True:
             raise ScaffoldError(f"{TOKEN_ENV} cannot push to the fixture repo {repo} (permissions.push is not true)")
     try:
-        runner(["gh", "api", f"repos/{plugin}", *header], env=env)
+        runner(["gh", "api", f"repos/{plugin}"], env=env)
     except ScaffoldError as exc:
         if re.search(r"HTTP 404\b", str(exc)):
             return user
