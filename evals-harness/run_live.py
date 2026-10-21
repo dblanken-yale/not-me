@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -38,8 +39,19 @@ def subprocess_runner(argv: Sequence[str], env: Dict[str, str]) -> int:
     return subprocess.run(list(argv), env=env, cwd=str(ROOT)).returncode
 
 
+TOKEN_RE = re.compile(r"(?:github_pat|gh[pousr])_[A-Za-z0-9_]+")
+
+
+def redact(text: str) -> str:
+    """Hide GitHub tokens, and the exact NOT_ME_FIXTURE_TOKEN value, in anything printed."""
+    secret = os.environ.get("NOT_ME_FIXTURE_TOKEN")
+    if secret:
+        text = text.replace(secret, "<redacted-token>")
+    return TOKEN_RE.sub("<redacted-token>", text)
+
+
 def quote(argv: Sequence[str]) -> str:
-    return " ".join(shlex.quote(str(a)) for a in argv)
+    return redact(" ".join(shlex.quote(str(a)) for a in argv))
 
 
 def new_run_id(scenario: str, n: int) -> str:
@@ -212,7 +224,7 @@ def main(argv: Optional[Sequence[str]] = None, runner: Runner = subprocess_runne
     stream = out or sys.stdout
 
     def say(line: str) -> None:
-        print(line, file=stream)
+        print(redact(line), file=stream)
 
     missing = [f"--{k}" for k in ("repo", "owner") if not getattr(args, k)]
     if missing:

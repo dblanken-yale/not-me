@@ -116,12 +116,31 @@ class PrepareTest(unittest.TestCase):
         api = [a for a, _ in fake.calls if a[:2] == ["gh", "api"]]
         self.assertEqual([a[2] for a in api], ["user", f"repos/{FIX}", f"repos/{PLUGIN}"])
         for a in api:
-            self.assertEqual(a[3:], ["-H", "Authorization: token github_pat_tok"])
+            self.assertEqual(len(a), 3)  # no -H header: the token is not in argv
         self.assertFalse(any(a[:3] == ["gh", "auth", "token"] for a, _ in fake.calls))
         for a, env in fake.calls:
             if a[0] == "gh":
                 self.assertEqual(env["GH_TOKEN"], "github_pat_tok")
                 self.assertNotIn("hosts.yml", json.dumps(env))
+
+    def test_the_token_is_in_the_env_of_every_gh_call_and_in_no_argv(self):
+        fake = FakeRun()
+        self.prepare(fake)
+        self.assertTrue(any(a[:3] == ["gh", "repo", "clone"] for a, _ in fake.calls))
+        for argv, env in fake.calls:
+            self.assertNotIn("github_pat_tok", " ".join(argv))
+            if argv[0] == "gh":
+                self.assertEqual(env["GH_TOKEN"], "github_pat_tok")
+                self.assertTrue(env["GH_CONFIG_DIR"])
+
+    def test_errors_never_carry_a_token(self):
+        err = scaffold.ScaffoldError("gh failed: Authorization: token github_pat_ABC123 bad; also ghp_XYZ")
+        self.assertNotIn("github_pat_ABC123", str(err))
+        self.assertNotIn("ghp_XYZ", str(err))
+        fake = FakeRun(plugin_error="HTTP 403 for token github_pat_tok")
+        with self.assertRaises(scaffold.ScaffoldError) as ctx:
+            self.prepare(fake)
+        self.assertNotIn("github_pat_tok", str(ctx.exception))
 
     def test_stages_the_token_0600_and_clean_removes_it(self):
         self.prepare(FakeRun())

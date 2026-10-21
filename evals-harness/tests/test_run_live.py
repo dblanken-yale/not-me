@@ -83,6 +83,14 @@ class RunLiveTest(unittest.TestCase):
         self.assertEqual(kinds, ["reset", "seed", "prepare", "eval", "grade", "clean", "teardown"])
         self.assertEqual(list(Path(self.out).iterdir()), [])
 
+    def test_dry_run_output_never_shows_the_token(self):
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"NOT_ME_FIXTURE_TOKEN": "github_pat_SECRET123"}):
+            run_live.main(self.args("--dry-run", "--repo", "acme/github_pat_SECRET123-fixture"),
+                          runner=Recorder(), rid_factory=rids, out=buf)
+        self.assertNotIn("SECRET123", buf.getvalue())
+        self.assertIn("<redacted-token>", buf.getvalue())
+
     def test_dry_run_eval_command_has_the_required_flags(self):
         buf = io.StringIO()
         run_live.main(self.args("--dry-run", "--cap", "4"), runner=Recorder(), rid_factory=rids, out=buf)
