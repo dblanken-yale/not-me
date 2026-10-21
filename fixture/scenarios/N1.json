@@ -22,7 +22,7 @@
   "prs": [],
   "expect": {
     "skill": "new",
-    "result": "DONE",
+    "result": "PR",
     "pr_exists": {"count": 1, "base": "main"},
     "labels_exact": {"issue:bug": ["needs review"]},
     "closing_ref_qualified": true,

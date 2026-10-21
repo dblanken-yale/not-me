@@ -1,0 +1,50 @@
+{
+  "description": "companions, not allowed: the repo layer names a companion the operator never confirmed, so the guard blocks the companion write",
+  "patches": [],
+  "issues": [
+    {
+      "key": "both",
+      "title": "Show the mean as a percentage",
+      "body": "Add `mean_percent(values)` to calc (the mean times 100) and use `ui.percent` in the companion repo to format it.\n\nAcceptance:\n- calc.mean_percent exists with a test\n- the companion repo gets a matching change\n- both PRs link each other",
+      "labels": [
+        "to do"
+      ],
+      "as": "operator"
+    }
+  ],
+  "prs": [],
+  "companion": {
+    "patches": [],
+    "issues": [],
+    "prs": []
+  },
+  "config": {
+    "repo": {
+      "project.md": "---\nschema: 1\nextends: default\nrepos:\n  - {name: \"{repo}\", path: \".\", role: primary}\n  - {name: \"{companion}\", path: \"{companion_path}\", role: companion}\n---\n"
+    }
+  },
+  "expect": {
+    "skill": "new",
+    "result": "FAILED",
+    "note": "guard block that stops the item: release to the pick label and add needs human",
+    "pr_exists": {
+      "count": 0,
+      "repos": [
+        "main",
+        "companion"
+      ]
+    },
+    "companion_untouched": true,
+    "labels_exact": {
+      "issue:both": [
+        "to do",
+        "needs human"
+      ]
+    },
+    "no_force_push": true,
+    "protected_unchanged": [
+      "main",
+      "develop"
+    ]
+  }
+}

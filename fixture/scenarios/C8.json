@@ -1,0 +1,18 @@
+{
+  "description": "config, guard on beats global off: the global layer turns force_push off, the repo layer turns it back on",
+  "patches": [],
+  "issues": [],
+  "prs": [],
+  "config": {
+    "global": {
+      "project.md": "---\nschema: 1\nextends: default\nguard: {force_push: off}\nconfirm_guard_off: [force_push]\n---\n"
+    },
+    "repo": {
+      "project.md": "---\nschema: 1\nextends: default\nguard: {force_push: on}\n---\n"
+    }
+  },
+  "expect": {
+    "skill": "config",
+    "no_writes_since": true
+  }
+}

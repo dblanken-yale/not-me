@@ -16,9 +16,15 @@
     "issues": [],
     "prs": []
   },
+  "config": {
+    "repo": {
+      "project.md": "---\nschema: 1\nextends: default\nrepos:\n  - {name: \"{repo}\", path: \".\", role: primary}\n  - {name: \"{companion}\", path: \"{companion_path}\", role: companion}\n---\n"
+    },
+    "allow_companions": true
+  },
   "expect": {
     "skill": "new",
-    "result": "DONE",
+    "result": "PR",
     "pr_exists": {"count": 1, "repos": ["main", "companion"]},
     "push_order": ["companion", "main"],
     "pr_body_contains": "## Companion PRs",

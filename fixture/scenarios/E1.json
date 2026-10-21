@@ -1,0 +1,20 @@
+{
+  "description": "retro, lesson with evidence: a finished run log shows CI ran a lint command the verify doc lacks; one repo-layer edit with the rollback diff in the audit log",
+  "patches": [],
+  "issues": [],
+  "prs": [],
+  "config": {
+    "repo": {
+      "verify.md": "---\nschema: 1\nextends: default\n---\n# Verify\n\n## Tests\n\nmake test\n\n## Lint\n\nNone. The project has no linter.\n"
+    },
+    "commit_repo_layer": true,
+    "git_files": {
+      "not-me/logs/new/20260101-120000-run-a1b2c3.md": "# not-me:new -   run=20260101-120000-run-a1b2c3\n\n## Summary\n\nStatus: FAILED - ci-red - lint\n\nRefused / failures first:\n- CI job lint failed: `make lint` is not in verify.md, so the local gate never ran it\n\nQuestions and decisions:\nnone\n\nCounts: ACTION 2, REFUSED 0, IGNORED 0, CHECK 2, GATE 1, WARN 1, DELEGATE 0, AUDIT 0, QUESTION 0\n\n## Timeline\n\n- 2026-01-01T12:00:05+00:00  ACTION  read config: verify.md pins `make test` and says the project has no linter\n- 2026-01-01T12:03:10+00:00  CHECK  make test: 7 passed\n- 2026-01-01T12:03:40+00:00  GATE  local gate green (tests only)\n- 2026-01-01T12:09:12+00:00  CHECK  CI job lint ran `make lint`: failed, calc/core.py does not compile\n- 2026-01-01T12:09:13+00:00  WARN  verify.md `## Lint` says there is no linter, but CI runs `make lint`\n- 2026-01-01T12:20:40+00:00  ACTION  stopped at limits.fix_loop with CI red on lint\n"
+    }
+  },
+  "expect": {
+    "skill": "retro",
+    "result": "RETRO",
+    "no_writes_since": true
+  }
+}

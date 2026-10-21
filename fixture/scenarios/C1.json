@@ -1,0 +1,18 @@
+{
+  "description": "config, repo wins: the global and repo layers both set limits.fix_loop; the repo value is effective",
+  "patches": [],
+  "issues": [],
+  "prs": [],
+  "config": {
+    "global": {
+      "project.md": "---\nschema: 1\nextends: default\nlimits: {fix_loop: 5}\n---\n"
+    },
+    "repo": {
+      "project.md": "---\nschema: 1\nextends: default\nlimits: {fix_loop: 2}\n---\n"
+    }
+  },
+  "expect": {
+    "skill": "config",
+    "no_writes_since": true
+  }
+}

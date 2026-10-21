@@ -1,0 +1,38 @@
+{
+  "description": "prove, no testing steps: the PR body has none, so nothing is run or posted",
+  "patches": [
+    {
+      "branch": "eval/{rid}/{id}",
+      "path": "site/index.html",
+      "find": "<h1 id=\"title\">Calc demo</h1>",
+      "replace": "<h1 id=\"title\">Calc demo v3</h1>",
+      "message": "feat: rename the demo heading"
+    }
+  ],
+  "issues": [],
+  "prs": [
+    {
+      "key": "pr",
+      "head": "eval/{rid}/{id}",
+      "base": "main",
+      "title": "feat: rename the demo heading",
+      "body": "## Summary\n\nThe page heading now reads \"Calc demo v3\".",
+      "labels": [
+        "needs review"
+      ],
+      "assignee": "{operator}",
+      "as": "operator"
+    }
+  ],
+  "expect": {
+    "skill": "prove",
+    "result": "NONE",
+    "no_writes_since": true,
+    "proof_comment": 0,
+    "labels_exact": {
+      "pr:pr": [
+        "needs review"
+      ]
+    }
+  }
+}

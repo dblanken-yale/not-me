@@ -1,0 +1,22 @@
+{
+  "description": "ticket, check: an issue with no acceptance criteria is reported as not ready; nothing is written without a yes",
+  "patches": [],
+  "issues": [
+    {
+      "key": "thin",
+      "title": "Add a clamp helper",
+      "body": "We need clamp in calc.",
+      "labels": [],
+      "as": "operator"
+    }
+  ],
+  "prs": [],
+  "expect": {
+    "skill": "ticket",
+    "result": "TICKET",
+    "no_writes_since": true,
+    "labels_exact": {
+      "issue:thin": []
+    }
+  }
+}

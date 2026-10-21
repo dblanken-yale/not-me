@@ -1,0 +1,5 @@
+# Mixed case: the prompt and graders are in prompt.md and graders/; only the
+# scaffold lives here, because prompt.md frontmatter has no scaffold key.
+schema_version: "1.0"
+context:
+  scaffold_script: scaffold.sh

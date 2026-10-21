@@ -1,0 +1,44 @@
+{
+  "description": "update, nothing to do: the only needs-work PR is not assigned to the operator",
+  "patches": [
+    {
+      "branch": "eval/{rid}/{id}",
+      "path": "calc/core.py",
+      "find": "    \"\"\"Return a * b.\"\"\"",
+      "replace": "    \"\"\"Return the product of a and b.\"\"\"",
+      "message": "docs: clarify mul docstring"
+    }
+  ],
+  "issues": [],
+  "prs": [
+    {
+      "key": "pr",
+      "head": "eval/{rid}/{id}",
+      "base": "main",
+      "title": "docs: clarify mul docstring",
+      "body": "## Summary\n\nDocstring wording only.\n\n## Testing steps\n\n1. Run `make test`.",
+      "labels": [
+        "needs work"
+      ],
+      "as": "operator",
+      "review_threads": [
+        {
+          "path": "calc/core.py",
+          "line": 15,
+          "as": "operator",
+          "body": "Say what happens with negative numbers too."
+        }
+      ]
+    }
+  ],
+  "expect": {
+    "skill": "update",
+    "result": "NONE",
+    "no_writes_since": true,
+    "labels_exact": {
+      "pr:pr": [
+        "needs work"
+      ]
+    }
+  }
+}

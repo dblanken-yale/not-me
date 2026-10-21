@@ -1,0 +1,24 @@
+{
+  "description": "ticket, create: a ready issue in the format the repo's standards doc defines",
+  "patches": [],
+  "issues": [],
+  "prs": [],
+  "config": {
+    "repo": {
+      "standards.md": "---\nschema: 1\nextends: default\n---\n# Standards\n\n## Issue readiness\n\nAn issue is ready to pick up when it has:\n\n- a problem statement\n- an acceptance criteria checklist\n- what is out of scope\n\n## Ticket format\n\nEvery new issue has exactly these sections, in this order:\n\n### Problem\n\n### Acceptance criteria\n\n### Out of scope\n"
+    }
+  },
+  "expect": {
+    "skill": "ticket",
+    "result": "TICKET",
+    "note": "the created issue itself is checked in-case; no expect key reads new issues",
+    "pr_exists": {
+      "count": 0
+    },
+    "branches_created": 0,
+    "protected_unchanged": [
+      "main",
+      "develop"
+    ]
+  }
+}

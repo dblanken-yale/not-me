@@ -29,9 +29,14 @@
       "as": "bot"
     }
   ],
+  "config": {
+    "repo": {
+      "project.md": "---\nschema: 1\nextends: default\n---\n# Project\n\n## Roster\n\n| GitHub login | Name | Tier | Assignable | Reviewer |\n|--------------|------|------|------------|----------|\n| {operator} | Operator | lead | yes | yes |\n| github-actions[bot] | Fixture bot | member | no | no |\n"
+    }
+  },
   "expect": {
     "skill": "review",
-    "result": "CHANGES_REQUESTED",
+    "result": "REVIEWED",
     "review_event": "REQUEST_CHANGES",
     "comment_anchor": {"path": "calc/core.py", "line": 16},
     "labels_exact": {"pr:pr": ["needs work"]},

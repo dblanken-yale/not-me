@@ -1,0 +1,18 @@
+{
+  "description": "config, explain: every layer is shown and no personal path appears",
+  "patches": [],
+  "issues": [],
+  "prs": [],
+  "config": {
+    "global": {
+      "project.md": "---\nschema: 1\nextends: default\nlimits: {ci_wait_minutes: 30}\n---\n"
+    },
+    "repo": {
+      "verify.md": "---\nschema: 1\nextends: default\n---\n# Verify\n\n## Tests\n\nmake test\n\n## Lint\n\nmake lint\n"
+    }
+  },
+  "expect": {
+    "skill": "config",
+    "no_writes_since": true
+  }
+}

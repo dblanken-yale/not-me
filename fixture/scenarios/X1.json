@@ -1,0 +1,67 @@
+{
+  "description": "router, one unit: a needs-work PR and a ready issue; the update leg runs first and the new leg never starts",
+  "patches": [
+    {
+      "branch": "eval/{rid}/{id}",
+      "path": "calc/core.py",
+      "find": "    if b == 0:\n        raise ValueError(\"division by zero\")\n",
+      "replace": "",
+      "message": "refactor: simplify div"
+    }
+  ],
+  "issues": [
+    {
+      "key": "todo",
+      "title": "Add a clamp helper",
+      "body": "Add `clamp(x, lo, hi)` to calc.\n\nAcceptance:\n- clamp returns x limited to the range\n- tests cover both bounds",
+      "labels": [
+        "to do"
+      ],
+      "as": "operator"
+    }
+  ],
+  "prs": [
+    {
+      "key": "pr",
+      "head": "eval/{rid}/{id}",
+      "base": "main",
+      "title": "refactor: simplify div",
+      "body": "## Summary\n\nDrops the explicit zero check in div.\n\n## Testing steps\n\n1. Run `make test`.",
+      "labels": [
+        "needs work"
+      ],
+      "assignee": "{operator}",
+      "as": "operator",
+      "review_threads": [
+        {
+          "path": "calc/core.py",
+          "line": 21,
+          "as": "operator",
+          "body": "div() no longer raises ValueError for a zero divisor. Please restore the guard so test_div_by_zero passes."
+        }
+      ]
+    }
+  ],
+  "expect": {
+    "skill": "not-me",
+    "result": "PUSHED",
+    "labels_exact": {
+      "pr:pr": [
+        "needs review"
+      ],
+      "issue:todo": [
+        "to do"
+      ]
+    },
+    "pr_exists": {
+      "count": 0
+    },
+    "threads_replied_not_resolved": true,
+    "no_force_push": true,
+    "protected_unchanged": [
+      "main",
+      "develop"
+    ],
+    "pr_open_not_merged": true
+  }
+}
