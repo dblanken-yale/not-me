@@ -527,6 +527,8 @@ def git(cwd, *args):
 
 def init_repo(path):
     git(path, "init", "-q", "-b", "main")
+    git(path, "config", "user.name", "t")
+    git(path, "config", "user.email", "t@example.test")
     (Path(path) / "a.txt").write_text("one\n", encoding="utf-8")
     git(path, "add", "a.txt")
     git(path, "commit", "-q", "-m", "init")
