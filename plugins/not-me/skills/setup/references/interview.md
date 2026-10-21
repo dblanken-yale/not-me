@@ -1,0 +1,75 @@
+# Setup: the interview
+
+Ask with AskUserQuestion, at most four questions per call, as few calls as the
+answers need. Put the detected value first as the recommended option and quote the
+key's comment from the shipped defaults as the explanation. Skip any question whose
+doc is not in scope for this run.
+
+## Repo layer questions
+
+| # | Ask | Writes | Doc |
+|---|-----|--------|-----|
+| 1 | Is this repo where issues live, or does another repo hold them? | `tracker` | project |
+| 2 | Pick work from labels or from a project board? Which board? | `queue.source`, `queue.board`, `queue.board_states`, `queue.pick_label`, `queue.opt_in_label` | project |
+| 3 | Who is on the roster, with what tier? (lead, authority, member; assignable; reviewer) | `## Roster` table rows | project |
+| 4 | Who is requested as reviewer by default, and per repo? | `reviewers` | project |
+| 5 | Which sibling checkouts are companions, and in what push order? | `repos` | project |
+| 6 | Per state: create, map to an existing label, or skip (see `labels.md`) | `labels` | project |
+| 7 | Which branches beyond main, master and develop are protected? | `protected_branches` (add only) | project |
+| 8 | Orchestrate across models, or one model for everything? | `models.strategy`, `models.single_model` | project |
+| 9 | Are these the test, lint and build commands? | verify sections | verify |
+| 10 | Which units need the most capable model? (paths or kinds) | `## Delegation` | standards |
+| 11 | Is this the ticket format and the readiness bar? | `## Ticket format`, `## Issue readiness` | standards |
+| 12 | Extra checks before review? | `## Gate additions` | verify |
+| 13 | Where is the URL to test a PR found, in what order? | `target` | prove |
+| 14 | A command to run when a run ends? | `notify.command` | project |
+| 15 | Add to the global docs, or replace them? (only when a global doc exists) | `extends` | each doc |
+| 16 | Turn on live mode at the end if doctor passes? | `mode` in the global layer | project (global) |
+
+## Global layer questions (`--global`)
+
+Ask only operator-level keys: `mode`, `attribution`, `limits`, `models`, `router`,
+`notify`, `logs.root`. Never ask `allow_repos`; the allow list is changed only with
+`/not-me:allow-repo`.
+
+Refuse repo-only keys in the global layer, and say why: `tracker`, `repos`,
+`queue`, `labels`, `reviewers`, the roster table, verify commands, and the
+`## Ticket format` section. They describe one project and belong in its repo layer.
+
+## Answers file (`--answers FILE`)
+
+A JSON object. Every field is optional; a missing field keeps the detected value,
+or the default when nothing was detected. With an answers file, setup asks
+nothing, treats every confirmation as given except `create_labels` and
+`mode_live` (both default false), and still runs every check.
+
+```json
+{
+  "layer": "repo",
+  "docs": ["project", "standards", "verify", "review", "prove"],
+  "body": "extend",
+  "tracker": "owner/name",
+  "queue": {"source": "board", "board": {"owner": "owner", "number": 3}},
+  "roster": [{"login": "someone", "name": "Some One", "tier": "lead", "assignable": true, "reviewer": true}],
+  "reviewers": {"default": ["someone"]},
+  "repos": [{"name": "owner/app", "role": "primary"}, {"name": "owner/app-ui", "role": "companion"}],
+  "companion_docs": false,
+  "labels": {"todo": "ready", "in_progress": "create", "epic": "skip"},
+  "create_labels": false,
+  "protected_branches": ["release"],
+  "models": {"strategy": "orchestrate"},
+  "verify": {"tests": "make test", "lint": "make lint", "build": null, "gate_additions": []},
+  "delegation": ["src/auth/", "database migrations"],
+  "ticket_format": "keep",
+  "prove": {"strategy": ["deployments", "local"]},
+  "notify": {"command": null},
+  "mode_live": false
+}
+```
+
+Field notes: `body` is `extend` (write `extends: global`) or `replace`. A `labels`
+value is `create`, `skip`, or the existing label name to map to. `ticket_format`
+is `keep` (the default text), `detected`, or the literal markdown to write. A
+global run may also carry `attribution`, `limits`, `router` and `logs` objects
+shaped like the keys in the shipped `project.md`; any repo-only field in a global
+run is an error that stops setup before writing.
