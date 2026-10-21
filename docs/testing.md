@@ -219,9 +219,11 @@ Create a fine-grained personal access token:
    Metadata (read) is added for you.
 5. Export it for the run: `export NOT_ME_FIXTURE_TOKEN=github_pat_...`
 
-Before staging anything, `prepare` checks the token with `gh api user -H "Authorization: token ..."`. The token
-must be able to read the fixture repo (and the companion when the scenario has one) and must not be able to read
-this plugin repo (`gh api repos/<plugin repo>` has to fail). A broad token is refused. The plugin repo is taken
+Before staging anything, `prepare` refuses any token that does not start with `github_pat_` (classic `ghp_` and
+OAuth `gho_` tokens are out), then checks the token with `gh api user -H "Authorization: token ..."`. The token
+must get a 200 with `permissions.push` true for the fixture repo (and the companion when the scenario has one), and
+must get an explicit HTTP 404 for this plugin repo. Any other failure there (network, 401, 403, 5xx, `gh` missing)
+also refuses, because it does not prove the repo is hidden. A broad token is refused. The plugin repo is taken
 from the `origin` remote; set `NOT_ME_PLUGIN_REPO=owner/name` if that is wrong.
 
 The token is copied to `evals/.state/<RID>/<ID>.stage/gh-token` (mode 600) for the scaffold to sign `gh` in

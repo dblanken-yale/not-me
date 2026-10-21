@@ -17,8 +17,9 @@ FIX, COMP, PLUGIN = "acme/x-fixture", "acme/x-fixture-companion", "acme/plugin"
 class FakeRun:
     """A scaffold runner: records calls; the token can see the fixtures and optionally the plugin repo."""
 
-    def __init__(self, sees_plugin=False, sees_fixture=True):
+    def __init__(self, sees_plugin=False, sees_fixture=True, plugin_error="HTTP 404", push=True):
         self.calls, self.sees_plugin, self.sees_fixture = [], sees_plugin, sees_fixture
+        self.plugin_error, self.push = plugin_error, push
 
     def __call__(self, argv, cwd=None, env=None, input_text=None):
         self.calls.append((list(argv), dict(env) if env is not None else None))
@@ -26,9 +27,11 @@ class FakeRun:
             return type("P", (), {"stdout": json.dumps({"login": "fixture-bot", "id": 7})})()
         if argv[:2] == ["gh", "api"] and argv[2].startswith("repos/"):
             repo = argv[2][len("repos/"):]
-            if repo == PLUGIN and not self.sees_plugin or repo != PLUGIN and not self.sees_fixture:
+            if repo == PLUGIN and not self.sees_plugin:
+                raise scaffold.ScaffoldError(f"gh api {repo} failed (1): {self.plugin_error}")
+            if repo != PLUGIN and not self.sees_fixture:
                 raise scaffold.ScaffoldError(f"gh api {repo} failed (1): HTTP 404")
-            return type("P", (), {"stdout": "{}"})()
+            return type("P", (), {"stdout": json.dumps({"permissions": {"push": self.push}})})()
         if argv[:3] == ["gh", "repo", "clone"]:
             Path(argv[4]).mkdir(parents=True)
             return type("P", (), {"stdout": ""})()
@@ -46,7 +49,7 @@ class PrepareTest(unittest.TestCase):
         self.manifest.write_text(json.dumps({"scenario": "N1", "run_id": "rid", "repo": FIX, "companion": None,
                                              "shas": {"main": "a" * 40}}), encoding="utf-8")
         self.stage = self.state / "rid" / "N1.stage"
-        self.env = {scaffold.TOKEN_ENV: "tok", scaffold.PLUGIN_REPO_ENV: PLUGIN, "GH_TOKEN": "operator"}
+        self.env = {scaffold.TOKEN_ENV: "github_pat_tok", scaffold.PLUGIN_REPO_ENV: PLUGIN, "GH_TOKEN": "operator"}
 
     def prepare(self, runner, env=None):
         return scaffold.prepare(self.manifest, self.stage, self.env if env is None else env, runner=runner,
@@ -71,8 +74,40 @@ class PrepareTest(unittest.TestCase):
         self.assertFalse(self.stage.exists())
         self.assertFalse(any(a[:3] == ["gh", "repo", "clone"] for a, _ in fake.calls))
 
+    def test_only_an_explicit_404_counts_as_not_visible(self):
+        self.prepare(FakeRun(plugin_error="gh: Not Found (HTTP 404)"))
+
+    def test_a_403_on_the_plugin_repo_refuses(self):
+        with self.assertRaisesRegex(scaffold.ScaffoldError, "expected HTTP 404"):
+            self.prepare(FakeRun(plugin_error="gh: Resource not accessible (HTTP 403)"))
+        self.assertFalse(self.stage.exists())
+
+    def test_401_and_5xx_on_the_plugin_repo_refuse(self):
+        for err in ("HTTP 401", "HTTP 502"):
+            with self.assertRaises(scaffold.ScaffoldError, msg=err):
+                self.prepare(FakeRun(plugin_error=err))
+
+    def test_a_network_error_on_the_plugin_repo_refuses(self):
+        with self.assertRaisesRegex(scaffold.ScaffoldError, "expected HTTP 404"):
+            self.prepare(FakeRun(plugin_error="error connecting to api.github.com"))
+
+    def test_gh_missing_refuses(self):
+        with self.assertRaisesRegex(scaffold.ScaffoldError, "could not run"):
+            scaffold.run(["definitely-not-a-real-gh-binary", "api", "user"])
+
+    def test_classic_and_oauth_tokens_are_refused_before_any_call(self):
+        for tok in ("ghp_abc", "gho_abc", "abc123"):
+            fake = FakeRun()
+            with self.assertRaisesRegex(scaffold.ScaffoldError, "fine-grained"):
+                self.prepare(fake, dict(self.env, **{scaffold.TOKEN_ENV: tok}))
+            self.assertEqual(fake.calls, [])
+
+    def test_a_token_without_push_on_the_fixture_is_refused(self):
+        with self.assertRaisesRegex(scaffold.ScaffoldError, "cannot push"):
+            self.prepare(FakeRun(push=False))
+
     def test_refuses_a_token_that_cannot_see_the_fixture(self):
-        with self.assertRaisesRegex(scaffold.ScaffoldError, "cannot see the fixture repo"):
+        with self.assertRaisesRegex(scaffold.ScaffoldError, "cannot read the fixture repo"):
             self.prepare(FakeRun(sees_fixture=False))
 
     def test_verifies_with_the_token_header_and_never_asks_gh_for_a_login(self):
@@ -81,17 +116,17 @@ class PrepareTest(unittest.TestCase):
         api = [a for a, _ in fake.calls if a[:2] == ["gh", "api"]]
         self.assertEqual([a[2] for a in api], ["user", f"repos/{FIX}", f"repos/{PLUGIN}"])
         for a in api:
-            self.assertEqual(a[3:], ["-H", "Authorization: token tok"])
+            self.assertEqual(a[3:], ["-H", "Authorization: token github_pat_tok"])
         self.assertFalse(any(a[:3] == ["gh", "auth", "token"] for a, _ in fake.calls))
         for a, env in fake.calls:
             if a[0] == "gh":
-                self.assertEqual(env["GH_TOKEN"], "tok")
+                self.assertEqual(env["GH_TOKEN"], "github_pat_tok")
                 self.assertNotIn("hosts.yml", json.dumps(env))
 
     def test_stages_the_token_0600_and_clean_removes_it(self):
         self.prepare(FakeRun())
         token = self.stage / "gh-token"
-        self.assertEqual(token.read_text(encoding="utf-8").strip(), "tok")
+        self.assertEqual(token.read_text(encoding="utf-8").strip(), "github_pat_tok")
         if os.name != "nt":
             self.assertEqual(stat.S_IMODE(token.stat().st_mode), 0o600)
         self.assertTrue((self.state / scaffold.POINTER).is_file())

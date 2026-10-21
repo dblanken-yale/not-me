@@ -56,8 +56,11 @@ class ScaffoldError(Exception):
 
 def run(argv: Sequence[str], cwd: Optional[Path] = None, env: Optional[Mapping[str, str]] = None,
         input_text: Optional[str] = None) -> "subprocess.CompletedProcess[str]":
-    proc = subprocess.run(list(argv), cwd=str(cwd) if cwd else None, env=dict(env) if env is not None else None,
-                          input=input_text, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(list(argv), cwd=str(cwd) if cwd else None, env=dict(env) if env is not None else None,
+                              input=input_text, capture_output=True, text=True)
+    except OSError as exc:
+        raise ScaffoldError(f"{argv[0]} could not run: {exc}")
     if proc.returncode != 0:
         raise ScaffoldError(f"{' '.join(argv[:3])} failed ({proc.returncode}): {proc.stderr.strip()[:300]}")
     return proc
@@ -168,21 +171,32 @@ def plugin_repo(env: Mapping[str, str], runner: Runner) -> str:
 
 
 def check_token(token: str, repos: Sequence[str], plugin: str, runner: Runner, env: Mapping[str, str]) -> Dict[str, Any]:
-    """Refuse a token that cannot see the fixture repos or that can see the plugin repo. Returns the user."""
+    """Refuse anything but a fine-grained token that can push to the fixture repos and gets an explicit
+    HTTP 404 for the plugin repo. Any other failure on the plugin repo (network, 401, 403, 5xx, gh missing)
+    also refuses, because it proves nothing about visibility. Returns the user."""
+    if not token.startswith("github_pat_"):
+        kind = "a classic or OAuth token" if token.startswith(("ghp_", "gho_", "ghu_", "ghs_")) else \
+            "not a fine-grained token"
+        raise ScaffoldError(f"{TOKEN_ENV} is {kind}. It must be a fine-grained token (github_pat_...) limited "
+                            "to the fixture repos (see docs/testing.md)")
     header = ["-H", f"Authorization: token {token}"]
     try:
         user = json.loads(runner(["gh", "api", "user", *header], env=env).stdout)
-    except ScaffoldError as exc:
+    except (ScaffoldError, ValueError) as exc:
         raise ScaffoldError(f"{TOKEN_ENV} was rejected by GitHub: {exc}")
     for repo in repos:
         try:
-            runner(["gh", "api", f"repos/{repo}", *header], env=env)
-        except ScaffoldError as exc:
-            raise ScaffoldError(f"{TOKEN_ENV} cannot see the fixture repo {repo}: {exc}")
+            info = json.loads(runner(["gh", "api", f"repos/{repo}", *header], env=env).stdout)
+        except (ScaffoldError, ValueError) as exc:
+            raise ScaffoldError(f"{TOKEN_ENV} cannot read the fixture repo {repo}: {exc}")
+        if not (info.get("permissions") or {}).get("push") is True:
+            raise ScaffoldError(f"{TOKEN_ENV} cannot push to the fixture repo {repo} (permissions.push is not true)")
     try:
         runner(["gh", "api", f"repos/{plugin}", *header], env=env)
-    except ScaffoldError:
-        return user
+    except ScaffoldError as exc:
+        if re.search(r"HTTP 404\b", str(exc)):
+            return user
+        raise ScaffoldError(f"cannot confirm {TOKEN_ENV} is blind to {plugin}: expected HTTP 404, got: {exc}")
     raise ScaffoldError(f"{TOKEN_ENV} can see {plugin}, the plugin repo. Refusing: it must be a fine-grained "
                         "token limited to the fixture repos (see docs/testing.md)")
 
