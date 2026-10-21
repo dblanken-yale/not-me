@@ -7,9 +7,12 @@ release-issue
 move-issue
 issue
 pick-needs-work
+pr-children
+pr-by-head
 claim-pr
 release-pr
 bundle
+wait-checks
 feedback
 pick-reviews
 prove-target
@@ -25,6 +28,7 @@ companion-prs
 testing-steps
 review-post
 resolve-threads
+issue-edit-body
 followup
 check-text
 log start
@@ -32,6 +36,10 @@ log action
 log question
 log finish
 log last
+log list
+retro save
+retro reviewed
+retro is-reviewed
 allow-repo add
 allow-repo remove
 allow-repo list
@@ -45,6 +53,7 @@ git stash
 git unstash
 git worktree-add
 git worktree-remove
+git remote-branch-exists
 git status
 status
 pause

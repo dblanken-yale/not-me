@@ -542,3 +542,120 @@ def _review_reason(gh: GhClient, repo: str, n: int, pr: Dict[str, Any], author: 
                 (since is None or (claims.parse_ts(c.get("created_at")) or since) > since):
             return "author commented since the last review"
     return None
+
+
+# --- work lists: rework candidates, stacked PRs, CI wait ---
+
+def needs_work_candidates(gh: GhClient, repo: str, operator: str, roster: Roster, labels: Any, *,
+                          include_answered: bool = False, exclude: Iterable[int] = (),
+                          legacy_markers: Sequence[str] = ()) -> List[Dict[str, Any]]:
+    """Open PRs to rework, lowest number first: {pr, labels, answered}.
+
+    A PR qualifies when it is assigned to the operator, not a draft, not paused or needs-human, by a trusted
+    author (or the operator), and labeled needs work. With include_answered, a PR labeled question also
+    qualifies (answered True) once a lead or authority (not the operator) commented after the last not-me marker. `exclude` skips
+    PR numbers.
+    """
+    skip_labels = {labels.name("paused").lower(), labels.name("needs_human").lower()}
+    skip_numbers = {int(x) for x in exclude}
+    wanted = [(labels.name("needs_work"), False)]
+    if include_answered:
+        wanted.append((labels.name("question"), True))
+    found: Dict[int, Dict[str, Any]] = {}
+    for label, answered in wanted:
+        for pr in gh.pr_list(repo, label=label, assignee=operator):
+            n = pr["number"]
+            author = login_of(pr.get("author"))
+            names = names_of(pr.get("labels"))
+            if n in skip_numbers or n in found or pr.get("isDraft") or skip_labels & {x.lower() for x in names}:
+                continue
+            if not (trusted(roster, author) or author.lower() == operator.lower()):
+                continue
+            if answered and not _lead_answered(gh, repo, n, roster, operator, legacy_markers):
+                continue
+            found[n] = {"pr": pr, "labels": names, "answered": answered}
+    return [found[n] for n in sorted(found)]
+
+
+def _lead_answered(gh: GhClient, repo: str, n: int, roster: Roster, operator: str,
+                   legacy_markers: Sequence[str]) -> bool:
+    """True when a lead or authority other than the operator commented after our last marker."""
+    fb = Feedback(repo=repo, number=int(n))
+    _comment_findings(fb, roster, gh.comments(repo, n), list(legacy_markers), None)
+    return any(a.get("tier") in ("lead", "authority") and (a.get("author") or "").lower() != operator.lower()
+               for a in fb.answered_since_marker)
+
+
+def _open_pr_split(gh: GhClient, roster: Roster, repo: str, prs: Sequence[Dict[str, Any]],
+                   keep: Any) -> "tuple[List[Dict[str, Any]], List[Dict[str, Any]]]":
+    """(found, skipped) among same-repo open PRs passing `keep`: trusted authors only."""
+    found: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    for pr in sorted(prs, key=lambda p: p["number"]):
+        if not keep(pr):
+            continue
+        login = login_of(pr.get("author"))
+        ref = {"number": pr["number"], "url": pr.get("url")}
+        if pr.get("isCrossRepository"):
+            skipped.append({**ref, "reason": "cross-repository (fork) PR"})
+        elif not trusted(roster, login, _dig(pr, "author", "type")):
+            skipped.append({**ref, "reason": "author not trusted"})
+        else:
+            found.append({**ref, "head": pr.get("headRefName"), "base": pr.get("baseRefName"), "author": login})
+    return found, skipped
+
+
+def stacked_children(gh: GhClient, repo: str, roster: Roster, head_branch: str):
+    """(children, skipped): open PRs whose base branch is `head_branch` (PRs stacked on it)."""
+    prs = gh.pr_list(repo, base=head_branch, limit=200)
+    return _open_pr_split(gh, roster, repo, prs, lambda p: p.get("baseRefName") == head_branch)
+
+
+def prs_by_head(gh: GhClient, repo: str, roster: Roster, branch: str):
+    """(found, skipped): open same-repo PRs whose head branch is `branch`."""
+    prs = gh.pr_list(repo, head=branch, limit=200)
+    return _open_pr_split(gh, roster, repo, prs, lambda p: p.get("headRefName") == branch)
+
+
+_PENDING = frozenset({"", "pending", "queued", "in_progress", "waiting", "requested", "expected"})
+_PASSING = frozenset({"success", "pass", "neutral", "skipped", "skipping"})
+
+
+def check_outcome(check: Dict[str, Any]) -> str:
+    """success, failure or pending for one check, from gh's bucket, a rollup conclusion or a status state."""
+    for key in ("bucket", "conclusion", "state"):
+        value = check.get(key)
+        if isinstance(value, str) and value.strip():
+            low = value.strip().lower()
+            if low in _PENDING:
+                return "pending"
+            return "success" if low in _PASSING else "failure"
+    return "pending"
+
+
+def checks_state(checks: Sequence[Dict[str, Any]]) -> str:
+    """none (no checks), failure (any failed), pending (any unfinished, none failed) or success."""
+    if not checks:
+        return "none"
+    outcomes = {check_outcome(c) for c in checks}
+    return "failure" if "failure" in outcomes else "pending" if "pending" in outcomes else "success"
+
+
+def wait_checks(fetch: Any, minutes: float, *, sleep: Any, clock: Any,
+                interval: float = 30.0) -> Dict[str, Any]:
+    """Poll fetch() (a list of checks) every `interval` seconds until none is pending or `minutes` pass.
+
+    Returns {state, checks, waited_s}. With no checks at all it returns "none" at once: it cannot tell a repo
+    without CI from CI that has not started. A failed check does not end the wait early; the result at the
+    deadline is "failure" if any failed, else "pending".
+    """
+    start = clock()
+    deadline = start + max(0.0, float(minutes)) * 60.0
+    while True:
+        checks = list(fetch())
+        state = checks_state(checks)
+        now = clock()
+        unfinished = any(check_outcome(c) == "pending" for c in checks)
+        if not unfinished or now >= deadline:
+            return {"state": state, "checks": checks, "waited_s": int(round(now - start))}
+        sleep(min(interval, deadline - now))
