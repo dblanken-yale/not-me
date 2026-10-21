@@ -1,0 +1,4 @@
+[
+  {"number": 7, "title": "Handle empty input in the widget", "headRefName": "fix/empty-input", "baseRefName": "main", "isDraft": false, "author": {"login": "octocat"}, "labels": [{"name": "needs review"}], "assignees": [{"login": "octocat"}], "url": "https://github.com/acme/app/pull/7"},
+  {"number": 9, "title": "Draft: refactor", "headRefName": "chore/refactor", "baseRefName": "main", "isDraft": true, "author": {"login": "hubot"}, "labels": [], "assignees": [], "url": "https://github.com/acme/app/pull/9"}
+]

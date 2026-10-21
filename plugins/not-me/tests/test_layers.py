@@ -29,10 +29,12 @@ class LayerCaseTests(unittest.TestCase):
         self.assertIsNone(cfg.layers.dirs["repo"])
 
     def test_L2_repo_only(self):
+        # The repo layer may not switch to live; the fixture's `mode: live` is ignored with a warning.
         cfg = self.case("L2").load()
-        self.assertEqual(cfg.meta["project"]["mode"], "live")
-        self.assertEqual(cfg.sources["project.mode"]["layer"], "repo")
-        self.assertEqual(cfg.warnings, [])
+        self.assertEqual(cfg.meta["project"]["mode"], "dry-run")
+        self.assertEqual(cfg.sources["project.mode"]["layer"], "default")
+        self.assertEqual(len(cfg.warnings), 1, cfg.warnings)
+        self.assertIn(".claude/not-me/project.md:3", cfg.warnings[0])
 
     def test_L3_global_only(self):
         cfg = self.case("L3").load()
@@ -58,7 +60,7 @@ class LayerCaseTests(unittest.TestCase):
 
     def test_L7_union_keys(self):
         cfg = self.case("L7").load()
-        self.assertEqual(cfg.meta["project"]["protected_branches"], ["main", "master", "develop", "trunk", "hotfix"])
+        self.assertEqual(cfg.meta["project"]["protected_branches"], ["main", "master", "develop", "release", "trunk", "hotfix"])
         self.assertEqual(cfg.meta["project"]["allow_repos"], ["acme/app-ui"])
         contributors = cfg.sources["project.protected_branches"]["contributors"]
         self.assertEqual([c["layer"] for c in contributors], ["default", "global", "repo"])
@@ -94,9 +96,11 @@ class LayerCaseTests(unittest.TestCase):
         self.assertTrue(any("extends" in w for w in cfg.warnings), cfg.warnings)
 
     def test_L12_guard_off_with_confirm_same_layer_ok(self):
+        # Confirmed in the same file, but a repo file still cannot loosen the guard.
         cfg = self.case("L12").load()
-        self.assertEqual(cfg.meta["project"]["guard"]["other_repo"], "off")
+        self.assertEqual(cfg.meta["project"]["guard"]["other_repo"], "on")
         self.assertEqual(cfg.check(), [])
+        self.assertTrue(any("other_repo" in w and "only tighten" in w for w in cfg.warnings), cfg.warnings)
 
     def test_L13_repo_turns_guard_back_on(self):
         cfg = self.case("L13").load()
@@ -160,6 +164,59 @@ class LayerCaseTests(unittest.TestCase):
         cfg = tc.load()
         self.assertEqual(cfg.meta["project"]["mode"], "live")
         self.assertEqual(cfg.sources["project.mode"]["layer"], "global")
+
+    def global_and_repo(self, global_text, repo_text):
+        tc = TempCase()
+        self.addCleanup(tc.cleanup)
+        if global_text is not None:
+            tc.write("global", "project", global_text)
+        tc.write("repo", "project", repo_text)
+        return tc.load()
+
+    def test_L19_repo_guard_may_only_tighten(self):
+        cfg = self.global_and_repo("---\nguard: {other_repo: off, force_push: off}\n"
+                                   "confirm_guard_off: [other_repo, force_push]\n---\n",
+                                   "---\nguard: {other_repo: on, force_push: off, destructive_git: off}\n"
+                                   "confirm_guard_off: [force_push, destructive_git]\n---\n")
+        guard = cfg.meta["project"]["guard"]
+        self.assertEqual(guard["other_repo"], "on")  # tightening is allowed
+        self.assertEqual(guard["force_push"], "off")  # stays at the global value
+        self.assertEqual(guard["destructive_git"], "on")  # repo off ignored
+        warned = [w for w in cfg.warnings if "only tighten" in w]
+        self.assertEqual(len(warned), 2, warned)
+        self.assertTrue(all(w.startswith("repo .claude/not-me/project.md:") for w in warned), warned)
+
+    def test_L20_repo_allow_repos_and_protected_removals_ignored(self):
+        cfg = self.global_and_repo("---\nallow_repos: [acme/app-ui]\nprotected_branches: [release]\n---\n",
+                                   "---\nallow_repos: [acme/evil]\nprotected_branches: ['!main', '!release', hotfix]\n---\n")
+        meta = cfg.meta["project"]
+        self.assertEqual(meta["allow_repos"], ["acme/app-ui"])
+        self.assertEqual(meta["protected_branches"], ["main", "master", "develop", "release", "hotfix"])
+        warned = [w for w in cfg.warnings if "only tighten" in w]
+        self.assertEqual(len(warned), 2, warned)
+        self.assertIn("acme/evil", " ".join(warned))
+
+    def test_L21_repo_mode_and_enabled_may_only_tighten(self):
+        cfg = self.global_and_repo("---\nmode: live\n---\n", "---\nmode: dry-run\nenabled: false\n---\n")
+        self.assertEqual(cfg.meta["project"]["mode"], "dry-run")
+        self.assertIs(cfg.meta["project"]["enabled"], False)
+        self.assertEqual([w for w in cfg.warnings if "only tighten" in w], [])
+        cfg = self.global_and_repo("---\nenabled: false\n---\n", "---\nmode: live\nenabled: true\n---\n")
+        self.assertEqual(cfg.meta["project"]["mode"], "dry-run")
+        self.assertIs(cfg.meta["project"]["enabled"], False)
+        self.assertEqual(len([w for w in cfg.warnings if "only tighten" in w]), 2)
+        cfg = self.global_and_repo(None, "---\nenabled: true\n---\n")  # no global false: harmless
+        self.assertIs(cfg.meta["project"]["enabled"], True)
+
+    def test_L22_explain_shows_ignored_with_reason(self):
+        cfg = self.global_and_repo("---\nmode: dry-run\n---\n", "---\nmode: live\nallow_repos: [acme/evil]\n---\n")
+        keys = cfg.explain()["keys"]
+        reason = "repo layer may only tighten"
+        self.assertEqual(keys["project.mode"]["ignored"], [{"layer": "repo", "value": "live", "reason": reason}])
+        self.assertEqual(keys["project.mode"]["source"]["layer"], "global")
+        self.assertEqual(keys["project.allow_repos"]["ignored"],
+                         [{"layer": "repo", "value": ["acme/evil"], "reason": reason}])
+        self.assertEqual(keys["project.allow_repos"]["value"], [])
 
     def test_every_case_has_a_fixture_dir(self):
         for i in range(1, 19):

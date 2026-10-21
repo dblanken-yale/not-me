@@ -1,10 +1,10 @@
 ---
 schema: 1                        # config format version; setup upgrades older files
-mode: dry-run                    # dry-run | live
-enabled: true                    # false turns not-me off for this layer and above
+mode: dry-run                    # dry-run | live; the repo layer may only set dry-run, never live
+enabled: true                    # false turns not-me off for this layer and above; the repo layer may set false, never true over a global false
 tracker: auto                    # owner/name of the repo that holds issues; auto = origin
 repos: []                        # [] = [tracker]; items {name, path: auto, default_branch: auto, role: primary|companion}, push order
-protected_branches: [main, master, develop]  # never committed to directly; union across layers, "!name" removes
+protected_branches: [main, master, develop]  # never committed to directly; union across layers, "!name" removes; the repo layer may add but its "!name" removals are ignored
 operator: auto                   # GitHub login; auto = gh api user
 queue:                           # where work is picked from
   source: labels                 # labels | board
@@ -27,9 +27,9 @@ labels:                          # label names used in the tracker, keyed by rol
 reviewers: {default: []}         # GitHub logins requested as reviewers, keyed by repo name or default
 router: [update, new]            # order in which the router tries work kinds
 workspace: {new: checkout, update: checkout, review: worktree}  # checkout | worktree per work kind
-guard: {other_repo: on, protected_branches: on, force_push: on, destructive_git: on}  # on | off; off needs confirm_guard_off in the same file
+guard: {other_repo: on, protected_branches: on, force_push: on, destructive_git: on}  # on | off; off needs confirm_guard_off in the same file; the repo layer may only set on (repo layer may only tighten)
 confirm_guard_off: []            # guard rules this file deliberately turns off
-allow_repos: []                  # extra owner/name repos the guard lets not-me touch; union across layers
+allow_repos: []                  # extra owner/name repos the guard lets not-me touch; union across layers; repo-layer entries are ignored (use /not-me:allow-repo)
 logs: {root: null}               # directory for run logs; null = <git-common-dir>/not-me/logs in the checkout
 markers: {legacy: []}            # older run-marker strings still recognised; union across layers
 attribution: inherit             # inherit | none | "<text>"
