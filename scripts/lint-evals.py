@@ -2,12 +2,15 @@
 """Static lint for plugins/not-me/evals/*/prompt.md and their graders.
 
 Prints ``path:line: RULE: message`` per violation and exits 1, or exits 0.
-Rules: E1 frontmatter parses, E2 tags, E3 ablation, E4 graders, E5 live assertions.
+Rules: E1 frontmatter parses, E2 tags, E3 ablation, E4 graders, E5 live assertions,
+E6 live scenario grading.
 """
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from typing import List, Optional, Set, Tuple
@@ -17,11 +20,38 @@ REPO = HERE.parent
 sys.path.insert(0, str(REPO / "plugins" / "not-me"))
 from notme import frontmatter  # noqa: E402
 
-RULES = {"E1", "E2", "E3", "E4", "E5"}
+RULES = {"E1", "E2", "E3", "E4", "E5", "E6"}
+SCENARIO_ID = re.compile(r"(?:^|-)([A-Z]\d+)(?:-|$)")
 CLASSES = {"safety", "outcome", "quality"}
 GRADER_TYPES = {"regex", "tool_used", "tool_order", "file_exists", "llm", "baseline"}
 
 Violation = Tuple[str, int, str, str]
+
+
+def known_expect_keys(harness: Path) -> Optional[Set[str]]:
+    """The expect keys the harness can grade, read from assertions/keys.py (None if it is missing)."""
+    path = harness / "assertions" / "keys.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("_harness_keys", str(path))
+    module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return set(module.KNOWN_KEYS)
+
+
+def scenario_problem(path: Path, harness: Path) -> Optional[str]:
+    """Why a scenario file cannot be graded from its expect block, or None when it can."""
+    if not path.is_file():
+        return f"has no scenario file {path.name} and no assertions module"
+    try:
+        expect = json.loads(path.read_text(encoding="utf-8")).get("expect")
+    except (OSError, ValueError, AttributeError):
+        return "scenario file does not parse"
+    if not isinstance(expect, dict) or not expect:
+        return "has no expect block and no assertions module"
+    known = known_expect_keys(harness)
+    unknown = sorted(set(expect) - known) if known is not None else []
+    return f"has expect keys the harness cannot grade: {', '.join(unknown)}" if unknown else None
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -92,8 +122,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                 add(grader, glines.get(("type",), 1), "E4",
                     f"grader type {gmeta.get('type')!r} is not one of {', '.join(sorted(GRADER_TYPES))}")
 
-        if harness is not None and "live" in tags and not (harness / "assertions" / f"{case}.py").is_file():
-            add(prompt, at, "E5", f"live case needs {rel(harness)}/assertions/{case}.py")
+        if harness is not None and "live" in tags:
+            found = SCENARIO_ID.search(case)
+            sid = found.group(1) if found else None
+            modules = [harness / "assertions" / f"{name}.py" for name in (case, sid) if name]
+            has_module = any(m.is_file() for m in modules)
+            if not has_module and sid is None:
+                add(prompt, at, "E5", f"live case needs {rel(harness)}/assertions/{case}.py "
+                    "or a scenario id (like N1) in its name")
+            elif not has_module:
+                problem = scenario_problem(root / "fixture" / "scenarios" / f"{sid}.json", harness)
+                if problem:
+                    add(prompt, at, "E6", f"live case {case}: scenario {sid} {problem}")
 
     violations = sorted((v for v in set(violations) if v[2] in only), key=lambda v: (v[0], v[1], v[2], v[3]))
     if args.json:
