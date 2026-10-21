@@ -676,7 +676,7 @@ class WaitChecksTests(base.CliCase):
         out, err = io.StringIO(), io.StringIO()
         code = base.cli.main(["--project-dir", str(self.project), "--repo", REPO, "wait-checks", "3", *argv],
                              runner=self.fake, env=self.env, stdin=base.TtyIO(""), stdout=out, stderr=err,
-                             sleep=self.sleep, clock=self.clock)
+                             sleep=self.sleep, clock=self.clock, process_check=lambda: False)
         self.assertEqual(out.getvalue().count("\n"), 1)
         return code, json.loads(out.getvalue())
 
