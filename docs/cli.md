@@ -169,13 +169,46 @@ Output: repo, number, title, state, url, author, author_trusted, labels, status,
 
 ### `notme pick-needs-work`
 
-The lowest-numbered open PR labeled needs work and assigned to the operator, by a trusted author.
+The lowest-numbered open PR labeled needs work and assigned to the operator, by a trusted author. With --include-answered, a PR labeled question (assigned to the operator) whose newest lead or authority comment is newer than the last not-me marker also counts, and carries answered: true.
 
 ```
-notme pick-needs-work
+notme pick-needs-work [--include-answered] [--exclude N]
 ```
 
-Output: repo, number, title, url, head_ref, labels, others; or none (with reason when paused)
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `--include-answered` | optional | also PRs labeled question that a lead or authority has answered since our last marker |
+| `--exclude N` | optional | skip this PR (repeatable) |
+
+Output: repo, number, title, url, head_ref, labels, answered (only when true), others; or none (with reason when paused)
+
+### `notme pr-children`
+
+Open PRs in the same repository whose base branch is this PR's head branch (stacked children), from trusted authors only; the others are listed in skipped with a reason.
+
+```
+notme pr-children REF
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `REF` | required |  |
+
+Output: repo, number, head, children ([{number, url, head, base, author}]), skipped
+
+### `notme pr-by-head`
+
+Open PRs in the repository (--repo, default origin) whose head branch is BRANCH, same-repository PRs from trusted authors only (others are listed in skipped). Used to find the predecessor of a "Builds on" line.
+
+```
+notme pr-by-head BRANCH
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `BRANCH` | required |  |
+
+Output: repo, branch, prs ([{number, url, head, base, author}]), skipped
 
 ### `notme claim-pr`
 
@@ -222,6 +255,21 @@ notme bundle REF
 | `REF` | required |  |
 
 Output: the feedback.Bundle fields (repo, number, title, body, head_ref, head_sha, base, state, author, author_trusted, labels, review_requests, linked_issue, companions, checks, ...)
+
+### `notme wait-checks`
+
+Poll the PR's checks (as `notme bundle` reports them) every 30 seconds until every check has a conclusion or the time is up. This is the one long-running read: it can take as long as --minutes (default limits.ci_wait_minutes). It exits 0 whatever the state; the skill decides what a failure means. With no checks at all the state is none, at once.
+
+```
+notme wait-checks REF [--minutes N]
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `REF` | required |  |
+| `--minutes N` | optional | give up after N minutes (default limits.ci_wait_minutes) |
+
+Output: state (success, failure, pending or none), checks, waited_s
 
 ### `notme feedback`
 
@@ -283,15 +331,15 @@ Output: repo, number, kind, from, to, labels
 
 ### `notme labels-sync`
 
-Make an item's labels match: --set replaces the whole set, --add and --remove edit it. --check only reports.
+Make an item's labels match: --set replaces the whole set, --add and --remove edit it. --check only reports. A bare number is an item in the tracker; owner/name#N or a URL names an item in another allowed repository (a companion PR).
 
 ```
-notme labels-sync N [--set a,b] [--add a,b] [--remove a,b] [--check]
+notme labels-sync N|REF [--set a,b] [--add a,b] [--remove a,b] [--check]
 ```
 
 | Argument | Required | Meaning |
 |----------|----------|---------|
-| `N` | required |  |
+| `N|REF` | required | a number (in the tracker), #N, owner/name#N or a URL |
 | `--set a,b` | optional | replace the whole label set |
 | `--add a,b` | optional | labels to add |
 | `--remove a,b` | optional | labels to remove (not with --set) |
@@ -763,6 +811,20 @@ notme git worktree-remove PATH
 | `PATH` | required |  |
 
 Output: path, removed
+
+### `notme git remote-branch-exists`
+
+Whether origin has the branch (git ls-remote --exit-code --heads origin NAME), and its sha.
+
+```
+notme git remote-branch-exists NAME
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `NAME` | required |  |
+
+Output: exists, sha (null when it does not exist)
 
 ### `notme git status`
 

@@ -7,9 +7,12 @@ release-issue
 move-issue
 issue
 pick-needs-work
+pr-children
+pr-by-head
 claim-pr
 release-pr
 bundle
+wait-checks
 feedback
 pick-reviews
 prove-target
@@ -45,6 +48,7 @@ git stash
 git unstash
 git worktree-add
 git worktree-remove
+git remote-branch-exists
 git status
 status
 pause

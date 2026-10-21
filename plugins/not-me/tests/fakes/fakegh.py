@@ -227,6 +227,8 @@ class FakeGitHub:
             wanted = [t for t in wanted if state == "ALL" or t["state"] == state]
             for head_ref in flags.get("--head", []):
                 wanted = [t for t in wanted if t["headRefName"] == head_ref]
+            for base_ref in flags.get("--base", []):
+                wanted = [t for t in wanted if t["baseRefName"] == base_ref]
             for label in flags.get("--label", []):
                 wanted = [t for t in wanted if label in t["labels"]]
             for who in flags.get("--assignee", []):
