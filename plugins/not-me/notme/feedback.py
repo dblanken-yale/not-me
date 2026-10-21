@@ -33,6 +33,8 @@ _AGREE_RE = re.compile(r"\b(?:correct|agree|yes|right)\b", re.IGNORECASE)
 _DOIT_RE = re.compile(r"\b(?:do it|please implement|go ahead|apply)\b", re.IGNORECASE)
 _MENTION_RE = re.compile(r"@([A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?)")
 _QUOTE_RE = re.compile(r"^\s*>")
+_SAFE_BRANCH_RE = re.compile(r"^[0-9]+-[a-z0-9._/-]{0,100}$")
+_CONCLUSION_RE = re.compile(r"^[A-Za-z_]{1,30}$")
 _BRANCH_RE = re.compile(r"^(\d+)-")
 _CLOSES_RE = re.compile(r"\b(?:closes|fixes|resolves)\s+((?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?)#(\d+)", re.IGNORECASE)
 _XREF_RE = re.compile(r"(?<![\w/.-])([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)\b")
@@ -128,6 +130,17 @@ def strip_quotes(text: Optional[str]) -> "tuple[str, int]":
     return "\n".join(kept).strip(), removed
 
 
+def quoted_lines(text: Optional[str]) -> List[str]:
+    """The non-empty quoted lines of text, markers removed and whitespace normalised."""
+    out = []
+    for line in (text or "").splitlines():
+        if _QUOTE_RE.match(line):
+            q = _norm(re.sub(r"^\s*(?:>\s*)+", "", line))
+            if q:
+                out.append(q)
+    return out
+
+
 def _clean(item: Dict[str, Any], key: str = "body") -> Dict[str, Any]:
     """{key: stripped body, quoted_lines_removed: n} for a trusted item."""
     body, removed = strip_quotes(item.get("body"))
@@ -178,9 +191,21 @@ class Bundle:
     companions: List[Dict[str, Any]] = field(default_factory=list)
     companions_skipped: List[Dict[str, Any]] = field(default_factory=list)
     checks: List[Dict[str, Any]] = field(default_factory=list)
+    head_ref_untrusted: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+def _safe_checks(checks: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Check names and conclusions only, names cut to 80 chars: for PRs whose author sets those names."""
+    out = []
+    for c in checks:
+        concl = c.get("conclusion") or c.get("bucket") or c.get("state")
+        out.append({"name": str(c.get("name") or "")[:80],
+                    "conclusion": concl if isinstance(concl, str) and _CONCLUSION_RE.match(concl) else None,
+                    "untrusted": True})
+    return out
 
 
 def _checks(gh: GhClient, repo: str, n: int) -> List[Dict[str, Any]]:
@@ -252,21 +277,34 @@ def bundle(gh: GhClient, repo: str, n: int, roster: Roster, *, tracker: Optional
     tracker = tracker or repo
     login = _dig(pr, "author", "login")
     ok = trusted(roster, login, _dig(pr, "author", "type"))
-    # An untrusted author's title and body are untrusted text: withheld, and not parsed for issue links.
+    cross = bool(pr.get("isCrossRepository"))
+    # An untrusted author's title and body are untrusted text: withheld. A fork's or an untrusted author's
+    # branch name and check names are attacker-chosen too: neither feeds issue or companion lookup.
     body = pr.get("body") if ok else None
     head_ref = pr.get("headRefName")
-    linked = _linked_issue(gh, roster, tracker, parse_linked_issue(head_ref, body, tracker))
-    companions, skipped = _companions(gh, roster, repo, head_ref, _repo_names(repos))
+    checks = _checks(gh, repo, n)
+    reason = "untrusted PR author" if not ok else "cross-repository PR" if cross else None
+    if reason:
+        head_untrusted = True
+        head_ref = head_ref if isinstance(head_ref, str) and _SAFE_BRANCH_RE.match(head_ref) else None
+        linked: Optional[Dict[str, Any]] = {"trusted": False}
+        companions: List[Dict[str, Any]] = []
+        skipped = [{"repo": None, "number": None, "reason": reason}]
+        checks = _safe_checks(checks)
+    else:
+        head_untrusted = False
+        linked = _linked_issue(gh, roster, tracker, parse_linked_issue(head_ref, body, tracker))
+        companions, skipped = _companions(gh, roster, repo, head_ref, _repo_names(repos))
     return Bundle(
         repo=repo, number=int(n), title=pr.get("title") if ok else None, body=body, head_ref=head_ref,
         head_sha=pr.get("headRefOid"), base=pr.get("baseRefName"), state=pr.get("state"),
-        is_draft=bool(pr.get("isDraft")), is_cross_repository=bool(pr.get("isCrossRepository")),
+        is_draft=bool(pr.get("isDraft")), is_cross_repository=cross,
         author=login, author_tier=tier_of(roster, login), author_trusted=ok,
         labels=[x.get("name") for x in pr.get("labels") or []],
         review_requests=[x.get("login") or x.get("slug") or x.get("name") for x in pr.get("reviewRequests") or []],
         review_decision=pr.get("reviewDecision"), mergeable=pr.get("mergeable"),
         linked_issue=linked, companions=companions, companions_skipped=skipped,
-        checks=_checks(gh, repo, n))
+        checks=checks, head_ref_untrusted=head_untrusted)
 
 
 # --- feedback ---
@@ -315,7 +353,7 @@ def _thread_findings(fb: Feedback, roster: Roster, threads: Sequence[Dict[str, A
         # Decide on the login only; the body is read after this check.
         if not trusted(roster, login, _dig(root, "author", "__typename")):
             fb._ignore(login, root.get("url"), "thread")
-            targets.append({"login": login, "url": root.get("url"), "created_at": None})
+            targets.append({"login": login, "url": root.get("url"), "created_at": None, "norm_body": ""})
             for reply in comments[1:]:
                 rlogin = _dig(reply, "author", "login")
                 if trusted(roster, rlogin, _dig(reply, "author", "__typename")) \
@@ -362,20 +400,24 @@ def _review_findings(fb: Feedback, roster: Roster, reviews: Sequence[Dict[str, A
                             "url": r.get("url"), "thread_ids": threads})
 
 
-def _target_for(text: str, quoted: bool, created_at: Optional[str],
+def _target_for(raw: str, text: str, created_at: Optional[str],
                 targets: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """The untrusted item a trusted comment answers: an @-mentioned login, else (for a quote) the latest
-    untrusted comment before it."""
-    by_login = {}
-    for t in targets:
-        if t["login"]:
-            by_login[t["login"].lower()] = t
-    for login in _MENTION_RE.findall(text):
-        if login.lower() in by_login:
-            return by_login[login.lower()]
-    if quoted and targets:
-        earlier = [t for t in targets if t["created_at"] and created_at and t["created_at"] <= created_at]
-        return (earlier or list(targets))[-1]
+    """The untrusted comment a trusted comment answers. Only comments with a known timestamp strictly
+    earlier than this one can be bound, so a later post can never be endorsed in advance.
+    An @-mention binds to the latest such comment by that login. A quote binds to the latest such comment
+    whose body contains every quoted line (compared in memory only; the body is never returned)."""
+    if not created_at:
+        return None
+    earlier = [t for t in targets if t["created_at"] and t["created_at"] < created_at and t["login"]]
+    for login in reversed(_MENTION_RE.findall(text)):
+        match = [t for t in earlier if t["login"].lower() == login.lower()]
+        if match:
+            return match[-1]
+    lines = quoted_lines(raw)
+    if lines:
+        for t in reversed(earlier):
+            if all(q in t["norm_body"] for q in lines):
+                return t
     return None
 
 
@@ -396,7 +438,8 @@ def _comment_findings(fb: Feedback, roster: Roster, comments: Sequence[Dict[str,
         login = c.get("author")
         if not trusted(roster, login):
             fb._ignore(login, c.get("url"), "comment")
-            targets.append({"login": login, "url": c.get("url"), "created_at": c.get("created_at")})
+            targets.append({"login": login, "url": c.get("url"), "created_at": c.get("created_at"),
+                            "norm_body": _norm(c.get("body") or "")})  # in memory, for quote matching only
             continue
         text = c.get("body") or ""
         marker = _marker_kind(text, legacy)
@@ -411,12 +454,13 @@ def _comment_findings(fb: Feedback, roster: Roster, comments: Sequence[Dict[str,
     for c in mine:
         login = c.get("author")
         text, quoted = strip_quotes(c.get("body"))
+        raw = c.get("body") or ""
         who = _who(roster, login, c.get("association"))
         if cutoff is None or (c.get("created_at") or "") > cutoff:
             fb.answered_since_marker.append({"id": c.get("id"), **who, "body": text, "quoted_lines_removed": quoted,
                                              "url": c.get("url"), "created_at": c.get("created_at")})
         endorsed = endorsement(text)
-        endorses = _target_for(text, bool(quoted), c.get("created_at"), targets) if endorsed else None
+        endorses = _target_for(raw, text, c.get("created_at"), targets) if endorsed else None
         if is_change_request(text) or endorsed:
             finding = {"kind": "comment", "id": c.get("id"), **who, "body": text, "quoted_lines_removed": quoted,
                        "url": c.get("url")}

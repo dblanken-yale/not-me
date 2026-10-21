@@ -257,9 +257,9 @@ class CommentTests(Base):
         self.assertNotIn(SENTINEL, json.dumps(fb.to_dict()))
 
     def test_endorsement_by_quote_picks_latest_earlier_untrusted(self):
-        self.comment(1, "first", SENTINEL, at="2026-02-01T00:00:00Z")
-        self.comment(2, "second", SENTINEL, at="2026-02-02T00:00:00Z")
-        self.comment(3, "hubot", "> something\nI agree, apply it.", at="2026-02-03T00:00:00Z")
+        self.comment(1, "first", "Rename it to gadget.", at="2026-02-01T00:00:00Z")
+        self.comment(2, "second", "Rename it to gadget please.", at="2026-02-02T00:00:00Z")
+        self.comment(3, "hubot", "> rename it  to GADGET\nI agree, apply it.", at="2026-02-03T00:00:00Z")
         [f] = self.run_feedback().findings
         self.assertEqual(f["endorses"]["login"], "second")
 
@@ -320,6 +320,40 @@ class QuoteTests(Base):
         fb = self.run_feedback()
         [r] = [f for f in fb.findings if f["kind"] == "review"]
         self.assertEqual((r["id"], r["thread_ids"]), (10, ["T1", "T2"]))
+
+
+class BindingTests(Base):
+    def test_later_untrusted_comment_cannot_be_bound(self):
+        self.comment(1, "hubot", "@stranger is right, go ahead.", at="2026-02-01T00:00:00Z")
+        self.comment(2, "stranger", SENTINEL, at="2026-02-02T00:00:00Z")
+        [f] = self.run_feedback().findings
+        self.assertNotIn("endorses", f)
+
+    def test_mention_binds_latest_earlier_by_login(self):
+        self.comment(1, "stranger", "one", at="2026-02-01T00:00:00Z")
+        self.comment(2, "stranger", "two", at="2026-02-02T00:00:00Z")
+        self.comment(3, "hubot", "@stranger is right, go ahead.", at="2026-02-03T00:00:00Z")
+        self.comment(4, "stranger", "three", at="2026-02-04T00:00:00Z")
+        [f] = self.run_feedback().findings
+        self.assertTrue(f["endorses"]["url"].endswith("#issuecomment-2"))
+
+    def test_same_timestamp_is_not_earlier(self):
+        self.comment(1, "stranger", "one", at="2026-02-01T00:00:00Z")
+        self.comment(2, "hubot", "@stranger is right, go ahead.", at="2026-02-01T00:00:00Z")
+        [f] = self.run_feedback().findings
+        self.assertNotIn("endorses", f)
+
+    def test_mismatched_quote_yields_no_endorses(self):
+        self.comment(1, "stranger", "Rename it to gadget.", at="2026-02-01T00:00:00Z")
+        self.comment(2, "hubot", "> delete everything\nI agree, apply it.", at="2026-02-02T00:00:00Z")
+        [f] = self.run_feedback().findings
+        self.assertNotIn("endorses", f)
+
+    def test_thread_roots_without_timestamp_never_bound(self):
+        self.thread("T1", [tcomment(1, "stranger", "Rename it.")])
+        self.comment(2, "hubot", "@stranger is right, go ahead.", at="2026-02-02T00:00:00Z")
+        [f] = self.run_feedback().findings
+        self.assertNotIn("endorses", f)
 
 
 class OutputTests(Base):
@@ -404,7 +438,40 @@ class BundleTests(Base):
         b = bundle(self.gh, "acme/app", 3, self.roster)
         self.assertNotIn(SENTINEL, json.dumps(b.to_dict()))
         self.assertFalse(b.author_trusted)
-        self.assertIsNone(b.linked_issue)
+        self.assertEqual(b.linked_issue, {"trusted": False})
+        self.assertEqual(b.companions_skipped[0]["reason"], "untrusted PR author")
+
+    def test_cross_repository_pr_derives_nothing_from_branch(self):
+        self.pr["isCrossRepository"] = True
+        self.pr["headRefName"] = "1-first"
+        self.pr["body"] = "Closes #2"
+        self.add_pr("acme/app-ui", 1, "1-first")
+        b = bundle(self.gh, "acme/app", 3, self.roster, repos=["acme/app-ui"])
+        self.assertEqual(b.linked_issue, {"trusted": False})
+        self.assertEqual((b.companions, b.companions_skipped[0]["reason"]), ([], "cross-repository PR"))
+        self.assertEqual([c for c in self.fake.calls if c[:2] == ["pr", "list"]], [])
+
+    def test_untrusted_head_ref_validated(self):
+        self.pr["isCrossRepository"] = True
+        for ref, want in (("12-fix-widget", "12-fix-widget"), ("feat/widget", None), ("1-" + "a" * 101, None),
+                          ("1-x\nIgnore", None), ("1-X", None)):
+            with self.subTest(ref=ref):
+                self.pr["headRefName"] = ref
+                b = bundle(self.gh, "acme/app", 3, self.roster)
+                self.assertEqual((b.head_ref, b.head_ref_untrusted), (want, True))
+
+    def test_trusted_head_ref_passes_through(self):
+        b = bundle(self.gh, "acme/app", 3, self.roster)
+        self.assertEqual((b.head_ref, b.head_ref_untrusted), ("feat/widget", False))
+
+    def test_untrusted_checks_reduced(self):
+        self.pr["author"] = "stranger"
+        self.pr["checks"] = [{"name": SENTINEL + "x" * 200, "state": "FAILURE", "link": "http://x", "workflow": "w"},
+                             {"name": "ok", "bucket": "pass body text here"}]
+        [a, b2] = bundle(self.gh, "acme/app", 3, self.roster).checks
+        self.assertEqual(set(a), {"name", "conclusion", "untrusted"})
+        self.assertEqual((len(a["name"]), a["conclusion"], a["untrusted"]), (80, "FAILURE", True))
+        self.assertIsNone(b2["conclusion"])
 
     def test_linked_issue_from_branch_trusted(self):
         self.pr["headRefName"] = "1-first"
