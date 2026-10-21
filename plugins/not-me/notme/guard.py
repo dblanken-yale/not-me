@@ -23,27 +23,26 @@ it fails closed.
 """
 from __future__ import annotations
 
-import datetime as _dt
 import json
 import os
 import re
 import subprocess
-import time
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Set, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Iterator, List, Mapping, Optional, Set, Tuple
 
-from . import paths
+from . import paths, runlog, writes
+from .writes import parse_origin, valid_slug
 
-RULES = ("other_repo", "protected_branches", "force_push", "destructive_git")
+RULES = writes.GUARD_RULES
 RULE_LABEL = {"destructive_git": "destructive"}
 SELF = "self_protect"
 OPAQUE = "opaque"  # cannot be checked: reported under the first enabled rule
 
-ALLOWLIST_NAME = "allowed-repos.json"
+ALLOWLIST_NAME = writes.ALLOWLIST_FILE
 BOARD_MARKER = "--not-me-board"
-ACTIVE_RUN_MAX_AGE = 6 * 3600
+ACTIVE_RUN_STALE_HOURS = 6
 CONFIG_HINT = ".claude/not-me/project.md"
 PLUGIN_PROTECTED_DIRS = ("hooks", "bin", "notme", "cli", "skills")
 SCRIPT_READ_LIMIT = 1 << 20
@@ -53,8 +52,6 @@ GitFn = Callable[[List[str], str], Optional[str]]
 
 # --- patterns --------------------------------------------------------------
 
-_SLUG = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
-_URL = re.compile(r"^(?:git@|ssh://git@|https?://(?:[^@/]+@)?)github\.com[:/]+([^/]+)/([^/?# ]+)")
 _HOST_SLUG = re.compile(r"^github\.com/([^/]+/[^/]+)$")
 _GH_GIT = re.compile(r"(^|[^A-Za-z0-9_.-])(gh|git)([^A-Za-z0-9_.-]|$)")
 _GITHUB = re.compile(r"github\.com", re.IGNORECASE)
@@ -65,7 +62,18 @@ _HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 _WORD_SPLIT = re.compile(r"[\s;|&()]+")
 _PATH_SEP = re.compile(r"[/\\]")
 _SCP_REMOTE = re.compile(r"^[^/]*@[^/]*:")
-_ALLOW_EDIT = re.compile(r"(^|[^A-Za-z0-9_-])(add|remove)([^A-Za-z0-9_-]|$)|--everywhere")
+_ALLOW_EDIT = re.compile(r"(?:^|[^A-Za-z0-9_-])(?:(add|remove)|(--e[a-z]*))(?:[^A-Za-z0-9_-]|$)")
+_PARAM_DEFAULT = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=+?]([^}]*)\}")
+_NOTME_PROGS = {"notme", "notme.py"}
+# variables that re-point the not-me CLI's trust anchor (its project, home, operator or GitHub identity)
+_TRUST_ENV = re.compile(r"(?<![A-Za-z0-9_])(NOT_ME_[A-Za-z0-9_]*|CLAUDE_PROJECT_DIR|CLAUDECODE|HOME|GH_HOST|GH_TOKEN|"
+                        r"GITHUB_TOKEN)=")
+_TRUST_UNSET = re.compile(r"(?<![A-Za-z0-9_-])(?:unset|-u|--unset)\s+(?:-[a-z]+\s+)*(NOT_ME_[A-Za-z0-9_]*|"
+                          r"CLAUDE_PROJECT_DIR|CLAUDECODE|HOME|GH_HOST|GH_TOKEN|GITHUB_TOKEN)\b")
+OPERATOR_CONFIRM = "NOT_ME_OPERATOR_CONFIRM"
+# VAR=value prefixes that may sit in front of gh, git or notme; any other one cannot be checked
+_SAFE_ENV = {"LC_ALL", "LANG", "PYTHONUTF8", "PAGER", "GH_PAGER", "NO_COLOR", "TERM"}
+_PAUSE_OK = ([], ["on"], ["status"])
 _INTERP = re.compile(r"^(python[0-9.]*|pythonw|py|node|nodejs|perl|ruby|php|deno|bun)$")
 _REPO_PATH = re.compile(r"^repos/([^/]+)/([^/?]+)(/|\?|$)")
 _PULL_MERGE = re.compile(r"/pulls/\d+/merge/?$")
@@ -80,7 +88,7 @@ _MCP_WRITE_WORDS = re.compile(
 _PREFILTER = re.compile(
     r"(?<![A-Za-z0-9_-])(gh|git|github|rm|find|xargs|parallel|curl|wget|python[0-9.]*|py|node|nodejs|perl|ruby|"
     r"php|deno|bun|bash|sh|zsh|dash|ksh|fish|source|exec|eval)(?![A-Za-z0-9_-])"
-    r"|(?:^|[\s;|&(])\.(?:\s|$)|\./|\.(?:sh|bash|zsh)\b|\$|`|allow-repo|allowed-repos|GIT_|\.git")
+    r"|(?:^|[\s;|&(])\.(?:\s|$)|\./|\.(?:sh|bash|zsh)\b|\$|`|allow-repo|allowed-repos|GIT_|\.git|notme|NOT_ME_")
 
 _SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
 _KEYWORDS = {"builtin", "{", "}", "if", "then", "else", "elif", "do", "while", "until", "!"}
@@ -166,39 +174,14 @@ Decision = Optional[Block]  # None = allow
 # --- helpers ---------------------------------------------------------------
 
 
-def run_git(args: List[str], cwd: str) -> Optional[str]:
-    """stdout of `git <args>` in cwd (stripped), or None on any failure or empty output."""
-    try:
-        proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=10,
-                              stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return None
-    if proc.returncode != 0:
-        return None
-    return proc.stdout.strip() or None
-
-
-def is_slug(s: str) -> bool:
-    return bool(_SLUG.match(s))
-
-
-def parse_url(url: str) -> Optional[str]:
-    """owner/name for a github.com https, ssh or ssh:// URL; None otherwise."""
-    m = _URL.match(url.strip())
-    if not m:
-        return None
-    name = m.group(2)
-    return f"{m.group(1)}/{name[:-4] if name.endswith('.git') else name}"
-
-
 def repo_slug(value: Any) -> Optional[str]:
-    """owner/name from a slug, a github URL or github.com/owner/name; None otherwise."""
+    """owner/name from a slug, a github URL (as gh reads it) or github.com/owner/name; None otherwise."""
     if not isinstance(value, str) or not value:
         return None
-    if is_slug(value):
+    if valid_slug(value):
         return value
     m = _HOST_SLUG.match(value)
-    return m.group(1) if m else parse_url(value)
+    return m.group(1) if m else parse_origin(value, allow_path=True)
 
 
 def has_gh_git(text: str) -> bool:
@@ -223,25 +206,49 @@ def _head(word: str) -> str:
     return _base(word)
 
 
+def _unshell(text: str) -> str:
+    """Text as the shell would mostly see it: quotes and backslashes gone, ${X:-word} replaced by word."""
+    return _PARAM_DEFAULT.sub(r"\1", text.replace('"', "").replace("'", "").replace("\\", ""))
+
+
 def _short(text: str, limit: int = 100) -> str:
     one = " ".join(text.split()).replace("`", "'")
     return one if len(one) <= limit else one[: limit - 3] + "..."
 
 
+_path = os.path  # every guard path comparison goes through this module (tests swap in ntpath)
+
+
+def _resolve(p: str) -> str:
+    """realpath of p; a part that does not exist yet is joined onto its deepest existing ancestor's realpath,
+    so short names (RUNNER~1) and symlinks above it resolve the same way as for an existing path."""
+    tail: List[str] = []
+    here = _path.normpath(p)
+    while not _path.exists(here):
+        parent, name = _path.split(here)
+        if not name or parent == here:
+            break
+        tail.append(name)
+        here = parent
+    try:
+        here = _path.realpath(here)
+    except (OSError, ValueError):
+        pass
+    return _path.join(here, *reversed(tail)) if tail else here
+
+
 def _norm(p: str, base: str) -> str:
     """The single path normaliser: unquote, expand ~, make absolute against base, resolve, normcase."""
-    p = os.path.expanduser(p.replace('"', "").replace("'", ""))
-    if not os.path.isabs(p):
-        p = os.path.join(base, p)
-    try:
-        p = os.path.realpath(p)
-    except (OSError, ValueError):
-        p = os.path.normpath(p)
-    return os.path.normcase(p)
+    p = _path.expanduser(p.replace('"', "").replace("'", ""))
+    if not _path.isabs(p):
+        p = _path.join(base, p)
+    return _path.normcase(_path.normpath(_resolve(p)))
 
 
 def _under(path: str, base: str) -> bool:
-    return path == base or path.startswith(base.rstrip(os.sep) + os.sep)
+    """path is base or inside it; both must come from _norm."""
+    sep = _path.sep
+    return path == base or path.startswith(base.rstrip(sep) + sep)
 
 
 def _short_flags(args: List[str]) -> str:
@@ -388,50 +395,23 @@ def head_branch(git_dir: Path) -> Optional[str]:
     return head[len("ref: refs/heads/"):] if head.startswith("ref: refs/heads/") else None
 
 
-def _fresh(marker: Path) -> bool:
-    try:
-        return time.time() - marker.stat().st_mtime < ACTIVE_RUN_MAX_AGE
-    except OSError:
-        return False
-
-
-def read_allowlist(path: Path, origin: Optional[str]) -> Set[str]:
-    """Repos the global allow list grants to this origin and to every project ("*")."""
-    try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return set()
-    projects = data.get("projects") if isinstance(data, dict) else None
-    if not isinstance(projects, dict):
-        return set()
-    out: Set[str] = set()
-    for key, entry in projects.items():
-        if not isinstance(key, str) or (key != "*" and key.lower() != (origin or "")):
-            continue
-        allow = entry.get("allow") if isinstance(entry, dict) else None
-        for item in allow if isinstance(allow, list) else []:
-            name = item.get("repo") if isinstance(item, dict) else item
-            if isinstance(name, str) and is_slug(name):
-                out.add(name.lower())
-    return out
+def log_root(common_dir: Optional[Path]) -> Optional[Path]:
+    """The default run-log root (<git common dir>/not-me/logs), found without git; None outside git."""
+    return Path(common_dir) / "not-me" / "logs" if common_dir else None
 
 
 # --- context ---------------------------------------------------------------
 
-_LAZY = ("origin_repo", "allowed_repos", "rules", "protected_branches", "board")
-
-
 class GuardContext:
-    """Where the call runs. Config-derived values load on first use; pass them as keywords to fix them."""
+    """Where the call runs. The write gate (`writes.GuardContext`: origin, allowed repos, rules,
+    protected branches) is built from config on first use; pass `write_ctx` to fix it."""
 
     def __init__(self, *, cwd: str = ".", root: Optional[str] = None, git_dir: Optional[Path] = None,
                  common_dir: Optional[Path] = None, config_dir: Optional[Path] = None,
                  allowlist_path: Optional[Path] = None, active_run: bool = False,
                  plugin_root: Optional[Path] = None, home: Optional[Path] = None,
-                 env: Optional[Mapping[str, str]] = None, git: GitFn = run_git, **known: Any):
-        unknown = set(known) - set(_LAZY)
-        if unknown:
-            raise TypeError(f"unknown GuardContext fields: {', '.join(sorted(unknown))}")
+                 env: Optional[Mapping[str, str]] = None, git: GitFn = paths.run_git,
+                 write_ctx: Optional[writes.GuardContext] = None):
         self.env = os.environ if env is None else env
         self.cwd = str(cwd)
         self.root = root
@@ -439,15 +419,16 @@ class GuardContext:
         self.common_dir = common_dir
         self.config_dir = Path(config_dir) if config_dir else Path(root or self.cwd) / ".claude" / "not-me"
         self.home = Path(home) if home else paths.home_dir(self.env)
-        self.allowlist_path = Path(allowlist_path) if allowlist_path else self.home / ALLOWLIST_NAME
+        self.allowlist_path = Path(allowlist_path) if allowlist_path else writes.allowlist_path(self.home)
         self.active_run = active_run
         self.plugin_root = Path(plugin_root) if plugin_root else paths.plugin_root(self.env)
         self.git = git
-        self.__dict__.update(known)  # shadows the cached properties below
+        if write_ctx is not None:
+            self.__dict__["write_ctx"] = write_ctx  # shadows the cached property
 
     @classmethod
     def from_project(cls, project_dir: Any, home: Optional[Any] = None, env: Optional[Mapping[str, str]] = None,
-                     git: GitFn = run_git) -> "GuardContext":
+                     git: GitFn = paths.run_git) -> "GuardContext":
         """Build the context for a checkout without starting a process (git only if the walk is ambiguous)."""
         env = os.environ if env is None else env
         cwd = str(project_dir)
@@ -460,59 +441,44 @@ class GuardContext:
             out = git(["rev-parse", "--show-toplevel", "--git-dir", "--git-common-dir"], cwd)
             parts = out.splitlines() if out else []
             if len(parts) == 3:
-                abs_ = [Path(p) if os.path.isabs(p) else Path(cwd) / p for p in parts]
-                found = (str(abs_[0]), abs_[1].resolve(), abs_[2].resolve())
+                top, git_dir, common = (paths._abs_git_path(cwd, p) for p in parts)
+                found = (str(top), git_dir, common)
         root, git_dir, common = found if found else (None, None, None)
         config_dir = Path(root or cwd) / ".claude" / "not-me"
         if not config_dir.is_dir() and git_dir is not None and git_dir != common and common.name == ".git":
             main = common.parent / ".claude" / "not-me"
             if main.is_dir():
                 config_dir = main
-        active = _fresh(common / "not-me" / "active-run") if common else False
+        active = common is not None and runlog.active_run(runlog.marker_path_in(common),
+                                                          stale_hours=ACTIVE_RUN_STALE_HOURS) is not None
         return cls(cwd=cwd, root=root, git_dir=git_dir, common_dir=common, config_dir=config_dir,
                    home=Path(home) if home else None, env=env, active_run=active, git=git)
 
     @cached_property
-    def _project(self) -> Dict[str, Any]:
+    def write_ctx(self) -> writes.GuardContext:
         from . import config  # deferred: most calls never need config
 
         base = self.root or self.cwd
-        project = config.load(project_dir=str(base), home=str(self.home), env=self.env).meta.get("project", {})
-        return project if isinstance(project, dict) else {}
+        cfg = config.load(project_dir=str(base), home=str(self.home), env=self.env)
+        origin_url = self.git(["remote", "get-url", "origin"], base) or ""  # "" stops writes asking git again
+        return writes.GuardContext.from_config(cfg, origin_url=origin_url, checkout=base)
 
-    @cached_property
+    @property
     def origin_repo(self) -> Optional[str]:
-        url = self.git(["remote", "get-url", "origin"], self.root or self.cwd)
-        slug = parse_url(url) if url else None
-        return slug.lower() if slug else None
+        origin = self.write_ctx.origin_repo
+        return origin.lower() if origin else None
+
+    @property
+    def allowed_repos(self) -> FrozenSet[str]:
+        return self.write_ctx.allowed_repos_lower
+
+    @property
+    def rules(self) -> Mapping[str, bool]:
+        return self.write_ctx.rules
 
     @cached_property
-    def rules(self) -> Dict[str, bool]:
-        guard = self._project.get("guard")
-        guard = guard if isinstance(guard, dict) else {}
-        return {r: guard.get(r, "on") not in ("off", False) for r in RULES}
-
-    @cached_property
-    def protected_branches(self) -> Set[str]:
-        return {b for b in self._project.get("protected_branches") or []
-                if isinstance(b, str) and b and not b.startswith("!")}
-
-    @cached_property
-    def allowed_repos(self) -> Set[str]:
-        p = self._project
-        allowed: Set[str] = {self.origin_repo} if self.origin_repo else set()
-        names: List[Any] = [p.get("tracker")]
-        names += [i.get("name") if isinstance(i, dict) else i for i in p.get("repos") or []]
-        names += [i.get("repo") if isinstance(i, dict) else i for i in p.get("allow_repos") or []]
-        allowed |= {n.lower() for n in names if isinstance(n, str) and is_slug(n)}
-        return allowed | read_allowlist(self.allowlist_path, self.origin_repo)
-
-    @cached_property
-    def board(self) -> Optional[Tuple[str, int]]:
-        board = (self._project.get("queue") or {}).get("board") or {}
-        if isinstance(board, dict) and board.get("owner") and isinstance(board.get("number"), int):
-            return str(board["owner"]), board["number"]
-        return None
+    def protected_branches(self) -> FrozenSet[str]:
+        return frozenset(self.write_ctx.protected_branches)
 
 
 def is_active(ctx: GuardContext) -> bool:
@@ -532,8 +498,8 @@ def render(block: Block, ctx: GuardContext) -> str:
         allowed = ", ".join(sorted(ctx.allowed_repos)) or "nothing (no origin found)"
         lines += [f"This repo ({ctx.origin_repo or 'unknown origin'}) may write only to: {allowed}.",
                   f"If {t} is intended, the operator runs:  /not-me:allow-repo {t}",
-                  f"  (all projects: /not-me:allow-repo {t} --everywhere; team-wide: add it to allow_repos "
-                  f"in {CONFIG_HINT})"]
+                  f"  (all projects: /not-me:allow-repo {t} --everywhere; team-wide: list it under repos "
+                  f"in {CONFIG_HINT}, then each operator confirms it once with /not-me:allow-repo {t})"]
     else:
         lines.append(f"Why: {block.reason}.")
         if block.hint:
@@ -590,7 +556,7 @@ def _check_target(ctx: GuardContext, target: str, blk: Blk) -> Iterator[Block]:
     """Block unless target (a named repo) is allowed."""
     if target.lower() in ctx.allowed_repos:
         return
-    if not is_slug(target):
+    if not valid_slug(target):
         yield blk("other_repo", f"cannot read repo '{target}'", "spell out the repo as owner/name")
     else:
         yield blk("other_repo", f"{target} is not an allowed repo", target=target, suggest=True)
@@ -608,12 +574,12 @@ def _file(tool: str, fpath: str, cwd: str, ctx: GuardContext) -> Iterator[Block]
     if full == _norm(str(ctx.allowlist_path), cwd) or _base(fpath) == ALLOWLIST_NAME:
         yield blk(SELF, "only the operator changes the not-me allow list", "ask the operator to run /not-me:allow-repo")
     plugin = _norm(str(ctx.plugin_root), cwd)
-    if any(_under(full, os.path.join(plugin, d)) for d in PLUGIN_PROTECTED_DIRS):
+    if any(_under(full, _norm(d, plugin)) for d in PLUGIN_PROTECTED_DIRS):
         yield blk(SELF, "the not-me plugin's own code is off limits to the agent",
                   "describe the change in a QUESTION for the operator")
     if ctx.active_run:
         home = _norm(str(ctx.home), cwd)
-        if _under(full, _norm(str(ctx.config_dir), cwd)) or (os.path.dirname(full) == home and full.endswith(".md")):
+        if _under(full, _norm(str(ctx.config_dir), cwd)) or (_path.dirname(full) == home and full.endswith(".md")):
             yield blk(SELF, "not-me config is read-only while a not-me run is active",
                       "log a QUESTION proposing the config change for the operator")
     low = fpath.replace("\\", "/").lower()
@@ -677,7 +643,9 @@ def _git_config(ctx: GuardContext, st: _State, d: str, key: str) -> Optional[str
 
 def _bash(cmd: str, cwd: str, ctx: GuardContext) -> Iterator[Block]:
     blk = _blk(_short(cmd))
-    if "allow-repo" in cmd and _ALLOW_EDIT.search(cmd):
+    plain = _unshell(cmd)
+    if "allow-repo" in plain and any(m.group(1) or "--everywhere".startswith(m.group(2))
+                                     for m in _ALLOW_EDIT.finditer(plain)):
         yield blk(SELF, "only the operator changes the not-me allow list", "ask the operator to run /not-me:allow-repo")
     if ALLOWLIST_NAME in cmd.lower() or str(ctx.allowlist_path).lower() in cmd.lower():
         yield blk(SELF, "the not-me allow list is off limits to the agent",
@@ -710,28 +678,46 @@ def _drop_prefix(word: str, rest: List[str]) -> List[str]:
 def _command(t: List[str], seg: str, st: _State, ctx: GuardContext) -> Iterator[Block]:
     """Check one simple command given as tokens."""
     blk = _blk(_short(seg))
-    gitenv = prefixed = False
+    prefixed = chdir = False
+    assigned: List[str] = []
     while t:
         head = _head(t[0])
         if _ASSIGN.match(t[0]):
-            gitenv = gitenv or t[0].startswith("GIT_")
+            assigned.append(t[0].split("=", 1)[0])
             t = t[1:]
         elif head in _PREFIX_WORDS:
+            chdir = chdir or (head == "env" and any(a in ("-C", "--chdir") or a.startswith(("--chdir=", "-C"))
+                                                    for a in t[1:] if a.startswith("-")))
             t = _drop_prefix(head, t[1:])
             prefixed = True
         elif head in _KEYWORDS:
             t = t[1:]
         else:
             break
+    if OPERATOR_CONFIRM in assigned:
+        yield blk(SELF, f"{OPERATOR_CONFIRM} is the operator's own confirmation", "ask the operator to confirm")
     if not t:
         return
     word, head = t[0], _head(t[0])
     if "$" in word or "`" in word:
         yield blk(OPAQUE, "a command name taken from a variable cannot be checked", "spell out the command")
         return
+    notme_args = _notme_args(t)
+    if notme_args is not None:
+        yield from _cmd_notme(notme_args, st, ctx, blk, chdir)
+    unsafe = [a for a in assigned if a not in _SAFE_ENV]
+    if unsafe and (head in ("gh", "git") or notme_args is not None):
+        if any(a.startswith("GIT_") for a in unsafe):
+            yield blk(OPAQUE, "GIT_* variables change where git reads its repo or config",
+                      "run git without GIT_* variables")
+        else:
+            yield blk(OPAQUE, f"{unsafe[0]}=... in front of {_prog(word)} cannot be checked",
+                      "run it without the variable")
+    if notme_args is not None:
+        return
     handler = _COMMANDS.get(head)
     if handler is not None:
-        yield from handler(t, seg, st, ctx, blk, gitenv)
+        yield from handler(t, seg, st, ctx, blk, unsafe)
     elif word.startswith(("./", "../", ".\\", "..\\")) or word.endswith(SCRIPT_SUFFIXES):
         yield from _script(word, st, blk)
     elif _INTERP.match(head):
@@ -744,6 +730,77 @@ def _command(t: List[str], seg: str, st: _State, ctx: GuardContext) -> Iterator[
         yield blk(OPAQUE, f"{head} to GitHub bypasses gh's repo checks", "use gh with --repo owner/name")
     elif prefixed and has_gh_git(seg):
         yield blk(OPAQUE, f"cannot tell what '{word}' runs", "run gh/git directly, without the wrapper")
+
+
+def _prog(word: str) -> str:
+    """Program name for matching: basename, backslashes removed, lowercased, without .exe."""
+    low = _base(word.replace("\\", "")).lower()
+    return low[:-4] if low.endswith(".exe") else low
+
+
+def _notme_args(t: List[str]) -> Optional[List[str]]:
+    """The arguments of a not-me CLI call (bin/notme, cli/notme.py, a shell or python running it); else None."""
+    prog = _prog(t[0])
+    if prog in _NOTME_PROGS:
+        return t[1:]
+    if prog in _SHELLS or prog == "notme-python" or _INTERP.match(prog):
+        for k, a in enumerate(t[1:], 1):
+            if a.startswith("-"):
+                if a in ("-c", "-m", "-e", "--eval"):
+                    return None  # inline code: the interpreter checks handle it
+                continue
+            return _notme_args(t[k:]) if _prog(a) in _NOTME_PROGS | {"notme-python"} else None
+    return None
+
+
+def _worktrees(ctx: GuardContext) -> List[str]:
+    """The session checkout and every worktree of its repo, found without git."""
+    dirs = [ctx.root or ctx.cwd]
+    common = ctx.common_dir
+    if common is not None:
+        if Path(common).name == ".git":
+            dirs.append(str(Path(common).parent))
+        try:
+            entries = list((Path(common) / "worktrees").iterdir())
+        except OSError:
+            entries = []
+        for e in entries:
+            try:
+                dirs.append(_path.dirname((e / "gitdir").read_text(encoding="utf-8").strip()))
+            except OSError:
+                continue
+    return [_norm(d, "/") for d in dirs if d]
+
+
+def _cmd_notme(args: List[str], st: _State, ctx: GuardContext, blk: Blk, chdir: bool) -> Iterator[Block]:
+    """Self-protection for the not-me CLI: it trusts its project, home and operator, so nothing may re-point them."""
+    hint = "run notme from the session checkout with no overrides"
+    plain = [_unshell(a) for a in args]
+    if any(a.startswith("--") and len(a) > 2 and "--project-dir".startswith(a.split("=", 1)[0]) for a in plain):
+        yield blk(SELF, "notme --project-dir points the CLI at another project", hint)
+    text = _unshell(st.text)
+    m = _TRUST_ENV.search(text) or _TRUST_UNSET.search(text)
+    if m:
+        yield blk(SELF, f"{m.group(1)} changes which project, home or identity notme trusts", hint)
+    here = _norm(st.dir, "/")
+    if chdir or not any(_under(here, w) for w in _worktrees(ctx)):
+        yield blk(SELF, "notme runs outside the session checkout", hint)
+    pos = [a for a in plain if not a.startswith("-")]
+    raw_pos = [r for r, a in zip(args, plain) if not a.startswith("-")]  # paths keep their backslashes
+    if pos[:1] == ["allow-repo"] and pos[1:2] != ["list"]:
+        if not ({"--help", "-h"} & set(plain)):
+            yield blk(SELF, "only the operator changes the not-me allow list",
+                      "ask the operator to run /not-me:allow-repo")
+    if "pause" in plain:
+        rest = plain[plain.index("pause") + 1:]
+        if rest not in _PAUSE_OK:
+            yield blk(SELF, "only a person turns a not-me pause off", "leave the pause for the operator")
+    if pos[:2] == ["git", "worktree-add"]:
+        target = _norm(raw_pos[2], st.dir) if len(raw_pos) > 2 else None
+        base = _norm(_path.join(str(ctx.common_dir), "not-me", "worktrees"), "/") if ctx.common_dir else None
+        if target is None or base is None or target == base or not _under(target, base):
+            yield blk(SELF, "notme git worktree-add may only create worktrees under <git common dir>/not-me/worktrees/",
+                      "let notme pick the worktree path")
 
 
 def _script(path: str, st: _State, blk: Blk) -> Iterator[Block]:
@@ -810,6 +867,8 @@ def _cmd_find(t, seg, st, ctx, blk, gitenv):
 
 def _cmd_export(t, seg, st, ctx, blk, gitenv):
     for w in t[1:]:
+        if w.split("=", 1)[0] == OPERATOR_CONFIRM:
+            yield blk(SELF, f"{OPERATOR_CONFIRM} is the operator's own confirmation", "ask the operator to confirm")
         if w.startswith("GIT_"):
             yield blk(OPAQUE, f"{t[0]} {w} changes where git reads its repo or config", "do not set GIT_* variables")
 
@@ -843,9 +902,6 @@ class _GitCall:
 
 
 def _cmd_git(t, seg, st, ctx, blk, gitenv):
-    if gitenv:
-        yield blk(OPAQUE, "GIT_* variables change where git reads its repo or config",
-                  "run git without GIT_* variables")
     d = st.dir
     c_values: List[str] = []
     i = 1
@@ -905,7 +961,7 @@ def _git_commit(c: _GitCall) -> Iterator[Block]:
         yield c.blk("protected_branches", f"commits on the protected branch {b} are not allowed",
                     "create a feature branch first (git switch -c <type>/<topic>) and commit there")
     origin = c.st.once(("origin", c.d), lambda: c.ctx.git(["remote", "get-url", "origin"], c.d))
-    slug = parse_url(origin) if origin else None
+    slug = parse_origin(origin)
     if slug:
         yield from _check_target(c.ctx, slug, c.blk)
     else:
@@ -1025,7 +1081,7 @@ def _git_push(c: _GitCall) -> Iterator[Block]:
         yield blk("other_repo", "git -c with push can rewrite the push URL", "push without -c")
         return
     if remote is not None:
-        url_repo = parse_url(remote)
+        url_repo = parse_origin(remote)
         if url_repo:
             yield from _check_target(ctx, url_repo, blk)
             return
@@ -1044,7 +1100,7 @@ def _git_push(c: _GitCall) -> Iterator[Block]:
         yield blk("other_repo", f"remote '{remote}' has no push URL here",
                   "push to a remote that exists and points at an allowed repo")
     for url in urls:
-        slug = parse_url(url)
+        slug = parse_origin(url)
         if slug:
             yield from _check_target(ctx, slug, blk)
         else:
@@ -1125,7 +1181,7 @@ def _gh_write(t: List[str], ctx: GuardContext, blk: Blk) -> Iterator[Block]:
             raw = a[len("--repo="):] if a.startswith("--repo=") else a[2:]
             n_repo += 1
         elif j >= 3:
-            raw = parse_url(a)
+            raw = parse_origin(a, allow_path=True)
         if raw is None:
             continue
         repo = repo_slug(raw)
@@ -1140,7 +1196,7 @@ def _gh_write(t: List[str], ctx: GuardContext, blk: Blk) -> Iterator[Block]:
         yield blk("other_repo", f"{what}: the URL and --repo name different repos", "name one repo")
     if group == "repo":
         for a in t[3:]:
-            if not a.startswith("-") and is_slug(a):
+            if not a.startswith("-") and valid_slug(a):
                 yield from _check_target(ctx, a, blk)
                 targets.append(a.lower())
         if verb in ("create", "fork") and not targets:
@@ -1226,21 +1282,12 @@ _COMMANDS: Dict[str, Callable[..., Iterator[Block]]] = {
 # --- log and self-test -----------------------------------------------------
 
 
-def blocklog_path(ctx: GuardContext) -> Optional[Path]:
-    return ctx.common_dir / "not-me" / "logs" / "guard.jsonl" if ctx.common_dir else None
-
-
-def blocklog_append(path: Any, block: Block) -> None:
-    """Append one JSON line describing a block. Logging never breaks the guard."""
-    entry = {"ts": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "tool": block.tool,
-             "rule": block.rule, "reason": block.reason, "target": block.target}
-    try:
-        p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with p.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry, sort_keys=True) + "\n")
-    except OSError:
-        pass
+def log_block(ctx: GuardContext, block: Block) -> None:
+    """Append the block to the guard log in the default run-log root (none outside git)."""
+    root = log_root(ctx.common_dir)
+    if root is not None:
+        runlog.guard_log_append(runlog.guard_log_path(root), {
+            "tool": block.tool, "rule": block.rule, "reason": block.reason, "target": block.target})
 
 
 def selftest(hook_cmd: List[str], ctx: GuardContext, env: Optional[Mapping[str, str]] = None) -> bool:

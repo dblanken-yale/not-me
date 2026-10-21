@@ -34,9 +34,7 @@ def main(raw: "str | None" = None) -> int:
         block = guard.decide(event, ctx)
         if block is None:
             return 0
-        log = guard.blocklog_path(ctx)
-        if log is not None:
-            guard.blocklog_append(log, block)
+        guard.log_block(ctx, block)
         print(block.message, file=sys.stderr)
         return 2
     except Exception as exc:  # noqa: BLE001 - any failure must still produce a decision
