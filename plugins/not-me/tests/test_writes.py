@@ -84,6 +84,25 @@ class OriginParseTests(unittest.TestCase):
                 self.assertIsNone(writes.parse_origin(url, allow_path=True))
 
 
+    def test_userinfo_cannot_smuggle_the_host(self):
+        # git and curl would contact evil.example here; the github.com after "@" is not the host
+        for url in ("https://evil.example#@github.com/acme/app", "https://evil.example?x@github.com/acme/app",
+                    "https://evil.example\\@github.com/acme/app", "ssh://evil.example#@github.com/acme/app",
+                    "x#@github.com:acme/app", "x?@github.com:acme/app", "a@b@github.com:acme/app",
+                    "https://github.com/acme/app?x", "https://github.com/acme/app#x", "https://github.com:x/acme/app",
+                    "https://github.com /acme/app"):
+            with self.subTest(url=url):
+                self.assertIsNone(writes.parse_origin(url))
+        for url in ("https://evil.example#@github.com/acme/app", "https://evil.example?x@github.com/acme/app"):
+            with self.subTest(url=url, allow_path=True):
+                self.assertIsNone(writes.parse_origin(url, allow_path=True))
+
+    def test_userinfo_and_port_forms(self):
+        self.assertEqual(writes.parse_origin("https://user:pass@github.com/acme/app.git"), "acme/app")
+        self.assertEqual(writes.parse_origin("https://github.com:443/acme/app"), "acme/app")
+        self.assertEqual(writes.parse_origin("https://github.com:443/acme/app/pull/1", allow_path=True), "acme/app")
+
+
 class SlugTests(unittest.TestCase):
     def test_valid_slug(self):
         for slug in ("acme/app", "acme/app.js", "Acme/App_2", "acme/.github"):

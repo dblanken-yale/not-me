@@ -62,7 +62,18 @@ _HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 _WORD_SPLIT = re.compile(r"[\s;|&()]+")
 _PATH_SEP = re.compile(r"[/\\]")
 _SCP_REMOTE = re.compile(r"^[^/]*@[^/]*:")
-_ALLOW_EDIT = re.compile(r"(^|[^A-Za-z0-9_-])(add|remove)([^A-Za-z0-9_-]|$)|--everywhere")
+_ALLOW_EDIT = re.compile(r"(?:^|[^A-Za-z0-9_-])(?:(add|remove)|(--e[a-z]*))(?:[^A-Za-z0-9_-]|$)")
+_PARAM_DEFAULT = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=+?]([^}]*)\}")
+_NOTME_PROGS = {"notme", "notme.py"}
+# variables that re-point the not-me CLI's trust anchor (its project, home, operator or GitHub identity)
+_TRUST_ENV = re.compile(r"(?<![A-Za-z0-9_])(NOT_ME_[A-Za-z0-9_]*|CLAUDE_PROJECT_DIR|CLAUDECODE|HOME|GH_HOST|GH_TOKEN|"
+                        r"GITHUB_TOKEN)=")
+_TRUST_UNSET = re.compile(r"(?<![A-Za-z0-9_-])(?:unset|-u|--unset)\s+(?:-[a-z]+\s+)*(NOT_ME_[A-Za-z0-9_]*|"
+                          r"CLAUDE_PROJECT_DIR|CLAUDECODE|HOME|GH_HOST|GH_TOKEN|GITHUB_TOKEN)\b")
+OPERATOR_CONFIRM = "NOT_ME_OPERATOR_CONFIRM"
+# VAR=value prefixes that may sit in front of gh, git or notme; any other one cannot be checked
+_SAFE_ENV = {"LC_ALL", "LANG", "PYTHONUTF8", "PAGER", "GH_PAGER", "NO_COLOR", "TERM"}
+_PAUSE_OK = ([], ["on"], ["status"])
 _INTERP = re.compile(r"^(python[0-9.]*|pythonw|py|node|nodejs|perl|ruby|php|deno|bun)$")
 _REPO_PATH = re.compile(r"^repos/([^/]+)/([^/?]+)(/|\?|$)")
 _PULL_MERGE = re.compile(r"/pulls/\d+/merge/?$")
@@ -77,7 +88,7 @@ _MCP_WRITE_WORDS = re.compile(
 _PREFILTER = re.compile(
     r"(?<![A-Za-z0-9_-])(gh|git|github|rm|find|xargs|parallel|curl|wget|python[0-9.]*|py|node|nodejs|perl|ruby|"
     r"php|deno|bun|bash|sh|zsh|dash|ksh|fish|source|exec|eval)(?![A-Za-z0-9_-])"
-    r"|(?:^|[\s;|&(])\.(?:\s|$)|\./|\.(?:sh|bash|zsh)\b|\$|`|allow-repo|allowed-repos|GIT_|\.git")
+    r"|(?:^|[\s;|&(])\.(?:\s|$)|\./|\.(?:sh|bash|zsh)\b|\$|`|allow-repo|allowed-repos|GIT_|\.git|notme|NOT_ME_")
 
 _SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
 _KEYWORDS = {"builtin", "{", "}", "if", "then", "else", "elif", "do", "while", "until", "!"}
@@ -193,6 +204,11 @@ def _head(word: str) -> str:
         if low in ("gh", "git"):
             return low
     return _base(word)
+
+
+def _unshell(text: str) -> str:
+    """Text as the shell would mostly see it: quotes and backslashes gone, ${X:-word} replaced by word."""
+    return _PARAM_DEFAULT.sub(r"\1", text.replace('"', "").replace("'", "").replace("\\", ""))
 
 
 def _short(text: str, limit: int = 100) -> str:
@@ -608,7 +624,9 @@ def _git_config(ctx: GuardContext, st: _State, d: str, key: str) -> Optional[str
 
 def _bash(cmd: str, cwd: str, ctx: GuardContext) -> Iterator[Block]:
     blk = _blk(_short(cmd))
-    if "allow-repo" in cmd and _ALLOW_EDIT.search(cmd):
+    plain = _unshell(cmd)
+    if "allow-repo" in plain and any(m.group(1) or "--everywhere".startswith(m.group(2))
+                                     for m in _ALLOW_EDIT.finditer(plain)):
         yield blk(SELF, "only the operator changes the not-me allow list", "ask the operator to run /not-me:allow-repo")
     if ALLOWLIST_NAME in cmd.lower() or str(ctx.allowlist_path).lower() in cmd.lower():
         yield blk(SELF, "the not-me allow list is off limits to the agent",
@@ -641,28 +659,46 @@ def _drop_prefix(word: str, rest: List[str]) -> List[str]:
 def _command(t: List[str], seg: str, st: _State, ctx: GuardContext) -> Iterator[Block]:
     """Check one simple command given as tokens."""
     blk = _blk(_short(seg))
-    gitenv = prefixed = False
+    prefixed = chdir = False
+    assigned: List[str] = []
     while t:
         head = _head(t[0])
         if _ASSIGN.match(t[0]):
-            gitenv = gitenv or t[0].startswith("GIT_")
+            assigned.append(t[0].split("=", 1)[0])
             t = t[1:]
         elif head in _PREFIX_WORDS:
+            chdir = chdir or (head == "env" and any(a in ("-C", "--chdir") or a.startswith(("--chdir=", "-C"))
+                                                    for a in t[1:] if a.startswith("-")))
             t = _drop_prefix(head, t[1:])
             prefixed = True
         elif head in _KEYWORDS:
             t = t[1:]
         else:
             break
+    if OPERATOR_CONFIRM in assigned:
+        yield blk(SELF, f"{OPERATOR_CONFIRM} is the operator's own confirmation", "ask the operator to confirm")
     if not t:
         return
     word, head = t[0], _head(t[0])
     if "$" in word or "`" in word:
         yield blk(OPAQUE, "a command name taken from a variable cannot be checked", "spell out the command")
         return
+    notme_args = _notme_args(t)
+    if notme_args is not None:
+        yield from _cmd_notme(notme_args, st, ctx, blk, chdir)
+    unsafe = [a for a in assigned if a not in _SAFE_ENV]
+    if unsafe and (head in ("gh", "git") or notme_args is not None):
+        if any(a.startswith("GIT_") for a in unsafe):
+            yield blk(OPAQUE, "GIT_* variables change where git reads its repo or config",
+                      "run git without GIT_* variables")
+        else:
+            yield blk(OPAQUE, f"{unsafe[0]}=... in front of {_prog(word)} cannot be checked",
+                      "run it without the variable")
+    if notme_args is not None:
+        return
     handler = _COMMANDS.get(head)
     if handler is not None:
-        yield from handler(t, seg, st, ctx, blk, gitenv)
+        yield from handler(t, seg, st, ctx, blk, unsafe)
     elif word.startswith(("./", "../", ".\\", "..\\")) or word.endswith(SCRIPT_SUFFIXES):
         yield from _script(word, st, blk)
     elif _INTERP.match(head):
@@ -675,6 +711,76 @@ def _command(t: List[str], seg: str, st: _State, ctx: GuardContext) -> Iterator[
         yield blk(OPAQUE, f"{head} to GitHub bypasses gh's repo checks", "use gh with --repo owner/name")
     elif prefixed and has_gh_git(seg):
         yield blk(OPAQUE, f"cannot tell what '{word}' runs", "run gh/git directly, without the wrapper")
+
+
+def _prog(word: str) -> str:
+    """Program name for matching: basename, backslashes removed, lowercased, without .exe."""
+    low = _base(word.replace("\\", "")).lower()
+    return low[:-4] if low.endswith(".exe") else low
+
+
+def _notme_args(t: List[str]) -> Optional[List[str]]:
+    """The arguments of a not-me CLI call (bin/notme, cli/notme.py, a shell or python running it); else None."""
+    prog = _prog(t[0])
+    if prog in _NOTME_PROGS:
+        return t[1:]
+    if prog in _SHELLS or prog == "notme-python" or _INTERP.match(prog):
+        for k, a in enumerate(t[1:], 1):
+            if a.startswith("-"):
+                if a in ("-c", "-m", "-e", "--eval"):
+                    return None  # inline code: the interpreter checks handle it
+                continue
+            return _notme_args(t[k:]) if _prog(a) in _NOTME_PROGS | {"notme-python"} else None
+    return None
+
+
+def _worktrees(ctx: GuardContext) -> List[str]:
+    """The session checkout and every worktree of its repo, found without git."""
+    dirs = [ctx.root or ctx.cwd]
+    common = ctx.common_dir
+    if common is not None:
+        if Path(common).name == ".git":
+            dirs.append(str(Path(common).parent))
+        try:
+            entries = list((Path(common) / "worktrees").iterdir())
+        except OSError:
+            entries = []
+        for e in entries:
+            try:
+                dirs.append(os.path.dirname((e / "gitdir").read_text(encoding="utf-8").strip()))
+            except OSError:
+                continue
+    return [_norm(d, "/") for d in dirs if d]
+
+
+def _cmd_notme(args: List[str], st: _State, ctx: GuardContext, blk: Blk, chdir: bool) -> Iterator[Block]:
+    """Self-protection for the not-me CLI: it trusts its project, home and operator, so nothing may re-point them."""
+    hint = "run notme from the session checkout with no overrides"
+    plain = [_unshell(a) for a in args]
+    if any(a.startswith("--") and len(a) > 2 and "--project-dir".startswith(a.split("=", 1)[0]) for a in plain):
+        yield blk(SELF, "notme --project-dir points the CLI at another project", hint)
+    text = _unshell(st.text)
+    m = _TRUST_ENV.search(text) or _TRUST_UNSET.search(text)
+    if m:
+        yield blk(SELF, f"{m.group(1)} changes which project, home or identity notme trusts", hint)
+    here = _norm(st.dir, "/")
+    if chdir or not any(_under(here, w) for w in _worktrees(ctx)):
+        yield blk(SELF, "notme runs outside the session checkout", hint)
+    pos = [a for a in plain if not a.startswith("-")]
+    if pos[:1] == ["allow-repo"] and pos[1:2] != ["list"]:
+        if not ({"--help", "-h"} & set(plain)):
+            yield blk(SELF, "only the operator changes the not-me allow list",
+                      "ask the operator to run /not-me:allow-repo")
+    if "pause" in plain:
+        rest = plain[plain.index("pause") + 1:]
+        if rest not in _PAUSE_OK:
+            yield blk(SELF, "only a person turns a not-me pause off", "leave the pause for the operator")
+    if pos[:2] == ["git", "worktree-add"]:
+        target = pos[2] if len(pos) > 2 else None
+        base = _norm(str(Path(ctx.common_dir) / "not-me" / "worktrees"), "/") if ctx.common_dir else None
+        if target is None or base is None or not _under(_norm(target, st.dir), base) or _norm(target, st.dir) == base:
+            yield blk(SELF, "notme git worktree-add may only create worktrees under <git common dir>/not-me/worktrees/",
+                      "let notme pick the worktree path")
 
 
 def _script(path: str, st: _State, blk: Blk) -> Iterator[Block]:
@@ -741,6 +847,8 @@ def _cmd_find(t, seg, st, ctx, blk, gitenv):
 
 def _cmd_export(t, seg, st, ctx, blk, gitenv):
     for w in t[1:]:
+        if w.split("=", 1)[0] == OPERATOR_CONFIRM:
+            yield blk(SELF, f"{OPERATOR_CONFIRM} is the operator's own confirmation", "ask the operator to confirm")
         if w.startswith("GIT_"):
             yield blk(OPAQUE, f"{t[0]} {w} changes where git reads its repo or config", "do not set GIT_* variables")
 
@@ -774,9 +882,6 @@ class _GitCall:
 
 
 def _cmd_git(t, seg, st, ctx, blk, gitenv):
-    if gitenv:
-        yield blk(OPAQUE, "GIT_* variables change where git reads its repo or config",
-                  "run git without GIT_* variables")
     d = st.dir
     c_values: List[str] = []
     i = 1

@@ -13,6 +13,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
+from urllib.parse import urlsplit
 
 from . import git, paths
 from .dryrun import utc_now
@@ -21,13 +22,13 @@ SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.][A-Za-z0-9_.-]*$
 GUARD_RULES = ("other_repo", "protected_branches", "force_push", "destructive_git")
 ALLOWLIST_FILE = "allowed-repos.json"
 
-_URL_FORMS = (
-    re.compile(r"^(?:https?|ssh|git)://(?:[^@/]+@)?(?P<h>[^/:]+)(?::\d+)?/(?P<o>[^/]+)/(?P<n>[^/]+?)(?:\.git)?/?$"),
-    re.compile(r"^(?:[^@/\s]+@)?(?P<h>[^/:\s]+):(?P<o>[^/:\s]+)/(?P<n>[^/:\s]+?)(?:\.git)?/?$"),
-)
-# a github web URL with more after the repo (…/pull/3, ?tab=x): only where gh, not git, reads the URL
-_URL_WITH_PATH = re.compile(
-    r"^https?://(?:[^@/]+@)?(?P<h>[^/:]+)(?::\d+)?/(?P<o>[^/]+)/(?P<n>[^/?#]+?)(?:\.git)?(?:[/?#].*)?$")
+_SCHEMES = ("http", "https", "ssh", "git")
+_PATH_SCHEMES = ("http", "https")  # web URLs gh reads, where allow_path applies
+_BAD_NETLOC = re.compile(r"[\s#?\\]")
+_REPO_PATH = re.compile(r"^/(?P<o>[^/]+)/(?P<n>[^/]+?)(?:\.git)?/?$")
+_REPO_PATH_PREFIX = re.compile(r"^/(?P<o>[^/]+)/(?P<n>[^/]+?)(?:\.git)?(?:/.*)?$")
+_SCP = re.compile(r"^(?P<pre>[^:]+):(?P<o>[^/:\s]+)/(?P<n>[^/:\s]+?)(?:\.git)?/?$")
+_BAD_SCP_PREFIX = re.compile(r"[\s#?/\\]")
 
 
 def valid_slug(value: Any) -> bool:
@@ -36,22 +37,50 @@ def valid_slug(value: Any) -> bool:
     return not any(part in (".", "..") for part in value.split("/"))
 
 
+def _github_host(host: Optional[str]) -> bool:
+    return bool(host) and host.lower() in {"github.com", os.environ.get("GH_HOST", "github.com").lower()}
+
+
+def _slug_or_none(owner: str, name: str) -> Optional[str]:
+    slug = f"{owner}/{name}"
+    return slug if valid_slug(slug) else None
+
+
 def parse_origin(url: Optional[str], allow_path: bool = False) -> Optional[str]:
     """owner/name from an https, scp-style ssh or ssh:// remote URL on github.com (or $GH_HOST); else None.
 
-    allow_path also takes an https URL with more after the repo (https://github.com/o/n/pull/3).
+    The host is the one git and curl would contact (urlsplit), so userinfo tricks such as
+    https://evil.example#@github.com/o/n do not pass. A scheme URL's path must be exactly
+    /owner/name (optional .git), with no query or fragment.
+
+    allow_path also takes an https URL with more after the repo (https://github.com/o/n/pull/3?x).
     Leave it off for URLs git itself fetches or pushes, where a path such as /../x changes the repo.
     """
     if not url:
         return None
     url = url.strip()
-    for form in _URL_FORMS + ((_URL_WITH_PATH,) if allow_path else ()):
-        m = form.match(url)
-        if m and m.group("h").lower() in {"github.com", os.environ.get("GH_HOST", "github.com").lower()}:
-            slug = f"{m.group('o')}/{m.group('n')}"
-            if valid_slug(slug):
-                return slug
-    return None
+    if any(c.isspace() for c in url):
+        return None
+    if "://" in url:
+        try:
+            parts = urlsplit(url)
+            parts.port  # noqa: B018 - raises ValueError on a bad port
+        except ValueError:
+            return None
+        scheme = parts.scheme.lower()
+        if scheme not in _SCHEMES or _BAD_NETLOC.search(parts.netloc) or not _github_host(parts.hostname):
+            return None
+        loose = allow_path and scheme in _PATH_SCHEMES
+        if not loose and (parts.query or parts.fragment or "?" in url or "#" in url):
+            return None
+        m = (_REPO_PATH_PREFIX if loose else _REPO_PATH).match(parts.path)
+        return _slug_or_none(m.group("o"), m.group("n")) if m else None
+    m = _SCP.match(url)
+    if not m or _BAD_SCP_PREFIX.search(m.group("pre")) or m.group("pre").count("@") > 1:
+        return None
+    if not _github_host(m.group("pre").rpartition("@")[2]):
+        return None
+    return _slug_or_none(m.group("o"), m.group("n"))
 
 
 # --- targets ---------------------------------------------------------------
