@@ -52,6 +52,7 @@ REPOS: Dict[str, Tuple[str, str, Optional[str], str]] = {
     "run": (GH + "acme/app.git", "feature/x", None, "run"),
     "running": (GH + "acme/app.git", "feature/x", "", "run"),
     "stale": (GH + "acme/app.git", "feature/x", None, "stale"),
+    "runenv": (GH + "acme/app.git", "feature/x", None, "runenv"),
     "bare": (GH + "acme/app.git", "main", None, ""),
     "ssh": ("git@github.com:acme/app.git", "feature/x", "", ""),
     "sshurl": ("ssh://git@github.com/acme/app.git", "feature/x", "", ""),
@@ -76,6 +77,9 @@ HOMES: Dict[str, Optional[str]] = {
     "hstar": json.dumps({"version": 1, "projects": {"*": {"allow": [{"repo": "acme/friend"}]}}}),
     "hmismatch": json.dumps({"version": 1, "projects": {"acme/zzz": {"allow": [{"repo": "acme/friend"}]}}}),
     "hbad": "{not json",
+    # confirms the "tracker" fixture's repo-layer tracker and companion
+    "htracker": json.dumps({"version": 1, "projects": {"acme/app": {"allow": [{"repo": "acme/issues"},
+                                                                             {"repo": "acme/web"}]}}}),
 }
 
 
@@ -132,9 +136,16 @@ def build_fixtures(root: Path) -> Dict[str, str]:
             marker = repo / ".git" / "not-me" / "active-run"
             marker.parent.mkdir(parents=True, exist_ok=True)
             started = time.time() - (7 * 3600 if extra == "stale" else 0)
-            stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started))
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(started))
             marker.write_text(json.dumps({"started": stamp, "run_id": f"fixture-{name}"}) + "\n", encoding="utf-8")
-            os.utime(str(marker), (started, started))
+            # mtime says the opposite of "started": freshness must come from the JSON alone
+            mtime = time.time() - (0 if extra == "stale" else 7 * 3600)
+            os.utime(str(marker), (mtime, mtime))
+        elif extra == "runenv":
+            # a real run that logged to $NOT_ME_LOG_ROOT: its marker still sits in the git common dir
+            from notme import runlog
+            logs = runlog.log_root(repo, None, {"NOT_ME_LOG_ROOT": str(root / "custom-logs" / name)})
+            runlog.RunLog.start(logs, "fixture", name, project_dir=repo)
         if front is not None:
             cfg = repo / ".claude" / "not-me"
             cfg.mkdir(parents=True, exist_ok=True)
@@ -309,8 +320,8 @@ bash(A, None, FRIEND, "app@hproj")
 bash(A, None, FRIEND, "app@hstar")
 bash(B, OR, FRIEND, "app@hmismatch")
 bash(B, OR, FRIEND, "app@hbad")
-bash(A, None, "gh issue comment 1 --repo acme/issues -b x", "tracker")
-bash(A, None, "gh pr create --repo acme/web --title x --body y", "tracker")
+bash(A, None, "gh issue comment 1 --repo acme/issues -b x", "tracker@htracker")
+bash(A, None, "gh pr create --repo acme/web --title x --body y", "tracker@htracker")
 mcp(A, None, "mcp__github__create_issue", {"owner": "acme", "repo": "friend", "title": "x"}, "app@hstar")
 # Near matches.
 bash(B, OR, "gh pr comment 1 --repo acme/ap -b x")
@@ -520,10 +531,18 @@ bash(B, OR, "gh pr comment 1 -R acme/other -b x &> /dev/null")
 bash(B, OR, "gh pr comment 1 --repo acme/other -b x", "repooff")
 bash(B, OR, FRIEND, "repoallow")
 _repo_allow_id = CASES[-1][0]
+# A tracker or companion named only in the repo layer (committed, so untrusted) needs the
+# global allow list to confirm it; the "tracker" fixture's are confirmed only under htracker.
+bash(B, OR, "gh pr create --repo acme/web --title x --body y", "tracker")
+_unconfirmed_id = CASES[-1][0]
+bash(B, OR, "gh issue comment 1 --repo acme/issues -b x", "tracker")
+# The active-run marker does not move with the log root: a run logging to $NOT_ME_LOG_ROOT still activates the guard.
+bash(B, FP, "git push --force origin feature/x", "runenv")
 
 # Substrings a block message must contain, by case id.
 MESSAGE_CHECKS: Dict[str, List[str]] = {
     CASES[17][0]: ["not-me guard [other_repo]", "/not-me:allow-repo acme/other", "acme/other --everywhere",
                    "This repo (acme/app) may write only to: acme/app."],
     _repo_allow_id: ["/not-me:allow-repo acme/friend"],
+    _unconfirmed_id: ["/not-me:allow-repo acme/web"],
 }

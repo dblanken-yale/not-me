@@ -11,8 +11,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from notme import guard
-from notme.guard import RULES, Block, GuardContext
+from notme import guard, runlog, writes
+from notme.guard import Block, GuardContext
 from tests import PLUGIN_ROOT
 from tests import guard_cases as gc
 
@@ -70,12 +70,14 @@ class ContextTests(_Fixtures):
     def test_activation(self):
         self.assertTrue(guard.is_active(self.ctx("app")))
         self.assertTrue(guard.is_active(self.ctx("run")))
+        self.assertTrue(guard.is_active(self.ctx("runenv")))  # the run logged to $NOT_ME_LOG_ROOT
         self.assertFalse(guard.is_active(self.ctx("stale")))
         self.assertFalse(guard.is_active(self.ctx("bare")))
 
     def test_allowed_sources(self):
         self.assertEqual(self.ctx("app").allowed_repos, {"acme/app"})
-        self.assertEqual(self.ctx("tracker").allowed_repos, {"acme/app", "acme/issues", "acme/web"})
+        self.assertEqual(self.ctx("tracker@htracker").allowed_repos, {"acme/app", "acme/issues", "acme/web"})
+        self.assertEqual(self.ctx("tracker").allowed_repos, {"acme/app"})  # repo layer, not confirmed
         self.assertIn("acme/friend", self.ctx("cfgallow").allowed_repos)
         self.assertIn("acme/friend", self.ctx("app@hproj").allowed_repos)
         self.assertIn("acme/friend", self.ctx("app@hstar").allowed_repos)
@@ -98,7 +100,8 @@ class ContextTests(_Fixtures):
         empty.mkdir(exist_ok=True)
         ctx = GuardContext.from_project(empty, home=self.root / "homes" / "h0", env=self.env)
         self.assertFalse(guard.is_active(ctx))
-        self.assertIsNone(guard.blocklog_path(ctx))
+        self.assertIsNone(guard.log_root(ctx.common_dir))
+        guard.log_block(ctx, Block("force_push", "r"))  # nowhere to log: no exception, no file
 
 
 class TokenizerTests(unittest.TestCase):
@@ -172,36 +175,18 @@ class CheckoutWalkTests(unittest.TestCase):
 
 
 class UrlTests(unittest.TestCase):
-    def test_parse_url(self):
-        for url in ("https://github.com/acme/app.git", "https://github.com/acme/app", "git@github.com:acme/app.git",
-                    "ssh://git@github.com/acme/app.git", "https://token@github.com/acme/app.git",
-                    "https://github.com/acme/app/pull/3"):
-            self.assertEqual(guard.parse_url(url), "acme/app", url)
-        for url in ("git@gitlab.com:acme/app.git", "origin", "https://example.com/acme/app", ""):
-            self.assertIsNone(guard.parse_url(url), url)
-
-    def test_slug(self):
-        self.assertTrue(guard.is_slug("acme/app.js"))
-        self.assertFalse(guard.is_slug("evil/acme/app"))
-        self.assertFalse(guard.is_slug("{owner}/{repo}"))
-
-    def test_read_allowlist(self):
-        d = Path(tempfile.mkdtemp(prefix="notme-allow-"))
-        self.addCleanup(shutil.rmtree, d, True)
-        p = d / "allowed-repos.json"
-        self.assertEqual(guard.read_allowlist(p, "acme/app"), set())
-        p.write_text(json.dumps({"version": 1, "projects": {
-            "ACME/App": {"allow": [{"repo": "acme/One"}, {"repo": "bad slug"}, "acme/two"]},
-            "*": {"allow": [{"repo": "acme/three"}]}, "acme/zzz": {"allow": [{"repo": "acme/four"}]}}}))
-        self.assertEqual(guard.read_allowlist(p, "acme/app"), {"acme/one", "acme/two", "acme/three"})
-        p.write_text("[]")
-        self.assertEqual(guard.read_allowlist(p, "acme/app"), set())
+    def test_repo_slug(self):
+        for value in ("acme/app", "github.com/acme/app", "https://github.com/acme/app.git",
+                      "https://github.com/acme/app/pull/3", "git@github.com:acme/app.git"):
+            self.assertEqual(guard.repo_slug(value), "acme/app", value)
+        for value in ("evil/acme/app", "{owner}/{repo}", "https://example.com/acme/app", "", None):
+            self.assertIsNone(guard.repo_slug(value), value)
 
 
 class MessageTests(unittest.TestCase):
     def ctx(self):
-        return GuardContext(origin_repo="acme/app", allowed_repos={"acme/app", "acme/web"},
-                            rules={r: True for r in RULES}, protected_branches={"main"})
+        return GuardContext(write_ctx=writes.GuardContext(origin_repo="acme/app", allowed_repos=("acme/app", "acme/web"),
+                                                          protected_branches=("main",)))
 
     def test_allow_suggestion(self):
         b = Block("other_repo", "acme/other is not an allowed repo", target="acme/other", command="gh pr comment 1",
@@ -210,8 +195,9 @@ class MessageTests(unittest.TestCase):
         self.assertTrue(msg.startswith("not-me guard [other_repo]: blocked `gh pr comment 1`: targeting acme/other."))
         self.assertIn("This repo (acme/app) may write only to: acme/app, acme/web.", msg)
         self.assertIn("the operator runs:  /not-me:allow-repo acme/other\n", msg)
-        self.assertIn("(all projects: /not-me:allow-repo acme/other --everywhere; team-wide: add it to allow_repos "
-                      "in .claude/not-me/project.md)", msg)
+        self.assertIn("(all projects: /not-me:allow-repo acme/other --everywhere; team-wide: list it under repos "
+                      "in .claude/not-me/project.md, then each operator confirms it once with "
+                      "/not-me:allow-repo acme/other)", msg)
         self.assertIn("Autonomous runs: do not retry; log a QUESTION naming the operator and continue.", msg)
         self.assertIn("set guard.other_repo: off and confirm_guard_off: [other_repo]", msg)
         self.assertTrue(msg.endswith("See effective config: /not-me:config"))
@@ -249,9 +235,11 @@ class BlocklogTests(unittest.TestCase):
     def test_append(self):
         d = Path(tempfile.mkdtemp(prefix="notme-log-"))
         self.addCleanup(shutil.rmtree, d, True)
+        ctx = GuardContext(common_dir=d)
+        guard.log_block(ctx, Block("force_push", "r1", tool="Bash"))
+        guard.log_block(ctx, Block("other_repo", "r2", target="acme/x", tool="Write"))
         p = d / "not-me" / "logs" / "guard.jsonl"
-        guard.blocklog_append(p, Block("force_push", "r1", tool="Bash"))
-        guard.blocklog_append(p, Block("other_repo", "r2", target="acme/x", tool="Write"))
+        self.assertEqual(runlog.guard_log_path(guard.log_root(d)), p)
         rows = [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines()]
         self.assertEqual([r["rule"] for r in rows], ["force_push", "other_repo"])
         self.assertEqual(set(rows[1]), {"ts", "tool", "rule", "reason", "target"})
@@ -259,7 +247,7 @@ class BlocklogTests(unittest.TestCase):
         self.assertTrue(rows[0]["ts"].endswith("Z"))
         blocker = d / "file"
         blocker.write_text("x")
-        guard.blocklog_append(blocker / "guard.jsonl", Block("force_push", "r"))  # unwritable: no exception
+        runlog.guard_log_append(blocker / "guard.jsonl", {"rule": "force_push"})  # unwritable: no exception
 
 
 class HookTests(_Fixtures):

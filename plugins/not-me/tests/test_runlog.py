@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -19,9 +20,14 @@ class TmpDirTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = str(Path(tempfile.mkdtemp(prefix="notme-runlog-")).resolve())
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.root = Path(self.tmp) / "proj" / "not-me" / "logs"
+        self.project = Path(self.tmp) / "proj"  # not a git checkout: the marker sits in <project>/.not-me
+        self.root = self.project / "not-me" / "logs"
         self.root.mkdir(parents=True)
-        self.marker = self.root.parent / "active-run"
+        self.marker = self.project / ".not-me" / "active-run"
+        self.marker.parent.mkdir()
+        env = mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(self.project)})
+        env.start()
+        self.addCleanup(env.stop)
 
 
 class StartTests(TmpDirTestCase):
@@ -210,6 +216,21 @@ class RootTests(TmpDirTestCase):
         wt = Path(self.tmp) / "linked"
         _git(repo, "worktree", "add", "-q", "-b", "other", str(wt))
         self.assertEqual(runlog.log_root(wt, None, {}), runlog.log_root(repo, None, {}))
+
+    def test_marker_ignores_a_custom_log_root(self):
+        repo = Path(self.tmp) / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-q")
+        want = (repo / ".git").resolve() / "not-me" / "active-run"
+        for root in (runlog.log_root(repo, str(Path(self.tmp) / "cfgroot"), {}),
+                     runlog.log_root(repo, None, {"NOT_ME_LOG_ROOT": str(Path(self.tmp) / "envroot")})):
+            with self.subTest(root=root):
+                log = RunLog.start(root, "s", "r", project_dir=repo, force=True)
+                self.assertEqual(log.marker_path, want)
+                self.assertEqual(runlog.active_run(want)["run_id"], log.run_id)
+                self.assertEqual(RunLog.open(log.path, project_dir=repo).marker_path, want)
+        self.assertEqual(runlog.default_marker_path(Path(self.tmp) / "plain"),
+                         Path(self.tmp) / "plain" / ".not-me" / "active-run")
 
     def test_no_root_available_raises(self):
         with self.assertRaises(ValueError):

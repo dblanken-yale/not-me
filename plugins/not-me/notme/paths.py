@@ -31,15 +31,19 @@ def home_dir(env: Optional[Mapping[str, str]] = None) -> Path:
     return Path(_env(env).get("NOT_ME_HOME") or default_home_dir())
 
 
-def _git(args: list, cwd: PathLike) -> Optional[str]:
+def run_git(args: list, cwd: PathLike, stdin_devnull: bool = True) -> Optional[str]:
+    """stdout of `git <args>` in cwd (stripped), or None on any failure or empty output.
+
+    stdin is /dev/null by default so git never waits on a prompt.
+    """
     try:
-        proc = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
+        proc = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=10,
+                              stdin=subprocess.DEVNULL if stdin_devnull else None)
+    except (OSError, subprocess.SubprocessError, ValueError):
         return None
     if proc.returncode != 0:
         return None
-    out = proc.stdout.strip()
-    return out or None
+    return proc.stdout.strip() or None
 
 
 def project_dir(arg: Optional[PathLike] = None, env: Optional[Mapping[str, str]] = None) -> Optional[Path]:
@@ -49,7 +53,7 @@ def project_dir(arg: Optional[PathLike] = None, env: Optional[Mapping[str, str]]
     value = _env(env).get("CLAUDE_PROJECT_DIR")
     if value:
         return Path(value)
-    top = _git(["rev-parse", "--show-toplevel"], os.getcwd())
+    top = run_git(["rev-parse", "--show-toplevel"], os.getcwd())
     return Path(top) if top else None
 
 
@@ -60,7 +64,7 @@ def _abs_git_path(base: PathLike, out: str) -> Path:
 
 def git_common_dir(path: PathLike) -> Optional[Path]:
     """The shared .git directory for a checkout or worktree, or None outside git."""
-    out = _git(["rev-parse", "--git-common-dir"], path)
+    out = run_git(["rev-parse", "--git-common-dir"], path)
     return _abs_git_path(path, out) if out else None
 
 
@@ -76,14 +80,14 @@ def main_checkout(path: PathLike) -> Path:
     path = Path(path)
     if not (path / ".git").is_file():
         return path
-    out = _git(["rev-parse", "--git-dir", "--git-common-dir"], path)
+    out = run_git(["rev-parse", "--git-dir", "--git-common-dir"], path)
     dirs = out.splitlines() if out else []
     if len(dirs) != 2:
         return path
     git_dir, common = (_abs_git_path(path, d) for d in dirs)
     if git_dir == common:
         return path
-    configured = _git(["--git-dir", str(common), "config", "core.worktree"], path)
+    configured = run_git(["--git-dir", str(common), "config", "core.worktree"], path)
     main = _abs_git_path(common, configured) if configured else common.parent
     return main if main.is_dir() else path
 

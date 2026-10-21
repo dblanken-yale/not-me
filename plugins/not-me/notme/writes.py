@@ -25,6 +25,9 @@ _URL_FORMS = (
     re.compile(r"^(?:https?|ssh|git)://(?:[^@/]+@)?(?P<h>[^/:]+)(?::\d+)?/(?P<o>[^/]+)/(?P<n>[^/]+?)(?:\.git)?/?$"),
     re.compile(r"^(?:[^@/\s]+@)?(?P<h>[^/:\s]+):(?P<o>[^/:\s]+)/(?P<n>[^/:\s]+?)(?:\.git)?/?$"),
 )
+# a github web URL with more after the repo (…/pull/3, ?tab=x): only where gh, not git, reads the URL
+_URL_WITH_PATH = re.compile(
+    r"^https?://(?:[^@/]+@)?(?P<h>[^/:]+)(?::\d+)?/(?P<o>[^/]+)/(?P<n>[^/?#]+?)(?:\.git)?(?:[/?#].*)?$")
 
 
 def valid_slug(value: Any) -> bool:
@@ -33,16 +36,21 @@ def valid_slug(value: Any) -> bool:
     return not any(part in (".", "..") for part in value.split("/"))
 
 
-def parse_origin(url: Optional[str]) -> Optional[str]:
-    """owner/name from an https, scp-style ssh or ssh:// remote URL on github.com (or $GH_HOST); else None."""
+def parse_origin(url: Optional[str], allow_path: bool = False) -> Optional[str]:
+    """owner/name from an https, scp-style ssh or ssh:// remote URL on github.com (or $GH_HOST); else None.
+
+    allow_path also takes an https URL with more after the repo (https://github.com/o/n/pull/3).
+    Leave it off for URLs git itself fetches or pushes, where a path such as /../x changes the repo.
+    """
     if not url:
         return None
     url = url.strip()
-    for form in _URL_FORMS:
+    for form in _URL_FORMS + ((_URL_WITH_PATH,) if allow_path else ()):
         m = form.match(url)
         if m and m.group("h").lower() in {"github.com", os.environ.get("GH_HOST", "github.com").lower()}:
             slug = f"{m.group('o')}/{m.group('n')}"
-            return slug if valid_slug(slug) else None
+            if valid_slug(slug):
+                return slug
     return None
 
 
@@ -112,10 +120,18 @@ def _read_allowlist(home: Any) -> Tuple[Dict[str, Any], Optional[str]]:
     return data, None
 
 
+def _scope_allow(data: Mapping[str, Any], scope: str) -> List[Any]:
+    """The allow entries of every project key matching scope (owner/name compares case-insensitively)."""
+    out: List[Any] = []
+    for key, block in data.get("projects", {}).items():
+        allow = block.get("allow") if isinstance(block, dict) else None
+        if isinstance(key, str) and key.lower() == scope.lower() and isinstance(allow, list):
+            out += allow
+    return out
+
+
 def _entries(data: Mapping[str, Any], scope: str) -> List[dict]:
-    block = data.get("projects", {}).get(scope)
-    allow = block.get("allow") if isinstance(block, dict) else None
-    return [e for e in allow if isinstance(e, dict) and valid_slug(e.get("repo"))] if isinstance(allow, list) else []
+    return [e for e in _scope_allow(data, scope) if isinstance(e, dict) and valid_slug(e.get("repo"))]
 
 
 def _write_allowlist(home: Any, data: Mapping[str, Any]) -> None:
@@ -202,10 +218,8 @@ def allowlist_remove(home: Any, project: Optional[str], repo: Optional[str] = No
 
 
 def _board_entries(data: Mapping[str, Any], scope: str) -> List[str]:
-    block = data.get("projects", {}).get(scope)
-    allow = block.get("allow") if isinstance(block, dict) else None
-    return [e["board"] for e in allow if isinstance(e, dict) and isinstance(e.get("board"), str)
-            and BOARD_RE.fullmatch(e["board"])] if isinstance(allow, list) else []
+    return [e["board"] for e in _scope_allow(data, scope) if isinstance(e, dict) and isinstance(e.get("board"), str)
+            and BOARD_RE.fullmatch(e["board"])]
 
 
 def allowlist_list(home: Any, project: Optional[str] = None) -> List[Dict[str, str]]:
@@ -281,9 +295,10 @@ class GuardContext:
         candidates: List[Any] = [origin]
         if not untrusted(tracker, "tracker"):
             candidates.append(tracker)
-        candidates += [r.get("name") for r in meta.get("repos") or [] if isinstance(r, dict)
-                       and not untrusted(r.get("name"), "repos")]
-        candidates += list(meta.get("allow_repos") or []) + confirmed
+        names = [r.get("name") if isinstance(r, dict) else r for r in meta.get("repos") or []]
+        candidates += [n for n in names if not untrusted(n, "repos")]
+        candidates += [r.get("repo") if isinstance(r, dict) else r for r in meta.get("allow_repos") or []]
+        candidates += confirmed
         allowed: List[str] = []
         for c in candidates:
             if valid_slug(c) and str(c).lower() not in (a.lower() for a in allowed):
@@ -305,10 +320,13 @@ class GuardContext:
                                 f"run /not-me:allow-repo --board {label}")
                 board = None
 
-        guard = meta.get("guard") or {}
-        rules = {r: guard.get(r, "on") != "off" for r in GUARD_RULES}
+        guard = meta.get("guard")
+        guard = guard if isinstance(guard, dict) else {}
+        rules = {r: guard.get(r, "on") not in ("off", False) for r in GUARD_RULES}
+        protected = tuple(b for b in meta.get("protected_branches") or ()
+                          if isinstance(b, str) and b and not b.startswith("!"))
         return cls(origin_repo=origin, allowed_repos=tuple(allowed), board=board,
-                   protected_branches=tuple(meta.get("protected_branches") or ()), rules=rules,
+                   protected_branches=protected, rules=rules,
                    mode=str(meta.get("mode") or "dry-run"), warnings=tuple(warnings + list(cfg.warnings or [])),
                    project_dir=project_dir)
 
