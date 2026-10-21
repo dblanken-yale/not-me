@@ -7,7 +7,7 @@ each scenario and may delete its issues, pull requests and branches at any time.
 
 - `make test` runs the unit tests, `make lint` byte-compiles the package.
 - `site/index.html` is served with `python3 -m http.server` for browser proofs.
-- `.github/workflows/post-as-bot.yml` lets the seeder act as `github-actions[bot]`.
+- `.github/workflows/post-as-bot.yml` (stored as `_github/` in the plugin repo) lets the seeder act as `github-actions[bot]`.
   The repo setting "Allow GitHub Actions to create and approve pull requests"
   (Settings, Actions, General, Workflow permissions) must be enabled for the
   `pr` and `review` kinds to work.

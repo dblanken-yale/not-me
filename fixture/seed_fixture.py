@@ -552,7 +552,10 @@ class Fixture:
                 for item in sorted(source.iterdir()):
                     if item.name == "__pycache__":
                         continue
-                    dest = os.path.join(clone, item.name)
+                    # `_github` is stored under that name so GitHub does not run
+                    # these workflows from the plugin repo; restore it here.
+                    name = ".github" if item.name == "_github" else item.name
+                    dest = os.path.join(clone, name)
                     if item.is_dir():
                         shutil.copytree(str(item), dest,
                                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))

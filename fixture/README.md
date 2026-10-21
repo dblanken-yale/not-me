@@ -11,6 +11,10 @@ Contents and tooling for the two private throwaway GitHub repos the live evals r
 | `seed_fixture.py` | Bootstrap, reset, seed, teardown and verify. Stdlib only, calls `gh` and `git`. |
 | `tests/` | Unit tests for the seeder, run by `scripts/run-tests.py` with a fake `run`. |
 
+Note: `repo/_github` and `companion/_github` are stored under that name so GitHub does not
+run their workflows from the plugin repo. `--bootstrap` renames `_github` to `.github` when it
+stages the temporary clone.
+
 ## One-time setup
 
 1. Create two private repos, for example `OWNER/not-me-fixture` and `OWNER/not-me-fixture-companion`.

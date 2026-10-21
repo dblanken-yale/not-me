@@ -354,6 +354,34 @@ class ScenarioTests(unittest.TestCase):
                 self.assertIn(pr["head"], branches, f.name)
 
 
+class BootstrapTests(unittest.TestCase):
+    def test_staged_tree_has_dot_github_not_underscore(self):
+        staged = {}
+
+        def run(argv, input_text=None):
+            line = " ".join(argv)
+            if argv[:3] == ["gh", "repo", "clone"]:
+                Path(argv[-1]).mkdir(parents=True)
+            if line.endswith(" add -A"):
+                root = Path(argv[2])
+                staged["files"] = sorted(
+                    p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
+            if "repo view" in line:
+                return ok(json.dumps({"isPrivate": True}))
+            if "git/ref/tags/fixture-baseline" in line:
+                return Result(1, "", "not found")
+            return ok("")
+
+        out, err = io.StringIO(), io.StringIO()
+        code = sf.main(["--repo", REPO, "--owner", "acme", "--bootstrap"], run=run,
+                       out=out, err=err, sleep=lambda s: None)
+        self.assertEqual(code, 0, err.getvalue())
+        files = staged["files"]
+        self.assertIn(".github/workflows/post-as-bot.yml", files)
+        self.assertIn(".github/workflows/ci.yml", files)
+        self.assertFalse([f for f in files if f.startswith("_github")])
+
+
 class VerifyTests(unittest.TestCase):
     def labels_json(self):
         return json.dumps([{"name": l["name"], "color": l["color"], "description": l["description"]}
@@ -402,7 +430,7 @@ class ContentTests(unittest.TestCase):
                 self.assertIsNone(pattern.search(text), str(path))
 
     def test_fixture_workflow_inputs(self):
-        text = (FIXTURE / "repo/.github/workflows/post-as-bot.yml").read_text(encoding="utf-8")
+        text = (FIXTURE / "repo/_github/workflows/post-as-bot.yml").read_text(encoding="utf-8")
         for name in ("kind", "number", "title", "body", "path", "line", "branch"):
             self.assertRegex(text, r"\n      %s:\n" % name)
         self.assertIn("workflow_dispatch", text)
