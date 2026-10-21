@@ -79,6 +79,45 @@ class LedgerTests(unittest.TestCase):
             Ledger(link / "intended-writes.jsonl").append("a", "t", ["x"], payload_bytes=b"p")
         self.assertEqual(list(real.iterdir()), [])
 
+    def test_symlinked_intermediate_dir_is_refused(self):
+        base = self.dir / "base"
+        base.mkdir()
+        real = self.dir / "elsewhere"
+        real.mkdir()
+        try:
+            (base / "not-me").symlink_to(real)
+        except OSError:
+            self.skipTest("no symlinks")
+        ledger = Ledger(base / "not-me" / "logs" / "intended-writes.jsonl", base=base)
+        with self.assertRaises(LedgerError):
+            ledger.append("a", "t", ["x"], payload_bytes=b"p")
+        self.assertEqual(list(real.iterdir()), [])
+
+    def test_symlinked_not_me_fallback_base_refused(self):
+        project = self.dir / "plain2"
+        project.mkdir()
+        real = self.dir / "elsewhere2"
+        real.mkdir()
+        try:
+            (project / ".not-me").symlink_to(real)
+        except OSError:
+            self.skipTest("no symlinks")
+        with self.assertRaises(LedgerError):
+            Ledger.default_for(project).append("a", "t", ["x"])
+        self.assertEqual(list(real.iterdir()), [])
+
+    def test_missing_tail_is_created_private_one_by_one(self):
+        base = self.dir / "base2"
+        base.mkdir()
+        ledger = Ledger(base / "not-me" / "logs" / "intended-writes.jsonl", base=base)
+        ledger.append("a", "t", ["x"], payload_bytes=b"p")
+        for d in (base / "not-me", base / "not-me" / "logs", base / "not-me" / "logs" / "payloads"):
+            self.assertEqual(d.stat().st_mode & 0o777, 0o700)
+
+    def test_path_outside_base_refused(self):
+        with self.assertRaises(LedgerError):
+            Ledger(self.dir / "x" / "l.jsonl", base=self.dir / "other").append("a", "t", ["x"])
+
     def test_ledger_file_is_private_and_appends(self):
         self.ledger.append("a", "t", ["x"])
         self.ledger.append("b", "t", ["y"])

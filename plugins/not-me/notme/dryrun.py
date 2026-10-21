@@ -16,11 +16,31 @@ class LedgerError(RuntimeError):
     pass
 
 
-def _real_dir(path: Path, mode: int = 0o777) -> None:
-    """Create path if needed, then insist it is a real directory and not a symlink."""
-    path.mkdir(mode=mode, parents=True, exist_ok=True)
-    if stat.S_ISLNK(os.lstat(path).st_mode):
-        raise LedgerError(f"{path.name} is a symlink; refusing to write the ledger through it")
+def _real_dir(path: Path, base: Optional[Path] = None) -> None:
+    """Make path a real directory. With a trusted base, every component below it is lstat-checked.
+
+    Missing components are made one at a time (0700) and re-checked; any symlink or non-directory
+    component raises LedgerError. Without a base only the last component is checked.
+    """
+    if base is None:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if stat.S_ISLNK(os.lstat(path).st_mode):
+            raise LedgerError(f"{path.name} is a symlink; refusing to write the ledger through it")
+        return
+    try:
+        parts = path.relative_to(base).parts
+    except ValueError:
+        raise LedgerError(f"{path.name} is not under the ledger's base directory") from None
+    current = base
+    for part in parts:
+        current = current / part
+        try:
+            st = os.lstat(current)
+        except FileNotFoundError:
+            os.mkdir(current, 0o700)
+            st = os.lstat(current)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            raise LedgerError(f"{part} is not a plain directory; refusing to write the ledger through it")
 
 
 def _write_new(dest: Path, data: bytes) -> None:
@@ -39,14 +59,17 @@ def utc_now() -> str:
 
 
 class Ledger:
-    def __init__(self, path: Any):
+    def __init__(self, path: Any, base: Optional[Any] = None):
+        """base: the trusted directory above path; every directory between them is checked for symlinks."""
         self.path = Path(path)
+        self.base = Path(base) if base is not None else None
 
     @classmethod
     def default_for(cls, project_dir: Any) -> "Ledger":
         common = paths.git_common_dir(project_dir)
-        base = common / "not-me" if common is not None else Path(project_dir) / ".not-me"
-        return cls(base / "logs" / "intended-writes.jsonl")
+        base = common if common is not None else Path(project_dir)
+        rel = ("not-me", "logs") if common is not None else (".not-me", "logs")
+        return cls(base.joinpath(*rel, "intended-writes.jsonl"), base=base)
 
     def append(self, op: str, target: str, argv: Sequence[str], payload_path: Optional[Any] = None,
                description: str = "", payload_bytes: Optional[bytes] = None) -> Dict[str, Any]:
@@ -55,11 +78,11 @@ class Ledger:
         copied = None
         if payload_bytes is None and payload_path is not None:
             payload_bytes = Path(payload_path).read_bytes()
-        _real_dir(self.path.parent)
+        _real_dir(self.path.parent, self.base)
         if payload_bytes is not None:
             sha = hashlib.sha256(payload_bytes).hexdigest()
             dest = self.path.parent / "payloads" / f"{sha}.md"
-            _real_dir(dest.parent, 0o700)
+            _real_dir(dest.parent, self.base)
             _write_new(dest, payload_bytes)
             copied = f"payloads/{sha}.md"
         entry = {"ts": utc_now(), "op": op, "target": target,
