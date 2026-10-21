@@ -216,20 +216,39 @@ def _short(text: str, limit: int = 100) -> str:
     return one if len(one) <= limit else one[: limit - 3] + "..."
 
 
+_path = os.path  # every guard path comparison goes through this module (tests swap in ntpath)
+
+
+def _resolve(p: str) -> str:
+    """realpath of p; a part that does not exist yet is joined onto its deepest existing ancestor's realpath,
+    so short names (RUNNER~1) and symlinks above it resolve the same way as for an existing path."""
+    tail: List[str] = []
+    here = _path.normpath(p)
+    while not _path.exists(here):
+        parent, name = _path.split(here)
+        if not name or parent == here:
+            break
+        tail.append(name)
+        here = parent
+    try:
+        here = _path.realpath(here)
+    except (OSError, ValueError):
+        pass
+    return _path.join(here, *reversed(tail)) if tail else here
+
+
 def _norm(p: str, base: str) -> str:
     """The single path normaliser: unquote, expand ~, make absolute against base, resolve, normcase."""
-    p = os.path.expanduser(p.replace('"', "").replace("'", ""))
-    if not os.path.isabs(p):
-        p = os.path.join(base, p)
-    try:
-        p = os.path.realpath(p)
-    except (OSError, ValueError):
-        p = os.path.normpath(p)
-    return os.path.normcase(p)
+    p = _path.expanduser(p.replace('"', "").replace("'", ""))
+    if not _path.isabs(p):
+        p = _path.join(base, p)
+    return _path.normcase(_path.normpath(_resolve(p)))
 
 
 def _under(path: str, base: str) -> bool:
-    return path == base or path.startswith(base.rstrip(os.sep) + os.sep)
+    """path is base or inside it; both must come from _norm."""
+    sep = _path.sep
+    return path == base or path.startswith(base.rstrip(sep) + sep)
 
 
 def _short_flags(args: List[str]) -> str:
@@ -555,12 +574,12 @@ def _file(tool: str, fpath: str, cwd: str, ctx: GuardContext) -> Iterator[Block]
     if full == _norm(str(ctx.allowlist_path), cwd) or _base(fpath) == ALLOWLIST_NAME:
         yield blk(SELF, "only the operator changes the not-me allow list", "ask the operator to run /not-me:allow-repo")
     plugin = _norm(str(ctx.plugin_root), cwd)
-    if any(_under(full, os.path.join(plugin, d)) for d in PLUGIN_PROTECTED_DIRS):
+    if any(_under(full, _norm(d, plugin)) for d in PLUGIN_PROTECTED_DIRS):
         yield blk(SELF, "the not-me plugin's own code is off limits to the agent",
                   "describe the change in a QUESTION for the operator")
     if ctx.active_run:
         home = _norm(str(ctx.home), cwd)
-        if _under(full, _norm(str(ctx.config_dir), cwd)) or (os.path.dirname(full) == home and full.endswith(".md")):
+        if _under(full, _norm(str(ctx.config_dir), cwd)) or (_path.dirname(full) == home and full.endswith(".md")):
             yield blk(SELF, "not-me config is read-only while a not-me run is active",
                       "log a QUESTION proposing the config change for the operator")
     low = fpath.replace("\\", "/").lower()
@@ -747,7 +766,7 @@ def _worktrees(ctx: GuardContext) -> List[str]:
             entries = []
         for e in entries:
             try:
-                dirs.append(os.path.dirname((e / "gitdir").read_text(encoding="utf-8").strip()))
+                dirs.append(_path.dirname((e / "gitdir").read_text(encoding="utf-8").strip()))
             except OSError:
                 continue
     return [_norm(d, "/") for d in dirs if d]
@@ -767,6 +786,7 @@ def _cmd_notme(args: List[str], st: _State, ctx: GuardContext, blk: Blk, chdir: 
     if chdir or not any(_under(here, w) for w in _worktrees(ctx)):
         yield blk(SELF, "notme runs outside the session checkout", hint)
     pos = [a for a in plain if not a.startswith("-")]
+    raw_pos = [r for r, a in zip(args, plain) if not a.startswith("-")]  # paths keep their backslashes
     if pos[:1] == ["allow-repo"] and pos[1:2] != ["list"]:
         if not ({"--help", "-h"} & set(plain)):
             yield blk(SELF, "only the operator changes the not-me allow list",
@@ -776,9 +796,9 @@ def _cmd_notme(args: List[str], st: _State, ctx: GuardContext, blk: Blk, chdir: 
         if rest not in _PAUSE_OK:
             yield blk(SELF, "only a person turns a not-me pause off", "leave the pause for the operator")
     if pos[:2] == ["git", "worktree-add"]:
-        target = pos[2] if len(pos) > 2 else None
-        base = _norm(str(Path(ctx.common_dir) / "not-me" / "worktrees"), "/") if ctx.common_dir else None
-        if target is None or base is None or not _under(_norm(target, st.dir), base) or _norm(target, st.dir) == base:
+        target = _norm(raw_pos[2], st.dir) if len(raw_pos) > 2 else None
+        base = _norm(_path.join(str(ctx.common_dir), "not-me", "worktrees"), "/") if ctx.common_dir else None
+        if target is None or base is None or target == base or not _under(target, base):
             yield blk(SELF, "notme git worktree-add may only create worktrees under <git common dir>/not-me/worktrees/",
                       "let notme pick the worktree path")
 

@@ -183,6 +183,42 @@ class UrlTests(unittest.TestCase):
             self.assertIsNone(guard.repo_slug(value), value)
 
 
+class WindowsPathTests(unittest.TestCase):
+    """Path checks with ntpath standing in for os.path: drive-letter case, backslashes and forward slashes."""
+
+    def setUp(self):
+        import ntpath
+        for patch in (mock.patch.object(guard, "_path", ntpath), mock.patch.object(ntpath, "realpath", ntpath.abspath),
+                      mock.patch.object(ntpath, "exists", lambda p: False)):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.ctx = GuardContext(cwd="C:\\Work\\App", root="C:\\Work\\App", common_dir="C:\\Work\\App\\.git",
+                                config_dir="C:\\Work\\App\\.claude\\not-me", home="C:\\Users\\op\\.claude\\not-me",
+                                plugin_root="C:\\Plugins\\not-me", active_run=True, env={},
+                                write_ctx=writes.GuardContext(origin_repo="acme/app", allowed_repos=("acme/app",)))
+
+    def decide(self, tool, tin):
+        return guard.decide({"tool_name": tool, "tool_input": tin, "cwd": "C:\\Work\\App"}, self.ctx)
+
+    def test_worktree_add_containment(self):
+        for path in ("C:/work/app/.git/not-me/worktrees/feat-x", "c:\\WORK\\App\\.git\\not-me\\worktrees\\feat-x",
+                     ".git/not-me/worktrees/feat-x"):
+            with self.subTest(path=path):
+                self.assertIsNone(self.decide("Bash", {"command": f"notme git worktree-add {path}"}))
+        for path in ("C:\\Work\\App\\.git\\not-me\\worktrees\\..\\..\\hooks", "D:\\x", "C:/Work/App/.git/not-me/worktrees"):
+            with self.subTest(path=path):
+                self.assertEqual(self.decide("Bash", {"command": f"notme git worktree-add {path}"}).rule, "self_protect")
+
+    def test_session_checkout_and_file_self_protection(self):
+        self.assertIsNone(self.decide("Bash", {"command": "cd C:/work/APP/sub && notme status"}))
+        self.assertEqual(self.decide("Bash", {"command": "cd D:\\Other && notme status"}).rule, "self_protect")
+        for path in ("c:/work/app/.claude/not-me/project.md", "C:\\Plugins\\NOT-ME\\hooks\\repo_guard.py",
+                     "C:/Users/OP/.claude/not-me/allowed-repos.json"):
+            with self.subTest(path=path):
+                self.assertEqual(self.decide("Edit", {"file_path": path}).rule, "self_protect")
+        self.assertIsNone(self.decide("Edit", {"file_path": "C:/Work/App/src/main.py"}))
+
+
 class MessageTests(unittest.TestCase):
     def ctx(self):
         return GuardContext(write_ctx=writes.GuardContext(origin_repo="acme/app", allowed_repos=("acme/app", "acme/web"),
