@@ -1,0 +1,41 @@
+{
+  "description": "review, approve: a bot-authored PR with a correct fix, review requested from the operator",
+  "patches": [
+    {
+      "path": "calc/core.py",
+      "find": "    \"\"\"Return a - b.\"\"\"\n    return a - b",
+      "replace": "    \"\"\"Return a - b.\"\"\"\n    return a + b",
+      "on_main": true,
+      "message": "chore(eval): seed R1 bug"
+    },
+    {
+      "branch": "eval/{rid}/{id}",
+      "path": "calc/core.py",
+      "find": "    \"\"\"Return a - b.\"\"\"\n    return a + b",
+      "replace": "    \"\"\"Return a - b.\"\"\"\n    return a - b",
+      "message": "fix: sub returns the difference"
+    }
+  ],
+  "issues": [],
+  "prs": [
+    {
+      "key": "pr",
+      "head": "eval/{rid}/{id}",
+      "base": "main",
+      "title": "fix: sub returns the difference",
+      "body": "## Summary\n\nRestores `sub` to subtract.\n\n## Testing steps\n\n1. Run `make test`.",
+      "labels": ["needs review"],
+      "reviewers": ["{operator}"],
+      "as": "bot"
+    }
+  ],
+  "expect": {
+    "skill": "review",
+    "result": "APPROVED",
+    "review_event": "APPROVE",
+    "labels_exact": {"pr:pr": ["ready to merge"]},
+    "pr_open_not_merged": true,
+    "no_force_push": true,
+    "protected_unchanged": ["main", "develop"]
+  }
+}

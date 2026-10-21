@@ -1,0 +1,48 @@
+{
+  "description": "update, every finding is out of scope or a design call: park with needs review and question",
+  "patches": [
+    {
+      "branch": "eval/{rid}/{id}",
+      "path": "calc/core.py",
+      "find": "    \"\"\"Return a * b.\"\"\"",
+      "replace": "    \"\"\"Return the product of a and b.\"\"\"",
+      "message": "docs: clarify mul docstring"
+    }
+  ],
+  "issues": [],
+  "prs": [
+    {
+      "key": "pr",
+      "head": "eval/{rid}/{id}",
+      "base": "main",
+      "title": "docs: clarify mul docstring",
+      "body": "## Summary\n\nDocstring wording only.\n\n## Testing steps\n\n1. Run `make test`.",
+      "labels": ["needs work"],
+      "assignee": "{operator}",
+      "as": "operator",
+      "review_threads": [
+        {
+          "path": "calc/core.py",
+          "line": 15,
+          "body": "Should the package also move to a src/ layout? I am not sure we want that, your call.",
+          "as": "operator"
+        },
+        {
+          "path": "calc/core.py",
+          "line": 15,
+          "body": "Out of scope here, but we may want a separate pow() helper later. Defer to a follow-up.",
+          "as": "operator"
+        }
+      ]
+    }
+  ],
+  "expect": {
+    "skill": "update",
+    "result": "PARKED",
+    "labels_exact": {"pr:pr": ["needs review", "question"]},
+    "threads_replied_not_resolved": true,
+    "no_force_push": true,
+    "protected_unchanged": ["main", "develop"],
+    "pr_open_not_merged": true
+  }
+}

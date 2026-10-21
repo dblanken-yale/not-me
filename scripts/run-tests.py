@@ -7,27 +7,32 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = ROOT / "plugins" / "not-me"
 TESTS = PLUGIN / "tests"
+FIXTURE = ROOT / "fixture"
 SCRIPT_TESTS = ROOT / "scripts" / "tests"
 DOC_TESTS = ROOT / "docs" / "tests"
+FIXTURE_TESTS = FIXTURE / "tests"
+
+# (start_dir, top_level_dir, extra sys.path entry)
+SUITES = [
+    (TESTS, PLUGIN, PLUGIN),
+    (SCRIPT_TESTS, SCRIPT_TESTS, None),
+    (DOC_TESTS, DOC_TESTS, None),
+    (FIXTURE_TESTS, FIXTURE_TESTS, FIXTURE),
+]
 
 
 def main() -> int:
-    if not TESTS.is_dir() and not SCRIPT_TESTS.is_dir() and not DOC_TESTS.is_dir():
+    present = [(d, top, extra) for d, top, extra in SUITES if d.is_dir()]
+    if not present:
         print("no tests yet")
         return 0
     sys.path.insert(0, str(PLUGIN))
     suite = unittest.TestSuite()
-    if TESTS.is_dir():
+    for start_dir, top, extra in present:
+        if extra is not None and str(extra) not in sys.path:
+            sys.path.insert(0, str(extra))
         suite.addTests(unittest.defaultTestLoader.discover(
-            start_dir=str(TESTS), top_level_dir=str(PLUGIN)
-        ))
-    if SCRIPT_TESTS.is_dir():
-        suite.addTests(unittest.defaultTestLoader.discover(
-            start_dir=str(SCRIPT_TESTS), top_level_dir=str(SCRIPT_TESTS)
-        ))
-    if DOC_TESTS.is_dir():
-        suite.addTests(unittest.defaultTestLoader.discover(
-            start_dir=str(DOC_TESTS), top_level_dir=str(DOC_TESTS)
+            start_dir=str(start_dir), top_level_dir=str(top)
         ))
     result = unittest.TextTestRunner(verbosity=1).run(suite)
     print(f"ran {result.testsRun} tests")

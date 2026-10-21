@@ -1,0 +1,22 @@
+{
+  "description": "new, declared base branch is missing: stop without writing code",
+  "patches": [],
+  "issues": [
+    {
+      "key": "badbase",
+      "title": "Add a clamp helper",
+      "body": "Add `clamp(x, lo, hi)` to calc.\n\nBase branch: `release/does-not-exist`\n\nAcceptance:\n- clamp returns x limited to the range\n- tests cover both bounds",
+      "labels": ["to do"],
+      "as": "operator"
+    }
+  ],
+  "prs": [],
+  "expect": {
+    "skill": "new",
+    "result": "STOP",
+    "pr_exists": {"count": 0},
+    "branches_created": 0,
+    "protected_unchanged": ["main", "develop"],
+    "labels_exact": {"issue:badbase": ["to do", "needs human"]}
+  }
+}

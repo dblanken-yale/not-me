@@ -1,0 +1,13 @@
+[
+  {"name": "to do", "color": "0e8a16", "description": "Ready to be picked up"},
+  {"name": "in progress", "color": "fbca04", "description": "Claimed and being worked"},
+  {"name": "needs review", "color": "1d76db", "description": "PR open and waiting for a reviewer"},
+  {"name": "needs work", "color": "d93f0b", "description": "Reviewer sent the PR back"},
+  {"name": "ready to merge", "color": "5319e7", "description": "Approved"},
+  {"name": "question", "color": "d876e3", "description": "Waiting on an answer from a person"},
+  {"name": "blocked", "color": "b60205", "description": "Cannot move until something else lands"},
+  {"name": "epic", "color": "3e4b9e", "description": "Parent issue, never picked up directly"},
+  {"name": "needs help", "color": "e99695", "description": "not-me gave up and asks for a person"},
+  {"name": "needs human", "color": "ff9f1c", "description": "A run stopped and needs a person to act"},
+  {"name": "paused", "color": "cfd3d7", "description": "Skip this issue until the label is removed"}
+]
