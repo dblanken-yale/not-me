@@ -130,6 +130,9 @@ the owner's say-so, not a cleanup.
 
 ## Where the context lives
 
+- Start of a new orchestrating session: `docs/migration/HANDOFF.md` (what is
+  done, what is next, the decisions that are not obvious from the code, how to
+  test). Keep it true when any of that changes.
 - Design plan and the reasoning behind each unit: the PR descriptions in this
   repository, in number order.
 - Operating rules the model follows at run time: `plugins/not-me/references/`.
