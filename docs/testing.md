@@ -135,7 +135,7 @@ Drop `--dry-run` to run for real. Per run, in order:
 
 1. **Reset.** `seed_fixture.py --reset --run-id RID`.
 2. **Seed.** `seed_fixture.py --scenario ID --run-id RID`. The manifest lands in `evals/.state/RID/ID.json`.
-3. **Run.** `claude plugin eval plugins/not-me --case <skill>-<ID> --runs 1 --scaffold --trust-plugin --ablation none --allow-tools Bash,Write,Edit --max-cost-usd CAP --json <out>/<ID>-<n>.eval --no-publish`. The case is named `<skill>-<ID>`, for example `new-N1`. The command gets `NOT_ME_EVAL_RUN_ID`, `NOT_ME_EVAL_SCENARIO`, `NOT_ME_EVAL_BACKEND`, `NOT_ME_EVAL_MANIFEST` and the `NOT_ME_FIXTURE_*` variables.
+3. **Run.** `claude plugin eval plugins/not-me --case <skill>-<ID> --runs 1 --scaffold --trust-plugin --ablation none --allow-tools Bash,Write,Edit --max-cost-usd CAP --output-dir <out>/<ID>-<n>.eval --json <out>/<ID>-<n>.eval/run.json --no-publish`. The case is named `<skill>-<ID>`, for example `new-N1`. The command gets `NOT_ME_EVAL_RUN_ID`, `NOT_ME_EVAL_SCENARIO`, `NOT_ME_EVAL_BACKEND`, `NOT_ME_EVAL_MANIFEST` and the `NOT_ME_FIXTURE_*` variables.
 4. **Grade.** `grade_state.py --manifest ... --scenario ID --backend B`. It reads what the run left on GitHub and checks each assertion.
 5. **Merge.** The eval result and the grade are merged into `<out>/<ID>-<n>.json`, the file the gate report reads.
 6. **Teardown.** `seed_fixture.py --teardown RID`, also when a step failed.

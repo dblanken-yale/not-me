@@ -38,9 +38,10 @@ class Recorder:
         name = self.step(argv)
         self.calls.append((name, list(argv), dict(env)))
         if self.write_outputs and name == "eval":
-            d = Path(argv[argv.index("--json") + 1])
+            d = Path(argv[argv.index("--output-dir") + 1])
             d.mkdir(parents=True, exist_ok=True)
             (d / "aggregate-result.json").write_text(json.dumps({"summary": {"total_cost_usd": 1.5}}), encoding="utf-8")
+            Path(argv[argv.index("--json") + 1]).write_text("{}", encoding="utf-8")
         if self.write_outputs and name == "grade":
             Path(argv[argv.index("--json") + 1]).write_text(json.dumps(
                 {"scenario": "N1", "backend": "github", "ok": self.grade_ok, "results": [
@@ -96,8 +97,11 @@ class RunLiveTest(unittest.TestCase):
         run_live.main(self.args("--dry-run", "--cap", "4"), runner=Recorder(), rid_factory=rids, out=buf)
         line = next(l for l in buf.getvalue().splitlines() if "claude plugin eval" in l)
         for piece in ("--case new-N1", "--runs 1", "--scaffold", "--trust-plugin", "--ablation none",
-                      "--allow-tools Bash,Write,Edit", "--max-cost-usd 4", "--no-publish", "--json"):
+                      "--allow-tools Bash,Write,Edit", "--max-cost-usd 4", "--no-publish", "--output-dir", "--json"):
             self.assertIn(piece, line)
+        json_path = line.split("--json ")[1].split()[0]
+        self.assertTrue(json_path.endswith(".json"), json_path)  # claude plugin eval refuses any other suffix
+        self.assertTrue(json_path.startswith(line.split("--output-dir ")[1].split()[0]))
 
     def test_real_run_runs_in_order_merges_and_tears_down(self):
         rec = Recorder()
