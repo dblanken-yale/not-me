@@ -787,7 +787,24 @@ class RunLiveTest(unittest.TestCase):
         self.assertNotIn("GIT_CONFIG_PARAMETERS", env)
         self.assertEqual(env["GIT_SSH_COMMAND"], "false")
         self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
-        self.assertEqual(PurePath(env["GIT_CONFIG_GLOBAL"]).parts[-3:], ("n1-1-test", "N1.stage", "gitconfig-empty"))
+        self.assertEqual(PurePath(env["GIT_CONFIG_GLOBAL"]).parts[-3:], ("n1-1-test", "N1.stage", "gitconfig"))
+
+    def test_credential_helper_lives_in_the_run_gitconfig_not_the_environment(self):
+        # Claude Code sets GIT_CONFIG_COUNT/KEY/VALUE for its own git proxy, which displaced an env helper.
+        rec = self.rec()
+        seen = {}
+        orig = rec.__call__
+
+        def spy(argv, env, **opts):
+            if argv[0] == "claude":
+                seen["text"] = Path(env["GIT_CONFIG_GLOBAL"]).read_text(encoding="utf-8")
+            return orig(argv, env, **opts)
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "x.y", "GIT_CONFIG_VALUE_0": "z"}):
+            self.run_main(spy)
+        env = rec.call("launch")[2]
+        self.assertFalse([k for k in env if k.startswith("GIT_CONFIG_COUNT") or k.startswith("GIT_CONFIG_KEY")])
+        self.assertIn("helper = !gh auth git-credential", seen["text"])
+        self.assertIn("[credential]", seen["text"])
 
     def test_staged_token_file_is_gone_before_the_session_starts(self):
         rec = self.rec()

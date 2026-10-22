@@ -496,8 +496,11 @@ class Plan:
         login is invisible, and none of the other credentials. Claude uses the interactive login."""
         env = {k: v for k, v in base.items() if k not in STRIPPED_ENV}
         self.gh_config.mkdir(parents=True, exist_ok=True)
-        empty_gitconfig = self.stage_dir / "gitconfig-empty"
-        empty_gitconfig.write_text("", encoding="utf-8")
+        # The run's own global git config: nothing from the operator's (a url.*.insteadOf could route pushes
+        # over their SSH agent), just the credential helper that answers from GH_TOKEN. It lives in a file, not
+        # in GIT_CONFIG_COUNT/KEY/VALUE: Claude Code sets those itself for its git proxy and would displace ours.
+        run_gitconfig = self.stage_dir / "gitconfig"
+        run_gitconfig.write_text(GITCONFIG, encoding="utf-8")
         for key in ("SSH_AUTH_SOCK", "GIT_CONFIG_PARAMETERS", "GIT_SSH"):
             env.pop(key, None)
         env.update(self.env_extra)
@@ -505,14 +508,20 @@ class Plan:
                     "GIT_TERMINAL_PROMPT": "0",
                     # no global or system git config (a url.*.insteadOf could route pushes over the operator's
                     # SSH agent), and no ssh at all
-                    "GIT_CONFIG_GLOBAL": str(empty_gitconfig), "GIT_CONFIG_NOSYSTEM": "1", "GIT_SSH_COMMAND": "false",
-                    # git asks gh for credentials, and gh answers from GH_TOKEN, not from a keychain login
-                    "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "",
-                    "GIT_CONFIG_KEY_1": "credential.helper", "GIT_CONFIG_VALUE_1": "!gh auth git-credential"})
+                    "GIT_CONFIG_GLOBAL": str(run_gitconfig), "GIT_CONFIG_NOSYSTEM": "1", "GIT_SSH_COMMAND": "false"})
+        for key in [k for k in env if k.startswith("GIT_CONFIG_") and k not in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM")]:
+            env.pop(key)
         return env
 
     def commands(self) -> List[List[str]]:
         return [self.reset, self.seed, self.prepare, self.stage, self.launch, self.grade, self.clean, self.teardown]
+
+
+GITCONFIG = """# written by evals-harness/run_live.py for one run; git asks gh, and gh answers from GH_TOKEN
+[credential]
+	helper =
+	helper = !gh auth git-credential
+"""
 
 
 def find_session_transcript(plan: Plan, session_id: Optional[str], since: float, home: Path) -> Optional[Path]:

@@ -378,6 +378,10 @@ def _identity(repo_dir: Path, info: Mapping[str, str], runner: Runner) -> None:
         f"{login}@users.noreply.github.com"
     runner(["git", "-C", str(repo_dir), "config", "user.name", login])
     runner(["git", "-C", str(repo_dir), "config", "user.email", email])
+    # Repo-local too: Claude Code injects its own git config through the environment, and a file-level helper
+    # is the one place that cannot displace. gh answers from GH_TOKEN in the session's environment.
+    runner(["git", "-C", str(repo_dir), "config", "--replace-all", "credential.helper", ""])
+    runner(["git", "-C", str(repo_dir), "config", "--add", "credential.helper", "!gh auth git-credential"])
 
 
 def stage_workspace(case: str, workspace: Path, home: Path, state: Path = STATE, runner: Runner = run,
