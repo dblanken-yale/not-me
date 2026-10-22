@@ -3,7 +3,7 @@
 
 Prints ``path:line: RULE: message`` per violation and exits 1, or exits 0.
 Rules: E1 frontmatter parses, E2 tags, E4 graders, E5 live assertions, E6 live scenario grading.
-(E3, the old ablation rule, went with `claude plugin eval`; the ids are not renumbered.)
+(E3, the old ablation rule, went with the old eval runner; the ids are not renumbered.)
 """
 from __future__ import annotations
 

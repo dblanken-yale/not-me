@@ -2,10 +2,11 @@
 # Run live eval scenarios against the fixture repos. See evals-harness/README.md.
 #
 #   scripts/eval-live.sh --owner OWNER --repo OWNER/x-fixture [--companion OWNER/x-fixture-companion] \
-#       --skill new --scenario N1 [run_live.py flags such as --runs 3 --cap 6 --dry-run]
+#       --skill new --scenario N1 [run_live.py flags such as --runs 3 --launch interactive --dry-run]
 #
 # --owner, --repo and --companion are exported as NOT_ME_FIXTURE_OWNER, NOT_ME_FIXTURE_REPO and
-# NOT_ME_FIXTURE_COMPANION; everything else is passed to run_live.py unchanged.
+# NOT_ME_FIXTURE_COMPANION; everything else is passed to run_live.py unchanged. run_live.py starts a real
+# Claude Code session with your own login (see docs/testing.md); NOT_ME_FIXTURE_TOKEN must be exported.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,7 +27,7 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     -h|--help)
-      sed -n '2,9p' "${BASH_SOURCE[0]}"
+      sed -n '2,11p' "${BASH_SOURCE[0]}"
       exit 0
       ;;
     *)

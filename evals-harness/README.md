@@ -13,51 +13,66 @@ tests use `unittest` (`python3 scripts/run-tests.py` runs them with everything e
 | `transcript.py` | Reads a Claude Code session transcript (JSONL, plus its subagent files): tool uses, last message, trace. |
 | `graders.py` | Grades a transcript against a case in `cases/` (regex, tool_used, tool_order, file_exists; llm skipped). |
 | `readers.py` | `GhReader` (live `gh`) and `LedgerReader` (dry-run ledger). Same questions, two sources. |
-| `run_live.py` | Seed, run `claude plugin eval`, grade, merge, tear down. |
+| `run_live.py` | Seed, stage, run a real Claude Code session, grade the transcript and the state, merge, tear down. |
 | `gate_report.py` | Aggregate results into `docs/gates/<name>.md` and apply the thresholds. |
 | `../scripts/eval-live.sh` | Wrapper that sets the `NOT_ME_FIXTURE_*` variables from flags. |
 
 ## Run one scenario end to end
 
-You need the two fixture repos bootstrapped (see `fixture/README.md`), `gh` logged in with a token that can
-write to them, and `claude` on the path.
+You need the two fixture repos bootstrapped (see `fixture/README.md`), `gh` logged in with your own account
+(the seeder uses it), `claude` on the path and logged in (the session uses your interactive Claude login: no
+token and no API key), and `NOT_ME_FIXTURE_TOKEN` exported (`docs/testing.md`, "The fixture token").
 
     scripts/eval-live.sh --owner OWNER --repo OWNER/not-me-fixture \
         --companion OWNER/not-me-fixture-companion \
-        --skill new --scenario N1 --runs 1 --cap 6 --dry-run     # prints the commands only
+        --skill new --scenario N1 --runs 1 --dry-run     # prints the commands only
 
 Drop `--dry-run` to run. Per run, in order:
 
-Setup first: export `NOT_ME_FIXTURE_TOKEN`, a dedicated fine-grained token for the two fixture repos only
-(`docs/testing.md` says how to make it). `run_live.py` refuses to start without it.
-
-Per run, in order:
-
 1. `seed_fixture.py --reset --run-id RID`, then `--scenario ID --run-id RID`, with your own `gh` login. The
    manifest lands in `evals/.state/RID/ID.json`.
-2. **Prepare (operator side)**: `scaffold/scaffold.py prepare --manifest ... --stage-dir evals/.state/RID/ID.stage`.
+2. **Prepare**: `scaffold/scaffold.py prepare --manifest ... --stage-dir evals/.state/RID/ID.stage`.
    It checks the token (sees the fixture repo, cannot see the plugin repo), clones the fixture at the manifest's
    SHAs and stages the token there, mode 600.
-3. `claude plugin eval plugins/not-me --case <skill>-<ID> --runs 1 --scaffold --trust-plugin --ablation none
-   --allow-tools Bash,Write,Edit --max-cost-usd CAP --json <out>/<ID>-<n>.eval --no-publish [--keep-temp]`.
-   The sandbox passes through only `EVAL_*` keys, so the command gets `EVAL_NOT_ME_RUN_ID`,
-   `EVAL_NOT_ME_SCENARIO`, `EVAL_NOT_ME_BACKEND` and `EVAL_NOT_ME_STAGE_DIR`, and `GH_TOKEN`,
-   `GITHUB_TOKEN` and `NOT_ME_FIXTURE_TOKEN` are removed from its environment. Nothing from your shell reaches
-   the case's scaffold. **Stage (inside the eval)**: the case's `scaffold.sh` runs `scaffold.py stage`, which
-   copies the prepared clone into the workspace, writes the config layers and signs `gh` in for the sandbox
-   home with the staged token. The same `EVAL_*` values are saved in `<out>/<ID>-<n>.scaffold.json`.
-4. `grade_state.py --manifest ... --scenario ID --backend B --json <out>/<ID>-<n>.grade.json`.
-5. `scaffold.py clean --stage-dir ...` removes the stage and the token copy.
-6. The eval aggregate and the grade are merged into `<out>/<ID>-<n>.json` (the file `gate_report.py` reads).
-7. `seed_fixture.py --teardown RID`.
+3. **Stage the workspace**: your real `~/.claude/not-me/` is renamed to `~/.claude/not-me.backup-RID` and
+   recorded (with the run's pid) in `evals/.state/RID/global-backup.json`, then `scaffold.py stage --case <skill>-<ID>
+   --workspace evals/.state/RID/ID.workspace --home ~` copies the clone there and writes the scenario's config
+   layers. The global layer has to land in your real home because inside a session the `notme` CLI and the guard
+   read `~/.claude/not-me/` directly. It is restored afterwards, also when the run failed.
+4. **Launch the session** in the workspace with `--launch print` (default) or `--launch interactive`:
+   - `print`: `claude -p "<prompt>" --plugin-dir plugins/not-me --output-format json --allowedTools <case
+     allowed_tools>`, stdin closed, stdout saved to `<out>/<ID>-<n>.session.json`, killed after the case's
+     `timeout_seconds` (default 1800). The session id in that JSON names the transcript.
+   - `interactive`: `claude --plugin-dir plugins/not-me "<prompt>"` in your terminal. You watch, answer any
+     permission prompt, and exit the session when the skill is done. The newest transcript is graded.
 
-Steps 5 and 7 also run when an earlier step failed.
+   The session sees the fixture token only as `GH_TOKEN`, with `GH_CONFIG_DIR` pointing at an empty directory
+   under the stage so your own `gh` login is invisible. `NOT_ME_FIXTURE_TOKEN`, `GITHUB_TOKEN`,
+   `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` are removed from its environment.
+   `EVAL_NOT_ME_RUN_ID`, `EVAL_NOT_ME_SCENARIO` and `EVAL_NOT_ME_BACKEND` are set.
+5. **Grade twice**: `graders.py` on the transcript (`<out>/<ID>-<n>.graders.json`, table on screen), then
+   `grade_state.py` on GitHub or the ledger (`<out>/<ID>-<n>.grade.json`). The ledger for `--backend ledger` is
+   `<workspace>/.git/not-me/logs/intended-writes.jsonl`; `--ledger PATH` overrides it.
+6. **Clean**: `scaffold.py clean` removes the stage and the token copy, the workspace is deleted (`--keep-temp`
+   keeps it), the global layer is restored, and `seed_fixture.py --teardown RID` runs. All of it also runs when
+   an earlier step failed. Restoring never deletes: the layer the run wrote is kept at
+   `~/.claude/not-me.replaced-RID` (`-2`, `-3` added if taken); delete it by hand when you are done with it.
+7. The two grades and the session facts are merged into `<out>/<ID>-<n>.json` (the file `gate_report.py`
+   reads): `ok` is true only when the state grade passed, the transcript graders passed and nothing errored.
+
+While a run is live, any other Claude Code session you have open reads the scenario's global layer, and the
+restore moves anything those sessions wrote there to `~/.claude/not-me.replaced-RID`; close other not-me sessions
+first.
+
+If a run is killed, your own `~/.claude/not-me/` may still be in `~/.claude/not-me.backup-RID`. The next run
+refuses (exit 2) until you run `python3 evals-harness/run_live.py --restore-global RID`; it refuses that too
+while the run's process is alive, and with several records it restores the newest first. Records that look
+tampered with are listed but never count as live or newest. A failed restore, including a backup that vanished
+during the run, stops the run loop and keeps the record. Details in `docs/testing.md`.
 
 `--out` defaults to `results/evals/<today>`. A second invocation on the same day adds runs (`N1-2.json`) instead
-of overwriting. `-j` is always 1, because a skill scans the whole fixture repo and parallel runs would see each other.
-`--keep-temp` is passed on to the eval so its workspace survives; `--backend ledger` needs it, plus
-`--ledger <workspace>/.git/not-me/logs/intended-writes.jsonl` (see `docs/testing.md`).
-Exit code: 0 when the grade passed and nothing errored, 1 otherwise, 2 for a usage error.
+of overwriting. Runs go one at a time, because a skill scans the whole fixture repo.
+Exit code: 0 when everything passed, 1 otherwise, 2 for a usage error.
 
 Grade a finished run by hand:
 
@@ -141,6 +156,6 @@ A run passes a class when every assertion of that class passed in it.
 
 ## Cost
 
-One scenario run costs about one skill run (the plan estimates a few dollars). `--cap` is passed to every
-`claude plugin eval` call as `--max-cost-usd`. Three runs of the smoke subset are about three times that;
-check `cost_usd` in the result files and the gate report after the first pass.
+One scenario run costs about one skill run, billed to your own Claude login. A `print` run records `cost_usd`
+from the session's JSON; an `interactive` run records none. Three runs of the smoke subset are about three times
+that; check `cost_usd` in the result files and the gate report after the first pass.

@@ -87,7 +87,7 @@ class EvalLiveShTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("seed_fixture.py", proc.stdout)
         self.assertIn("--repo acme/x-fixture", proc.stdout)
-        self.assertIn("claude plugin eval", proc.stdout)
+        self.assertIn("claude -p", proc.stdout)
 
     def test_missing_repo_is_refused(self):
         env = {k: v for k, v in os.environ.items() if not k.startswith("NOT_ME_")}

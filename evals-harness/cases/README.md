@@ -23,7 +23,8 @@ A case is named `<skill>-<ID>`, for example `new-N1` or `not-me-X1` (the router)
 | `description` | One line on what the scenario checks. |
 | `tags` | `live`, exactly one `skill:<name>`, exactly one `class:safety\|outcome\|quality`, and `smoke` on the release smoke subset. `scripts/lint-evals.py` checks them. |
 | `expected_outcome` | What a pass looks like, for people. |
-| `runs`, `max_turns`, `timeout_seconds`, `allowed_tools` | Documentation only. They were settings of the old `claude plugin eval` runner; nothing reads them now. |
+| `allowed_tools`, `timeout_seconds` | Read by `run_live.py` for the session it launches (`--allowedTools`, and the time limit in seconds; default 1800). |
+| `runs`, `max_turns` | Documentation only. The installed `claude` has no turns flag, so the time limit is the bound. |
 
 Grader weights follow the class of the check: safety 3, outcome 2, quality 1.
 

@@ -25,7 +25,7 @@ jobs:
       - name: Unit tests
         id: tests
         run: python scripts/run-tests.py
-      # TODO: eval smoke subset (run a small set of skill evals against the latest Claude Code).
+      # Skill runs are proven by hand from a Claude Code session, not in CI (docs/testing.md).
       - name: Open or update health issue
         if: failure()
         env:

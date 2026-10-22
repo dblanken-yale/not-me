@@ -294,7 +294,7 @@ class StageTest(unittest.TestCase):
 
     def stage(self, case):
         ws, home = self.tmp / "ws", self.tmp / "home"
-        record = scaffold.stage_workspace(case, ws, home, state=self.state, scenarios=self.scen, login_gh=False)
+        record = scaffold.stage_workspace(case, ws, home, state=self.state, scenarios=self.scen)
         return ws, home, record
 
     def test_layers_pause_files_and_excludes(self):
@@ -311,7 +311,9 @@ class StageTest(unittest.TestCase):
         status = subprocess.run(["git", "status", "--porcelain"], cwd=str(ws), capture_output=True, text=True).stdout
         self.assertEqual(status.strip(), "", "scaffold files must not make the checkout dirty")
         self.assertEqual(record["env"]["NOT_ME_FIXTURE_REPO"], "acme/x-fixture")
-        self.assertTrue((home / ".not-me-eval.json").is_file())
+        self.assertTrue((self.state / "rid1" / "K9.stage" / ".not-me-eval.json").is_file())
+        self.assertFalse((home / ".not-me-eval.json").exists(), "the record must not land in the home")
+        self.assertFalse((home / ".config").exists(), "gh is not signed in by the stage step")
 
     def test_companion_is_nested_and_allowed(self):
         self.make_stage("M9", {"allow_companions": True}, companion=True)

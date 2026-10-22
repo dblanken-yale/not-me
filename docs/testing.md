@@ -11,7 +11,7 @@ Run these from the repo root. CI runs the same things on macOS, Linux and Window
 | Unit tests | `python3 scripts/run-tests.py` | Four suites in one run: the plugin (`plugins/not-me/tests/`), the scripts (`scripts/tests/`), these docs (`docs/tests/`) and the fixture seeder (`fixture/tests/`). Exits 1 on a failure or when zero tests ran |
 | Hook cases | `python3 plugins/not-me/tests/run_guard_cases.py` (add `-v` for each case) | Pipes every guard case through the real hook entry point as a subprocess, in throwaway git repos, and checks the exit code (2 blocks, 0 allows) and the rule named on stderr |
 | Skill lint | `python3 scripts/check-skills.py` | Static rules R1 to R14 on skills, references, defaults, docs and the README: frontmatter, references that resolve, CLI commands that exist, no personal paths, the name denylist, no raw GitHub writes, no em dashes |
-| Eval lint | `python3 scripts/lint-evals.py` | Rules E1 to E6 on `plugins/not-me/evals/*/prompt.md` and their graders, and whether a live case can be graded (`--only E1,E4` picks rules, `--json` for machines) |
+| Eval lint | `python3 scripts/lint-evals.py` | Rules E1 to E6 on `evals-harness/cases/*/prompt.md` and their graders, and whether a live case can be graded (`--only E1,E4` picks rules, `--json` for machines) |
 | CLI docs sync | `python3 scripts/gen-cli-docs.py --check` | `docs/cli.md` and `scripts/known-commands.txt` match the `notme` command registry. Run without `--check` to regenerate. Never edit `docs/cli.md` by hand |
 | Plugin validation | `claude plugin validate --strict plugins/not-me` | The manifest and layout, with Claude Code's own validator |
 | Layout check | `bash scripts/validate-plugins.sh` | Every plugin under `plugins/` has a manifest with name, description and author, and a README |
@@ -121,26 +121,41 @@ The scenarios that exist today:
 
 ## Run one scenario end to end
 
-You need the fixture repos bootstrapped, `gh` logged in as above, and `claude` on the path. The harness is in `evals-harness/`, and `scripts/eval-live.sh` is the entry point.
+You need the fixture repos bootstrapped, `gh` logged in as above (the seeder uses it), `claude` on the path and logged in, and `NOT_ME_FIXTURE_TOKEN` exported (see "The fixture token" below). The session uses your interactive Claude login: there is no token or API key to set for it. The harness is in `evals-harness/`, and `scripts/eval-live.sh` is the entry point.
 
 Start with a dry run of the driver, which prints the commands only:
 
 ```
 scripts/eval-live.sh --owner OWNER --repo OWNER/not-me-fixture \
     --companion OWNER/not-me-fixture-companion \
-    --skill new --scenario N1 --runs 1 --cap 6 --dry-run
+    --skill new --scenario N1 --runs 1 --dry-run
 ```
 
 Drop `--dry-run` to run for real. Per run, in order:
 
-1. **Reset.** `seed_fixture.py --reset --run-id RID`.
-2. **Seed.** `seed_fixture.py --scenario ID --run-id RID`. The manifest lands in `evals/.state/RID/ID.json`.
-3. **Run.** `claude plugin eval plugins/not-me --case <skill>-<ID> --runs 1 --scaffold --trust-plugin --ablation none --allow-tools Bash,Write,Edit --max-cost-usd CAP --output-dir <out>/<ID>-<n>.eval --json <out>/<ID>-<n>.eval/run.json --no-publish`. The case is named `<skill>-<ID>`, for example `new-N1`. The command gets `NOT_ME_EVAL_RUN_ID`, `NOT_ME_EVAL_SCENARIO`, `NOT_ME_EVAL_BACKEND`, `NOT_ME_EVAL_MANIFEST` and the `NOT_ME_FIXTURE_*` variables.
-4. **Grade.** `grade_state.py --manifest ... --scenario ID --backend B`. It reads what the run left on GitHub and checks each assertion.
-5. **Merge.** The eval result and the grade are merged into `<out>/<ID>-<n>.json`, the file the gate report reads.
-6. **Teardown.** `seed_fixture.py --teardown RID`, also when a step failed.
+1. **Reset and seed.** `seed_fixture.py --reset --run-id RID`, then `--scenario ID --run-id RID`. The manifest lands in `evals/.state/RID/ID.json`.
+2. **Prepare.** `scaffold.py prepare` checks the fixture token, clones the fixture repos at the manifest's SHAs into `evals/.state/RID/ID.stage` and stages the token there (mode 600).
+3. **Stage the workspace.** Your real `~/.claude/not-me/` is renamed to `~/.claude/not-me.backup-RID` (beside it, so the rename stays on one filesystem and the session cannot find your config under `evals/.state`). A record with the run's pid and the time it was written goes in `evals/.state/RID/global-backup.json`; it is informational, and restore checks the paths in it against its own and refuses on a mismatch. If a `~/.claude/not-me.backup-RID` directory is already there, the run fails before anything moves and leaves both directories alone. Then `scaffold.py stage` copies the clone to `evals/.state/RID/ID.workspace` and writes the scenario's config layers, the global layer into your real `~/.claude/not-me/`. It has to be the real one: inside a session the `notme` CLI ignores `NOT_ME_HOME` and the guard reads `~/.claude/not-me/` directly.
+4. **Launch the session.** `claude` runs in the workspace with the plugin loaded (`--plugin-dir plugins/not-me`) and the case's prompt, in one of two modes:
+   - `--launch print` (default): `claude -p` with `--output-format json` and `--allowedTools` from the case. Nothing to watch; the result JSON is saved to `<out>/<ID>-<n>.session.json` and the run is killed after the case's `timeout_seconds` (default 1800).
+   - `--launch interactive`: plain `claude` in your terminal. You watch, answer permission prompts, and exit the session when the skill is done.
 
-`--out` defaults to `results/evals/<today>`. A second run on the same day adds `N1-2.json` instead of overwriting. Runs go one at a time, because a skill scans the whole fixture repo and parallel runs would see each other. The exit code is 0 when the grade passed and nothing errored, 1 otherwise, and 2 for a usage error.
+   The session gets the fixture token only as `GH_TOKEN`, with an empty `GH_CONFIG_DIR` so your own `gh` login is invisible to it. `NOT_ME_FIXTURE_TOKEN`, `GITHUB_TOKEN`, `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` are removed from its environment.
+
+   What this does not do: the session is a normal Claude Code session on your machine, with your home directory
+   and your login, because a throwaway home cannot see the interactive login and the alternative is a long-lived
+   token. So it has the same reach as any session you start by hand: your files, your shell environment minus
+   the credentials above. The repo guard hook is active inside it and the only GitHub credential it holds is the
+   fixture token. Run it on a machine and in a shell you would start Claude Code in anyway.
+5. **Grade twice.** `graders.py` grades the session transcript against the case's graders (`<out>/<ID>-<n>.graders.json`). `grade_state.py --manifest ... --scenario ID --backend B` reads what the run left on GitHub, or in the ledger, and checks each assertion.
+6. **Clean up.** `scaffold.py clean` removes the stage and the token copy, the workspace is deleted (`--keep-temp` keeps it), your `~/.claude/not-me/` is put back, and `seed_fixture.py --teardown RID` runs. Restoring never deletes: the layer the run wrote is renamed to `~/.claude/not-me.replaced-RID` (with `-2`, `-3` added if that name is taken) and kept there; look at it or delete it by hand. If the backup directory is gone at restore time, the run fails, the record stays, and the run's layer is still renamed aside, so `~/.claude/not-me` is left empty rather than holding the scenario's `mode: live`. If only the record file cannot be deleted after a good restore, the message says the config was restored and names the leftover record to delete. This also happens when a step failed.
+7. **Merge.** Both grades and the session facts (mode, session id, turns, transcript path) go into `<out>/<ID>-<n>.json`, the file the gate report reads. `ok` needs the state grade, the transcript graders and an empty error list.
+
+While a run is live, any other Claude Code session you have open reads the scenario's global layer (`~/.claude/not-me/`), and anything those sessions wrote there ends up in `~/.claude/not-me.replaced-RID` after the restore. Close other not-me sessions before you start.
+
+If a run is killed before step 6, your own config may still be in `~/.claude/not-me.backup-RID`, and the next run refuses to start (exit 2). While any run's process is still alive the message says it is still going, and `--restore-global` refuses for every run id; wait for it. A run counts as alive when its pid exists and that process started before the record was written, so a pid reused by a later process does not count; the host name is not used. When the start time cannot be read the run counts as alive. If `ps -p PID` (Windows: `tasklist /FI "PID eq PID"`) shows the process is gone, `python3 evals-harness/run_live.py --restore-global RID --force` skips that check; use it only then. Otherwise put the config back with `python3 evals-harness/run_live.py --restore-global RID`, then run again. If more than one record exists (several runs died), restore the newest first (the message lists them by time written), then the next. If a restore fails partway, the run stops and starts no further run; your config stays in the backup directory. `--restore-global` deletes nothing either: what is at `~/.claude/not-me` goes to `~/.claude/not-me.replaced-RID` and the message names that path. If the run had no `~/.claude/not-me` before it started and the backup directory is missing, `--restore-global` renames the layer the run wrote to `~/.claude/not-me.replaced-RID` and says so. If the run did have one and the backup directory is missing, the run may have died before moving it, so `--restore-global` refuses and touches nothing: look at what is in `~/.claude/not-me` yourself, then delete the record file it names to clear the refusal. A record whose paths are not this machine's, or whose time is more than an hour in the future, looks tampered with: the refusal names its file and why, it never counts as a live run or as the newest record, so it never blocks restoring a real record, and `--restore-global` never acts on it. Move its backup directory back by hand if one exists, then delete the record file.
+
+`--out` defaults to `results/evals/<today>`. A second run on the same day adds `N1-2.json` instead of overwriting. Runs go one at a time, because a skill scans the whole fixture repo and parallel runs would see each other. The exit code is 0 when everything passed, 1 otherwise, and 2 for a usage error.
 
 Grade a finished run by hand:
 
@@ -180,8 +195,8 @@ A scenario describes the world. A case is one eval of one skill in that world.
 
 1. **Write the scenario.** Add `fixture/scenarios/<ID>.json`: the issues, branches and PRs to seed, and an `expect` block. `expect` keys are listed in `evals-harness/README.md` (the "expect mapping"), for example `labels_exact`, `pr_exists`, `no_force_push`, `protected_unchanged`, `untrusted_untouched`, `review_event`. An unknown key fails grading and lint. `skill`, `result`, `note` and `description` only describe the scenario.
 2. **Seed it by hand** to see the world: `seed_fixture.py ... --scenario <ID> --run-id test1`, look at the repo, then `--teardown test1`. Add `--dry-run` first.
-3. **Write the case.** Add `plugins/not-me/evals/<skill>-<ID>/prompt.md`, for example `new-N1`, with frontmatter `name`, `tags` (exactly one `skill:<name>`, exactly one `class:safety`, `class:outcome` or `class:quality`, and `live` for a live case), `ablation: none` and `runs`. The body is the prompt. Keep the scenario ID in the case name: that is how the harness finds the scenario.
-4. **Add graders.** Put at least one file in `plugins/not-me/evals/<skill>-<ID>/graders/`. Its frontmatter `type` is one of `regex`, `tool_used`, `tool_order`, `file_exists`, `llm` or `baseline`.
+3. **Write the case.** Add `evals-harness/cases/<skill>-<ID>/prompt.md`, for example `new-N1`, with frontmatter `name`, `tags` (exactly one `skill:<name>`, exactly one `class:safety`, `class:outcome` or `class:quality`, and `live` for a live case), and optionally `allowed_tools` and `timeout_seconds`. The body is the prompt. Keep the scenario ID in the case name: that is how the harness finds the scenario.
+4. **Add graders.** Put at least one file in `evals-harness/cases/<skill>-<ID>/graders/`. Its frontmatter `type` is one of `regex`, `tool_used`, `tool_order`, `file_exists`, `llm` or `baseline`.
 5. **Add assertions** only when the generic grading from `expect` is not enough: `evals-harness/assertions/<case or ID>.py` defines `checks(ctx)` and replaces the generic grading. Without that file, lint rule E5 and E6 need a scenario ID in the case name, a scenario file with a non-empty `expect`, and only keys the harness knows.
 6. **Lint and test.** `python3 scripts/lint-evals.py`, then `python3 scripts/run-tests.py`.
 7. **Run it** once with `--dry-run`, then live with `--runs 1`, then the window of 6 for the gate.
@@ -190,7 +205,7 @@ A new assertion in `assertions/common.py` also needs a mapping in `generic.py` a
 
 ## Cost
 
-One scenario run costs about one skill run, a few dollars. `--cap` is passed to every `claude plugin eval` call as `--max-cost-usd`, so a run stops at the cap. A gate window is 6 runs per scenario over at least 2 days, so budget for that, not for one run. Read `cost_usd` in the result files and the gate report after your first pass and adjust `--cap`. Run the smallest set that answers your question: one scenario with `--runs 1` while you build, the full window only for a gate.
+One scenario run costs about one skill run, billed to your own Claude login. A `print` run records `cost_usd` from the session's JSON; an `interactive` run records none. A gate window is 6 runs per scenario over at least 2 days, so budget for that, not for one run. Read `cost_usd` in the result files and the gate report after your first pass. Run the smallest set that answers your question: one scenario with `--runs 1` while you build, the full window only for a gate.
 
 The unit tests, hook cases and lints are free and run in about a minute.
 
@@ -198,16 +213,14 @@ The unit tests, hook cases and lints are free and run in about a minute.
 
 - **Windows live runs.** CI runs the unit tests and hook cases on Windows. Live evals run on one developer machine, so nothing exercises a live run on Windows.
 - **The desktop client.** The plugin is meant to work the same in the Claude Code desktop app, but no automated check runs there. Test it by hand: `/not-me:doctor`, then `/not-me --dry-run`.
-- **Evals in CI.** The weekly health job has a placeholder for an eval smoke subset. Today evals are run by hand.
+- **Evals in CI.** Skill runs are proven by hand from a session, because they need your Claude login. CI runs only the unit tests and lints.
 - **Simultaneous claims.** `N3` covers falling through to a free issue when one is already claimed. A true race between two runs is not covered.
 - **Real preview hosts and boards.** Prove scenarios use a local static page, and queue scenarios use labels.
 - **Merging.** Nothing in not-me merges, so there is nothing to test; the safety class checks that no PR was merged.
 
 ## The fixture token
 
-The `claude plugin eval` sandbox runs each case with a scaffold that has no environment of its own, so the
-harness stages a token for it. That token must be a dedicated one. The harness never reads `gh auth token` or
-`~/.config/gh/hosts.yml`, and `scaffold.py prepare` refuses to run without `NOT_ME_FIXTURE_TOKEN`.
+The session that runs a case acts on GitHub, so it gets a token of its own. That token must be a dedicated one. The harness never reads `gh auth token` or `~/.config/gh/hosts.yml`, and `scaffold.py prepare` refuses to run without `NOT_ME_FIXTURE_TOKEN`.
 
 Create a fine-grained personal access token:
 
@@ -234,8 +247,7 @@ not the token's grant. Any other failure (network, 401, 5xx, `gh` missing) also 
 A broad token is refused. The plugin repo is taken
 from the `origin` remote; set `NOT_ME_PLUGIN_REPO=owner/name` if that is wrong.
 
-The token is copied to `evals/.state/<RID>/<ID>.stage/gh-token` (mode 600) for the scaffold to sign `gh` in
-inside the sandbox home, and `scaffold.py clean` deletes it. `run_live.py` runs `clean` after every run, also when
+The token is copied to `evals/.state/<RID>/<ID>.stage/gh-token` (mode 600). `run_live.py` reads it from there and gives it to the session as `GH_TOKEN` in its environment, never on a command line. `scaffold.py clean` deletes it. `run_live.py` runs `clean` after every run, also when
 a step failed. If a run is killed, run `python3 evals-harness/scaffold/scaffold.py clean` yourself.
 
 The seeder (`fixture/seed_fixture.py`) still uses your own `gh` login, because it needs rights the fixture token
@@ -247,17 +259,16 @@ does not have (it deletes issues and force-moves refs). The eval session only ev
     scripts/eval-live.sh --owner OWNER --repo OWNER/not-me-fixture --companion OWNER/not-me-fixture-companion \
         --skill new --scenario N1 --dry-run
 
-Drop `--dry-run` to run. The phases are described in `evals-harness/README.md`.
+Drop `--dry-run` to run. The phases are described above and in `evals-harness/README.md`.
 
 ## Grading a dry-run (ledger) case
 
-A case that runs in dry-run mode writes its ledger inside the eval workspace, which is deleted afterwards.
-Pass `--keep-temp` to keep it. `claude plugin eval` prints the workspace path; the ledger is at
+A case that runs in dry-run mode writes its ledger inside the run's workspace:
 
-    <workspace>/.git/not-me/logs/intended-writes.jsonl
+    evals/.state/<RID>/<ID>.workspace/.git/not-me/logs/intended-writes.jsonl
 
-Run `run_live.py --backend ledger --keep-temp --ledger <that path>`, or grade by hand:
+`run_live.py --backend ledger` reads it from there by default, so nothing extra is needed. The workspace is
+deleted at the end of the run; pass `--keep-temp` to keep it and grade by hand later:
 
     python3 evals-harness/grade_state.py --manifest evals/.state/RID/N1.json --scenario N1 \
         --backend ledger --ledger <that path>
-
