@@ -4,7 +4,7 @@
     python3 evals-harness/run_live.py --skill new --scenario N1 [--runs N] [--backend github|ledger]
         [--launch print|interactive] [--repo O/N] [--companion O/N] [--owner O] [--out DIR]
         [--keep-temp] [--dry-run]
-    python3 evals-harness/run_live.py --restore-global RUN_ID
+    python3 evals-harness/run_live.py --restore-global RUN_ID [--force]
 
 Per run: seed_fixture.py --reset and --scenario, scaffold.py prepare, stage the workspace (the scenario's
 global config layer goes into your real ~/.claude/not-me, which is backed up first and restored after),
@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -50,6 +51,8 @@ SCENARIO_RE = re.compile(r"^[A-Z]\d+$")
 RID_RE = re.compile(r"^[a-z0-9-]+$")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 DEFAULT_TIMEOUT = 1800
+FUTURE_SLACK = 3600  # a record `created` further ahead of now than this was not written by a run
+START_SLACK = 2.0  # start times read through ps have one-second resolution
 # Credentials the session must not see: it uses the interactive Claude login and the fixture GH_TOKEN only.
 STRIPPED_ENV = ("NOT_ME_FIXTURE_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
                 "CLAUDE_CODE_OAUTH_TOKEN")
@@ -119,16 +122,41 @@ def _present(path: Path) -> bool:
     return path.exists() or path.is_symlink()  # a dangling symlink is still the operator's
 
 
+def host_name() -> str:
+    """Informational only: on macOS the name can change with the network, so liveness never depends on it."""
+    return platform.node() or socket.gethostname()
+
+
+def _kernel32() -> Any:
+    """kernel32 with pointer-sized handle types, so a 64-bit handle is not cut to an int."""
+    import ctypes
+    from ctypes import wintypes
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.OpenProcess.restype = wintypes.HANDLE
+    k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k.CloseHandle.argtypes = [wintypes.HANDLE]
+    k.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    k.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(ctypes.c_ulonglong)] * 4
+    return k
+
+
 def pid_alive(pid: int) -> bool:
     """Whether a process with this pid exists on this host. Unsure means alive."""
     try:
         if os.name == "nt":
             import ctypes
-            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))  # QUERY_LIMITED_INFORMATION
-            if handle:
-                ctypes.windll.kernel32.CloseHandle(handle)
+            from ctypes import wintypes
+            kernel32 = _kernel32()
+            handle = kernel32.OpenProcess(0x1000, False, int(pid))  # QUERY_LIMITED_INFORMATION
+            if not handle:
+                return ctypes.get_last_error() == 5  # access denied: it exists
+            try:
+                code = wintypes.DWORD()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return code.value == 259  # STILL_ACTIVE; an exited process can linger while a handle is open
                 return True
-            return ctypes.windll.kernel32.GetLastError() == 5  # access denied: it exists
+            finally:
+                kernel32.CloseHandle(handle)
         os.kill(int(pid), 0)
         return True
     except ProcessLookupError:
@@ -137,11 +165,78 @@ def pid_alive(pid: int) -> bool:
         return True
 
 
+def _start_windows(pid: int) -> Optional[float]:
+    import ctypes
+    kernel32 = _kernel32()
+    handle = kernel32.OpenProcess(0x1000, False, int(pid))
+    if not handle:
+        return None
+    try:
+        times = [ctypes.c_ulonglong() for _ in range(4)]  # creation, exit, kernel, user as FILETIME
+        if not kernel32.GetProcessTimes(handle, *[ctypes.byref(t) for t in times]):
+            return None
+        return times[0].value / 1e7 - 11644473600.0  # 100 ns ticks since 1601 to the Unix epoch
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _start_darwin(pid: int) -> Optional[float]:
+    import ctypes
+    import ctypes.util
+    import struct
+    libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    mib = (ctypes.c_int * 4)(1, 14, 1, int(pid))  # CTL_KERN, KERN_PROC, KERN_PROC_PID
+    buf = ctypes.create_string_buffer(1024)  # struct kinfo_proc is 648 bytes on 64-bit
+    size = ctypes.c_size_t(len(buf))
+    if libc.sysctl(mib, 4, buf, ctypes.byref(size), None, ctypes.c_size_t(0)) != 0 or size.value < 16:
+        return None
+    sec, usec = struct.unpack_from("qi", buf.raw, 0)  # kp_proc.p_starttime, a struct timeval
+    return sec + usec / 1e6
+
+
+def _start_proc(pid: int) -> Optional[float]:
+    proc = Path("/proc")
+    if not (proc / "stat").is_file():
+        return None
+    stat_text = (proc / str(int(pid)) / "stat").read_text(encoding="utf-8", errors="replace")
+    ticks = int(stat_text.rsplit(")", 1)[1].split()[19])  # field 22, starttime; the fields after ")" start at 3
+    btime = next(int(line.split()[1]) for line in (proc / "stat").read_text(encoding="utf-8").splitlines()
+                 if line.startswith("btime "))
+    return btime + ticks / os.sysconf("SC_CLK_TCK")
+
+
+def _start_ps(pid: int) -> Optional[float]:
+    text = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True,
+                          env=dict(os.environ, LC_ALL="C"), timeout=10).stdout.strip()
+    if not text:
+        return None
+    return time.mktime(time.strptime(" ".join(text.split()), "%a %b %d %H:%M:%S %Y"))
+
+
+def process_start_time(pid: int) -> Optional[float]:
+    """When the process with this pid started, as Unix time, or None when it cannot be read."""
+    if os.name == "nt":
+        readers: List[Callable[[int], Optional[float]]] = [_start_windows]
+    elif sys.platform == "darwin":
+        readers = [_start_darwin, _start_ps]
+    else:
+        readers = [_start_proc, _start_ps]
+    for reader in readers:
+        try:
+            found = reader(pid)
+        except Exception:  # missing /proc, no ps, ctypes trouble: try the next way, then give up
+            found = None
+        if found is not None:
+            return found
+    return None
+
+
 def backup_global(home: Path, rid: str, record_path: Path) -> bool:
     """Rename the operator's ~/.claude/not-me to ~/.claude/not-me.backup-RID and write an informational record
-    (pid and host mark the run as live). Returns whether there was something to move. The record is written
-    first, so a crash at any point leaves enough for --restore-global. If the rename fails nothing has moved
-    and the record is removed again."""
+    (pid and created mark the run as live). Returns whether it moved something: the caller restores from this
+    value, never from its own earlier look at the filesystem. The record is written first, so a crash at any
+    point leaves enough for --restore-global. If the rename fails nothing has moved and the record is removed
+    again."""
     gdir, backup = global_dir(home), backup_path(home, rid)
     if _present(backup):
         raise RuntimeError(f"{backup} already exists; run --restore-global first")
@@ -149,7 +244,7 @@ def backup_global(home: Path, rid: str, record_path: Path) -> bool:
     record_path.parent.mkdir(parents=True, exist_ok=True)
     now = time.time()
     record = {"original": str(gdir.absolute()), "backup": str(backup.absolute()), "had_original": had,
-              "run_id": rid, "pid": os.getpid(), "host": socket.gethostname(), "created": now,
+              "run_id": rid, "pid": os.getpid(), "host": host_name(), "created": now,
               "timestamp": datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
     record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     if had:
@@ -190,48 +285,99 @@ def restore_dirs(original: Path, backup: Path, had_original: bool) -> str:
     return f"removed the layer the run wrote at {original} (there was none before)"
 
 
-def read_records(state: Path) -> List[Dict[str, Any]]:
-    """Every backup record under `state`, newest first by the time written inside it (not by name)."""
+def read_records(state: Path, home: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Every backup record under `state`, newest first by the time written inside it (not by name). A `created`
+    more than an hour ahead of now is a rewritten record: it counts as 0 so it cannot jump the queue. With `home`,
+    each record also lists why it looks tampered with (`tampered`, empty when it looks fine)."""
     found = []
+    now = time.time()
     for path in state.glob(f"*/{BACKUP_RECORD}"):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             created = float(data.get("created") or 0)
-        except (OSError, ValueError, AttributeError, TypeError):
+        except (OSError, ValueError, AttributeError, TypeError, OverflowError):
             data, created = {}, 0.0
         data = data if isinstance(data, dict) else {}
-        found.append({"path": path, "rid": path.parent.name, "created": created, "data": data})
+        tampered = []
+        if created != created or created > now + FUTURE_SLACK:  # NaN or the future
+            tampered.append("its timestamp is in the future")
+            created = 0.0
+        rid = path.parent.name
+        if home is not None and not points_home(data, home, rid):
+            tampered.append(f"it does not point at {global_dir(home)} and the backup for {rid}")
+        found.append({"path": path, "rid": rid, "created": created, "data": data, "tampered": tampered})
     return sorted(found, key=lambda r: (r["created"], r["rid"]), reverse=True)
 
 
+def points_home(data: Dict[str, Any], home: Path, rid: str) -> bool:
+    """Whether a record names the paths this machine would use for this run id."""
+    if not RID_RE.match(rid):
+        return False
+    return (Path(str(data.get("original"))) == global_dir(home).absolute()
+            and Path(str(data.get("backup"))) == backup_path(home, rid).absolute())
+
+
 def record_is_live(data: Dict[str, Any]) -> bool:
-    """A record whose run is still going: its pid is alive on this host (and is not this process)."""
+    """A record whose run may still be going: its pid is alive (and is not this process), and that process
+    started before the record was written. A process that started later reuses the pid of a dead run. When the
+    start time cannot be read the run counts as live; `--restore-global RID --force` is the way out. The host
+    name is not used: on macOS it changes with the network."""
     pid = data.get("pid")
-    return (isinstance(pid, int) and pid != os.getpid() and data.get("host") == socket.gethostname()
-            and pid_alive(pid))
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or pid == os.getpid() or not pid_alive(pid):
+        return False
+    started = process_start_time(pid)
+    if started is None:
+        return True
+    try:
+        created = float(data.get("created") or 0)
+    except (ValueError, TypeError, OverflowError):
+        return True
+    return started <= created + START_SLACK
 
 
-def restore_global(state: Path, rid: str, home: Path) -> str:
+def force_hint(rid: str, pid: Any) -> str:
+    return (f"If `ps -p {pid}` (Windows: `tasklist /FI \"PID eq {pid}\"`) shows that run is gone, and only "
+            f"then, run `python3 evals-harness/run_live.py --restore-global {rid} --force`")
+
+
+def tampered_hint(records: List[Dict[str, Any]], home: Path) -> str:
+    """The refusal text for records that look rewritten, with how to clear each one."""
+    bad = [r for r in records if r["tampered"]]
+    if not bad:
+        return ""
+    lines = [" These records look tampered with and are never acted on: " + "; ".join(
+        f"{r['path']} ({', '.join(r['tampered'])})" for r in bad) + "."]
+    lines.append(f" For each, check that your config is in {global_dir(home)}; if a "
+                 f"{global_dir(home).parent / 'not-me.backup-<RID>'} directory for it still exists, move it back "
+                 "by hand, then delete the record file.")
+    return "".join(lines)
+
+
+def restore_global(state: Path, rid: str, home: Path, force: bool = False) -> str:
     """--restore-global RID. The record is checked against what this machine expects and then only read for
-    `had_original`; the paths always come from `home` and the run id."""
+    liveness; the paths always come from `home` and the run id. `force` skips the liveness check only."""
     if not RID_RE.match(rid):
         raise RuntimeError(f"{rid!r} is not a run id")
-    records = read_records(state)
+    records = read_records(state, home)
     mine = next((r for r in records if r["rid"] == rid), None)
     if mine is None:
         raise RuntimeError(f"no backup record at {state / rid / BACKUP_RECORD}")
     data = mine["data"]
+    if not force:
+        live = next((r for r in records if record_is_live(r["data"])), None)
+        if live is not None:  # before the order check, so it never points at a live run to restore
+            pid = live["data"].get("pid")
+            raise RuntimeError(f"run {live['rid']} is still going (pid {pid}). Let it finish, or stop it, before "
+                               f"restoring anything. {force_hint(live['rid'], pid)}")
+    original, backup = global_dir(home), backup_path(home, rid)
+    if mine["tampered"]:
+        raise RuntimeError(f"the record for {rid} does not point at {original} and {backup}, or looks rewritten "
+                           f"({', '.join(mine['tampered'])}); not touching anything. If {backup} exists, move it "
+                           f"back to {original} by hand, then delete {mine['path']} to clear this record")
     if len(records) > 1 and records[0]["rid"] != rid:
         listing = ", ".join(f"{r['rid']} ({r['data'].get('timestamp', 'unknown time')})" for r in records)
         raise RuntimeError(f"{len(records)} backup records exist: {listing}. Restore the newest first, "
-                           f"{records[0]['rid']}, then run this again for the next")
-    if record_is_live(data):
-        raise RuntimeError(f"run {rid} is still going (pid {data.get('pid')} on this host). Let it finish, or stop "
-                           "it, before restoring")
-    original, backup = global_dir(home), backup_path(home, rid)
-    if Path(str(data.get("original"))) != original.absolute() or Path(str(data.get("backup"))) != backup.absolute():
-        raise RuntimeError(f"the record for {rid} does not point at {original} and {backup}; not touching "
-                           "anything. Move the backup back by hand")
+                           f"{records[0]['rid']}, then run this again for the next.{tampered_hint(records, home)}")
     if not _present(backup):
         # The record lives where a session could rewrite it, so it never authorises a deletion. With no backup
         # to put back there is nothing safe to do automatically.
@@ -374,8 +520,7 @@ def run_once(args: argparse.Namespace, n: int, runner: Runner, rid_factory: Call
     session: Dict[str, Any] = {"mode": args.launch, "command": quote(plan.launch)}
     report: Optional[graders.Report] = None
     cost: Optional[float] = None
-    attempted = restore_failed = False
-    had = _present(global_dir(home))  # in memory: the finally block never trusts the record file
+    attempted = restore_failed = had = False
     try:
         for label, cmd in (("reset", plan.reset), ("seed", plan.seed)):
             say("+ " + quote(cmd))
@@ -385,8 +530,10 @@ def run_once(args: argparse.Namespace, n: int, runner: Runner, rid_factory: Call
         if runner(plan.prepare, prep_env) != 0:
             raise RuntimeError("prepare failed (is NOT_ME_FIXTURE_TOKEN a dedicated fixture token?)")
         say(f"+ (moving {global_dir(home)} to {plan.backup_dir})")
+        # in memory: the finally block never trusts the record file. Set only once the backup returned, so a
+        # refused backup (one already exists, the rename failed) never runs a restore over the operator's config.
+        had = backup_global(home, rid, plan.backup_record)
         attempted = True
-        backup_global(home, rid, plan.backup_record)
         say("+ " + quote(plan.stage))
         if runner(plan.stage, env) != 0:
             raise RuntimeError("stage failed")
@@ -489,6 +636,9 @@ def build_parser() -> argparse.ArgumentParser:
                                      ".git/not-me/logs/intended-writes.jsonl)")
     ap.add_argument("--restore-global", metavar="RUN_ID",
                     help="put back the ~/.claude/not-me that a run which died had moved aside, then exit")
+    ap.add_argument("--force", action="store_true",
+                    help="with --restore-global: skip the check that the run is still going. Only when "
+                         "`ps -p <pid>` shows the run's process is gone")
     ap.add_argument("--dry-run", action="store_true", help="print the commands and run nothing")
     return ap
 
@@ -508,11 +658,14 @@ def main(argv: Optional[Sequence[str]] = None, runner: Runner = subprocess_runne
                   file=sys.stderr)
             return 2
         try:
-            say(restore_global(STATE_DIR, args.restore_global, home))
+            say(restore_global(STATE_DIR, args.restore_global, home, force=args.force))
         except (OSError, RuntimeError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
         return 0
+    if args.force:
+        print("error: --force only goes with --restore-global", file=sys.stderr)
+        return 2
     missing = [f"--{k}" for k in ("skill", "scenario", "repo", "owner") if not getattr(args, k)]
     if missing:
         print(f"error: {', '.join(missing)} required (--repo and --owner also come from "
@@ -529,18 +682,19 @@ def main(argv: Optional[Sequence[str]] = None, runner: Runner = subprocess_runne
         print(f"error: no usable case {case_dir.name}: {exc}", file=sys.stderr)
         return 2
     if not args.dry_run:
-        records = read_records(STATE_DIR)
+        records = read_records(STATE_DIR, home)
         live = [r for r in records if record_is_live(r["data"])]
         if live:
-            print(f"error: run {live[0]['rid']} is still going on this machine (pid {live[0]['data'].get('pid')}); "
-                  "it has your ~/.claude/not-me moved aside. Wait for it to finish. Do not restore it now.",
-                  file=sys.stderr)
+            pid = live[0]["data"].get("pid")
+            print(f"error: run {live[0]['rid']} is still going on this machine (pid {pid}); it has your "
+                  f"~/.claude/not-me moved aside. Wait for it to finish. Do not restore it while it runs. "
+                  f"{force_hint(live[0]['rid'], pid)}", file=sys.stderr)
             return 2
         if records:
             listing = ", ".join(f"{r['rid']} ({r['data'].get('timestamp', 'unknown time')})" for r in records)
             print(f"error: a previous run died with your ~/.claude/not-me moved aside: {listing}. Restore the "
                   f"newest first: `python3 evals-harness/run_live.py --restore-global {records[0]['rid']}`, "
-                  "then the next, before anything else.", file=sys.stderr)
+                  f"then the next, before anything else.{tampered_hint(records, home)}", file=sys.stderr)
             return 2
         if not os.environ.get("NOT_ME_FIXTURE_TOKEN"):
             print("error: NOT_ME_FIXTURE_TOKEN is not set (a fine-grained token for the fixture repos only; "

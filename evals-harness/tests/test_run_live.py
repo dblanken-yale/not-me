@@ -5,6 +5,7 @@ import os
 import shlex
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path, PurePath
 from unittest import mock
@@ -339,17 +340,67 @@ class RunLiveTest(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(self.run_main(self.rec()), 2)
             self.assertIn("still going", err.getvalue())
-            self.assertNotIn("--restore-global", err.getvalue())
+            # the only restore it names is the forced one, behind a check that the process is gone
+            self.assertIn("--restore-global live-1 --force", err.getvalue())
+            self.assertIn(f"ps -p {os.getppid()}", err.getvalue())
             self.assertEqual(run_live.main(["--restore-global", "live-1"], home=self.home), 1)
         self.assertIn("still going", err.getvalue())
         self.assertTrue(data_path.is_file())
 
-    def test_a_record_from_another_host_is_not_live(self):
+    def test_a_dead_record_from_another_host_is_offered_for_restore(self):
+        # the host name can change on macOS with the network, so a dead pid decides, whatever host is recorded
         self.operator_config()
-        self.dead_run("far-1", host="some-other-host", pid=os.getppid())
+        self.dead_run("far-1", host="some-other-host")
         with contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(self.run_main(self.rec()), 2)
-        self.assertIn("--restore-global far-1", err.getvalue())
+        self.assertIn("--restore-global far-1`", err.getvalue())
+        self.assertNotIn("still going", err.getvalue())
+
+    def test_a_live_record_with_another_host_name_is_still_live(self):
+        self.operator_config()
+        self.dead_run("far-2", host="old-wifi-name", pid=os.getppid())
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.run_main(self.rec()), 2)
+        self.assertIn("still going", err.getvalue())
+
+    def test_force_restores_despite_a_live_pid(self):
+        self.operator_config()
+        record = self.dead_run("live-2", pid=os.getppid())
+        self.assertTrue(run_live.record_is_live(json.loads(record.read_text(encoding="utf-8"))))
+        self.assertEqual(run_live.main(["--restore-global", "live-2", "--force"], out=io.StringIO(),
+                                       home=self.home), 0)
+        self.assert_operator_config()
+
+    def test_force_without_restore_global_is_a_usage_error(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.run_main(self.rec(), "--force"), 2)
+        self.assertIn("--restore-global", err.getvalue())
+
+    def test_unreadable_start_time_counts_as_live(self):
+        with mock.patch.object(run_live, "process_start_time", return_value=None):
+            self.assertTrue(run_live.record_is_live({"pid": os.getppid(), "created": 1.0}))
+
+    def test_a_reused_pid_counts_dead_by_start_time(self):
+        # the process behind the pid started after the record was written: the run that wrote it is gone
+        with mock.patch.object(run_live, "process_start_time", return_value=5000.0):
+            self.assertFalse(run_live.record_is_live({"pid": os.getppid(), "created": 1000.0}))
+            self.assertTrue(run_live.record_is_live({"pid": os.getppid(), "created": 6000.0}))
+
+    def test_process_start_time_reads_this_process(self):
+        started = run_live.process_start_time(os.getpid())
+        self.assertIsNotNone(started, "no way to read a process start time on this platform")
+        self.assertLessEqual(started, time.time() + run_live.START_SLACK)
+        self.assertGreater(started, time.time() - 6 * 3600)
+
+    def test_liveness_with_the_real_start_time(self):
+        # the parent process started before now and long after 1970
+        if run_live.process_start_time(os.getppid()) is None:
+            self.skipTest("cannot read the parent's start time here")
+        self.assertTrue(run_live.record_is_live({"pid": os.getppid(), "created": time.time()}))
+        self.assertFalse(run_live.record_is_live({"pid": os.getppid(), "created": 1.0}))
+
+    def test_a_dead_pid_is_not_live(self):
+        self.assertFalse(run_live.record_is_live({"pid": 999999999, "created": time.time()}))
 
     def test_two_records_restore_newest_first_by_timestamp_not_name(self):
         self.operator_config()
@@ -366,6 +417,52 @@ class RunLiveTest(unittest.TestCase):
         self.assertEqual(run_live.main(["--restore-global", "n1-9-x"], out=io.StringIO(), home=self.home), 0)
         self.assertEqual(run_live.main(["--restore-global", "n1-10-x"], out=io.StringIO(), home=self.home), 0)
         self.assert_operator_config()
+
+    def test_restoring_an_older_run_while_the_newest_is_live_says_still_going(self):
+        self.operator_config()
+        older = self.dead_run("n1-10-x", created=1000.0)
+        newest = self.dead_run("n1-11-x", pid=os.getppid())  # created now, by a process that is still running
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(run_live.main(["--restore-global", "n1-10-x"], home=self.home), 1)
+        self.assertIn("run n1-11-x is still going", err.getvalue())
+        self.assertNotIn("newest first", err.getvalue())
+        self.assertTrue(older.is_file())
+        self.assertTrue(newest.is_file())
+
+    def test_a_future_timestamp_cannot_jump_the_queue_and_is_named(self):
+        self.operator_config()
+        self.dead_run("real-1")
+        forged = self.state / "forged-1" / run_live.BACKUP_RECORD
+        forged.parent.mkdir(parents=True)
+        forged.write_text(json.dumps({
+            "original": str(self.glob.absolute()),
+            "backup": str(run_live.backup_path(self.home, "forged-1").absolute()),
+            "pid": 999999999, "created": 1e12}), encoding="utf-8")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.run_main(self.rec()), 2)
+        text = err.getvalue()
+        self.assertIn("--restore-global real-1`", text)
+        self.assertIn("tampered", text)
+        self.assertIn(str(forged), text)
+        self.assertIn("in the future", text)
+        self.assertEqual(run_live.main(["--restore-global", "real-1"], out=io.StringIO(), home=self.home), 0)
+        self.assertEqual((self.glob / "project.md").read_text(encoding="utf-8"), "operator's own\n")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(run_live.main(["--restore-global", "forged-1"], home=self.home), 1)
+        self.assertIn(f"delete {forged}", err.getvalue())
+        self.assertEqual((self.glob / "project.md").read_text(encoding="utf-8"), "operator's own\n")
+
+    def test_a_mismatched_newest_record_is_named_when_restoring_the_real_one(self):
+        self.operator_config()
+        self.dead_run("real-2", created=1000.0)
+        bad = self.dead_run("bad-2")
+        data = json.loads(bad.read_text(encoding="utf-8"))
+        data["original"] = str(self.tmp / "elsewhere")
+        bad.write_text(json.dumps(data), encoding="utf-8")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(run_live.main(["--restore-global", "real-2"], home=self.home), 1)
+        self.assertIn("newest first, bad-2", err.getvalue())
+        self.assertIn(f"{bad} (it does not point at", err.getvalue())
 
     def test_run_loop_stops_at_the_first_restore_failure(self):
         self.operator_config()
@@ -423,8 +520,37 @@ class RunLiveTest(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(run_live.main(["--restore-global", "dead-3"], home=self.home), 1)
         self.assertIn("does not point at", err.getvalue())
+        self.assertIn(f"delete {record}", err.getvalue())
         self.assertTrue(victim.is_dir())
         self.assertTrue((self.home / ".claude" / "not-me.backup-dead-3").is_dir())
+
+    def test_an_existing_backup_directory_fails_the_run_and_touches_nothing(self):
+        self.operator_config()
+        foreign = run_live.backup_path(self.home, "n1-1-test")
+        foreign.mkdir(parents=True)
+        (foreign / "marker").write_text("someone else's\n", encoding="utf-8")
+        rec = self.rec()
+        self.assertEqual(self.run_main(rec), 1)
+        self.assertNotIn("stage", rec.names())
+        self.assert_operator_config()
+        self.assertFalse((self.glob / "marker").exists())
+        self.assertEqual((foreign / "marker").read_text(encoding="utf-8"), "someone else's\n")
+        self.assertTrue(any("already exists" in e for e in self.result()["errors"]))
+
+    def test_a_layer_that_vanishes_before_the_backup_is_not_left_as_the_operators(self):
+        self.operator_config()
+        rec = self.rec()
+        orig = rec.__call__
+
+        def spy(argv, env, **opts):
+            code = orig(argv, env, **opts)
+            if rec.calls[-1][0] == "prepare":  # after the run started, before backup_global looks
+                shutil.rmtree(str(self.glob))
+            return code
+        self.run_main(spy)
+        self.assertEqual(rec.global_at_launch, "scenario layer\n")
+        self.assertFalse(self.glob.exists(), "the scenario layer must not stay behind as the operator's config")
+        self.assertFalse(list(self.state.glob("*/global-backup.json")))
 
     def test_backup_refuses_when_the_rename_fails_and_moves_nothing(self):
         self.operator_config()
