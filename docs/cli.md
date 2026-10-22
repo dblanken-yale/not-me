@@ -61,6 +61,16 @@ notme me
 
 Output: operator, source (config or gh)
 
+### `notme tmp-dir`
+
+Create a new directory (mode 0700) inside not-me's temp directory and print its path. Input files such as --body-file and --message-file are accepted from there. Run it once per run and use the literal path. Local only: nothing is sent to GitHub.
+
+```
+notme tmp-dir
+```
+
+Output: path
+
 ### `notme config`
 
 Effective configuration. --explain adds where each key came from, --check lists errors (exit 4 when any; two states sharing one label name is an error), --layer limits the output to one layer (default, global or repo).

@@ -21,8 +21,7 @@ Arguments: `$ARGUMENTS`. An optional issue number, `--base B`, `--dry-run`, `--b
   subcommand prints its flags.
 - With `--dry-run`, pass `--dry-run` to every `notme` call. Run the whole flow as
   if live and say `dry-run` in the result note.
-- Every GitHub write goes through `notme`. Text goes in files under a directory
-  made with `mktemp -d "$TMPDIR/not-me.XXXXXX"`, never in a shell argument.
+- Every GitHub write goes through `notme`. Text goes in files under the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/references/autonomy-and-logging.md` (Text to GitHub, rule 2), never in a shell argument.
 - After `notme log start`, every write call also passes `--log <path>`.
 - Label names in this file are the abstract keys of `labels` (for example
   `needs_human`). When a command takes a repo label name, write the value the
@@ -122,7 +121,8 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/delegation.md`.
 2. Else classify the unit. A path or kind under `## Delegation` in standards, or
    anything security-sensitive, goes to `models.review`; the rest to
    `models.implement`.
-3. Brief one subagent with goal, files, conventions, scope ("no commits, no
+3. Always dispatch the implementation to a subagent, even for a one-line change.
+   This overrides any operator preference about delegation size. Brief one subagent with goal, files, conventions, scope ("no commits, no
    pushes, no posts"), and acceptance from the issue. Include the failing test
    first rule. Log `DELEGATE <model> unit="..." try=1` with `notme log action
    --kind DELEGATE`.

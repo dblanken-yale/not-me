@@ -553,6 +553,7 @@ bash(B, OR, "gh pr comment https://evil.example#@github.com/acme/app/pull/1 -b x
 # The not-me CLI trusts its project, home and operator: nothing may re-point them (always on).
 bash(A, None, "notme config")
 bash(A, None, "notme status")
+bash(A, None, "notme tmp-dir")
 bash(A, None, "notme allow-repo list")
 bash(A, None, "{P}/bin/notme status", "alloff")
 bash(A, None, "LC_ALL=C git status")

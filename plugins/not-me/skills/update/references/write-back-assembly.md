@@ -9,7 +9,7 @@ each outcome leaves. The shape rules themselves are in `write-back.md`,
 
 ## Files
 
-Make one directory with `mktemp -d "$TMPDIR/not-me.XXXXXX"` and write one file per
+Make one work directory in the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/references/autonomy-and-logging.md` (Text to GitHub, rule 2) and write one file per
 post. Run `notme check-text --file <f>` on each; for the summary add `--summary`.
 Fix every problem it lists and run it again. Never post a failing text.
 

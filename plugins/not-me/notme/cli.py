@@ -35,6 +35,7 @@ import re
 import secrets
 import shlex
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from enum import IntEnum
@@ -619,6 +620,21 @@ def cmd_me(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     if isinstance(configured, str) and configured != "auto":
         return {"operator": configured, "source": "config"}
     return {"operator": ctx.operator, "source": "gh"}
+
+
+@command("tmp-dir", "make a fresh private work directory for input files")
+def cmd_tmp_dir(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """Create a new directory (mode 0700) inside not-me's temp directory and print its path. Input files such as
+    --body-file and --message-file are accepted from there. Run it once per run and use the literal path.
+    Local only: nothing is sent to GitHub.
+
+    Output: path
+    """
+    try:
+        base_dir = gh_mod.notme_tmp_dir()
+    except RuntimeError as exc:
+        raise fail(ExitCode.ERROR, "unsafe_path", str(exc)) from None
+    return {"path": tempfile.mkdtemp(prefix="run-", dir=str(base_dir))}
 
 
 @command("config", "print the effective configuration", args=[

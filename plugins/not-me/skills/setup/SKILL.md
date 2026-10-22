@@ -148,7 +148,7 @@ Keep every other section's default text. Do not invent sections.
 
 ## Step 6: write and check
 
-1. Before writing, copy each existing target file under `$TMPDIR` and show a unified
+1. Before writing, copy each existing target file into the temp directory (`autonomy-and-logging.md`, Text to GitHub, rule 2) and show a unified
    diff (`diff -u old new`, an empty old for a new file). Ask once to write them
    all. With `--answers`, write without asking.
 2. Write the files.

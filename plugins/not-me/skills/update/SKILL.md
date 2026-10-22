@@ -22,8 +22,7 @@ in this repo), `--dry-run`, `--bg`.
   subcommand prints its flags.
 - With `--dry-run`, pass `--dry-run` to every `notme` call. Run the whole flow as
   if live and say `dry-run` in the result note.
-- Every GitHub write goes through `notme`. Text goes in files under a directory
-  made with `mktemp -d "$TMPDIR/not-me.XXXXXX"`, never in a shell argument.
+- Every GitHub write goes through `notme`. Text goes in files under the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/references/autonomy-and-logging.md` (Text to GitHub, rule 2), never in a shell argument.
 - After `notme log start`, every write call also passes `--log <path>`.
 - Label names in this file are the abstract keys of `labels` (for example
   `needs_human`). When a command takes a repo label name, write the value the
@@ -145,7 +144,8 @@ the effective verify doc; never invent a test or lint command.
    `models.single_model`. Else a path or kind under `## Delegation` in standards,
    or anything security-sensitive, goes to `models.review`; the rest to
    `models.implement`.
-3. Brief one subagent per unit with goal, files, conventions, scope ("no commits,
+3. Always dispatch each unit to a subagent, even a one-line change. This overrides
+   any operator preference about delegation size. Brief one subagent per unit with goal, files, conventions, scope ("no commits,
    no pushes, no posts"), and acceptance from the finding. Failing test first.
    Log `DELEGATE` and, after your own audit of the diff and checks, `AUDIT`.
 4. Retry ladder from delegation.md, capped at `models.max_tries`, then do the unit
