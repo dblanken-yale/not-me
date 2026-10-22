@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import stat
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from notme import humans
@@ -207,6 +208,75 @@ class EffectiveModeTests(unittest.TestCase):
         self.assertEqual(mode, "dry-run")
         self.assertIsNone(cfg.live_unconfirmed)
         self.assertNotIn("downgraded", cfg.explain()["keys"]["project.mode"])
+
+
+class RevokeOnDryRunTests(unittest.TestCase):
+    """Going back to dry-run by any means (a hand edit too) revokes the signature, so a later edit back to
+    `mode: live` is not confirmed again."""
+
+    NO_MODE = "---\nschema: 1\n---\n# Project\n"
+
+    def setUp(self):
+        self.tc = TempCase()
+        self.addCleanup(self.tc.cleanup)
+        self.marker = self.tc.home / humans.LIVE_MARKER
+        self.epoch = self.tc.home / humans.LIVE_EPOCH
+
+    def _signed_live(self):
+        self.tc.write("global", "project", LIVE)
+        sign_live(self.tc.home)
+        self.assertEqual(self.tc.load().meta["project"]["mode"], "live")
+        return self.epoch.read_text(encoding="utf-8")
+
+    def _assert_revoked_then_unconfirmed(self, before):
+        cfg = self.tc.load()
+        self.assertEqual(cfg.meta["project"]["mode"], "dry-run")
+        self.assertFalse(self.marker.exists())
+        self.assertNotEqual(self.epoch.read_text(encoding="utf-8"), before)
+        self.tc.write("global", "project", LIVE)
+        cfg = self.tc.load()
+        self.assertEqual(cfg.meta["project"]["mode"], "dry-run")
+        self.assertIsNotNone(cfg.live_unconfirmed)
+        self.assertTrue([w for w in cfg.warnings if "not confirmed" in w])
+
+    def test_hand_edit_to_dry_run_revokes_the_signature(self):
+        before = self._signed_live()
+        self.tc.write("global", "project", DRY)
+        self._assert_revoked_then_unconfirmed(before)
+
+    def test_removing_the_global_mode_key_revokes_the_signature(self):
+        before = self._signed_live()
+        self.tc.write("global", "project", self.NO_MODE)
+        self._assert_revoked_then_unconfirmed(before)
+
+    def test_a_repo_dry_run_pin_does_not_revoke_global_live(self):
+        before = self._signed_live()
+        self.tc.write("repo", "project", DRY)
+        cfg = self.tc.load()
+        self.assertEqual(cfg.meta["project"]["mode"], "dry-run")
+        self.assertTrue(self.marker.exists())
+        self.assertEqual(self.epoch.read_text(encoding="utf-8"), before)
+        self.tc.write("repo", "project", self.NO_MODE)
+        self.assertEqual(self.tc.load().meta["project"]["mode"], "live")
+
+    def test_no_signature_and_dry_run_creates_no_epoch(self):
+        self.tc.write("global", "project", DRY)
+        humans.create_token(self.tc.home)
+        self.tc.load()
+        self.assertFalse(self.epoch.exists())
+        self.assertFalse(self.marker.exists())
+
+    def test_a_failed_revocation_warns_and_does_not_break_loading(self):
+        self._signed_live()
+        self.tc.write("global", "project", DRY)
+
+        def boom(home):
+            raise OSError("read-only")
+
+        with mock.patch.object(humans, "clear_live_marker", boom):
+            cfg = self.tc.load()
+        self.assertEqual(cfg.meta["project"]["mode"], "dry-run")
+        self.assertTrue([w for w in cfg.warnings if "could not revoke" in w], cfg.warnings)
 
 
 if __name__ == "__main__":

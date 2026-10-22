@@ -226,6 +226,7 @@ def _confirm_live(cfg: Config) -> None:
     """Live mode needs both `mode: live` in the layers (only the global layer can say it) and the marker that
     `notme mode live` signs with the operator token. Without a valid marker the effective mode is dry-run, the
     source records what was configured and why it was downgraded, and a warning says how to go live."""
+    _revoke_live_unless_global_live(cfg)
     project = cfg.meta.get("project", {})
     if project.get("mode") != "live" or humans.live_confirmed(cfg.home):
         return
@@ -238,3 +239,24 @@ def _confirm_live(cfg: Config) -> None:
     cfg.live_unconfirmed = (f"mode: live is set in {where} but not confirmed, so not-me runs in dry-run; "
                             "run /not-me:mode live")
     cfg.warnings.append(cfg.live_unconfirmed)
+
+
+def _revoke_live_unless_global_live(cfg: Config) -> None:
+    """When the global layer's own `mode` is not `live` (absent, dry-run, invalid, or the file is unreadable),
+    delete the live marker and rotate the epoch, so returning to dry-run by a hand edit revokes the signature the
+    same way `notme mode dry-run --global` does. Only the global layer counts: a repo-layer dry-run pin leaves the
+    operator's live signature alone. Cheap and file-free when there is no marker. This also runs inside the guard
+    hook (it loads config for write checks); that is fine because it only touches files in the not-me home and
+    starts no process. Best effort: a failure becomes a warning, never an exception."""
+    if cfg.home is None:
+        return
+    global_doc = cfg.docs.get("project", {}).get("global")
+    if global_doc is not None and global_doc.meta.get("mode") == "live":
+        return
+    try:
+        if not os.path.lexists(str(humans.live_marker_path(cfg.home))):
+            return
+        humans.clear_live_marker(cfg.home)
+    except Exception as exc:  # never let revocation abort config loading
+        cfg.warnings.append(f"global mode is not live but could not revoke the live marker {humans.LIVE_MARKER} "
+                            f"in the not-me home ({exc.__class__.__name__}); run `notme mode dry-run --global`")

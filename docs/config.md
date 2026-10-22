@@ -278,7 +278,7 @@ The ledger is `<git-common-dir>/not-me/logs/intended-writes.jsonl`, one JSON obj
 
 To go live, run `/not-me:mode live` and follow the steps. It needs the operator token (see [install.md](install.md#the-operator-token)). It sets `mode: live` in your global `project.md` and signs it: it writes `~/.claude/not-me/mode-live.sig`, a code made from your operator token and the random epoch in `~/.claude/not-me/mode-live.epoch`. `live` takes effect only when the signature matches your current token and epoch, so typing `mode: live` by hand does not turn live mode on. Not-me then stays in dry-run, and `/not-me:mode`, `/not-me:config` (the `downgraded` entry) and `/not-me:doctor` say live is set but not confirmed. A new operator token invalidates the signature: run `/not-me:mode live` again. The repo layer cannot set `live` at all.
 
-`/not-me:mode dry-run` switches back (with `--global`, it also deletes the signature and replaces the epoch, so an old signature saved somewhere never works again). Setting `mode: dry-run` by hand works too.
+`/not-me:mode dry-run` switches back (with `--global`, it also deletes the signature and replaces the epoch, so an old signature saved somewhere never works again). Setting `mode: dry-run` by hand works too. Returning the global layer to dry-run by any means (a hand edit or removing the `mode` key included) revokes the signature, so going live again needs `/not-me:mode live`. A repo-layer `mode: dry-run` pin does not revoke it.
 
 Upgrading: an existing global `mode: live` written before signatures existed runs as dry-run until you run `/not-me:mode live` once.
 

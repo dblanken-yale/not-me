@@ -160,7 +160,7 @@ Run `/not-me:mode live`. It checks whether you have an [operator token](#the-ope
 
 That command is the only way to go live. It sets `mode: live` in `~/.claude/not-me/project.md` and writes a small signature file next to it, `~/.claude/not-me/mode-live.sig`, made with your operator token and a random secret in `~/.claude/not-me/mode-live.epoch` (created the first time). Not-me runs live only when both are there and the signature matches your current token and epoch. Typing `mode: live` into the file by hand is not enough: not-me keeps running in dry-run and `/not-me:mode`, `/not-me:config` and `/not-me:doctor` warn that live is set but not confirmed. A new operator token makes the old signature invalid, so run `/not-me:mode live` again after you rotate it.
 
-`/not-me:mode dry-run --global` switches back at any time: it deletes the signature and replaces the epoch with a new random one, so a copy of an old signature can never turn live back on. You can also set `mode: dry-run` by hand (that leaves the signature and epoch in place).
+`/not-me:mode dry-run --global` switches back at any time: it deletes the signature and replaces the epoch with a new random one, so a copy of an old signature can never turn live back on. You can also set `mode: dry-run` by hand. Returning to dry-run by any means revokes the signature (the next time not-me reads its config), so going live again needs `/not-me:mode live`.
 
 Upgrading from an older version: if your global `project.md` already says `mode: live`, not-me runs in dry-run until you run `/not-me:mode live` once.
 

@@ -98,7 +98,9 @@ the owner's say-so, not a cleanup.
    `_confirm_live`); otherwise the effective mode is dry-run with a warning,
    so no file edit can turn live on, and a new token means going live again.
    Going back to dry-run in the global layer deletes the marker and replaces
-   the epoch, so a marker copy saved while live never verifies again. The guard's
+   the epoch, so a marker copy saved while live never verifies again; the
+   loader does the same whenever the global layer's own `mode` is not `live`
+   (a hand edit included; a repo-layer pin does not revoke). The guard's
    Edit/Write check on the global `mode` is UX, not the boundary. Logs and the
    active-run marker live under `<git-common-dir>/not-me/` and never move
    with a configured log root, so the guard can always find a running run.

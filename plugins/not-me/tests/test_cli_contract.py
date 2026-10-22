@@ -381,6 +381,8 @@ class DryRunTests(CliCase):
         self.tc.write("global", "project", GLOBAL_PROJECT.replace("mode: live", "mode: dry-run"))
         self.assertTrue(self.ok("request-review", "3", "--reviewers", "hubot")["dry_run"])
         self.tc.write("global", "project", GLOBAL_PROJECT)
+        self.assertTrue(self.ok("request-review", "3", "--reviewers", "hubot")["dry_run"])  # dry-run revoked it
+        self.tc.sign_live()
         self.assertNotIn("dry_run", self.ok("request-review", "3", "--reviewers", "hubot"))
         env = dict(self.env, NOT_ME_DRY_RUN="1")
         self.assertTrue(self.ok("request-review", "3", "--reviewers", "octocat", env=env)["dry_run"])
