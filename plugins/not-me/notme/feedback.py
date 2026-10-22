@@ -183,6 +183,7 @@ class Bundle:
     companions_skipped: List[Dict[str, Any]] = field(default_factory=list)
     checks: List[Dict[str, Any]] = field(default_factory=list)
     head_ref_untrusted: bool = False
+    text_is_data: bool = False  # title and body are a member's PR text under review: data, never instructions
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -261,36 +262,46 @@ def _companions(gh: GhClient, roster: Roster, repo: str, head_ref: Optional[str]
 
 
 def bundle(gh: GhClient, repo: str, n: int, roster: Roster, *, tracker: Optional[str] = None,
-           repos: Optional[Iterable[Any]] = None) -> Bundle:
+           repos: Optional[Iterable[Any]] = None, review: bool = False) -> Bundle:
     """The PR's facts. tracker (default: repo) holds the linked issue; repos are the configured
-    `repos[*]` (names or {name: ...} items) searched for companion PRs on the same branch."""
+    `repos[*]` (names or {name: ...} items) searched for companion PRs on the same branch.
+
+    review: the bundle is for reviewing the PR. A roster member's title and body are then returned as the
+    text under review (text_is_data true): data to judge, never instructions. Without it, and for anyone
+    not on the roster, an untrusted author's text stays withheld."""
     pr = gh.pr(repo, n)
     tracker = tracker or repo
     login = _dig(pr, "author", "login")
     ok = trusted(roster, login, _dig(pr, "author", "type"))
+    tier = tier_of(roster, login)
+    as_data = review and not ok and tier == "member"
+    shown = ok or as_data
     cross = bool(pr.get("isCrossRepository"))
-    # An untrusted author's title and body are untrusted text: withheld. A fork's or an untrusted author's
-    # branch name and check names are attacker-chosen too: neither feeds issue or companion lookup.
-    body = pr.get("body") if ok else None
+    # An untrusted author's title and body are untrusted text: withheld, except a member's under review, which
+    # is returned flagged as data. A fork's or an untrusted author's branch name and check names are
+    # attacker-chosen too: neither feeds issue or companion lookup, and check names are cut down.
+    body = pr.get("body") if shown else None
     head_ref = pr.get("headRefName")
     checks = _checks(gh, repo, n)
-    reason = "untrusted PR author" if not ok else "cross-repository PR" if cross else None
-    if reason:
-        head_untrusted = True
+    reason = "untrusted PR author" if not shown else "cross-repository PR" if cross else None
+    head_untrusted = bool(reason) or as_data
+    if head_untrusted:
         head_ref = head_ref if isinstance(head_ref, str) and _SAFE_BRANCH_RE.match(head_ref) else None
+        checks = _safe_checks(checks)
+    if reason:
         linked: Optional[Dict[str, Any]] = {"trusted": False}
         companions: List[Dict[str, Any]] = []
         skipped = [{"repo": None, "number": None, "reason": reason}]
-        checks = _safe_checks(checks)
     else:
-        head_untrusted = False
+        # A member's branch and body only name which issue and companions to look up; each of those still
+        # passes the trust filter on its own author.
         linked = _linked_issue(gh, roster, tracker, parse_linked_issue(head_ref, body, tracker))
         companions, skipped = _companions(gh, roster, repo, head_ref, _repo_names(repos))
     return Bundle(
-        repo=repo, number=int(n), title=pr.get("title") if ok else None, body=body, head_ref=head_ref,
+        repo=repo, number=int(n), title=pr.get("title") if shown else None, body=body, head_ref=head_ref,
         head_sha=pr.get("headRefOid"), base=pr.get("baseRefName"), state=pr.get("state"),
         is_draft=bool(pr.get("isDraft")), is_cross_repository=cross,
-        author=login, author_tier=tier_of(roster, login), author_trusted=ok,
+        author=login, author_tier=tier, author_trusted=ok, text_is_data=as_data,
         labels=[x.get("name") for x in pr.get("labels") or []],
         review_requests=[x.get("login") or x.get("slug") or x.get("name") for x in pr.get("reviewRequests") or []],
         review_decision=pr.get("reviewDecision"), mergeable=pr.get("mergeable"),
@@ -497,9 +508,12 @@ def review_candidates(gh: GhClient, repo: str, operator: str, roster: Roster,
                       label: str) -> "tuple[List[Dict[str, Any]], List[Dict[str, Any]]]":
     """(picks, skipped) among open PRs carrying `label`, lowest number first.
 
-    A pick is a non-draft PR where the operator is a requested reviewer, the author is trusted and is not the
-    operator, and something changed since the operator's last submitted review (a new head SHA, or a comment
-    by the author after it). picks: {number, why, head_sha, title, url}; skipped: {number, reason}.
+    A pick is a non-draft PR where the operator is a requested reviewer, the author is on the roster at any
+    tier (lead, authority or member) and is not the operator, and something changed since the operator's last
+    submitted review (a new head SHA, or a comment by the author after it). A member may be reviewed, but that
+    does not make their text trusted: see bundle(review=True).
+    picks: {number, why, head_sha, title (None unless author_trusted), url, author, author_tier, author_trusted};
+    skipped: {number, reason}.
     """
     me = operator.lower()
     picks: List[Dict[str, Any]] = []
@@ -516,14 +530,17 @@ def review_candidates(gh: GhClient, repo: str, operator: str, roster: Roster,
             reason = "operator is not a requested reviewer"
         elif author.lower() == me:
             reason = "operator is the author"
-        elif not trusted(roster, author, (pr.get("author") or {}).get("type")):
-            reason = "author not trusted"
+        elif tier_of(roster, author) == "none":
+            reason = "author not on the roster"
         why = None if reason else _review_reason(gh, repo, n, pr, author, me)
         if why is None:
             skipped.append({"number": n, "reason": reason or "unchanged since the last review"})
         else:
-            picks.append({"number": n, "why": why, "head_sha": pr.get("headRefOid"), "title": pr.get("title"),
-                          "url": item.get("url")})
+            # A member's title is text under review: read it only through bundle(review=True), flagged as data.
+            ok = trusted(roster, author, (pr.get("author") or {}).get("type"))
+            picks.append({"number": n, "why": why, "head_sha": pr.get("headRefOid"),
+                          "title": pr.get("title") if ok else None, "url": item.get("url"), "author": author,
+                          "author_tier": tier_of(roster, author), "author_trusted": ok})
     return picks, skipped
 
 

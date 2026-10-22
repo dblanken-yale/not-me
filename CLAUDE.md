@@ -77,7 +77,9 @@ the owner's say-so, not a cleanup.
 5. **Untrusted text never reaches the model as instructions.** Authors are
    filtered by login against the roster before any body is read; only counts,
    logins and URLs of untrusted items are reported, and quoted lines inside
-   trusted replies are stripped. An endorsement is a flag on a trusted
+   trusted replies are stripped. The one exception: a roster member's PR
+   title and body reach the reviewer (`bundle --review`), flagged as data
+   under review, never instructions. An endorsement is a flag on a trusted
    comment, never a binding to the untrusted text. Markers are honoured only
    when the real author matches the marker's login and is trusted.
 

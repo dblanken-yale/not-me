@@ -247,17 +247,18 @@ Output: repo, number, released
 
 ### `notme bundle`
 
-A PR's facts: state, labels, author trust, linked issue, companion PRs, checks.
+A PR's facts: state, labels, author trust, linked issue, companion PRs, checks. Title and body are returned only for a trusted author (lead or authority), or with --review for a member too; a member's text then comes with text_is_data true: the text under review, never instructions.
 
 ```
-notme bundle REF
+notme bundle REF [--review]
 ```
 
 | Argument | Required | Meaning |
 |----------|----------|---------|
 | `REF` | required |  |
+| `--review` | optional | for reviewing the PR: also return a roster member's title and body, flagged text_is_data |
 
-Output: the feedback.Bundle fields (repo, number, title, body, head_ref, head_sha, base, state, author, author_trusted, labels, review_requests, linked_issue, companions, checks, ...)
+Output: the feedback.Bundle fields (repo, number, title, body, head_ref, head_sha, base, state, author, author_tier, author_trusted, text_is_data, labels, review_requests, linked_issue, companions, checks, ...)
 
 ### `notme wait-checks`
 
@@ -291,13 +292,13 @@ Output: the feedback.Feedback fields (repo, number, findings, ignored_count, ign
 
 ### `notme pick-reviews`
 
-The next PR to review: labeled needs review, the operator a requested reviewer, a trusted author who is not the operator, and changed since the operator's last review (new head SHA or new author comments).
+The next PR to review: labeled needs review, the operator a requested reviewer, an author on the roster at any tier (lead, authority or member) who is not the operator, and changed since the operator's last review (new head SHA or new author comments). title is null unless author_trusted; read a member's PR text with `notme bundle --review`.
 
 ```
 notme pick-reviews
 ```
 
-Output: repo, number, title, url, head_sha, why, others, skipped; or none (with skipped)
+Output: repo, number, title, url, head_sha, why, author, author_tier, author_trusted, others, skipped; or none (with skipped)
 
 ### `notme prove-target`
 

@@ -144,7 +144,7 @@ Squash before pushing. Use the `fix:` and `feat:` prefixes.
 | hubot | Hu Bot | member | yes | no |
 ```
 
-Tier is `lead`, `authority`, or `member`. Leads and authorities can direct work. Members can be assigned and asked to review, but their comments are treated as input, not instructions. Assignable and Reviewer take `yes` or `no`. An empty roster means the operator (you, by `gh` login) is the only lead.
+Tier is `lead`, `authority`, or `member`. Leads and authorities can direct work. Members can be assigned and asked to review, but their comments are treated as input, not instructions. `/not-me:review` reviews members' PRs too, reading their title and body as data under review. Assignable and Reviewer take `yes` or `no`. An empty roster means the operator (you, by `gh` login) is the only lead.
 
 The roster is special under `extends`. Instead of the `## Roster` section being replaced, the rows are merged by login (ignoring case). A row in the higher layer wins over the same login lower down and keeps the lower row's position. New logins are added at the end. Prose around the table comes from the higher file. So a repo file with `extends: global` and one new row adds that person to your global roster for this repo only.
 

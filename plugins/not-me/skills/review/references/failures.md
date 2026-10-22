@@ -25,7 +25,7 @@ written, what is left alone, and the result for that PR. Logging rules are in
 | Another run active | unchanged | none | `STOP - active run` |
 | Guard selftest exit 8 | unchanged | none | `FAILED - guard not working` |
 | Config exit 4 | unchanged | none | `FAILED - config invalid` |
-| PR closed, draft, `paused`, untrusted or own | unchanged | none | skipped, logged |
+| PR closed, draft, `paused`, author not on the roster, or own | unchanged | none | skipped, logged |
 | Fetch or worktree-add fails | unchanged | none | `FAILED <ref> worktree` |
 | A check fails because of the change | per verdict | the review | request changes |
 | A check cannot run | per verdict | the review or none | a finding; unsure when the cause is outside the PR |
