@@ -27,6 +27,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -182,11 +183,36 @@ def plugin_repo(env: Mapping[str, str], runner: Runner) -> str:
     return found.group(1)
 
 
-def check_token(token: str, repos: Sequence[str], plugin: str, runner: Runner, env: Mapping[str, str]) -> Dict[str, Any]:
-    """Refuse anything but a fine-grained token that can push to the fixture repos and has no write access
-    to the plugin repo: an explicit HTTP 404 (private plugin repo) or a 200 whose permissions.push and
-    permissions.admin are both false (public plugin repo). Any other failure on the plugin repo (network,
-    401, 403, 5xx, gh missing) also refuses, because it proves nothing about access. Returns the user."""
+NOT_GRANTED = "Resource not accessible by personal access token"
+
+
+NETWORK_ENV = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR",
+               "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "SYSTEMROOT")
+
+
+def network_env(source: Mapping[str, str] = os.environ) -> Dict[str, str]:
+    """Proxy and CA settings a scrubbed gh/git environment still needs to reach GitHub (both cases)."""
+    out = {}
+    for key in NETWORK_ENV:
+        for name in (key, key.lower()):
+            if source.get(name):
+                out[name] = source[name]
+    return out
+
+
+def check_token(token: str, repos: Sequence[str], plugin: str, runner: Runner, env: Mapping[str, str],
+                allowed: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+    """Refuse anything but a fine-grained token granted only the fixture repos.
+
+    `gh api user/repos` lists every public repo the account can see but only the private repos in the
+    token's grant, so a private repo outside `allowed` (default: `repos`) means a broad token. Each fixture
+    repo must answer 200 with permissions.push true, and a no-op write probe (PATCH of a label name that
+    cannot exist) must be authorised there (404). The plugin repo must answer HTTP 404 (private, not granted)
+    or, when it answers 200 (public), the same probe must fail with 403 "Resource not accessible by personal
+    access token"; because the probe was authorised on the fixtures, that 403 can only mean "not granted". A
+    404 there means the write was authorised and the token is broad. `permissions` on a public repo reflects the account, not the grant, and
+    is not trusted. Any other failure (network, 401, 5xx, gh missing) refuses, because it proves nothing.
+    Returns the user."""
     if not token.startswith("github_pat_"):
         kind = "a classic or OAuth token" if token.startswith(("ghp_", "gho_", "ghu_", "ghs_")) else \
             "not a fine-grained token"
@@ -197,6 +223,18 @@ def check_token(token: str, repos: Sequence[str], plugin: str, runner: Runner, e
         user = json.loads(runner(["gh", "api", "user"], env=env).stdout)
     except (ScaffoldError, ValueError) as exc:
         raise ScaffoldError(f"{TOKEN_ENV} was rejected by GitHub: {exc}")
+    allowed_set = {r.lower() for r in (allowed if allowed is not None else repos)}
+    try:
+        listed = json.loads(runner(["gh", "api", "--paginate", "user/repos?per_page=100"], env=env).stdout)
+        private = sorted({str(r.get("full_name", "")).lower() for r in listed if r.get("private") is True})
+    except (ScaffoldError, ValueError, AttributeError) as exc:
+        raise ScaffoldError(f"cannot list the repositories {TOKEN_ENV} is granted: {exc}")
+    extra = [n for n in private if n not in allowed_set]
+    if extra:
+        raise ScaffoldError(f"{TOKEN_ENV} is granted private repositories outside the fixture set: "
+                            f"{', '.join(extra)}. Refusing: it must be a fine-grained token limited to the "
+                            "fixture repos (see docs/testing.md)")
+    probe = "not-me-probe-" + secrets.token_hex(8)
     for repo in repos:
         try:
             info = json.loads(runner(["gh", "api", f"repos/{repo}"], env=env).stdout)
@@ -204,24 +242,38 @@ def check_token(token: str, repos: Sequence[str], plugin: str, runner: Runner, e
             raise ScaffoldError(f"{TOKEN_ENV} cannot read the fixture repo {repo}: {exc}")
         if not (info.get("permissions") or {}).get("push") is True:
             raise ScaffoldError(f"{TOKEN_ENV} cannot push to the fixture repo {repo} (permissions.push is not true)")
+        # Calibrate the write probe: on a granted repo the same no-op PATCH must be authorised (404, nothing
+        # to rename). A fine-grained token's permissions are uniform across its grant, so a 403 on the plugin
+        # repo afterwards can only mean the plugin repo is outside the grant.
+        try:
+            runner(["gh", "api", "-X", "PATCH", f"repos/{repo}/labels/{probe}", "-f", f"new_name={probe}"], env=env)
+        except ScaffoldError as exc:
+            if not re.search(r"HTTP 404\b", str(exc)):
+                raise ScaffoldError(f"{TOKEN_ENV} is not authorised to edit labels on the fixture repo {repo} "
+                                    f"(it needs Issues read and write): {exc}")
+        else:
+            raise ScaffoldError(f"the write probe on the fixture repo {repo} unexpectedly succeeded; refusing")
     try:
-        raw = runner(["gh", "api", f"repos/{plugin}"], env=env).stdout
+        runner(["gh", "api", f"repos/{plugin}"], env=env)
     except ScaffoldError as exc:
         if re.search(r"HTTP 404\b", str(exc)):
             return user
-        raise ScaffoldError(f"cannot confirm {TOKEN_ENV} has no access to {plugin}: expected HTTP 404 or a "
-                            f"200 without push, got: {exc}")
+        raise ScaffoldError(f"cannot confirm {TOKEN_ENV} has no access to {plugin}: expected HTTP 404 or 200, "
+                            f"got: {exc}")
     try:
-        perms = json.loads(raw).get("permissions") or {}
-    except (ValueError, AttributeError):
-        raise ScaffoldError(f"cannot confirm {TOKEN_ENV} has no access to {plugin}: unreadable reply")
-    if not isinstance(perms, dict):
-        raise ScaffoldError(f"cannot confirm {TOKEN_ENV} has no access to {plugin}: unreadable reply")
-    # A public plugin repo answers 200 to every token; what matters is that this one cannot write to it.
-    if perms.get("push") is False and perms.get("admin") is False:
-        return user
-    raise ScaffoldError(f"{TOKEN_ENV} can write to {plugin}, the plugin repo. Refusing: it must be a fine-grained "
-                        "token limited to the fixture repos (see docs/testing.md)")
+        runner(["gh", "api", "-X", "PATCH", f"repos/{plugin}/labels/{probe}", "-f", f"new_name={probe}"], env=env)
+    except ScaffoldError as exc:
+        text = str(exc)
+        if re.search(r"HTTP 403\b", text) and NOT_GRANTED in text:
+            return user
+        if re.search(r"HTTP 404\b", text):
+            raise ScaffoldError(f"{TOKEN_ENV} can write to {plugin}, the plugin repo (a write probe was "
+                                "authorised). Refusing: it must be a fine-grained token limited to the fixture "
+                                "repos (see docs/testing.md)")
+        raise ScaffoldError(f"cannot confirm {TOKEN_ENV} cannot write to {plugin}: expected HTTP 403 "
+                            f"'{NOT_GRANTED}', got: {exc}")
+    raise ScaffoldError(f"{TOKEN_ENV} can write to {plugin}, the plugin repo (a write probe succeeded). "
+                        "Refusing: it must be a fine-grained token limited to the fixture repos (see docs/testing.md)")
 
 
 def prepare(manifest_path: Any, stage: Path, env: Mapping[str, str], runner: Runner = run,
@@ -247,11 +299,12 @@ def prepare(manifest_path: Any, stage: Path, env: Mapping[str, str], runner: Run
     with_companion = bool(companion and spec.get("companion") is not None)
 
     empty_cfg = Path(tempfile.mkdtemp(prefix="not-me-gh-"))
-    gh_env = {"PATH": os.environ.get("PATH", ""), "HOME": str(empty_cfg), "GH_CONFIG_DIR": str(empty_cfg),
-              "GH_TOKEN": token, "GH_PROMPT_DISABLED": "1"}
+    gh_env = dict(network_env(), PATH=os.environ.get("PATH", ""), HOME=str(empty_cfg),
+                  GH_CONFIG_DIR=str(empty_cfg), GH_TOKEN=token, GH_PROMPT_DISABLED="1")
     try:
         user = check_token(token, [manifest["repo"]] + ([companion] if with_companion else []),
-                           plugin_repo(env, runner), runner, gh_env)
+                           plugin_repo(env, runner), runner, gh_env,
+                           allowed=[manifest["repo"]] + ([companion] if companion else []))
         if stage.exists():
             shutil.rmtree(str(stage))
         stage.mkdir(parents=True)
@@ -396,8 +449,8 @@ def stage_workspace(case: str, workspace: Path, home: Path, state: Path = STATE,
         hosts = home / ".config" / "gh" / "hosts.yml"
         _write(hosts, _hosts_yml(info["operator"], token))
         os.chmod(str(hosts), 0o600)
-        gh_env = {"PATH": os.environ.get("PATH", ""), "HOME": str(home),
-                  "XDG_CONFIG_HOME": str(home / ".config"), "GH_PROMPT_DISABLED": "1"}
+        gh_env = dict(network_env(), PATH=os.environ.get("PATH", ""), HOME=str(home),
+                      XDG_CONFIG_HOME=str(home / ".config"), GH_PROMPT_DISABLED="1")
         runner(["gh", "auth", "setup-git", "--hostname", "github.com"], env=gh_env)
 
     record = {"run_id": info["run_id"], "scenario": sid, "case": case, "backend": info["backend"],
