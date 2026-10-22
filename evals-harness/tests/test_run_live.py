@@ -758,6 +758,24 @@ class RunLiveTest(unittest.TestCase):
         self.assertEqual((self.glob / "project.md").read_text(encoding="utf-8"), "operator's own\n")  # untouched
         self.assertTrue(record.is_file())  # the person checks the config and clears the record by hand
 
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "needs POSIX modes and a non-root user")
+    def test_an_unreadable_workspace_dir_still_restores_the_config(self):
+        self.operator_config()
+        rec = self.rec()
+        orig = rec.__call__
+
+        def spy(argv, env, **opts):
+            code = orig(argv, env, **opts)
+            if argv[0] == "claude":
+                locked = self.state / "n1-1-test" / "N1.workspace" / "locked"
+                locked.mkdir(parents=True, exist_ok=True)
+                (locked / "f").write_text("x", encoding="utf-8")
+                os.chmod(str(locked), 0)
+                self.addCleanup(lambda: os.path.isdir(str(locked)) and os.chmod(str(locked), 0o700))
+            return code
+        self.run_main(spy)
+        self.assert_operator_config()
+
     # credentials
 
     def test_launch_env_blocks_global_git_config_and_ssh(self):

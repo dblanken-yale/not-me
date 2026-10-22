@@ -266,12 +266,16 @@ def backup_global(home: Path, rid: str, record_path: Path) -> bool:
 
 
 def _force_remove(path: Path) -> None:
-    def onerror(func: Callable[..., Any], target: str, _exc: Any) -> None:
+    def onerror(func: Callable[..., Any], target: str, exc: Any) -> None:
+        if func not in (os.unlink, os.remove, os.rmdir):
+            # rmtree also reports failures from os.open/os.scandir; those cannot be retried with one argument
+            raise exc[1] if isinstance(exc, tuple) else exc
+        mode = stat.S_IWRITE | stat.S_IREAD | (stat.S_IEXEC if func is os.rmdir else 0)
         if not os.path.islink(target):  # a chmod through a symlink would change a file outside the tree
             if os.chmod in os.supports_follow_symlinks:
-                os.chmod(target, stat.S_IWRITE, follow_symlinks=False)  # read-only git objects on Windows
+                os.chmod(target, mode, follow_symlinks=False)  # read-only git objects on Windows
             else:
-                os.chmod(target, stat.S_IWRITE)
+                os.chmod(target, mode)
         func(target)
     if path.is_dir() and not path.is_symlink():
         shutil.rmtree(str(path), onerror=onerror)
@@ -637,7 +641,7 @@ def run_once(args: argparse.Namespace, n: int, runner: Runner, rid_factory: Call
         if not args.keep_temp:
             try:
                 _force_remove(plan.workspace)
-            except OSError as exc:
+            except Exception as exc:  # whatever rmtree raises, the restore below must still run
                 errors.append(f"could not delete the workspace {plan.workspace}: {exc}")
         if attempted:
             try:
