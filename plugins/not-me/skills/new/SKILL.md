@@ -198,7 +198,11 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/pr-shape.md` and
 4. Companion set: `notme companion-prs` on every PR once all exist.
 5. Move the issue: `notme move-issue N --to needs_review --require-current
    in_progress --log <path>`. This works for a label queue and a board queue.
-6. No summary comment on the happy path: the PR body carries the detail.
+6. One comment on the issue, so a person reading it sees the run without opening
+   the PR: write `Opened <repo>#<pr> for this issue.` plus the testing steps'
+   one-line status to a file and run `notme comment-upsert <tracker>#N --marker
+   new --body-file <f> --log <path>`. Upserted, so a rerun edits it rather than
+   adding another. The PR body carries the detail; this comment is the pointer.
 
 ## Step 10: Finish
 
@@ -244,5 +248,6 @@ checks. A clearly reported blocker is a correct outcome.
 - [ ] Delegated the unit, audited it myself, logged DELEGATE and AUDIT.
 - [ ] Ran baseline, reproduction, red then green, and the full gate.
 - [ ] Committed only touched paths; pushed only through the CLI.
-- [ ] Opened the PR ready for review and moved the issue to `needs_review`.
+- [ ] Opened the PR ready for review, moved the issue to `needs_review`, and left
+      one upserted `new` marker comment on the issue naming the PR.
 - [ ] Left the checkout clean on the default branch and finished the log.

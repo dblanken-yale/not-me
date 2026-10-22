@@ -183,7 +183,7 @@ class PrBodyTests(Base):
             self.assertIn(heading, body)
         self.assertIn("- [ ] Open the page\n- [ ] Click it", body)
         self.assertIn("- [acme/app-ui#4](https://example.test/4)", body)
-        self.assertIn("Closes #12", body)
+        self.assertIn(f"Closes {REPO}#12", body)
         self.assertIn("**References:** acme/app-ui#9", body)
         self.assertIn("<!-- not-me:new -->", body)
         self.assertNotIn("<details>", body)
@@ -199,14 +199,15 @@ class PrBodyTests(Base):
     def test_closing_keyword_auto_when_tracker_is_this_repo(self):
         self.cfg.meta["project"]["tracker"] = REPO
         _, body = wb.pr_body(self.cfg, 12, "T", "d", [], repo=REPO)
-        self.assertIn("Closes #12", body)
+        self.assertIn(f"Closes {REPO}#12", body)
+        self.assertNotRegex(body, r"Closes #\d")  # never a bare number, even in the same repo
 
     def test_explicit_keyword_and_title_template(self):
         self.cfg.meta["standards"]["closing_keyword"] = "Fixes"
         self.cfg.meta["standards"]["pr_title"] = "[{issue}] {issue_title}"
         title, body = wb.pr_body(self.cfg, 5, "Thing", "d", [], repo=REPO)
         self.assertEqual(title, "[5] Thing")
-        self.assertIn("Fixes #5", body)
+        self.assertIn(f"Fixes {REPO}#5", body)
 
     def test_attribution_is_last(self):
         self.cfg.meta["project"]["attribution"] = "Prepared by the team bot"
@@ -225,7 +226,7 @@ class PrBodyTests(Base):
         self.assertNotIn("<!-- what -->", body)
         self.assertNotIn("## Summary", body)
         self.assertNotIn("## Companion PRs", body)
-        self.assertIn("Closes #2", body)
+        self.assertIn(f"Closes {REPO}#2", body)
 
     def test_repo_template_without_matching_headings_is_appended(self):
         self.write_template("## Checklist\n\n- [ ] done\n")
@@ -278,15 +279,15 @@ class PrSectionTests(Base):
         path.parent.mkdir(parents=True)
         path.write_text("## Summary\n\nx\n\n## Testing steps\n\n- [ ] \n", encoding="utf-8")
         _, body = wb.pr_body(self.cfg, 12, "T", "Desc.", ["One"], repo=REPO, refs=["acme/app-ui#9"])
-        self.assertIn("## References\n\nCloses #12", body)
+        self.assertIn(f"## References\n\nCloses {REPO}#12", body)
         things(self.fake)["3"]["body"] = body
         wb.companion_prs_upsert(self.gh, REPO, 3, [{"repo": "acme/app-ui", "number": 4}])
-        self.assertIn("Closes #12", self.body())
+        self.assertIn(f"Closes {REPO}#12", self.body())
         self.assertIn("**References:** acme/app-ui#9", self.body())
         wb.testing_steps_append(self.gh, REPO, 3, ["Two"])
         after = self.body()
         self.assertLess(after.index("- [ ] Two"), after.index("## References"))
-        self.assertLess(after.index("- [ ] Two"), after.index("Closes #12"))
+        self.assertLess(after.index("- [ ] Two"), after.index(f"Closes {REPO}#12"))
         self.assertIn("## Companion PRs\n\n- acme/app-ui#4", after)
 
     def test_section_ends_at_closing_keyword_line(self):

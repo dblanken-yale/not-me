@@ -5,7 +5,7 @@ branch: "{issue}-{slug}"         # branch name template
 commit: conventional             # conventional | free
 pr_title: "{issue}: {issue_title}"  # PR title template
 pr_template: auto                # path to a PR template; auto = .github/pull_request_template.md if present
-closing_keyword: auto            # keyword that links a PR to its issue; auto = Closes when tracker is the same repo
+closing_keyword: auto            # keyword that links a PR to its issue; auto = Closes owner/repo#N when tracker is the same repo
 issue_template: auto             # path to an issue template; auto = .github/ISSUE_TEMPLATE if present
 ---
 # Standards
