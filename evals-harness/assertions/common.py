@@ -147,7 +147,7 @@ def pr_exists(ctx: Ctx, head: Optional[str] = None, base: Optional[str] = None, 
         got = [n for _, n in sorted(firsts, key=lambda t: str(t[0]))]
         ok = got == list(order) or len({str(t[0]) for t in firsts}) < len(firsts)
         return Result(ok, f"push order {got}, expected {list(order)}")
-    if repos:
+    if repos and count != 0:
         missing = [n for n in repos if not matches.get(n)]
         if missing:
             return Result(False, f"no matching PR in {missing} ({detail})")

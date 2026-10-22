@@ -72,6 +72,13 @@ class PrExistsTest(unittest.TestCase):
         w.pr("y", "fix/a", repo=COMP, seeded=False)
         self.assertTrue(c.pr_exists(ctx, count=1, repos=["main", "companion"]).ok)
 
+    def test_count_zero_in_each_repo(self):
+        w = World()
+        ctx, _ = ctx_for(w, with_companion=True)
+        self.assertTrue(c.pr_exists(ctx, count=0, repos=["main", "companion"]).ok)
+        w.pr("y", "fix/a", repo=COMP, seeded=False)
+        self.assertFalse(c.pr_exists(ctx, count=0, repos=["main", "companion"]).ok)
+
 
 class ClosingRefTest(unittest.TestCase):
     def _run(self, body):
@@ -413,6 +420,21 @@ class ExtensionsTest(unittest.TestCase):
         ctx, _ = ctx_for(w)
         w.review(MAIN, 1, "REQUEST_CHANGES", body="calc/core.py:16 returns a * a")
         self.assertTrue(c.comment_anchor(ctx, "pr:pr", "calc/core.py", 16).ok)
+
+
+class ThreadsQueryTest(unittest.TestCase):
+    def test_graphql_query_braces_balance(self):
+        # The fake gh does not parse GraphQL; real GitHub rejects an unbalanced query.
+        seen = []
+
+        def runner(argv):
+            seen.append(argv)
+            out = {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": []}}}}}
+            return type("P", (), {"returncode": 0, "stdout": json.dumps(out), "stderr": ""})()
+
+        readers.GhReader(runner).threads(MAIN, 7)
+        query = next(a for a in seen[0] if a.startswith("query="))
+        self.assertEqual(query.count("{"), query.count("}"), query)
 
 
 if __name__ == "__main__":
