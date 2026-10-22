@@ -17,9 +17,13 @@ FIX, COMP, PLUGIN = "acme/x-fixture", "acme/x-fixture-companion", "acme/plugin"
 class FakeRun:
     """A scaffold runner: records calls; the token can see the fixtures and optionally the plugin repo."""
 
-    def __init__(self, sees_plugin=False, sees_fixture=True, plugin_error="HTTP 404", push=True):
+    def __init__(self, sees_plugin=False, sees_fixture=True, plugin_error="HTTP 404", push=True,
+                 plugin_perms=None):
         self.calls, self.sees_plugin, self.sees_fixture = [], sees_plugin, sees_fixture
         self.plugin_error, self.push = plugin_error, push
+        # What a 200 on the plugin repo reports; default is a public repo the token cannot write to.
+        self.plugin_perms = {"admin": False, "push": False, "pull": True} if plugin_perms is None else plugin_perms
+        self.plugin_stdout = None  # raw stdout for the plugin repo call when set (overrides plugin_perms)
 
     def __call__(self, argv, cwd=None, env=None, input_text=None):
         self.calls.append((list(argv), dict(env) if env is not None else None))
@@ -31,6 +35,10 @@ class FakeRun:
                 raise scaffold.ScaffoldError(f"gh api {repo} failed (1): {self.plugin_error}")
             if repo != PLUGIN and not self.sees_fixture:
                 raise scaffold.ScaffoldError(f"gh api {repo} failed (1): HTTP 404")
+            if repo == PLUGIN:
+                out = self.plugin_stdout if self.plugin_stdout is not None else \
+                    json.dumps({"permissions": self.plugin_perms})
+                return type("P", (), {"stdout": out})()
             return type("P", (), {"stdout": json.dumps({"permissions": {"push": self.push}})})()
         if argv[:3] == ["gh", "repo", "clone"]:
             Path(argv[4]).mkdir(parents=True)
@@ -67,12 +75,26 @@ class PrepareTest(unittest.TestCase):
         with self.assertRaises(scaffold.ScaffoldError):
             self.prepare(FakeRun(), {"GH_TOKEN": "operator", scaffold.PLUGIN_REPO_ENV: PLUGIN})
 
-    def test_refuses_a_token_that_can_see_the_plugin_repo(self):
+    def test_refuses_a_token_that_can_write_to_the_plugin_repo(self):
+        for perms in ({"admin": False, "push": True, "pull": True}, {"admin": True, "push": False, "pull": True},
+                      {"pull": True}, {}):
+            fake = FakeRun(sees_plugin=True, plugin_perms=perms)
+            with self.assertRaisesRegex(scaffold.ScaffoldError, "can write to acme/plugin", msg=str(perms)):
+                self.prepare(fake)
+            self.assertFalse(self.stage.exists())
+            self.assertFalse(any(a[:3] == ["gh", "repo", "clone"] for a, _ in fake.calls))
+
+    def test_a_public_plugin_repo_without_push_is_accepted(self):
+        self.prepare(FakeRun(sees_plugin=True))
+        self.assertTrue(self.stage.exists())
+
+    def test_an_unreadable_200_on_the_plugin_repo_refuses(self):
         fake = FakeRun(sees_plugin=True)
-        with self.assertRaisesRegex(scaffold.ScaffoldError, "can see acme/plugin"):
-            self.prepare(fake)
-        self.assertFalse(self.stage.exists())
-        self.assertFalse(any(a[:3] == ["gh", "repo", "clone"] for a, _ in fake.calls))
+        for raw in ("<html>", json.dumps({"permissions": "admin"}), json.dumps({"permissions": ["push"]})):
+            fake.plugin_stdout = raw
+            with self.assertRaisesRegex(scaffold.ScaffoldError, "unreadable reply", msg=raw):
+                self.prepare(fake)
+            self.assertFalse(self.stage.exists())
 
     def test_only_an_explicit_404_counts_as_not_visible(self):
         self.prepare(FakeRun(plugin_error="gh: Not Found (HTTP 404)"))

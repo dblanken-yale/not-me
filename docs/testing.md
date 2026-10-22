@@ -222,8 +222,10 @@ Create a fine-grained personal access token:
 Before staging anything, `prepare` refuses any token that does not start with `github_pat_` (classic `ghp_` and
 OAuth `gho_` tokens are out), then checks the token with `gh api user`. The token is handed to `gh` only as `GH_TOKEN` in a scrubbed environment (empty `GH_CONFIG_DIR`), never on a command line, so it does not show in the process list or in `--dry-run` output. The token
 must get a 200 with `permissions.push` true for the fixture repo (and the companion when the scenario has one), and
-must get an explicit HTTP 404 for this plugin repo. Any other failure there (network, 401, 403, 5xx, `gh` missing)
-also refuses, because it does not prove the repo is hidden. A broad token is refused. The plugin repo is taken
+must have no write access to this plugin repo: either an explicit HTTP 404 (a private plugin repo) or a 200 whose
+`permissions.push` and `permissions.admin` are both false (a public plugin repo answers 200 to every token). Any
+other failure there (network, 401, 403, 5xx, `gh` missing) also refuses, because it does not prove the token
+cannot write. A broad token is refused. The plugin repo is taken
 from the `origin` remote; set `NOT_ME_PLUGIN_REPO=owner/name` if that is wrong.
 
 The token is copied to `evals/.state/<RID>/<ID>.stage/gh-token` (mode 600) for the scaffold to sign `gh` in
