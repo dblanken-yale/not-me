@@ -37,6 +37,15 @@ class PrExistsTest(unittest.TestCase):
         w.pr("x", "fix/a", base="main", body="## Companion PRs", seeded=False)
         self.assertTrue(c.pr_exists(ctx, base="main", marker="## Companion PRs", count=1).ok)
 
+    def test_pr_closed_by_an_earlier_run_is_not_new(self):
+        w = World()
+        old = w.pr("old", "32-old-run", body="Closes acme/x#32", seeded=False)
+        w.thing(MAIN, old)["state"] = "CLOSED"
+        ctx, _ = ctx_for(w)
+        n = w.pr("x", "35-this-run", base="main", body=f"Closes {MAIN}#35", seeded=False)
+        self.assertTrue(c.pr_exists(ctx, base="main", count=1).ok)
+        self.assertEqual(ctx.reader.real_number(MAIN, "new:1"), n)
+
     def test_fail_count_zero_but_one_exists(self):
         w = World()
         ctx, _ = ctx_for(w)

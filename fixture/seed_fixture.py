@@ -449,6 +449,15 @@ class Fixture:
             },
         }
 
+    def pr_floor(self):
+        """The highest PR number, open or closed. PRs at or below it are not the run's."""
+        prs = self.c.json(
+            self.gh("pr", "list", "--repo", self.repo, "--state", "all", "--limit",
+                    "1000", "--json", "number"),
+            [],
+        )
+        return max((p["number"] for p in prs), default=0)
+
     def baseline_snapshot(self, sha):
         return {
             "branches": {"main": sha, "develop": sha},
@@ -828,6 +837,8 @@ def run_scenario(main_fx, companion_fx, rid, sid, state_dir):
         "companion_created": companion_created,
         "snapshot": snapshot,
         "companion_snapshot": companion_fx.snapshot() if companion_fx else None,
+        "pr_floor": main_fx.pr_floor(),
+        "companion_pr_floor": companion_fx.pr_floor() if companion_fx else 0,
         "expect": spec.get("expect", {}),
         "writes": list(client.writes),
     }

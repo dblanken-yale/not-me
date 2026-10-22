@@ -4,7 +4,8 @@ Both expose the same methods. A method returns None when the backend cannot obse
 (for example commits from a ledger); assertions turn that into a skipped result.
 
 PR numbers: an int for PRs that existed at seeding, or the string "new:K" (K from 1) for the K-th PR
-the run opened in a repo. On GitHub "new:K" is the K-th PR whose number is not in the manifest.
+the run opened in a repo. On GitHub "new:K" is the K-th PR whose number is not in the manifest and is above
+the manifest's PR floor (the highest PR number at seeding, so PRs closed by earlier runs never count as new).
 """
 from __future__ import annotations
 
@@ -84,6 +85,10 @@ class GhReader:
         nums |= {int(n) for n in ((snap or {}).get("prs") or {})}
         return nums
 
+    def _pr_floor(self, repo: str) -> int:
+        m = self.manifest
+        return int(m.get("pr_floor" if repo == m.get("repo") else "companion_pr_floor") or 0)
+
     # -- pull requests
     def _all_prs(self, repo: str) -> List[dict]:
         rows = self._json(["pr", "list", "-R", repo, "--state", "all", "--limit", "200", "--json",
@@ -94,8 +99,9 @@ class GhReader:
                  "created_at": r.get("createdAt", "")} for r in rows]
 
     def new_prs(self, repo: str) -> List[dict]:
-        seeded = self._seeded_numbers(repo)
-        fresh = sorted((p for p in self._all_prs(repo) if p["number"] not in seeded), key=lambda p: p["number"])
+        seeded, floor = self._seeded_numbers(repo), self._pr_floor(repo)
+        fresh = sorted((p for p in self._all_prs(repo) if p["number"] not in seeded and p["number"] > floor),
+                       key=lambda p: p["number"])
         for k, pr in enumerate(fresh, 1):
             pr["ref_number"] = pr["number"]
             pr["number"] = f"new:{k}"
@@ -200,6 +206,11 @@ class GhReader:
                                        "comments": _count(p.get("comments")), "reviews": _count(p.get("reviews"))}
                     for p in prs},
         }
+
+    def pr_floor(self, repo: str) -> int:
+        """The highest PR number in `repo`, open or closed (0 when it has none)."""
+        rows = self._json(["pr", "list", "-R", repo, "--state", "all", "--limit", "1000", "--json", "number"]) or []
+        return max((r["number"] for r in rows), default=0)
 
     def snapshot_diff(self, repo: str, expected: dict) -> Optional[List[str]]:
         return diff_sections(expected, self.snapshot(repo))
