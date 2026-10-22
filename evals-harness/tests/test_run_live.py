@@ -99,9 +99,10 @@ class RunLiveTest(unittest.TestCase):
         for piece in ("--case new-N1", "--runs 1", "--scaffold", "--trust-plugin", "--ablation none",
                       "--allow-tools Bash,Write,Edit", "--max-cost-usd 4", "--no-publish", "--output-dir", "--json"):
             self.assertIn(piece, line)
-        json_path = line.split("--json ")[1].split()[0]
+        json_path = line.split("--json ")[1].split()[0].strip("'\"")  # the line is shell-quoted
+        out_dir = line.split("--output-dir ")[1].split()[0].strip("'\"")
         self.assertTrue(json_path.endswith(".json"), json_path)  # claude plugin eval refuses any other suffix
-        self.assertTrue(json_path.startswith(line.split("--output-dir ")[1].split()[0]))
+        self.assertTrue(json_path.startswith(out_dir), (json_path, out_dir))
 
     def test_real_run_runs_in_order_merges_and_tears_down(self):
         rec = Recorder()
