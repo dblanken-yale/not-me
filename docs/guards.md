@@ -61,6 +61,8 @@ python3 -c 'import subprocess; subprocess.run(["gh", "pr", "comment", "5", "-R",
 
 Edits to `.git/config`, `.git/hooks/*`, and `~/.gitconfig` are blocked too, because they change where git sends things.
 
+A git or gh call counts as a read only when the guard can prove it is one. An unknown git subcommand or alias, an option before the subcommand other than `-C`, an option on a read that is not on its allow list (`--ext-diff`, `--output`, `grep -O`, `ls-remote -u`), an option that runs a program (`rebase --exec`, `clone --template`, `--upload-pack`, a custom merge strategy, `push --recurse-submodules`), and any `git -c` key or `git config` write outside a short safe list (`user.name`, `user.email`, `color.*` and similar) are blocked. So are variables that make git or gh run a program (`GIT_*`, `EDITOR`, `PAGER` other than `cat` or `less`), gh or git behind a program that passes words through (`xargs git`, `xcrun git`, `watch git`), a graphql query that is not a literal, and REST endpoints with `..` or encoded separators.
+
 #### Directory changes and writes
 
 The guard does not follow `cd`. It judges a git write in the working directory Claude Code reports for the call, or in the `git -C <path>` it names, and a gh write by its `-R owner/name`. So a single Bash command that changes directory anywhere may not also write with git or gh:

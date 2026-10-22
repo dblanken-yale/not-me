@@ -70,6 +70,7 @@ REPOS: Dict[str, Tuple[str, str, Optional[str], str]] = {
     # a checkout with a companion checkout nested inside it, as the eval fixture lays them out
     "host": (GH + "acme/app.git", "feature/x", "", ""),
     "host/.not-me-companion/comp": (GH + "acme/friend.git", "feature/x", "", ""),
+    "recurse": (GH + "acme/app.git", "feature/x", "", "recurse"),
 }
 
 # The repo layer may only tighten guard.*, mode, enabled and protected_branches, and its
@@ -149,6 +150,8 @@ def build_fixtures(root: Path) -> Dict[str, str]:
                 os.chmod(str(scripts / script), 0o755)
         elif extra == "pushurl":
             _git(["remote", "set-url", "--push", "origin", "git@github.com:acme/lib.git"], repo, env)
+        elif extra == "recurse":
+            _git(["config", "push.recurseSubmodules", "on-demand"], repo, env)
         elif extra == "pushdefault":
             _git(["remote", "add", "up", GH + "acme/lib.git"], repo, env)
             _git(["config", "remote.pushDefault", "up"], repo, env)
@@ -1003,6 +1006,64 @@ bash(A, None, "gh pr create --repo acme/app \\\n  --title x --body y")
 bash(A, None, "git commit -m \"$(cat <<'EOF'\nfix: HOME=x and cd y\nEOF\n)\"")
 bash(A, None, "echo 'a `b` $(c)'; git push")  # single quotes are data
 bash(A, None, "git status 2>&1 | head; git push > push.log 2>&1")
+
+# Fix round 1: a git or gh call is a read only when proven to be one; anything that can run code blocks.
+OTHER = "https://github.com/acme/other HEAD"
+ROUND1_START = len(CASES)
+for cmd in (
+        # 1. subcommands and options that run programs; unknown subcommands and global options
+        f"git rebase -x 'git push {OTHER}' main", "git rebase --exec=true main", "git submodule foreach 'git push'",
+        "git bisect run ./x.sh", "git difftool -x 'sh -c y' HEAD", "git grep -O'sh -c y' x",
+        "git grep --open-files-in-pager=sh x", "git ls-remote --upload-pack='sh -c y' origin",
+        "git ls-remote -u 'sh -c y' origin", "git fetch --upload-pack='sh -c y' origin", "git log --ext-diff -p",
+        "git diff --ext-diff", "git diff --output=/tmp/x", "git cat-file --textconv HEAD:x", "git frobnicate",
+        "git --exec-path=/tmp/x status", "git --bare status", "git clone --template=/tmp/t https://github.com/acme/app",
+        "git clone -u 'sh -c y' https://github.com/acme/app", "git merge -s evil feature/y",
+        "git config core.pager 'sh -c y'", "git config --add core.hooksPath /tmp/h", "git config --edit",
+        # 2. -c keys and environment that run programs or redirect git
+        "git -c core.pager='sh -c y' log", "git -c core.fsmonitor='sh -c y' status", "git -c core.editor=x commit",
+        "git -c core.hooksPath=/tmp/h commit -m x", "git -c core.sshCommand=x fetch", "git -c diff.external=x diff",
+        "git -c credential.helper=x fetch", "git -c url.https://github.com/acme/other.insteadOf=x fetch",
+        "git -c protocol.ext.allow=always fetch", "git -c include.path=/tmp/c status", "git -c alias.x=log x",
+        "GIT_CONFIG_COUNT=1; git log", "export GIT_CONFIG_PARAMETERS=x; git status", "export PAGER='sh -c y'; git log",
+        "EDITOR=x; git commit", "export GH_PAGER='sh -c x'; gh pr view 1",
+        # 3. gh/git behind programs that pass words through
+        f"echo push {OTHER} | xargs git", "xargs -a f gh", "parallel git ::: push", f"xcrun git push {OTHER}",
+        f"arch -arm64 git push {OTHER}", f"flock /tmp/lk git push {OTHER}", f"mise exec -- git push {OTHER}",
+        f"watch git push {OTHER}", f"nice -n 5 git push {OTHER}", f"stdbuf -oL git push {OTHER}",
+        f"caffeinate -i git push {OTHER}", f"timeout --foreground 5 git push {OTHER}",
+        f"script -q -c 'git push {OTHER}' /dev/null",
+        # 4. zsh directory changes without a cd word
+        "echo *(e:'cd ../other':); git push", "emulate sh -c 'cd ../other'; git push", "zle -U x; git push",
+        "functions[f]='cd ../other'; git push", "echo *(+f); git push",
+        # 5. a graphql query built at runtime
+        'gh api graphql -f query="$(cat q.graphql)"', 'gh api graphql -f query="$Q"',
+        "gh api graphql -F query=@q.graphql", "gh api graphql -F owner=acme",
+        # 6. dot segments and encoded separators in REST endpoints
+        "gh api -X POST repos/acme/app/../../repos/acme/other/issues/1/comments -f body=x",
+        "gh api -X POST repos/acme/app/%2e%2e/other/issues -f body=x", "gh api -X POST repos/acme/app//issues -f t=x",
+        # 7. pushing submodules
+        "git push --recurse-submodules=on-demand origin feature/x", "git push --recurse-submodules origin feature/x",
+        # 8. ${ } in double quotes, and gh/git text inside ${ }
+        f"echo \"${{x:-'}}\"; git push {OTHER}", 'echo "${x:-git push}"',
+        # 9. remote and config writes
+        "git config remote.origin.url https://github.com/acme/other", "git config --add remote.origin.pushurl x",
+        "cd scripts && git remote set-url --push origin x",
+        # 10. here-documents and here-strings reaching a shell elsewhere in the command
+        f"cat <<EOF | bash\ngit push {OTHER}\nEOF", f'bash <<<"git push {OTHER}"',
+        f"cat <<-EOF | sh\n\tgit push {OTHER}\n\tEOF", f"cat <<-EOF\n\tx\n\tEOF\ngit push {OTHER}",
+        # whitespace between cd and its operand
+        "cd\t{F}/other && git push", "cd \t {F}/other;git push"):
+    bash(B, OR, cmd)
+bash(B, OR, "git push origin feature/x", "recurse")  # push.recurseSubmodules in the repo config
+ROUND1_END = len(CASES)
+for cmd in ("git log --oneline", "git diff --stat", "git -c color.ui=always log", "git remote -v",
+            "git config --get user.email", "git log --format=%h -n 5 --since=2.weeks -- src", "git status -sb",
+            "git -c user.name=x commit -m y", "git config user.name x", "git config core.pager", "echo git push",
+            "grep -rn git .", "gh api graphql -f query='query { viewer { login } }'", "git grep -n foo",
+            "git diff --name-only HEAD~1 -- src", "PAGER=cat git log", "git rev-parse --abbrev-ref HEAD",
+            "git remote get-url origin", "git branch --show-current", "timeout 30 git status"):
+    bash(A, None, cmd)
 
 # Substrings a block message must contain, by case id.
 MESSAGE_CHECKS: Dict[str, List[str]] = {
