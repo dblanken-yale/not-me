@@ -201,6 +201,8 @@ class World:
                                    if with_companion else None),
              "snapshot": reader.snapshot(MAIN),
              "companion_snapshot": reader.snapshot(COMP) if with_companion else None,
+             "pr_floor": reader.pr_floor(MAIN),
+             "companion_pr_floor": reader.pr_floor(COMP) if with_companion else 0,
              "expect": copy.deepcopy(expect)}
         m["shas"] = {"branches": dict(m["snapshot"]["branches"])}
         return m
