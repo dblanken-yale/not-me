@@ -64,7 +64,11 @@ the owner's say-so, not a cleanup.
    `notme` call that re-points its project,
    home or run via flags, environment assignments or a `cd` outside the
    checkout. The inactive path is fork-free. Block messages name the exact
-   `/not-me:allow-repo owner/name` command.
+   `/not-me:allow-repo owner/name` command. The guard does not follow `cd`: a
+   Bash command that changes directory anywhere (cd, pushd, source, eval, env
+   -C, a PWD/HOME/CDPATH assignment, and the like) may not also write with git
+   or gh, so writes are judged in the hook's real working directory or the
+   `git -C` / `gh -R` they name.
 
 4. **The CLI's trust anchor is the checkout it runs in.** Restricted mode is
    the default. It relaxes only when all of these hold: stdin is a terminal,

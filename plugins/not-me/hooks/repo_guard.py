@@ -9,13 +9,23 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 SENTINELS = ("gh ", "git ", "github", ".git/", ".git\\\\", "allowed-repos.json")
+# Below the 10 s timeout in hooks.json: a hook that times out does not block, so a slow check blocks instead.
+WATCHDOG_SECONDS = 8.0
+
+
+def _too_slow() -> None:
+    sys.stderr.write("not-me guard failed closed: the check took too long; split the command into simpler ones\n")
+    sys.stderr.flush()
+    os._exit(2)
 
 
 def main(raw: "str | None" = None) -> int:
     """Decide one hook call; raw is the stdin text (read from stdin when None)."""
+    watchdog = None
     try:
         if raw is None:
             raw = sys.stdin.buffer.read().decode("utf-8", "replace")
@@ -25,6 +35,9 @@ def main(raw: "str | None" = None) -> int:
         event = json.loads(raw)
         if not isinstance(event, dict):
             raise ValueError("hook input is not a JSON object")
+        watchdog = threading.Timer(WATCHDOG_SECONDS, _too_slow)
+        watchdog.daemon = True
+        watchdog.start()
         if not guard.needs_check(event):
             return 0
         cwd = event.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
@@ -45,6 +58,9 @@ def main(raw: "str | None" = None) -> int:
                   file=sys.stderr)
             return 2
         return 0
+    finally:
+        if watchdog is not None:
+            watchdog.cancel()
 
 
 if __name__ == "__main__":

@@ -36,7 +36,9 @@ Example: `acme/app` (primary) and `acme/app-ui` (companion), both on
 
 ## Push order
 
-1. Commit in each repo on its own branch.
+1. Commit in each repo on its own branch, naming the checkout instead of changing
+   into it: `git -C <checkout> add <paths>`, `git -C <checkout> commit -F <file>`.
+   The guard blocks a command that changes directory and writes with git or gh.
 2. Push companions first, in `repos` order, then the primary last.
 3. A push that fails in one repo stops the pushes after it. Log which repos were
    pushed and which were not; the next run resumes from there.
