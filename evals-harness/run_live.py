@@ -118,6 +118,14 @@ def backup_path(home: Path, rid: str) -> Path:
     return global_dir(home).parent / f"not-me.backup-{rid}"
 
 
+def replaced_path(home: Path, rid: str) -> Path:
+    """Where a restore puts whatever sat at ~/.claude/not-me when it ran: kept, never deleted, so a restore driven
+    by a rewritten record can at worst move the operator's config aside."""
+    if not RID_RE.match(rid):
+        raise RuntimeError(f"unsafe run id {rid!r}")
+    return global_dir(home).parent / f"not-me.replaced-{rid}"
+
+
 def _present(path: Path) -> bool:
     return path.exists() or path.is_symlink()  # a dangling symlink is still the operator's
 
@@ -259,7 +267,11 @@ def backup_global(home: Path, rid: str, record_path: Path) -> bool:
 
 def _force_remove(path: Path) -> None:
     def onerror(func: Callable[..., Any], target: str, _exc: Any) -> None:
-        os.chmod(target, stat.S_IWRITE)  # read-only git objects on Windows
+        if not os.path.islink(target):  # a chmod through a symlink would change a file outside the tree
+            if os.chmod in os.supports_follow_symlinks:
+                os.chmod(target, stat.S_IWRITE, follow_symlinks=False)  # read-only git objects on Windows
+            else:
+                os.chmod(target, stat.S_IWRITE)
         func(target)
     if path.is_dir() and not path.is_symlink():
         shutil.rmtree(str(path), onerror=onerror)
@@ -267,22 +279,43 @@ def _force_remove(path: Path) -> None:
         path.unlink()
 
 
-def restore_dirs(original: Path, backup: Path, had_original: bool) -> str:
-    """Remove what the run wrote at `original` and rename `backup` back over it. Callers pass trusted values,
-    never ones read from the record file. os.rename refuses a non-empty target, so a directory that appears
-    after the removal makes this fail instead of nesting the backup inside it; the backup is then intact."""
+def _move_aside(original: Path, replaced: Path) -> Optional[Path]:
+    """Rename `original` to `replaced` (or `replaced`-2, -3, ... when taken). Returns where it went, or None when
+    nothing was there. Never deletes."""
+    if not _present(original):
+        return None
+    dest, n = replaced, 1
+    while _present(dest):
+        n += 1
+        dest = replaced.with_name(f"{replaced.name}-{n}")
+    os.rename(str(original), str(dest))
+    return dest
+
+
+def restore_dirs(original: Path, backup: Path, replaced: Path, had_original: bool) -> str:
+    """Move what is at `original` aside to `replaced` and rename `backup` back over it. Nothing is deleted: the
+    layer the run wrote stays at `replaced` for the operator to inspect or delete. Callers pass trusted paths,
+    never ones read from the record file. os.rename refuses a non-empty target, so a directory that appears after
+    the move makes this fail instead of nesting the backup inside it; the backup is then intact."""
     if _present(backup):
-        _force_remove(original)
+        aside = _move_aside(original, replaced)
+        kept = f"; the layer the run wrote is at {aside}" if aside else ""
         try:
             os.rename(str(backup), str(original))
         except OSError as exc:
             raise RuntimeError(f"could not rename {backup} back to {original}: {exc}. Your config is intact in "
-                               f"{backup}")
-        return f"restored {original}"
+                               f"{backup}{kept}")
+        return f"restored {original}{kept}" + (", delete it by hand when done" if aside else "")
     if had_original:
-        return f"{original} was never moved; left as it is"  # crashed before the rename
-    _force_remove(original)
-    return f"removed the layer the run wrote at {original} (there was none before)"
+        # The run moved the config and the backup is gone: never leave the run's layer as the operator's.
+        aside = _move_aside(original, replaced)
+        kept = f" The layer the run wrote was moved from {original} to {aside}." if aside else ""
+        raise RuntimeError(f"the backup of your config at {backup} is missing; nothing to put back.{kept}")
+    aside = _move_aside(original, replaced)
+    if aside is None:
+        return f"there was no {original} before the run and there is none now; nothing to put back"
+    return (f"there was no {original} before the run; the layer the run wrote was renamed to {aside}, "
+            "delete it by hand when done")
 
 
 def read_records(state: Path, home: Optional[Path] = None) -> List[Dict[str, Any]]:
@@ -317,21 +350,22 @@ def points_home(data: Dict[str, Any], home: Path, rid: str) -> bool:
             and Path(str(data.get("backup"))) == backup_path(home, rid).absolute())
 
 
-def record_is_live(data: Dict[str, Any]) -> bool:
+def record_is_live(data: Dict[str, Any], created: Optional[float] = None) -> bool:
     """A record whose run may still be going: its pid is alive (and is not this process), and that process
     started before the record was written. A process that started later reuses the pid of a dead run. When the
     start time cannot be read the run counts as live; `--restore-global RID --force` is the way out. The host
-    name is not used: on macOS it changes with the network."""
+    name is not used: on macOS it changes with the network. Callers pass `created` as cleaned by read_records."""
     pid = data.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or pid == os.getpid() or not pid_alive(pid):
         return False
     started = process_start_time(pid)
     if started is None:
         return True
-    try:
-        created = float(data.get("created") or 0)
-    except (ValueError, TypeError, OverflowError):
-        return True
+    if created is None:
+        try:
+            created = float(data.get("created") or 0)
+        except (ValueError, TypeError, OverflowError):
+            return True
     return started <= created + START_SLACK
 
 
@@ -363,8 +397,9 @@ def restore_global(state: Path, rid: str, home: Path, force: bool = False) -> st
     if mine is None:
         raise RuntimeError(f"no backup record at {state / rid / BACKUP_RECORD}")
     data = mine["data"]
+    real = [r for r in records if not r["tampered"]]  # a tampered record never counts as live or as newer
     if not force:
-        live = next((r for r in records if record_is_live(r["data"])), None)
+        live = next((r for r in real if record_is_live(r["data"], r["created"])), None)
         if live is not None:  # before the order check, so it never points at a live run to restore
             pid = live["data"].get("pid")
             raise RuntimeError(f"run {live['rid']} is still going (pid {pid}). Let it finish, or stop it, before "
@@ -374,17 +409,26 @@ def restore_global(state: Path, rid: str, home: Path, force: bool = False) -> st
         raise RuntimeError(f"the record for {rid} does not point at {original} and {backup}, or looks rewritten "
                            f"({', '.join(mine['tampered'])}); not touching anything. If {backup} exists, move it "
                            f"back to {original} by hand, then delete {mine['path']} to clear this record")
-    if len(records) > 1 and records[0]["rid"] != rid:
-        listing = ", ".join(f"{r['rid']} ({r['data'].get('timestamp', 'unknown time')})" for r in records)
-        raise RuntimeError(f"{len(records)} backup records exist: {listing}. Restore the newest first, "
-                           f"{records[0]['rid']}, then run this again for the next.{tampered_hint(records, home)}")
-    if not _present(backup):
-        # The record lives where a session could rewrite it, so it never authorises a deletion. With no backup
-        # to put back there is nothing safe to do automatically.
+    if len(real) > 1 and real[0]["rid"] != rid:
+        listing = ", ".join(f"{r['rid']} ({r['data'].get('timestamp', 'unknown time')})" for r in real)
+        raise RuntimeError(f"{len(real)} backup records exist: {listing}. Restore the newest first, "
+                           f"{real[0]['rid']}, then run this again for the next.{tampered_hint(records, home)}")
+    replaced = replaced_path(home, rid)
+    if _present(backup):
+        what = restore_dirs(original, backup, replaced, True)
+    elif data.get("had_original") is False:
+        # Nothing to put back: the run's layer is renamed aside, never deleted, so a rewritten record can at
+        # worst move the operator's config to `replaced`, where the message names it.
+        what = restore_dirs(original, backup, replaced, False)
+    else:
+        # The record lives where a session could rewrite it. The run may have died before moving anything, so
+        # whatever is at `original` may be the operator's own config: left alone.
         raise RuntimeError(f"no backup at {backup}. Whatever is at {original} now is left alone; check it by "
                            f"hand, then delete {mine['path']} to clear this record")
-    what = restore_dirs(original, backup, True)
-    mine["path"].unlink()
+    try:
+        mine["path"].unlink()
+    except OSError as exc:
+        return f"{what}. Leftover record at {mine['path']}, delete it ({exc})"
     return what
 
 
@@ -597,12 +641,17 @@ def run_once(args: argparse.Namespace, n: int, runner: Runner, rid_factory: Call
                 errors.append(f"could not delete the workspace {plan.workspace}: {exc}")
         if attempted:
             try:
-                say("+ " + restore_dirs(global_dir(home), plan.backup_dir, had))
-                plan.backup_record.unlink(missing_ok=True)
+                say("+ " + restore_dirs(global_dir(home), plan.backup_dir, replaced_path(home, rid), had))
             except (OSError, RuntimeError) as exc:
                 restore_failed = True
                 errors.append(f"could not restore {global_dir(home)}: {exc}. Stopping. Run "
                               f"`run_live.py --restore-global {rid}` before anything else")
+            else:
+                try:
+                    plan.backup_record.unlink(missing_ok=True)
+                except OSError as exc:
+                    errors.append(f"restored {global_dir(home)}; leftover record at {plan.backup_record}, "
+                                  f"delete it ({exc})")
         say("+ " + quote(plan.teardown))
         try:
             if runner(plan.teardown, base) != 0:
@@ -683,18 +732,22 @@ def main(argv: Optional[Sequence[str]] = None, runner: Runner = subprocess_runne
         return 2
     if not args.dry_run:
         records = read_records(STATE_DIR, home)
-        live = [r for r in records if record_is_live(r["data"])]
+        real = [r for r in records if not r["tampered"]]  # tampered records are listed, never live or newest
+        live = [r for r in real if record_is_live(r["data"], r["created"])]
         if live:
             pid = live[0]["data"].get("pid")
             print(f"error: run {live[0]['rid']} is still going on this machine (pid {pid}); it has your "
                   f"~/.claude/not-me moved aside. Wait for it to finish. Do not restore it while it runs. "
                   f"{force_hint(live[0]['rid'], pid)}", file=sys.stderr)
             return 2
-        if records:
-            listing = ", ".join(f"{r['rid']} ({r['data'].get('timestamp', 'unknown time')})" for r in records)
+        if real:
+            listing = ", ".join(f"{r['rid']} ({r['data'].get('timestamp', 'unknown time')})" for r in real)
             print(f"error: a previous run died with your ~/.claude/not-me moved aside: {listing}. Restore the "
-                  f"newest first: `python3 evals-harness/run_live.py --restore-global {records[0]['rid']}`, "
+                  f"newest first: `python3 evals-harness/run_live.py --restore-global {real[0]['rid']}`, "
                   f"then the next, before anything else.{tampered_hint(records, home)}", file=sys.stderr)
+            return 2
+        if records:
+            print(f"error: backup records are left over.{tampered_hint(records, home)}", file=sys.stderr)
             return 2
         if not os.environ.get("NOT_ME_FIXTURE_TOKEN"):
             print("error: NOT_ME_FIXTURE_TOKEN is not set (a fine-grained token for the fixture repos only; "

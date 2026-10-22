@@ -124,6 +124,9 @@ class RunLiveTest(unittest.TestCase):
             self.addCleanup(patcher.stop)
         self.glob = self.home / ".claude" / "not-me"
 
+    def replaced(self, rid):
+        return self.home / ".claude" / f"not-me.replaced-{rid}"
+
     def rec(self, **kw):
         return Recorder(self.home, **kw)
 
@@ -275,6 +278,8 @@ class RunLiveTest(unittest.TestCase):
         self.run_main(rec)
         self.assertEqual(rec.global_at_launch, "scenario layer\n")
         self.assert_operator_config()
+        # nothing is deleted: the layer the run wrote waits beside the config for the operator
+        self.assertEqual((self.replaced("n1-1-test") / "project.md").read_text(encoding="utf-8"), "scenario layer\n")
 
     def test_global_layer_is_restored_when_launch_raises(self):
         self.operator_config()
@@ -288,9 +293,10 @@ class RunLiveTest(unittest.TestCase):
         self.assertEqual(self.run_main(self.rec(raise_on="grade")), 1)
         self.assert_operator_config()
 
-    def test_no_prior_layer_means_the_run_layer_is_removed(self):
+    def test_no_prior_layer_means_the_run_layer_is_moved_aside(self):
         self.run_main(self.rec())
         self.assertFalse(self.glob.exists())
+        self.assertEqual((self.replaced("n1-1-test") / "project.md").read_text(encoding="utf-8"), "scenario layer\n")
         self.assertFalse(list(self.state.glob("*/global-backup.json")))
 
     def dead_run(self, rid, host=None, pid=999999999, created=None):
@@ -452,30 +458,85 @@ class RunLiveTest(unittest.TestCase):
         self.assertIn(f"delete {forged}", err.getvalue())
         self.assertEqual((self.glob / "project.md").read_text(encoding="utf-8"), "operator's own\n")
 
-    def test_a_mismatched_newest_record_is_named_when_restoring_the_real_one(self):
+    def test_a_mismatched_newest_record_does_not_block_restoring_the_real_one(self):
+        # A record with foreign paths is tampered: it is named when a new run is refused, but it is never
+        # "newest" and never blocks restoring a real record.
         self.operator_config()
         self.dead_run("real-2", created=1000.0)
+        (self.glob / "project.md").write_text("scenario layer\n", encoding="utf-8")
         bad = self.dead_run("bad-2")
         data = json.loads(bad.read_text(encoding="utf-8"))
         data["original"] = str(self.tmp / "elsewhere")
         bad.write_text(json.dumps(data), encoding="utf-8")
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            self.assertEqual(run_live.main(["--restore-global", "real-2"], home=self.home), 1)
-        self.assertIn("newest first, bad-2", err.getvalue())
+            self.assertEqual(self.run_main(self.rec()), 2)
+        self.assertIn("--restore-global real-2`", err.getvalue())
         self.assertIn(f"{bad} (it does not point at", err.getvalue())
+        self.assertEqual(run_live.main(["--restore-global", "real-2"], out=io.StringIO(), home=self.home), 0)
+        self.assertEqual((self.glob / "project.md").read_text(encoding="utf-8"), "operator's own\n")
+        self.assertFalse((self.state / "real-2" / run_live.BACKUP_RECORD).exists())
+        self.assertTrue(bad.is_file())
+
+    def test_a_forged_live_record_from_the_future_does_not_block_restoring_the_real_one(self):
+        self.operator_config()
+        self.dead_run("real-3", created=1000.0)
+        forged = self.state / "forged-3" / run_live.BACKUP_RECORD
+        forged.parent.mkdir(parents=True)
+        forged.write_text(json.dumps({
+            "original": str(self.glob.absolute()),
+            "backup": str(run_live.backup_path(self.home, "forged-3").absolute()),
+            "pid": os.getppid(), "created": 1e12}), encoding="utf-8")
+        # given the raw `created`, the forged record would look live
+        self.assertTrue(run_live.record_is_live(json.loads(forged.read_text(encoding="utf-8"))))
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.run_main(self.rec()), 2)
+        self.assertNotIn("still going", err.getvalue())
+        self.assertIn("in the future", err.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(run_live.main(["--restore-global", "real-3"], out=io.StringIO(), home=self.home), 0)
+        self.assertEqual((self.glob / "project.md").read_text(encoding="utf-8"), "operator's own\n")
+        self.assertTrue(forged.is_file())
+
+    def test_a_forged_record_and_planted_backup_cannot_lose_the_operators_config(self):
+        self.operator_config()
+        forged = self.state / "forged-4" / run_live.BACKUP_RECORD
+        forged.parent.mkdir(parents=True)
+        forged.write_text(json.dumps({
+            "original": str(self.glob.absolute()),
+            "backup": str(run_live.backup_path(self.home, "forged-4").absolute()),
+            "had_original": True, "pid": 999999999, "created": 1.0}), encoding="utf-8")
+        planted = run_live.backup_path(self.home, "forged-4")
+        planted.mkdir(parents=True)
+        (planted / "project.md").write_text("---\nmode: live\n---\n", encoding="utf-8")
+        buf = io.StringIO()
+        self.assertEqual(run_live.main(["--restore-global", "forged-4"], out=buf, home=self.home), 0)
+        aside = self.replaced("forged-4")
+        self.assertEqual((aside / "project.md").read_text(encoding="utf-8"), "operator's own\n")
+        self.assertTrue((aside / "allowed-repos.json").is_file())
+        self.assertIn(str(aside), buf.getvalue())
+
+    def test_replaced_path_takes_a_suffix_when_taken(self):
+        self.operator_config()
+        self.replaced("x-1").mkdir(parents=True)
+        (self.replaced("x-1").parent / "not-me.replaced-x-1-2").mkdir()
+        aside = run_live._move_aside(self.glob, self.replaced("x-1"))
+        self.assertEqual(aside, self.replaced("x-1").parent / "not-me.replaced-x-1-3")
+        self.assertEqual((aside / "project.md").read_text(encoding="utf-8"), "operator's own\n")
+        self.assertFalse(self.glob.exists())
 
     def test_run_loop_stops_at_the_first_restore_failure(self):
         self.operator_config()
         rec = self.rec()
 
-        real_remove = run_live._force_remove
+        real_move = run_live._move_aside
 
-        def remove_then_recreate(path):
-            real_remove(path)
+        def move_then_recreate(path, replaced):
+            moved = real_move(path, replaced)
             if Path(path) == self.glob:
                 self.glob.mkdir(parents=True)
                 (self.glob / "racer").write_text("x", encoding="utf-8")
-        with mock.patch.object(run_live, "_force_remove", remove_then_recreate), \
+            return moved
+        with mock.patch.object(run_live, "_move_aside", move_then_recreate), \
                 contextlib.redirect_stderr(io.StringIO()) as err:
             code = run_live.main(self.args("--runs", "3"), runner=rec, rid_factory=rids, out=io.StringIO(),
                                  home=self.home)
@@ -571,18 +632,104 @@ class RunLiveTest(unittest.TestCase):
 
     def test_restore_global_never_deletes_when_the_backup_is_missing(self):
         # A session can rewrite the record; had_original: false must not turn into a delete of the real config.
+        # It renames whatever is at ~/.claude/not-me aside and says where it went.
         self.operator_config()
         record = self.dead_run("dead-9")
         shutil.rmtree(str(run_live.backup_path(self.home, "dead-9")))
         data = json.loads(record.read_text(encoding="utf-8"))
         data["had_original"] = False
         record.write_text(json.dumps(data), encoding="utf-8")
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            self.assertEqual(run_live.main(["--restore-global", "dead-9"], home=self.home), 1)
+        buf = io.StringIO()
+        self.assertEqual(run_live.main(["--restore-global", "dead-9"], out=buf, home=self.home), 0)
+        aside = self.replaced("dead-9")
+        self.assertTrue((aside / "project.md").is_file())  # kept, whatever it holds
+        self.assertFalse(self.glob.exists())
+        self.assertIn(f"renamed to {aside}", buf.getvalue())
+        self.assertNotIn("by hand, then", buf.getvalue())
+        self.assertFalse(record.exists())
+
+    def test_restore_global_missing_backup_with_had_original_true_is_left_alone(self):
+        self.operator_config()
+        record = self.dead_run("dead-8")
+        shutil.rmtree(str(run_live.backup_path(self.home, "dead-8")))
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(run_live.main(["--restore-global", "dead-8"], home=self.home), 1)
         self.assertIn("no backup", err.getvalue())
-        self.assertTrue((self.glob / "project.md").is_file())  # left alone, whatever it holds
-        self.assertTrue(record.is_file())  # the record stays until a person clears it
+        self.assertTrue((self.glob / "project.md").is_file())
+        self.assertTrue(record.is_file())
+
+    def test_a_backup_missing_at_restore_time_fails_the_run_and_keeps_the_record(self):
+        self.operator_config()
+        rec = self.rec()
+        orig = rec.__call__
+
+        def spy(argv, env, **opts):
+            if argv[0] == "claude":
+                shutil.rmtree(str(run_live.backup_path(self.home, "n1-1-test")))
+            return orig(argv, env, **opts)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.run_main(spy), 1)
+        errors = " ".join(self.result()["errors"])
+        self.assertIn(str(run_live.backup_path(self.home, "n1-1-test")), errors)
+        self.assertTrue((self.state / "n1-1-test" / run_live.BACKUP_RECORD).is_file())
+        # the scenario layer (mode: live and all) is not left in place as the operator's config
+        self.assertFalse(self.glob.exists())
+        self.assertEqual((self.replaced("n1-1-test") / "project.md").read_text(encoding="utf-8"),
+                         "scenario layer\n")
+
+    def test_a_record_that_cannot_be_deleted_after_restore_global_is_reported_as_leftover(self):
+        self.operator_config()
+        record = self.dead_run("dead-7")
+        real_unlink = Path.unlink
+
+        def unlink(path, *a, **kw):
+            if path.name == run_live.BACKUP_RECORD:
+                raise PermissionError("denied")
+            return real_unlink(path, *a, **kw)
+        buf = io.StringIO()
+        with mock.patch.object(Path, "unlink", unlink):
+            self.assertEqual(run_live.main(["--restore-global", "dead-7"], out=buf, home=self.home), 0)
+        self.assertIn("restored", buf.getvalue())
+        self.assertIn(f"Leftover record at {record}, delete it", buf.getvalue())
+        self.assertNotIn("could not restore", buf.getvalue())
+        self.assertEqual((self.glob / "project.md").read_text(encoding="utf-8"), "operator's own\n")
+
+    def test_a_record_that_cannot_be_deleted_after_a_run_is_not_a_failed_restore(self):
+        self.operator_config()
+        real_unlink = Path.unlink
+
+        def unlink(path, *a, **kw):
+            if path.name == run_live.BACKUP_RECORD:
+                raise PermissionError("denied")
+            return real_unlink(path, *a, **kw)
+        with mock.patch.object(Path, "unlink", unlink), contextlib.redirect_stderr(io.StringIO()) as err:
+            code = run_live.main(self.args("--runs", "2"), runner=self.rec(), rid_factory=rids, out=io.StringIO(),
+                                 home=self.home)
+        self.assertEqual(code, 1)
+        self.assertNotIn("could not be restored", err.getvalue())
+        errors = self.result()["errors"]
+        self.assertFalse(any("could not restore" in e for e in errors))
+        record = self.state / "n1-1-test" / run_live.BACKUP_RECORD
+        self.assertTrue(any(f"leftover record at {record}, delete it" in e for e in errors), errors)
+        self.assertEqual((self.glob / "project.md").read_text(encoding="utf-8"), "operator's own\n")
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_force_remove_never_chmods_through_a_symlink(self):
+        outside = self.tmp / "outside.txt"
+        outside.write_text("x", encoding="utf-8")
+        os.chmod(str(outside), 0o644)
+        before = os.stat(str(outside)).st_mode
+        ws = self.tmp / "ws"
+        locked = ws / "locked"
+        locked.mkdir(parents=True)
+        os.symlink(str(outside), str(locked / "link"))
+        os.chmod(str(locked), 0o500)
+        self.addCleanup(lambda: locked.exists() and os.chmod(str(locked), 0o700))
+        try:
+            run_live._force_remove(ws)
+        except OSError:
+            pass  # the unwritable directory may stop the delete; the point is the outside file
+        self.assertEqual(os.stat(str(outside)).st_mode, before)
 
     def test_restore_global_unknown_run_is_an_error(self):
         with contextlib.redirect_stderr(io.StringIO()):

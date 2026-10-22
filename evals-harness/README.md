@@ -55,17 +55,20 @@ Drop `--dry-run` to run. Per run, in order:
    `<workspace>/.git/not-me/logs/intended-writes.jsonl`; `--ledger PATH` overrides it.
 6. **Clean**: `scaffold.py clean` removes the stage and the token copy, the workspace is deleted (`--keep-temp`
    keeps it), the global layer is restored, and `seed_fixture.py --teardown RID` runs. All of it also runs when
-   an earlier step failed.
+   an earlier step failed. Restoring never deletes: the layer the run wrote is kept at
+   `~/.claude/not-me.replaced-RID` (`-2`, `-3` added if taken); delete it by hand when you are done with it.
 7. The two grades and the session facts are merged into `<out>/<ID>-<n>.json` (the file `gate_report.py`
    reads): `ok` is true only when the state grade passed, the transcript graders passed and nothing errored.
 
 While a run is live, any other Claude Code session you have open reads the scenario's global layer, and the
-restore removes anything those sessions wrote there; close other not-me sessions first.
+restore moves anything those sessions wrote there to `~/.claude/not-me.replaced-RID`; close other not-me sessions
+first.
 
 If a run is killed, your own `~/.claude/not-me/` may still be in `~/.claude/not-me.backup-RID`. The next run
 refuses (exit 2) until you run `python3 evals-harness/run_live.py --restore-global RID`; it refuses that too
-while the run's process is alive, and with several records it restores the newest first. A failed restore stops
-the run loop. Details in `docs/testing.md`.
+while the run's process is alive, and with several records it restores the newest first. Records that look
+tampered with are listed but never count as live or newest. A failed restore, including a backup that vanished
+during the run, stops the run loop and keeps the record. Details in `docs/testing.md`.
 
 `--out` defaults to `results/evals/<today>`. A second invocation on the same day adds runs (`N1-2.json`) instead
 of overwriting. Runs go one at a time, because a skill scans the whole fixture repo.
