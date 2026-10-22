@@ -21,7 +21,7 @@ Then, in the repo you want to automate:
 /not-me --dry-run
 ```
 
-`--dry-run` reads from GitHub for real and records every write in a ledger instead of posting it. Read the ledger and the run log, then set `mode: live` in `~/.claude/not-me/project.md` (a repo file can never set it). Then schedule it:
+`--dry-run` reads from GitHub for real and records every write in a ledger instead of posting it. Read the ledger and the run log, then run `/not-me:mode live` and follow its steps in your own terminal (a repo file can never set live, and a hand-edited `mode: live` stays dry-run). Then schedule it:
 
 ```
 /loop 2h /not-me --bg
@@ -51,6 +51,7 @@ Update with:
 | `/not-me:config [--layer default\|global\|repo]` | Explain the effective config and where each value came from |
 | `/not-me:doctor` | Check tools, GitHub auth, config, the guard self-test and subagent depth |
 | `/not-me:allow-repo <owner/name> [--everywhere]` | Show the allow list and print the command a person runs to change it (also `--board`, `--list`, `--remove`) |
+| `/not-me:mode [dry-run [--global] \| live]` | Show dry-run or live and where it is set, switch to dry-run, or get the steps to go live in your own terminal |
 
 ## Requirements
 

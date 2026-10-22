@@ -58,16 +58,18 @@ class UnderClaudeCase(unittest.TestCase):
         self.fake = FakeRunner()
         self.env = {"CLAUDECODE": "1", "PATH": os.environ.get("PATH", ""), "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT)}
         self.token = humans.create_token(self.home)
+        humans.write_live_marker(self.home)  # the global layer says live; signed as `notme mode live` would
         # a person: no Claude Code variable, the operator token, and (with stdin=TtyIO()) a terminal
         self.human_env = {k: v for k, v in self.env.items() if k not in cli.CLAUDE_ENV}
         self.human_env["NOT_ME_OPERATOR_CONFIRM"] = self.token
         self.claude_ancestor = False  # the injected process-tree check
 
-    def cli(self, *argv, env=None, cwd=None, stdin=None, repo=True):
+    def cli(self, *argv, env=None, cwd=None, stdin=None, repo=True, prompt=None):
         out, err = io.StringIO(), io.StringIO()
         args = (["--repo", REPO] if repo else []) + list(argv)
         code = cli.main(args, runner=self.fake, env=env or self.env, stdin=stdin or io.StringIO(""), stdout=out,
-                        stderr=err, cwd=str(cwd or self.session), process_check=lambda: self.claude_ancestor)
+                        stderr=err, cwd=str(cwd or self.session), process_check=lambda: self.claude_ancestor,
+                        prompt=prompt)
         return code, json.loads(out.getvalue()), err.getvalue()
 
     def ok(self, *argv, **kw):

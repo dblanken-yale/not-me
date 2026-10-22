@@ -62,7 +62,7 @@ What you get:
 
 | Key | Effective value | Why |
 | --- | --- | --- |
-| `mode` | `live` | Set in your global layer. The repo's `live` is ignored (see below) |
+| `mode` | `live` | Set in your global layer by `/not-me:mode live`, which also signs it (see [Live mode](#live-mode)). The repo's `live` is ignored (see below) |
 | `limits.fix_loop` | `5` | Global replaced the default. `limits.ci_wait_minutes` stays `20` because maps merge key by key |
 | `queue.pick_label` | `ready` | The repo replaced the default |
 | `protected_branches` | `main`, `master`, `release` | Union list: the default three, minus `develop` (global removed it), plus `release` (repo added it) |
@@ -84,6 +84,7 @@ What you get:
 - `shadowed` lists lower values that something higher replaced.
 - For union lists there is a `contributors` list instead: each layer's additions and `!` removals, in order.
 - `ignored` appears when a value was thrown away, with the reason. For the example above, `project.mode` shows `{"layer": "repo", "value": "live", "reason": "repo layer may only tighten"}`.
+- `downgraded` appears on `project.mode` when the layers say `live` but live mode is not confirmed: `{"configured": "live", "reason": "not confirmed: ..."}`. The value is then `dry-run` and the warnings say how to fix it.
 - `removed: true` appears when a layer deleted a key with `null`.
 - Paths print as `.claude/not-me/...` for the repo, `~/...` or `$NOT_ME_HOME/...` for global, and `${CLAUDE_PLUGIN_ROOT}/defaults/...` for the defaults.
 - Bodies get the same treatment: for each doc it lists which layers contributed and which layer each `##` section came from.
@@ -273,7 +274,13 @@ A repo layer cannot override a global `enabled: false` with `true`. Delete the `
 
 The ledger is `<git-common-dir>/not-me/logs/intended-writes.jsonl`, one JSON object per line with a timestamp, the operation, the target, the exact command, a hash of the text it would post, and a description. The text itself is saved next to it as `payloads/<hash>.md`. Both are written with owner-only permissions, and not-me refuses to write them through a symlink.
 
-To go live, set `mode: live` in your global `project.md`. The repo layer cannot do it.
+### Live mode
+
+To go live, run `/not-me:mode live` and follow the steps. It needs the operator token (see [install.md](install.md#the-operator-token)). It sets `mode: live` in your global `project.md` and signs it: it writes `~/.claude/not-me/mode-live.sig`, a code made from your operator token and the random epoch in `~/.claude/not-me/mode-live.epoch`. `live` takes effect only when the signature matches your current token and epoch, so typing `mode: live` by hand does not turn live mode on. Not-me then stays in dry-run, and `/not-me:mode`, `/not-me:config` (the `downgraded` entry) and `/not-me:doctor` say live is set but not confirmed. A new operator token invalidates the signature: run `/not-me:mode live` again. The repo layer cannot set `live` at all.
+
+`/not-me:mode dry-run` switches back (with `--global`, it also deletes the signature and replaces the epoch, so an old signature saved somewhere never works again). Setting `mode: dry-run` by hand works too. Returning the global layer to dry-run by any means (a hand edit or removing the `mode` key included) revokes the signature, so going live again needs `/not-me:mode live`. A repo-layer `mode: dry-run` pin does not revoke it.
+
+Upgrading: an existing global `mode: live` written before signatures existed runs as dry-run until you run `/not-me:mode live` once.
 
 ## Schema and upgrades
 
@@ -294,7 +301,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | Key | Default | What it does |
 | --- | --- | --- |
 | `schema` | `1` | Config format version. Setup upgrades older files |
-| `mode` | `dry-run` | `dry-run` or `live`. The repo layer may only set `dry-run` |
+| `mode` | `dry-run` | `dry-run` or `live`. `live` counts only when `/not-me:mode live` signed it (see [Live mode](#live-mode)). The repo layer may only set `dry-run` |
 | `enabled` | `true` | `false` turns not-me off for this layer and above. The repo layer may set `false`, never `true` over a global `false` |
 | `tracker` | `auto` | `owner/name` of the repo that holds issues. `auto` means `origin` |
 | `repos` | `[]` | Companion set, in push order. `[]` means just the tracker. Items are `{name, path: auto, default_branch: auto, role: primary or companion}` |

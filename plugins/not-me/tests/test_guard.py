@@ -142,7 +142,8 @@ class TokenizerTests(unittest.TestCase):
             self.assertFalse(bash(cmd), cmd)
         for cmd in ("git status", "g''h pr list", "g\\it log", "${X} y", "./run", "make.sh", "python3 -c 1",
                     "find . -name x", "cat ~/.claude/not-me/allowed-repos.json", "sh <<EOF\ngh pr merge 1\nEOF",
-                    "cp -r /some/home x", "wc < /some/home/op*", "cat -n notes"):
+                    "cp -r /some/home x", "wc < /some/home/op*", "cat -n notes", "echo 0 > /some/home/m*.sig",
+                    "echo 0 >~/x"):
             self.assertTrue(bash(cmd), cmd)
         self.assertTrue(guard.needs_check({"tool_name": "Write", "tool_input": {"file_path": "x"}}))
 
@@ -356,6 +357,36 @@ class HooksJsonTests(unittest.TestCase):
         hook = entry["hooks"][0]
         self.assertEqual((hook["type"], hook["timeout"]), ("command", 10))
         self.assertIn('bin/notme-python" "${CLAUDE_PLUGIN_ROOT}/hooks/repo_guard.py"', hook["command"])
+
+
+class LiveMarkerTests(unittest.TestCase):
+    """The guard protects the live-mode marker by name, the same cheap way as the allow list and the token."""
+
+    def test_the_guard_names_the_marker_the_cli_writes(self):
+        from notme import humans
+        self.assertEqual(guard.LIVE_MARKER_NAME, humans.LIVE_MARKER)
+
+    def test_a_shell_mention_of_the_marker_is_never_prefiltered_away(self):
+        for cmd in ("cp /tmp/x ~/.claude/x/mode-live.sig", "echo 0 > 'mode-live.sig'", "touch mode-l\\ive.sig"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(guard.needs_check({"tool_name": "Bash", "tool_input": {"command": cmd}}))
+
+
+class OwnScriptsTests(unittest.TestCase):
+    """The live-mode heuristics for interpreter code must not block this repository's own check commands."""
+
+    def test_the_acceptance_commands_are_allowed(self):
+        repo = PLUGIN_ROOT.parent.parent
+        home = Path(tempfile.mkdtemp(prefix="notme-home-"))
+        self.addCleanup(shutil.rmtree, str(home), True)
+        ctx = GuardContext(cwd=str(repo), root=str(repo), config_dir=str(repo / ".claude" / "not-me"), home=str(home),
+                           plugin_root=str(PLUGIN_ROOT), env={},
+                           write_ctx=writes.GuardContext(origin_repo="acme/app", allowed_repos=("acme/app",)))
+        for cmd in ("python3 scripts/run-tests.py", "python3 plugins/not-me/tests/run_guard_cases.py",
+                    "python3 scripts/check-skills.py", "python3 scripts/gen-cli-docs.py --check"):
+            with self.subTest(cmd=cmd):
+                event = {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(repo)}
+                self.assertIsNone(guard.decide(event, ctx))
 
 
 if __name__ == "__main__":

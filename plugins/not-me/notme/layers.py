@@ -18,6 +18,7 @@ from .frontmatter import iter_unfenced_lines
 LAYER_ORDER = ("default", "global", "repo")
 DOC_NAMES = ("project", "standards", "verify", "review", "prove")
 REPO_SUBDIR = (".claude", "not-me")
+PROJECT_FILE = "project.md"  # the doc that holds mode, in the global dir and in REPO_SUBDIR
 
 _H2 = re.compile(r"^##[ \t]+(.+?)[ \t]*#*[ \t]*$")
 

@@ -82,9 +82,11 @@ class HelperSkillsTest(unittest.TestCase):
         self.assertIs(meta.get("disable-model-invocation"), True)
         self.assertIn("notme allow-repo list", text)
         self.assertNotIn("allow-repo list --", text)
+        self.assertIn("hidden", text)
         for line in text.splitlines():
-            if re.search(r"allow-repo (add|remove)", line):
-                self.assertIn("NOT_ME_OPERATOR_CONFIRM", line)
+            if re.search(r"allow-repo (add|remove) ", line):
+                self.assertIn('"<notme>"', line)
+                self.assertNotIn("CLAUDE_PLUGIN_ROOT", line)
         self.assertLess(len(text.splitlines()), 50)
 
     def test_read_only_skills_have_no_writes(self):

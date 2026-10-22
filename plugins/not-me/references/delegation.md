@@ -16,6 +16,13 @@ skill is the orchestrator for its own run.
 
 A unit is one finding, one sub-issue, one verification pass, or one search.
 
+**Implementation is always dispatched.** Every code change goes to an implementer
+subagent, even a one-line or one-character fix. This rule takes precedence over
+any general operator preference about delegation size (for example "do not
+delegate what is smaller than the brief"). Under `single` the subagent runs on
+`models.single_model`; the only time you make a change yourself is after
+`models.max_tries` (see the retry ladder).
+
 ## Classify the unit
 
 Take the first that matches:
@@ -91,6 +98,7 @@ A subagent may draft text. You read it, own it, and decide whether it goes out.
 ## Checklist
 
 - [ ] Used `models.single_model` for everything when the strategy was `single`.
+- [ ] Dispatched every code change to a subagent, however small.
 - [ ] Classified each unit as triage, review, or implement before dispatch.
 - [ ] Wrote a self-contained brief with goal, files, conventions, scope, acceptance.
 - [ ] Audited by reading the diff and running the checks myself.

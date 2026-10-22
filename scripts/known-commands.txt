@@ -1,4 +1,5 @@
 me
+tmp-dir
 config
 preflight
 pick-issue
@@ -57,4 +58,7 @@ git remote-branch-exists
 git status
 status
 pause
+mode show
+mode dry-run
+mode live
 doctor

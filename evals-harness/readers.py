@@ -181,7 +181,7 @@ class GhReader:
         n = self.real_number(repo, number)
         query = ("query($owner:String!,$name:String!){repository(owner:$owner,name:$name){"
                  f"pullRequest(number:{n}){{reviewThreads(first:100){{nodes{{id isResolved "
-                 "comments(first:50){nodes{databaseId author{login} body path line}}}}}}}}}")
+                 "comments(first:50){nodes{databaseId author{login} body path line}}}}}}}")
         data = self._json(["api", "graphql", "-f", f"query={query}", "-f", f"owner={owner}", "-f", f"name={name}"])
         nodes = data["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
         return [{"id": t["id"], "resolved": bool(t["isResolved"]), "replies": max(len(t["comments"]["nodes"]) - 1, 0),

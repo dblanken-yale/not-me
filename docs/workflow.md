@@ -202,7 +202,7 @@ Start a loop yourself. A run never starts or extends one.
 5. Read the ledger and the run log. Ask: is this the label change, the comment and the PR I would have wanted?
 6. Run `/not-me:status` and `/not-me:config`. Confirm the roster, the label names and the protected branches.
 7. Repeat the dry run on a `needs work` PR and on a PR you are asked to review. Read each log summary.
-8. When the dry runs look right, set `mode: live` in your global layer, `~/.claude/not-me/project.md`. A repo file can never set it. `/not-me:config` should show `live` with source `global`.
+8. When the dry runs look right, run `/not-me:mode live` and follow its steps (you confirm in your own terminal with the operator token). That is the only way to go live: it signs the switch with your token, so a `mode: live` typed by hand stays dry-run. A repo file can never set it. `/not-me:mode` or `/not-me:config` should show `live` with source `global`.
 9. Run one live pass by hand: `/not-me`. Watch the result line and open the PR it made.
 10. Start the loop: `/loop 2h /not-me --bg`. Check `/not-me:status` each morning for the first week.
 11. After a few runs, let `/not-me:retro` suggest config edits, and read each diff before you commit it.

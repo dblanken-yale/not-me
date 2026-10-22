@@ -236,6 +236,9 @@ Self-protection is always on while the guard is active. It does not depend on th
 - Any Bash command containing `allow-repo` together with `add`, `remove`, or `--everywhere`, for example `notme allow-repo add acme/other`.
 - Writes to the plugin's own code: its `hooks`, `bin`, `notme`, `cli`, and `skills` folders.
 - Writes to not-me config while a run is in progress: the repo's `.claude/not-me/` folder and the `.md` files in your global folder.
+- Reading or changing the operator token or the live-mode epoch (`mode-live.epoch`), and `pause off`. This covers the Read, Grep, Glob and LS tools, Write and Edit, and Bash commands that name either file or reach it through a glob (`~/.claude/n*me/mode-live.e*`), a directory, a redirection, or a part the guard cannot work out, such as `$VAR`, `$(...)`, backticks or `{a,b}`, when the rest of the path could lead there.
+- Going live: `notme mode` with anything but `show` or `dry-run`, however it is started (`notme`, `bin/notme`, `python3 cli/notme.py`, `python3 -m notme.cli`, also after python options such as `-W ignore` or `-X utf8`). Also any Write or Edit of `mode-live.sig`, any Bash command that mentions it, and any Bash copy, move or redirection that reaches it through a glob or a part the guard cannot work out. That file is the signature `/not-me:mode live` writes with your operator token and epoch; without it a `mode: live` setting runs as dry-run, so no file edit can turn live mode on. Going back to dry-run with `/not-me:mode dry-run --global` replaces the epoch, so a saved copy of an old signature stops working.
+- A Write or Edit that would leave `mode: live` (or anything but `dry-run`) in your global `project.md`. This one is a courtesy: it stops the attempt early with a pointer to `/not-me:mode live`. The signature above is what actually keeps live mode off.
 
 The block message in each case says to ask the operator, which is you.
 

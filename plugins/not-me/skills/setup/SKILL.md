@@ -83,7 +83,8 @@ confirmation of the verify commands; the prove `target` strategy; `notify.comman
 and whether to turn on live mode at the end.
 
 With `--global`, ask only `mode`, `attribution`, `limits`, `models`, `router`,
-`notify` and `logs.root`. Refuse repo-only answers (tracker, repos, queue, labels,
+`notify` and `logs.root` (write `mode` only as `dry-run`; live is Step 7's
+command). Refuse repo-only answers (tracker, repos, queue, labels,
 reviewers, roster, verify commands, ticket format) with one line saying they
 belong in a repo layer. Never ask about `allow_repos`.
 
@@ -148,7 +149,7 @@ Keep every other section's default text. Do not invent sections.
 
 ## Step 6: write and check
 
-1. Before writing, copy each existing target file under `$TMPDIR` and show a unified
+1. Before writing, copy each existing target file into the temp directory (`autonomy-and-logging.md`, Text to GitHub, rule 2) and show a unified
    diff (`diff -u old new`, an empty old for a new file). Ask once to write them
    all. With `--answers`, write without asking.
 2. Write the files.
@@ -162,11 +163,12 @@ Keep every other section's default text. Do not invent sections.
 ## Step 7: finish
 
 1. Run `notme doctor` again.
-2. If it passes and the user said yes to live mode, set `mode: live` in the global
-   layer's `project.md` (create it from the defaults with only `schema` and `mode`
-   live if it does not exist). The repo layer cannot turn live mode on.
+2. If it passes and the user said yes to live mode, do not edit any file: run
+   `notme mode show` and print the live command it gives for the user to run in
+   their own terminal (as `/not-me:mode live` does). Only that signed command turns live on; a
+   hand-set `mode: live` stays dry-run, and the repo layer can never set it.
 3. Otherwise explain dry-run: every write a run would make is recorded in the
-   ledger and nothing is sent, until `mode: live` is set in the global layer.
+   ledger and nothing is sent, until the user runs `/not-me:mode live`.
 4. Print the next commands: `/not-me:doctor`, `/not-me --dry-run`, and each
    `/not-me:allow-repo` confirmation from Step 4.
 

@@ -69,6 +69,7 @@ class CliCase(unittest.TestCase):
         self.env = {"NOT_ME_HOME": str(self.tc.home), "PATH": os.environ.get("PATH", ""),
                     "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
                     "NOT_ME_OPERATOR_CONFIRM": humans.create_token(self.tc.home)}
+        humans.write_live_marker(self.tc.home)  # `mode: live` counts only when signed (notme mode live)
 
     @property
     def project(self) -> Path:
@@ -79,8 +80,9 @@ class CliCase(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         return str(path)
 
-    def cli(self, *argv, stdin="", runner=None, hook_cmd=None, env=None, repo=True, project=True):
-        """(exit code, parsed stdout object, stderr text). Fails the test unless stdout is exactly one object."""
+    def cli(self, *argv, stdin="", runner=None, hook_cmd=None, env=None, repo=True, project=True, prompt=None):
+        """(exit code, parsed stdout object, stderr text). Fails the test unless stdout is exactly one object.
+        prompt stands in for the hidden operator-token prompt (none by default)."""
         out, err = io.StringIO(), io.StringIO()
         args = list(argv)
         if project:
@@ -88,7 +90,7 @@ class CliCase(unittest.TestCase):
         if repo:
             args = ["--repo", REPO] + args
         code = cli.main(args, runner=runner or self.fake, env=env or self.env, stdin=TtyIO(stdin), stdout=out,
-                        stderr=err, hook_cmd=hook_cmd, process_check=lambda: False)
+                        stderr=err, hook_cmd=hook_cmd, process_check=lambda: False, prompt=prompt)
         text = out.getvalue()
         self.assertEqual(text.count("\n"), 1, f"stdout must be one line, got {text!r}")
         payload = json.loads(text)
@@ -379,10 +381,25 @@ class DryRunTests(CliCase):
         self.tc.write("global", "project", GLOBAL_PROJECT.replace("mode: live", "mode: dry-run"))
         self.assertTrue(self.ok("request-review", "3", "--reviewers", "hubot")["dry_run"])
         self.tc.write("global", "project", GLOBAL_PROJECT)
+        self.assertTrue(self.ok("request-review", "3", "--reviewers", "hubot")["dry_run"])  # dry-run revoked it
+        self.tc.sign_live()
         self.assertNotIn("dry_run", self.ok("request-review", "3", "--reviewers", "hubot"))
         env = dict(self.env, NOT_ME_DRY_RUN="1")
         self.assertTrue(self.ok("request-review", "3", "--reviewers", "octocat", env=env)["dry_run"])
         self.assertEqual(things(self.fake)["3"]["reviewRequests"], ["octocat", "hubot"])
+
+    def test_unconfirmed_live_records_to_the_ledger_only(self):
+        humans.clear_live_marker(self.tc.home)  # `mode: live` hand-set, never signed by `notme mode live`
+        before, state = len(self.ledger()), self.fake.snapshot()
+        self.fake.calls.clear()
+        payload = self.ok("request-review", "3", "--reviewers", "hubot")
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(self.fake.writes_made(), [])
+        self.assertEqual(self.fake.snapshot(), state)
+        self.assertGreater(len(self.ledger()), before)
+        pre = self.ok("preflight")
+        self.assertEqual((pre["mode"], pre["dry_run"]), ("dry-run", True))
+        self.assertTrue(any("not confirmed" in w for w in pre["warnings"]), pre["warnings"])
 
     def test_log_option_appends_an_action_line(self):
         start = self.ok("log", "start", "--skill", "new", "--ref", "1")
