@@ -16,7 +16,7 @@ result line. Parking rules are in `parking.md`; logging rules in
    The body leads with `**Waiting on:**` and a login, never "you".
 3. Finish the log with `notme log finish <path> --status "<result>"`. Pass the
    failing commands and their output with `--failures-file`.
-4. Return the checkout to the default branch and restore any stash.
+4. Return the checkout to the branch it started on and restore any stash.
 
 ## Table
 

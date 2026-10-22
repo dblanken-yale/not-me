@@ -206,8 +206,10 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/pr-shape.md` and
 
 ## Step 10: Finish
 
-1. Return the checkout to the default branch with a clean tree. Restore a stash
-   with `notme git unstash <sha>`. A tree you cannot clean is a `WARN`.
+1. Return the checkout to the branch it started on (`branch` from preflight; in
+   a linked worktree that is never the default branch) with a clean tree
+   (`branching.md`). Restore a stash with `notme git unstash <sha>`. A tree you
+   cannot clean is a `WARN`.
 2. `notme log finish <path> --status "PR <repo>#<pr> needs review"`.
 3. `notme prove-target <repo>#<pr>` finds a URL: start `/not-me:prove <repo>#<pr>`
    in the background. No target: skip it.
@@ -250,4 +252,4 @@ checks. A clearly reported blocker is a correct outcome.
 - [ ] Committed only touched paths; pushed only through the CLI.
 - [ ] Opened the PR ready for review, moved the issue to `needs_review`, and left
       one upserted `new` marker comment on the issue naming the PR.
-- [ ] Left the checkout clean on the default branch and finished the log.
+- [ ] Left the checkout clean on its starting branch and finished the log.
