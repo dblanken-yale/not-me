@@ -105,11 +105,30 @@ class ContextTests(_Fixtures):
 
 
 class TokenizerTests(unittest.TestCase):
-    def test_segments_and_tokens(self):
-        segs = guard.segments("a && b || c; d | e & f\ng")
-        self.assertEqual([s.strip() for s in segs], list("abcdefg"))
-        self.assertEqual(guard.tokens('git commit -m "fix: x" (y'), ["git", "commit", "-m", "fix:", "x", "y"])
-        self.assertEqual(guard.tokens("echo '' \"\""), ["echo"])
+    @staticmethod
+    def words(cmd):
+        return [c.words for c in guard.lex(cmd).commands]
+
+    def test_commands_and_words(self):
+        self.assertEqual(self.words("a && b || c; d | e & f\ng"), [[x] for x in "abcdefg"])
+        self.assertEqual(self.words('git commit -m "fix: x" (y'), [["git", "commit", "-m", "fix: x"], ["y"]])
+        self.assertEqual(self.words("echo '' \"\""), [["echo", "", ""]])
+        # quotes, escapes and $'...' are read the way the shell reads them
+        self.assertEqual(self.words("x='a b' y=a\\ b git push"), [["x=a b", "y=a b", "git", "push"]])
+        self.assertEqual(self.words("g''i\"t\" $'\\x70ush' 'a;b' \"c && d\""), [["git", "push", "a;b", "c && d"]])
+        # backslash-newline joins words, also inside double quotes; single quotes keep it
+        self.assertEqual(self.words("gi\\\nt push \"a\\\nb\" 'c\\\nd'"), [["git", "push", "ab", "c\\\nd"]])
+        # comments start only at a word start
+        self.assertEqual(self.words("a#b c # git push\nd"), [["a#b", "c"], ["d"]])
+        self.assertEqual(self.words("f() { cd x; }"), [["f"], ["{", "cd", "x"], ["}"]])
+        self.assertTrue(guard.lex("f() { cd x; }").funcdef)
+        self.assertFalse(guard.lex("a=() ; b").funcdef)
+
+    def test_expansion_flags(self):
+        (cmd,) = guard.lex("echo {a,b} x{1..3} g* [ab] '*' {} [").commands
+        flags = [(w.glob, w.brace) for w in cmd.words]
+        self.assertEqual(flags, [(False, False), (False, True), (False, True), (True, False), (True, False),
+                                 (False, False), (False, False), (False, False)])
 
     def test_has_gh_git(self):
         self.assertTrue(guard.has_gh_git("x; gh pr list"))
@@ -117,23 +136,63 @@ class TokenizerTests(unittest.TestCase):
         self.assertFalse(guard.has_gh_git("github-cli digit legit .gitignore"))
 
     def test_substitutions(self):
-        self.assertEqual(guard.substitutions("echo $(a $(b) c) `d` <(e)"), ["a $(b) c", "b", "e", "d"])
-        self.assertEqual(guard.substitutions("echo $(unclosed"), ["unclosed"])
+        p = guard.lex("echo $(a $(b) c) `d` <(e) \"$(f)\" ${x:-$(g)} $((1 + (2))) '$(h)'")
+        self.assertEqual(sorted(p.subs), sorted(["a $(b) c", "b", "d", "e", "f", "g"]))
+        self.assertEqual([c.words for c in p.commands if c.nested], [["b"], ["a", "$(b)", "c"], ["d"], ["e"], ["f"],
+                                                                     ["g"]])
+        self.assertEqual(guard.lex("echo $( (a) )").subs, [" (a) "])
 
     def test_heredocs(self):
-        text, opaque = guard.strip_heredocs("cat <<'EOF'\ngit push\nEOF\necho done")
-        self.assertEqual(text, "cat <<'EOF'\necho done")
-        self.assertIsNone(opaque)
-        _, opaque = guard.strip_heredocs("sh <<-EOF\n  gh pr merge 1\n  EOF")
-        self.assertIsNotNone(opaque)
-        text, _ = guard.strip_heredocs("grep x <<< 'y'\ngit status")
-        self.assertIn("git status", text)
+        p = guard.lex("cat <<'EOF'\ngit push\nEOF\necho done")
+        self.assertEqual(p.code, "cat <<'EOF'\necho done")
+        self.assertEqual([c.bodies for c in p.commands], [["git push\n"], []])
+        p = guard.lex("sh <<-EOF\n\tgh pr merge 1\n\tEOF\nnext")
+        self.assertEqual(p.commands[-1].words, ["next"])
+        p = guard.lex("grep x <<< 'y'\ngit status")
+        self.assertEqual([c.bodies for c in p.commands], [["y"], []])
+        # a quoted <<EOF is data; an unquoted delimiter runs the substitutions in its body
+        self.assertEqual(guard.lex("echo '<<EOF'\ngit push").commands[-1].words, ["git", "push"])
+        self.assertEqual(guard.lex("cat <<EOF\n$(git push)\nEOF").subs, ["git push"])
+        self.assertEqual(guard.lex("cat <<'EOF'\n$(git push)\nEOF").subs, [])
+        # a body inside $( ) is not part of the substitution text
+        self.assertEqual(guard.lex("x \"$(cat <<'E'\ngit push\nE\n)\"").subs, ["cat <<'E'\n"])
 
     def test_redirections(self):
-        self.assertEqual(guard.tokens("git push 2>&1 >/dev/null"), ["git", "push"])
-        self.assertEqual(guard.tokens("git push > log.txt 2> err.txt"), ["git", "push"])
-        self.assertEqual(guard.tokens("git push &> all.txt"), ["git", "push"])
-        self.assertEqual([s.strip() for s in guard.segments("a 2>&1 & b >&2")], ["a 2>&1", "b >&2"])
+        self.assertEqual(self.words("git push 2>&1 >/dev/null"), [["git", "push"]])
+        self.assertEqual(self.words("git push > log.txt 2> err.txt"), [["git", "push"]])
+        self.assertEqual(self.words("git push &> all.txt {fd}>x 3<&-"), [["git", "push"]])
+        self.assertEqual(self.words("a 2>&1 & b >&2"), [["a"], ["b"]])
+        self.assertEqual(self.words("echo '2'>x"), [["echo", "2"]])  # a quoted 2 is a word, not an fd
+        self.assertEqual(guard.lex("cat < in.txt").commands[0].redirs, [("<", "in.txt")])
+
+    def test_unparsed(self):
+        for bad in ("echo 'a", 'echo "a', "echo `a", "echo $(a", "echo ${a", "echo $'a", "cat >", "a <<",
+                    "echo `a \\`b\\``", "$(( $(a) ))", "x" * (guard.MAX_COMMAND + 1),
+                    "echo " + "$(" * (guard.MAX_NESTING + 1)):
+            with self.subTest(bad=bad[:40]):
+                with self.assertRaises(guard.Unparsed):
+                    guard.lex(bad)
+
+    def test_adversarial_input_is_fast(self):
+        """Commands far over the hook's budget are judged quickly: linear scans, a size cap and a nesting cap."""
+        import time
+        ctx = GuardContext(cwd="/nonexistent/app", root="/nonexistent/app", active_run=True, env={},
+                           home="/nonexistent/home", plugin_root="/nonexistent/plugin", git=lambda a, c: None,
+                           write_ctx=writes.GuardContext(origin_repo="acme/app", allowed_repos=("acme/app",)))
+        n = 100 * 1024
+        near = guard.MAX_COMMAND - 16
+        for cmd in ("$(" * (n // 2), "${X-" * (n // 4), "cat/" * (n // 4) + " -", "-u " * (n // 3),
+                    ("$(" * (near // 2))[:near], ("$(a)" * near)[:near], ("notme;" * near)[:near],
+                    ("cat a;" * near)[:near], ("${X-" * near)[:near], ("-u " * near)[:near], ("(" * near)):
+            event = {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": "/nonexistent/app"}
+            start = time.perf_counter()
+            guard.needs_check(event)
+            block = guard.decide(event, ctx)
+            took = time.perf_counter() - start
+            with self.subTest(cmd=cmd[:20], size=len(cmd)):
+                self.assertLess(took, 1.0)
+                if len(cmd) > guard.MAX_COMMAND:
+                    self.assertEqual(block.rule, "self_protect")
 
     def test_prefilter(self):
         def bash(cmd):
@@ -199,21 +258,22 @@ class WindowsPathTests(unittest.TestCase):
                                 plugin_root="C:\\Plugins\\not-me", active_run=True, env={},
                                 write_ctx=writes.GuardContext(origin_repo="acme/app", allowed_repos=("acme/app",)))
 
-    def decide(self, tool, tin):
-        return guard.decide({"tool_name": tool, "tool_input": tin, "cwd": "C:\\Work\\App"}, self.ctx)
+    def decide(self, tool, tin, cwd="C:\\Work\\App"):
+        return guard.decide({"tool_name": tool, "tool_input": tin, "cwd": cwd}, self.ctx)
 
     def test_worktree_add_containment(self):
         for path in ("C:/work/app/.git/not-me/worktrees/feat-x", "c:\\WORK\\App\\.git\\not-me\\worktrees\\feat-x",
                      ".git/not-me/worktrees/feat-x"):
             with self.subTest(path=path):
-                self.assertIsNone(self.decide("Bash", {"command": f"notme git worktree-add {path}"}))
+                self.assertIsNone(self.decide("Bash", {"command": f"notme git worktree-add '{path}'"}))
         for path in ("C:\\Work\\App\\.git\\not-me\\worktrees\\..\\..\\hooks", "D:\\x", "C:/Work/App/.git/not-me/worktrees"):
             with self.subTest(path=path):
-                self.assertEqual(self.decide("Bash", {"command": f"notme git worktree-add {path}"}).rule, "self_protect")
+                self.assertEqual(self.decide("Bash", {"command": f"notme git worktree-add '{path}'"}).rule, "self_protect")
 
     def test_session_checkout_and_file_self_protection(self):
-        self.assertIsNone(self.decide("Bash", {"command": "cd C:/work/APP/sub && notme status"}))
-        self.assertEqual(self.decide("Bash", {"command": "cd D:\\Other && notme status"}).rule, "self_protect")
+        self.assertIsNone(self.decide("Bash", {"command": "notme status"}, cwd="C:/work/APP/sub"))
+        self.assertEqual(self.decide("Bash", {"command": "notme status"}, cwd="D:\\Other").rule, "self_protect")
+        self.assertEqual(self.decide("Bash", {"command": "cd C:/work/APP/sub && notme status"}).rule, "self_protect")
         for path in ("c:/work/app/.claude/not-me/project.md", "C:\\Plugins\\NOT-ME\\hooks\\repo_guard.py",
                      "C:/Users/OP/.claude/not-me/allowed-repos.json"):
             with self.subTest(path=path):

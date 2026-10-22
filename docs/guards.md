@@ -61,6 +61,22 @@ python3 -c 'import subprocess; subprocess.run(["gh", "pr", "comment", "5", "-R",
 
 Edits to `.git/config`, `.git/hooks/*`, and `~/.gitconfig` are blocked too, because they change where git sends things.
 
+#### Directory changes and writes
+
+The guard does not follow `cd`. It judges a git write in the working directory Claude Code reports for the call, or in the `git -C <path>` it names, and a gh write by its `-R owner/name`. So a single Bash command that changes directory anywhere may not also write with git or gh:
+
+```
+cd ../app-ui && git commit -F msg.txt           # blocked: cd and a commit in one command
+(cd sub && git push)                            # blocked: a subshell cd counts too
+env -C ../other git push                        # blocked
+git -C ../app-ui commit -F msg.txt              # allowed: the path is named
+gh pr create -R acme/app --title x --body y     # allowed
+cd sub && make test                             # allowed: no write
+cd sub; git status                              # allowed: a read
+```
+
+What counts as changing directory: `cd`, `pushd`, `popd`, `chdir`; `source` and `.`; `eval`, `exec`, `trap`, `alias`, and function definitions; `env -C` (also grouped, as in `-iC`), `sudo -D`, and `find -execdir`; a `cd` behind `xargs`, `nohup`, `env`, `command` or `builtin`; setting or declaring `PWD`, `OLDPWD`, `CDPATH`, `HOME` or `DIRSTACK` (including `declare -n` and computed names); and a directory named on its own, which zsh's `auto_cd` enters. What counts as a write: every git subcommand except plain reads (`status`, `log`, `diff`, `show`, `rev-parse`, and listing forms such as `git branch -a`), and every gh command the rules above treat as a write. A command that changes directory also cannot run `notme`, a relative script, or a relative read, copy or `rm -r` that could reach the operator token or the checkout. Run the `cd` in its own Bash call first if you need it.
+
 Allowed, for example:
 
 ```
@@ -247,13 +263,14 @@ The block message in each case says to ask the operator, which is you.
 The guard fails closed:
 
 - If the hook crashes on a call that mentions `gh`, `git`, GitHub, `.git/`, or the allow list, it blocks the call. The message is `not-me guard failed closed: <error>; run /not-me:doctor`. A crash on a call that has nothing to do with git or GitHub lets the call through.
-- Anything the hook cannot read well enough to check is blocked, not guessed at.
+- Anything the hook cannot read well enough to check is blocked, not guessed at. A Bash command longer than 32 KB, nested more than 64 levels deep, or with quoting it cannot read is blocked unread, whatever rules are on.
+- A check that runs longer than 8 seconds blocks the call, so a slow check cannot run into the hook's 10 second timeout, which would let the call through.
 
 A missing Python is the case the hook cannot report itself. The launcher exits with code 7, and Claude Code treats any exit code other than 2 as a non-blocking error, so the call would run unchecked. To catch this, every autonomous run starts with a self-test. It pipes a command that must always be blocked (a write to the allow list) through the real hook command and checks that the exit code is 2. If it is not, the run stops with `FAILED - guard not working`. `/not-me:doctor` runs the same test.
 
 ## Honest limits
 
-The guard reads the text of a command with a simple tokenizer. It splits on `&&`, `||`, `;`, `|`, `&`, and newlines, then on spaces, and removes quotes and redirections. It understands `git`, `gh`, `rm`, `find`, `xargs`, `sudo`, `env`, `time`, `timeout`, and a few more. It is a net for an agent that follows the rules. A determined or buggy program can get around it.
+The guard splits a command into words the way the shell does: quotes, backslashes, line continuations, `$(...)`, backticks, here-documents and redirections. It does not run anything, expand variables or follow `cd`. It understands `git`, `gh`, `rm`, `find`, `xargs`, `sudo`, `env`, `time`, `timeout`, and a few more. It is a net for an agent that follows the rules. A determined or buggy program can get around it.
 
 What it does not cover:
 
