@@ -23,19 +23,9 @@ Arguments: `$ARGUMENTS`. Optional PR refs (`owner/repo#N` or `N`), `--dry-run`,
   worktree, so files in the PR head cannot change the config or the guard.
 - With `--dry-run`, pass `--dry-run` to every `notme` call and say `dry-run` in the
   result note.
-- Every GitHub write goes through `notme`. Text goes in files, never in a shell
-  argument. The CLI reads input files only from the checkout or its private temp
-  folder `not-me-<uid>` (mode 0700), so make the run's folder there with one Bash
-  call, which also works in a fresh shell where the folder does not exist yet:
-
-  ```bash
-  b="$(python3 -c 'import tempfile; print(tempfile.gettempdir())')"
-  [ -d "${XDG_RUNTIME_DIR:-}" ] && [ -O "$XDG_RUNTIME_DIR" ] && b="$XDG_RUNTIME_DIR"
-  d="$b/not-me-$(id -u)"; mkdir -p -m 700 "$d" && mktemp -d "$d/review.XXXXXX"
-  ```
-
-  Write every text file under the printed path. On Windows the folder is
-  `not-me-<user name>` (`$USERNAME`) in place of `$(id -u)`. After
+- Every GitHub write goes through `notme`. Text goes in files under the temp
+  directory made as in `${CLAUDE_PLUGIN_ROOT}/references/autonomy-and-logging.md`
+  (Text to GitHub, rule 2), never in a shell argument. After
   `notme log start`, every write call also passes `--log <path>`.
 - Label names here are the abstract keys of `labels`. When a command takes a repo
   label name, write the value the `labels` map gives for that key.

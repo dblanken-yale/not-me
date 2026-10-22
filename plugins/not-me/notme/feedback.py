@@ -2,8 +2,8 @@
 
 Trust rule: every item is filtered by its author's login BEFORE its body is read. The body of an
 untrusted item is never returned, stored, or logged; only its login, URL and kind are kept (and a
-count). Bot accounts (login ending in "[bot]", or GraphQL type Bot) are untrusted unless the roster
-lists them by name. Every returned body travels with separate `author`, `tier` and `association`
+count). Bot accounts (login ending in "[bot]", `app/<slug>` with is_bot, or GraphQL type Bot) are
+spelled `<slug>[bot]` everywhere (gh.login_of) and are untrusted unless the roster lists that name. Every returned body travels with separate `author`, `tier` and `association`
 fields, so trusted and untrusted text cannot be confused.
 
 Change-request heuristic (`is_change_request`): a trusted issue comment is kept as a finding when its
@@ -87,6 +87,11 @@ def endorsement(text: Optional[str]) -> bool:
 
 def _listed(roster: Roster, login: str) -> bool:
     return any(m.login.lower() == login.lower() for m in roster.entries)
+
+
+def _author_login(obj: Any) -> Optional[str]:
+    """The author's login with bots spelled `<slug>[bot]` (see gh.login_of); None when absent."""
+    return login_of(obj.get("author") if isinstance(obj, dict) else None) or None
 
 
 def is_bot(login: Optional[str], typename: Optional[str] = None) -> bool:
@@ -221,7 +226,7 @@ def _linked_issue(gh: GhClient, roster: Roster, tracker: str, number: Optional[i
         issue = gh.issue(tracker, number)
     except (GhError, ValueError):
         return {"number": number, "trusted": False, "error": "unreadable"}
-    login = _dig(issue, "author", "login")
+    login = _author_login(issue)
     if not trusted(roster, login):
         return {"number": number, "trusted": False}
     return {"number": number, "trusted": True, "repo": tracker, "title": issue.get("title"),
@@ -249,7 +254,7 @@ def _companions(gh: GhClient, roster: Roster, repo: str, head_ref: Optional[str]
             if pr.get("headRefName") != head_ref:
                 continue
             ref = {"repo": other, "number": pr.get("number")}
-            login = _dig(pr, "author", "login")
+            login = _author_login(pr)
             if pr.get("isCrossRepository"):
                 skipped.append({**ref, "reason": "cross-repository (fork) PR"})
             elif not trusted(roster, login, _dig(pr, "author", "type")):
@@ -271,7 +276,7 @@ def bundle(gh: GhClient, repo: str, n: int, roster: Roster, *, tracker: Optional
     not on the roster, an untrusted author's text stays withheld."""
     pr = gh.pr(repo, n)
     tracker = tracker or repo
-    login = _dig(pr, "author", "login")
+    login = _author_login(pr)
     ok = trusted(roster, login, _dig(pr, "author", "type"))
     tier = tier_of(roster, login)
     as_data = review and not ok and tier == "member"
@@ -351,12 +356,12 @@ def _thread_findings(fb: Feedback, roster: Roster, threads: Sequence[Dict[str, A
         if not comments:
             continue
         root = comments[0]
-        login = _dig(root, "author", "login")
+        login = _author_login(root)
         # Decide on the login only; the body is read after this check.
         if not trusted(roster, login, _dig(root, "author", "__typename")):
             fb._ignore(login, root.get("url"), "thread")
             for reply in comments[1:]:
-                rlogin = _dig(reply, "author", "login")
+                rlogin = _author_login(reply)
                 if not trusted(roster, rlogin, _dig(reply, "author", "__typename")):
                     continue
                 cleaned = _clean(reply)
@@ -370,7 +375,7 @@ def _thread_findings(fb: Feedback, roster: Roster, threads: Sequence[Dict[str, A
             continue
         replies = []
         for reply in comments[1:]:
-            rlogin = _dig(reply, "author", "login")
+            rlogin = _author_login(reply)
             if trusted(roster, rlogin, _dig(reply, "author", "__typename")):
                 replies.append({"author": rlogin, "tier": tier_of(roster, rlogin),
                                 "association": reply.get("authorAssociation"), **_clean(reply)})
@@ -393,7 +398,7 @@ def _review_findings(fb: Feedback, roster: Roster, reviews: Sequence[Dict[str, A
         state = r.get("state")
         if state not in _REVIEW_STATES:
             continue
-        login = _dig(r, "author", "login")
+        login = _author_login(r)
         if not trusted(roster, login, _dig(r, "author", "__typename")):
             fb._ignore(login, r.get("url"), "review")
             continue

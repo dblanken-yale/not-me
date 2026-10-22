@@ -151,7 +151,8 @@ class FakeGitHub:
         full = {
             "number": thing["number"], "title": thing["title"], "body": thing["body"], "state": thing["state"],
             "labels": [{"name": n} for n in thing["labels"]], "assignees": [{"login": a} for a in thing["assignees"]],
-            "author": {"login": thing["author"]}, "url": f"https://github.com/acme/app/issues/{thing['number']}",
+            "author": thing["author"] if isinstance(thing["author"], dict) else {"login": thing["author"]},
+            "url": f"https://github.com/acme/app/issues/{thing['number']}",
             "createdAt": thing.get("created_at", f"2026-01-01T00:00:{thing['number'] % 60:02d}Z"),
             "comments": [{"id": c["id"], "author": {"login": c["user"]}, "authorAssociation": c["assoc"],
                           "body": c["body"]} for c in thing["comments"]],

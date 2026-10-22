@@ -113,9 +113,31 @@ def names_of(items: Any) -> List[str]:
     return [x.get("name") if isinstance(x, dict) else str(x) for x in items or []]
 
 
+def bot_login(login: Any, bot: bool = False) -> str:
+    """One spelling for every account: a bot is always `<slug>[bot]`, as the REST API writes it.
+
+    `gh pr/issue --json author` gives an app as `app/<slug>` with is_bot true, GraphQL gives `<slug>` with
+    __typename Bot. Only GitHub sets those signals, and a person's login can contain neither "/" nor "[", so a
+    person never becomes a bot login and a bot never matches a person's roster row. "" when absent.
+    """
+    if not isinstance(login, str) or not login:
+        return ""
+    if login[:4].lower() == "app/":
+        slug = login[4:]
+        return f"{slug}[bot]" if slug and "/" not in slug else ""
+    if bot and not login.endswith("[bot]"):
+        return f"{login}[bot]"
+    return login
+
+
 def login_of(value: Any) -> str:
-    """The login from a {login} object or a plain string; "" when absent."""
-    return (value.get("login") if isinstance(value, dict) else value) or ""
+    """The login from an author/user object or a plain string, bots spelled `<slug>[bot]`; "" when absent.
+
+    An object counts as a bot when is_bot is true or its GraphQL __typename or REST type is Bot."""
+    if isinstance(value, dict):
+        kind = str(value.get("__typename") or value.get("type") or "").lower()
+        return bot_login(value.get("login"), value.get("is_bot") is True or kind == "bot")
+    return bot_login(value)
 
 
 def csv(value: Optional[str]) -> List[str]:
@@ -327,7 +349,7 @@ _PR_FIELDS = ("number,title,body,headRefName,headRefOid,baseRefName,state,isDraf
 _THREADS_QUERY = (  # {n} is an int, formatted in after validation; owner and name are -f variables
     "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){"
     "pullRequest(number:{n}){reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{"
-    "id databaseId author{login} authorAssociation body path line url}}}}}}}"
+    "id databaseId author{login __typename} authorAssociation body path line url}}}}}}}"
 )
 _THREAD_REPO_QUERY = ("query($id:ID!){node(id:$id){... on PullRequestReviewThread{repository{nameWithOwner}}}}")
 _RESOLVE_MUTATION = ("mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}")
@@ -482,7 +504,7 @@ class GhClient:
     def comments(self, repo: str, n: int) -> List[Dict[str, Any]]:
         self._repo(repo)
         data = self.read(["api", f"repos/{repo}/issues/{_num(n)}/comments?per_page=100"]) or []
-        return [{"id": c["id"], "author": _dig(c, "user", "login"),
+        return [{"id": c["id"], "author": login_of(c.get("user")),
                  "association": c.get("author_association"), "body": c.get("body", ""),
                  "created_at": c.get("created_at"), "updated_at": c.get("updated_at"), "url": c.get("html_url")}
                 for c in data]
@@ -513,7 +535,7 @@ class GhClient:
         data = self.read(self._graphql(query, owner=owner, name=name))
         nodes = _dig(data, "data", "repository", "pullRequest", "reviewThreads", "nodes") or []
         return [{"id": t.get("id"), "isResolved": bool(t.get("isResolved")),
-                 "comments": [{**c, "author": _dig(c, "author", "login")}
+                 "comments": [{**c, "author": login_of(c.get("author")) or None}
                               for c in _dig(t, "comments", "nodes") or []]} for t in nodes]
 
     def _board_project(self, owner: str, number: int, query: str) -> Dict[str, Any]:

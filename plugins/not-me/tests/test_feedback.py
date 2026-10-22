@@ -550,6 +550,36 @@ class ReviewCandidateTierTests(Base):
         picks, _ = self.candidates()
         self.assertEqual(picks[0]["author_tier"], "member")
 
+    def test_app_author_matches_bot_roster_row(self):
+        """gh pr view writes an app as app/<slug> with is_bot; the roster writes it <slug>[bot]."""
+        self.roster = roster(Member("github-actions[bot]", tier="member"))
+        self.pr["author"] = {"is_bot": True, "login": "app/github-actions"}
+        picks, skipped = self.candidates()
+        self.assertEqual(skipped, [])
+        self.assertEqual((picks[0]["author"], picks[0]["author_tier"]), ("github-actions[bot]", "member"))
+        b = bundle(self.gh, "acme/app", 3, self.roster, review=True)
+        self.assertEqual((b.author, b.author_tier, b.text_is_data), ("github-actions[bot]", "member", True))
+
+    def test_unlisted_app_bot_not_a_candidate(self):
+        self.pr["author"] = {"is_bot": True, "login": "app/x"}
+        picks, skipped = self.candidates()
+        self.assertEqual((picks, skipped), ([], [{"number": 3, "reason": "author not on the roster"}]))
+        b = bundle(self.gh, "acme/app", 3, self.roster, review=True)
+        self.assertEqual((b.author, b.author_tier, b.author_trusted, b.title), ("x[bot]", "none", False, None))
+
+    def test_bot_never_matches_a_person_row(self):
+        """A bot whose slug equals a person's roster login stays a bot: not that person's tier."""
+        for author in ({"is_bot": True, "login": "app/mona"}, {"login": "mona", "__typename": "Bot"}):
+            with self.subTest(author=author):
+                self.pr["author"] = author
+                picks, skipped = self.candidates()
+                self.assertEqual((picks, skipped), ([], [{"number": 3, "reason": "author not on the roster"}]))
+
+    def test_human_login_unchanged(self):
+        self.pr["author"] = {"is_bot": False, "login": "mona"}
+        picks, _ = self.candidates()
+        self.assertEqual((picks[0]["author"], picks[0]["author_tier"]), ("mona", "member"))
+
 
 class MemberBundleTests(Base):
     """A member's PR text reaches the reviewer only with review=True, flagged as data."""

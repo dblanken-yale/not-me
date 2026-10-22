@@ -13,7 +13,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .. import claims
-from ..gh import _node, _num, _owner
+from ..gh import _node, _num, _owner, login_of
 from . import BaseQueue, Candidate, Claim
 
 # abstract state -> key in queue.board_states. Other states (needs_work, question, ...) have no column.
@@ -24,7 +24,7 @@ _QUERY = (
     "id field(name:\"{status}\"){... on ProjectV2SingleSelectField{id options{id name}}}"
     "items(first:100){nodes{id fieldValueByName(name:\"{status}\"){... on ProjectV2ItemFieldSingleSelectValue{name}}"
     "{priority}"
-    "content{... on Issue{number title url state createdAt author{login} labels(first:50){nodes{name}} "
+    "content{... on Issue{number title url state createdAt author{login __typename} labels(first:50){nodes{name}} "
     "assignees(first:20){nodes{login}} repository{nameWithOwner}}}}}}}}}"
 )
 
@@ -77,7 +77,7 @@ class BoardQueue(BaseQueue):
             items.append({
                 "id": node.get("id"), "number": content["number"], "title": content.get("title", ""),
                 "url": content.get("url", ""), "state": content.get("state", "OPEN"),
-                "created": content.get("createdAt", ""), "author": (content.get("author") or {}).get("login", ""),
+                "created": content.get("createdAt", ""), "author": login_of(content.get("author")),
                 "labels": [x["name"] for x in (content.get("labels") or {}).get("nodes") or []],
                 "assignees": [x["login"] for x in (content.get("assignees") or {}).get("nodes") or []],
                 "repo": (content.get("repository") or {}).get("nameWithOwner"),
