@@ -206,10 +206,11 @@ def check_token(token: str, repos: Sequence[str], plugin: str, runner: Runner, e
 
     `gh api user/repos` lists every public repo the account can see but only the private repos in the
     token's grant, so a private repo outside `allowed` (default: `repos`) means a broad token. Each fixture
-    repo must answer 200 with permissions.push true. The plugin repo must answer HTTP 404 (private, not
-    granted) or, when it answers 200 (public), a no-op write probe (PATCH of a label name that cannot exist)
-    must fail with 403 "Resource not accessible by personal access token"; a 404 there means the write was
-    authorised and the token is broad. `permissions` on a public repo reflects the account, not the grant, and
+    repo must answer 200 with permissions.push true, and a no-op write probe (PATCH of a label name that
+    cannot exist) must be authorised there (404). The plugin repo must answer HTTP 404 (private, not granted)
+    or, when it answers 200 (public), the same probe must fail with 403 "Resource not accessible by personal
+    access token"; because the probe was authorised on the fixtures, that 403 can only mean "not granted". A
+    404 there means the write was authorised and the token is broad. `permissions` on a public repo reflects the account, not the grant, and
     is not trusted. Any other failure (network, 401, 5xx, gh missing) refuses, because it proves nothing.
     Returns the user."""
     if not token.startswith("github_pat_"):
@@ -233,6 +234,7 @@ def check_token(token: str, repos: Sequence[str], plugin: str, runner: Runner, e
         raise ScaffoldError(f"{TOKEN_ENV} is granted private repositories outside the fixture set: "
                             f"{', '.join(extra)}. Refusing: it must be a fine-grained token limited to the "
                             "fixture repos (see docs/testing.md)")
+    probe = "not-me-probe-" + secrets.token_hex(8)
     for repo in repos:
         try:
             info = json.loads(runner(["gh", "api", f"repos/{repo}"], env=env).stdout)
@@ -240,6 +242,17 @@ def check_token(token: str, repos: Sequence[str], plugin: str, runner: Runner, e
             raise ScaffoldError(f"{TOKEN_ENV} cannot read the fixture repo {repo}: {exc}")
         if not (info.get("permissions") or {}).get("push") is True:
             raise ScaffoldError(f"{TOKEN_ENV} cannot push to the fixture repo {repo} (permissions.push is not true)")
+        # Calibrate the write probe: on a granted repo the same no-op PATCH must be authorised (404, nothing
+        # to rename). A fine-grained token's permissions are uniform across its grant, so a 403 on the plugin
+        # repo afterwards can only mean the plugin repo is outside the grant.
+        try:
+            runner(["gh", "api", "-X", "PATCH", f"repos/{repo}/labels/{probe}", "-f", f"new_name={probe}"], env=env)
+        except ScaffoldError as exc:
+            if not re.search(r"HTTP 404\b", str(exc)):
+                raise ScaffoldError(f"{TOKEN_ENV} is not authorised to edit labels on the fixture repo {repo} "
+                                    f"(it needs Issues read and write): {exc}")
+        else:
+            raise ScaffoldError(f"the write probe on the fixture repo {repo} unexpectedly succeeded; refusing")
     try:
         runner(["gh", "api", f"repos/{plugin}"], env=env)
     except ScaffoldError as exc:
@@ -247,7 +260,6 @@ def check_token(token: str, repos: Sequence[str], plugin: str, runner: Runner, e
             return user
         raise ScaffoldError(f"cannot confirm {TOKEN_ENV} has no access to {plugin}: expected HTTP 404 or 200, "
                             f"got: {exc}")
-    probe = "not-me-probe-" + secrets.token_hex(8)
     try:
         runner(["gh", "api", "-X", "PATCH", f"repos/{plugin}/labels/{probe}", "-f", f"new_name={probe}"], env=env)
     except ScaffoldError as exc:

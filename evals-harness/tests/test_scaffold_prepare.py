@@ -24,6 +24,8 @@ class FakeRun:
         self.listed = None
         # Reply to the no-op write probe on the plugin repo: 403 not granted by default.
         self.probe_error = f"HTTP 403: {scaffold.NOT_GRANTED}"
+        # Reply to the same probe on a fixture repo: authorised, nothing to rename.
+        self.fixture_probe_error = "HTTP 404: Not Found"
 
     def __call__(self, argv, cwd=None, env=None, input_text=None):
         self.calls.append((list(argv), dict(env) if env is not None else None))
@@ -34,10 +36,11 @@ class FakeRun:
             if not isinstance(listed, list):
                 return type("P", (), {"stdout": listed})()
             return type("P", (), {"stdout": json.dumps([{"full_name": n, "private": p} for n, p in listed])})()
-        if argv[:4] == ["gh", "api", "-X", "PATCH"] and argv[4].startswith(f"repos/{PLUGIN}/labels/"):
-            if self.probe_error is None:
+        if argv[:4] == ["gh", "api", "-X", "PATCH"] and "/labels/" in argv[4]:
+            err = self.probe_error if argv[4].startswith(f"repos/{PLUGIN}/") else self.fixture_probe_error
+            if err is None:
                 return type("P", (), {"stdout": "{}"})()
-            raise scaffold.ScaffoldError(f"gh api failed (1): {self.probe_error}")
+            raise scaffold.ScaffoldError(f"gh api failed (1): {err}")
         if argv[:2] == ["gh", "api"] and argv[2].startswith("repos/"):
             repo = argv[2][len("repos/"):]
             if repo == PLUGIN and not self.sees_plugin:
@@ -117,9 +120,23 @@ class PrepareTest(unittest.TestCase):
         self.prepare(fake)
         self.assertTrue(self.stage.exists())
         probes = [a for a, _ in fake.calls if a[:4] == ["gh", "api", "-X", "PATCH"]]
-        self.assertEqual(len(probes), 1)
-        self.assertTrue(probes[0][4].startswith(f"repos/{PLUGIN}/labels/not-me-probe-"))
-        self.assertNotIn("github_pat_tok", " ".join(probes[0]))
+        self.assertEqual([a[4].split("/labels/")[0] for a in probes], [f"repos/{FIX}", f"repos/{PLUGIN}"])
+        names = {a[4].split("/labels/")[1] for a in probes}
+        self.assertEqual(len(names), 1)  # the same probe name on both, so the comparison is like for like
+        self.assertTrue(names.pop().startswith("not-me-probe-"))
+        self.assertNotIn("github_pat_tok", " ".join(sum(probes, [])))
+
+    def test_a_probe_the_fixture_repo_refuses_means_the_token_lacks_issues_write(self):
+        for err in (f"HTTP 403: {scaffold.NOT_GRANTED}", "HTTP 403: Must have admin rights", None, "HTTP 502"):
+            fake = FakeRun(sees_plugin=True)
+            fake.fixture_probe_error = err
+            with self.assertRaisesRegex(scaffold.ScaffoldError, "not authorised to edit labels|unexpectedly succeeded",
+                                        msg=str(err)):
+                self.prepare(fake)
+            self.assertFalse(self.stage.exists())
+            # The plugin repo is never probed when the calibration fails.
+            self.assertFalse(any(a[:4] == ["gh", "api", "-X", "PATCH"] and a[4].startswith(f"repos/{PLUGIN}/")
+                                 for a, _ in fake.calls))
 
     def test_a_write_probe_the_plugin_repo_accepts_refuses(self):
         for err in ("HTTP 404: Not Found", None, "HTTP 403: Must have admin rights", "HTTP 422: Validation Failed",
@@ -133,7 +150,8 @@ class PrepareTest(unittest.TestCase):
     def test_a_private_plugin_repo_404_skips_the_write_probe(self):
         fake = FakeRun()
         self.prepare(fake)
-        self.assertFalse(any(a[:4] == ["gh", "api", "-X", "PATCH"] for a, _ in fake.calls))
+        self.assertFalse(any(a[:4] == ["gh", "api", "-X", "PATCH"] and a[4].startswith(f"repos/{PLUGIN}/")
+                             for a, _ in fake.calls))
 
     def test_only_an_explicit_404_counts_as_not_visible(self):
         self.prepare(FakeRun(plugin_error="gh: Not Found (HTTP 404)"))
@@ -181,7 +199,8 @@ class PrepareTest(unittest.TestCase):
         fake = FakeRun()
         self.prepare(fake)
         api = [a for a, _ in fake.calls if a[:2] == ["gh", "api"]]
-        self.assertEqual([a[-1] for a in api], ["user", "user/repos?per_page=100", f"repos/{FIX}", f"repos/{PLUGIN}"])
+        self.assertEqual([a[-1] for a in api if not a[-1].startswith("new_name=")],
+                         ["user", "user/repos?per_page=100", f"repos/{FIX}", f"repos/{PLUGIN}"])
         for a in api:
             self.assertNotIn("-H", a)  # no header flag: the token is not in argv
             self.assertFalse(any("github_pat_tok" in part for part in a))

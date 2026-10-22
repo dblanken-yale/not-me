@@ -224,10 +224,12 @@ OAuth `gho_` tokens are out), then checks the token with `gh api user`. The toke
 must get a 200 with `permissions.push` true for the fixture repo (and the companion when the scenario has one), and
 must be granted nothing but the fixture repo and its companion. Two checks prove that. `gh api user/repos` lists
 every public repo the account can see but only the private repos in the token's grant, so a private repo outside
-the fixture set refuses. Then this plugin repo must answer HTTP 404 (private, not granted) or, when it answers 200
-(public), a no-op write probe (a PATCH of a label name that cannot exist) must fail with 403 "Resource not
-accessible by personal access token"; a 404 or a success there means the write was authorised and the token is
-broad. The `permissions` field on a public repo is not trusted because GitHub reports the account's role there,
+the fixture set refuses. Then a no-op write probe (a PATCH of a label name that cannot exist) must be authorised
+on each fixture repo (404, nothing to rename); a 403 there means the token lacks Issues write. Finally this plugin
+repo must answer HTTP 404 (private, not granted) or, when it answers 200 (public), the same probe must fail with
+403 "Resource not accessible by personal access token". A fine-grained token's permissions are uniform across its
+grant, so after the fixture calibration that 403 can only mean the plugin repo is outside the grant; a 404 or a
+success there means the write was authorised and the token is broad. The `permissions` field on a public repo is not trusted because GitHub reports the account's role there,
 not the token's grant. Any other failure (network, 401, 5xx, `gh` missing) also refuses.
 A broad token is refused. The plugin repo is taken
 from the `origin` remote; set `NOT_ME_PLUGIN_REPO=owner/name` if that is wrong.
