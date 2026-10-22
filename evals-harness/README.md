@@ -10,6 +10,8 @@ tests use `unittest` (`python3 scripts/run-tests.py` runs them with everything e
 | `assertions/generic.py` | Turns a manifest's `expect` block into checks (the mapping below). |
 | `assertions/<ID>.py` | Optional. Defines `checks(ctx)` and replaces the generic grading for scenario `<ID>`. |
 | `assertions/keys.py` | The known `expect` keys. `scripts/lint-evals.py` reads it (rule E6). |
+| `transcript.py` | Reads a Claude Code session transcript (JSONL, plus its subagent files): tool uses, last message, trace. |
+| `graders.py` | Grades a transcript against a case in `cases/` (regex, tool_used, tool_order, file_exists; llm skipped). |
 | `readers.py` | `GhReader` (live `gh`) and `LedgerReader` (dry-run ledger). Same questions, two sources. |
 | `run_live.py` | Seed, run `claude plugin eval`, grade, merge, tear down. |
 | `gate_report.py` | Aggregate results into `docs/gates/<name>.md` and apply the thresholds. |
