@@ -90,7 +90,7 @@ class LabelQueue(BaseQueue):
                 and self._has(names, "todo")
                 and (not opt_in or opt_in.lower() in {n.lower() for n in names})
                 and not any(self._has(names, x) for x in _EXCLUDED)
-                and not _assignees(issue)
+                and not [a for a in _assignees(issue) if not self._is_me(a)]  # mine, or nobody's
                 and self.trusted(_author(issue)))
 
     def candidates(self) -> List[Candidate]:
