@@ -78,7 +78,8 @@ class GraderTypesTest(unittest.TestCase):
         self.assertFalse(self.ok(type="file_exists", path=".git/not-me/logs/*.json"))
         self.assertTrue(self.ok(type="file_exists", path=".git/not-me/logs/*.json", exists=False))
         self.assertFalse(self.ok(type="file_exists", path=".git/not-me/logs/*.md", exists=False))
-        self.assertFalse(self.ok(type="file_exists", path="/etc/passwd"))
+        for bad in ("/etc/passwd", "\\\\server\\share", "C:/x", "../x", ""):
+            self.assertFalse(self.ok(type="file_exists", path=bad), bad)
 
     def test_llm_is_skipped_and_excluded(self):
         case = g.Case("c", self.tmp, {}, "", [

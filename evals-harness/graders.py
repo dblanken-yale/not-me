@@ -173,7 +173,8 @@ def _check_tool_order(g: Grader, tr: transcript_mod.Transcript) -> Tuple[bool, s
 
 def _check_file_exists(g: Grader, workspace: Path) -> Tuple[bool, str]:
     pattern = str(g.meta.get("path", ""))
-    if not pattern or Path(pattern).is_absolute() or ".." in Path(pattern).parts:
+    if (not pattern or Path(pattern).is_absolute() or pattern[0] in "/\\" or ".." in Path(pattern).parts
+            or (len(pattern) > 1 and pattern[1] == ":")):  # drive letters and root slashes on every platform
         return False, f"path must be a relative glob inside the workspace: {pattern!r}"
     hits = sorted(workspace.glob(pattern)) if workspace.is_dir() else []
     want = g.meta.get("exists", True)
