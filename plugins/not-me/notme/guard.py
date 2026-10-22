@@ -360,15 +360,52 @@ def _statement(before: str) -> Optional[str]:
     return None if quote else before[start:].lstrip()
 
 
-def _only_data_commands(cmd: str) -> bool:
-    """True when every command in cmd is cat, tee or a git add/commit/tag/status/diff, with no pipe or
-    substitution: then nothing in it can run a message or a written file afterwards."""
+def _unquoted(text: str) -> Optional[str]:
+    """text with its quoted spans removed; None when a quote is left open."""
+    out, quote = [], ""
+    for c in text:
+        if quote:
+            quote = "" if c == quote else quote
+        elif c in "'\"":
+            quote = c
+        else:
+            out.append(c)
+    return None if quote else "".join(out)
+
+
+def _writes_somewhere_live(seg: str, cwd: str) -> bool:
+    """A cat/tee segment whose words name git's own files (hooks, config) or an existing symlink: what it
+    writes there can run later, so its text is not inert data."""
+    for w in seg.split():
+        w = re.sub(r"^\d*>>?\|?", "", w.replace('"', "").replace("'", ""))
+        low = w.lower().replace("\\", "/")
+        if not w or w.startswith("-"):
+            continue
+        if ".git" in low or "config/git" in low or "hooks" in low:
+            return True
+        p = _path.join(cwd, w)
+        if _path.islink(p) or ".git" in Path(_path.realpath(p)).parts:
+            return True
+    return False
+
+
+def _only_data_commands(cmd: str, cwd: str) -> bool:
+    """True when every command in cmd is cat, tee or a git add/commit/tag/status/diff, with no pipe,
+    substitution, comment or backslash outside quotes, and cat/tee write nowhere that runs code: then nothing
+    in it can run a message or a written file afterwards."""
     text, _ = strip_heredocs(cmd)
+    bare = _unquoted(text)
+    if bare is None or "#" in bare or "\\" in bare:
+        return False  # a comment or an escape can turn a seeming heredoc into commands bash runs
     if "|" in text.replace("||", "") or any(s in text for s in ("$(", "`", "<(", ">(")):
         return False
     for seg in segments(text):
         t = tokens(seg)
-        if not t or _prog(t[0]) in _DATA_PROGS:
+        if not t:
+            continue
+        if _prog(t[0]) in _DATA_PROGS:
+            if _writes_somewhere_live(seg, cwd):
+                return False
             continue
         if _prog(t[0]) != "git":
             return False
@@ -380,14 +417,14 @@ def _only_data_commands(cmd: str) -> bool:
     return True
 
 
-def _data_only(cmd: str) -> str:
+def _data_only(cmd: str, cwd: str) -> str:
     """cmd without text that is only data: commit/tag messages and heredocs fed to cat, tee or git commit -F -.
 
     Used for the self-protection word scans, so a message that names not-me commands is not mistaken for
     running them. Text is kept when it could run: $ or backtick inside it, an unquoted heredoc delimiter
     with $ or backtick in the body, or any doubt about where the command starts.
     """
-    if not _only_data_commands(cmd):
+    if not _only_data_commands(cmd, cwd):
         return cmd
     lines = cmd.split("\n")
     out: List[str] = []
@@ -808,7 +845,7 @@ def _git_config(ctx: GuardContext, st: _State, d: str, key: str) -> Optional[str
 
 def _bash(cmd: str, cwd: str, ctx: GuardContext) -> Iterator[Block]:
     blk = _blk(_short(cmd))
-    plain = _unshell(_data_only(cmd))
+    plain = _unshell(_data_only(cmd, cwd))
     if "allow-repo" in plain and any(m.group(1) or "--everywhere".startswith(m.group(2))
                                      for m in _ALLOW_EDIT.finditer(plain)):
         yield blk(SELF, "only the operator changes the not-me allow list", "ask the operator to run /not-me:allow-repo")
