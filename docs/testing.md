@@ -228,7 +228,8 @@ Create a fine-grained personal access token:
 2. Resource owner: the account that owns the fixture repos. Expiry: 30 days or less.
 3. Repository access: **Only select repositories**, then the fixture repo and the companion repo. Nothing else.
    In particular, not this plugin repo.
-4. Repository permissions, all Read and write: Contents, Issues, Pull requests, Actions, Workflows.
+4. Repository permissions, all Read and write: Contents, Issues, Pull requests, Actions, Workflows,
+   and Deployments (the prove skill reads deployments and their statuses; without it that call fails with HTTP 403).
    Metadata (read) is added for you.
 5. Export it for the run: `export NOT_ME_FIXTURE_TOKEN=github_pat_...`
 

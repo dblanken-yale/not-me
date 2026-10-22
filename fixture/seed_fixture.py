@@ -775,6 +775,44 @@ class Fixture:
         return {"key": key, "number": number, "title": title, "head": head,
                 "as": spec.get("as", "operator")}
 
+    def wait_visible(self, spec, created, polls=30, interval=3):
+        """Wait until seeded items show up in the filtered list queries the plugin runs.
+
+        `gh pr list|issue list --label/--assignee` goes through GitHub's search
+        index, which lags new items by up to a minute. Dry-run never polls.
+        """
+        if self.c.dry_run:
+            return
+        pending = []
+        for kind, specs, made in (("issue", spec.get("issues", []), created["issues"]),
+                                  ("pr", spec.get("prs", []), created["prs"])):
+            for item_spec, item in zip(specs, made):
+                labels = item_spec.get("labels", [])
+                assignee = item_spec.get("assignee")
+                if labels or assignee:
+                    pending.append((kind, item["number"], labels, assignee))
+        for attempt in range(polls):
+            still = []
+            for kind, number, labels, assignee in pending:
+                argv = self.gh(kind, "list", "--repo", self.repo, "--state", "open",
+                               "--json", "number", "--limit", "200")
+                for label in labels:
+                    argv += ["--label", label]
+                if assignee:
+                    argv += ["--assignee", assignee]
+                rows = self.c.json(argv, [])
+                if not any(row.get("number") == number for row in rows):
+                    still.append((kind, number, labels, assignee))
+            pending = still
+            if not pending:
+                return
+            if attempt < polls - 1:
+                self.c.sleep(interval)
+        raise SeedError(
+            "seeded items not visible in filtered gh list after %ds: %s" % (
+                polls * interval,
+                ", ".join("%s #%d" % (k, n) for k, n, _, _ in pending)))
+
     def seed(self, spec, rid, sid):
         """Apply one repo's share of a scenario; return what was created."""
         prefix = "[eval:%s:%s]" % (rid, sid)
@@ -790,6 +828,7 @@ class Fixture:
         for index, pr in enumerate(spec.get("prs", [])):
             created["prs"].append(
                 self.create_pr(pr, prefix, pr.get("key", "pr%d" % (index + 1))))
+        self.wait_visible(spec, created)
         created["branches"] = state["branches"]
         created["commits"] = state["commits"]
         return created
