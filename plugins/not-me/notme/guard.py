@@ -337,6 +337,7 @@ _DATA_GIT = re.compile(r"^git(?:\.exe)?(?:\s+-C\s+[^\s;|&<>()$`]+)?\s+(commit|ta
 _DATA_PROGS = {"cat", "tee"}
 _MESSAGE_FILE = re.compile(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.(?:md|txt)$")
 _REDIR_OP = re.compile(r"^(?:\d*>>?|&>>?)")
+_OPTION = re.compile(r"^-[A-Za-z]+$|^--[a-z][a-z-]*$")  # a cat/tee option word, never a path
 _DATA_GIT_SUBS = {"add", "commit", "tag", "status", "diff"}
 _DATA_SINKS = re.compile(r"^(?:cat|tee)(?:\s|$)")
 _HEREDOC_REST = re.compile(r"[|&;()`$\\]|<<")
@@ -408,9 +409,19 @@ def _only_data_commands(cmd: str, cwd: str) -> bool:
             continue
         if t and t[0] not in _DATA_PROGS:
             return False
-        for w in seg.split()[1 if t else 0:]:  # every word a cat/tee (or a bare redirect) names
-            w = _REDIR_OP.sub("", w.replace('"', "").replace("'", ""))
-            if w and not w.startswith(("-", "<<")) and not _inert_target(w, cwd):
+        target = False  # the next word follows a bare > or >>
+        for raw in seg.split()[1 if t else 0:]:  # every word a cat/tee (or a bare redirect) names
+            raw = raw.replace('"', "").replace("'", "")
+            w = _REDIR_OP.sub("", raw)
+            after_redirect, target = target or w != raw, False
+            if not w:
+                target = after_redirect or raw != ""
+                continue
+            if w.startswith("<<") and not after_redirect:
+                continue
+            if _OPTION.match(w) and not after_redirect:
+                continue
+            if not _inert_target(w, cwd):
                 return False
     return True
 
