@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-"""Stage the workspace and sandbox home for one live eval case.
+"""Prepare the fixture clones and stage the workspace for one live eval case.
 
-`claude plugin eval` runs a case's scaffold with only PATH, HOME (the sandbox home), TMPDIR and TERM set,
-so nothing the harness exports reaches it: no run id, no manifest path, no token. The work is split in two:
+`run_live.py` runs a real Claude Code session in a staged workspace. The work is split in two:
 
     scaffold.py prepare --manifest PATH --stage-dir DIR
-                                   operator side, before `claude plugin eval`. Needs NOT_ME_FIXTURE_TOKEN, a
-                                   dedicated fine-grained token, and refuses without it. The token goes to
-                                   gh only as GH_TOKEN in a scrubbed environment, never on a command line. It checks that the
-                                   token sees the fixture repo and cannot see this plugin repo, clones the
-                                   fixture repo (and the companion) at the manifest's SHAs into DIR, stages
-                                   the token there (mode 600) and points evals/.state/current-stage.json at
-                                   it. The operator's own gh login is never read.
-    scaffold.py stage --case NAME  inside the eval, from the case's scaffold.sh. Copies the staged clones
-                                   into the working directory, writes the scenario's config layers, the
-                                   pause file and the allow list, signs gh in for the sandbox home and runs
-                                   `gh auth setup-git`.
+                                   Needs NOT_ME_FIXTURE_TOKEN, a dedicated fine-grained token, and refuses
+                                   without it. The token goes to gh only as GH_TOKEN in a scrubbed environment,
+                                   never on a command line. It checks that the token sees the fixture repo and
+                                   cannot see this plugin repo, clones the fixture repo (and the companion) at
+                                   the manifest's SHAs into DIR, stages the token there (mode 600) and points
+                                   evals/.state/current-stage.json at it. The operator's own gh login is never
+                                   read.
+    scaffold.py stage --case NAME --workspace DIR [--home DIR]
+                                   Copies the staged clones into the workspace, writes the scenario's config
+                                   layers (the global layer under HOME/.claude/not-me), the pause file and the
+                                   allow list. It does not sign gh in: the session gets the token as GH_TOKEN
+                                   from run_live.py. A record of what was written goes into the stage dir.
     scaffold.py clean [--stage-dir DIR]
-                                   operator side, after the run. Removes the stage and its token copy.
+                                   After the run. Removes the stage and its token copy.
 
-Stdlib only. See plugins/not-me/evals/README.md for the contract and the scenario `config` block.
+Stdlib only. See evals-harness/README.md and docs/testing.md.
 """
 from __future__ import annotations
 
@@ -364,11 +364,6 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _hosts_yml(login: str, token: str) -> str:
-    return (f"github.com:\n    users:\n        {login}:\n            oauth_token: {token}\n"
-            f"    git_protocol: https\n    oauth_token: {token}\n    user: {login}\n")
-
-
 def _identity(repo_dir: Path, info: Mapping[str, str], runner: Runner) -> None:
     login = info["operator"]
     email = f"{info['operator_id']}+{login}@users.noreply.github.com" if info.get("operator_id") else \
@@ -378,8 +373,12 @@ def _identity(repo_dir: Path, info: Mapping[str, str], runner: Runner) -> None:
 
 
 def stage_workspace(case: str, workspace: Path, home: Path, state: Path = STATE, runner: Runner = run,
-                    scenarios: Path = SCENARIOS, login_gh: bool = True) -> Dict[str, Any]:
-    """Fill `workspace` and `home` for one case run. Returns what was written (no secrets)."""
+                    scenarios: Path = SCENARIOS) -> Dict[str, Any]:
+    """Fill `workspace` and `home` (its global layer) for one case run. Returns what was written (no secrets).
+
+    gh is not signed in: the session authenticates with GH_TOKEN. The record of the run goes into the stage
+    directory, never into `home`.
+    """
     sid = scenario_id(case)
     pointer = state / POINTER
     if not pointer.is_file():
@@ -444,21 +443,12 @@ def stage_workspace(case: str, workspace: Path, home: Path, state: Path = STATE,
         runner(["git", "-C", str(workspace), "add", "-f", ".claude/not-me"])
         runner(["git", "-C", str(workspace), "commit", "-q", "-m", "chore(eval): repo layer config"])
 
-    if login_gh:
-        token = (stage / "gh-token").read_text(encoding="utf-8").strip()
-        hosts = home / ".config" / "gh" / "hosts.yml"
-        _write(hosts, _hosts_yml(info["operator"], token))
-        os.chmod(str(hosts), 0o600)
-        gh_env = dict(network_env(), PATH=os.environ.get("PATH", ""), HOME=str(home),
-                      XDG_CONFIG_HOME=str(home / ".config"), GH_PROMPT_DISABLED="1")
-        runner(["gh", "auth", "setup-git", "--hostname", "github.com"], env=gh_env)
-
     record = {"run_id": info["run_id"], "scenario": sid, "case": case, "backend": info["backend"],
               "repo": info["repo"], "companion": companion, "written": written,
               "env": {"NOT_ME_EVAL_RUN_ID": info["run_id"], "NOT_ME_EVAL_SCENARIO": sid,
                       "NOT_ME_EVAL_BACKEND": info["backend"], "NOT_ME_FIXTURE_REPO": info["repo"],
                       "NOT_ME_FIXTURE_COMPANION": companion or "", "NOT_ME_FIXTURE_OWNER": info["owner"]}}
-    _write(home / ".not-me-eval.json", json.dumps(record, indent=2, sort_keys=True) + "\n")
+    _write(stage / ".not-me-eval.json", json.dumps(record, indent=2, sort_keys=True) + "\n")
     return record
 
 
@@ -472,9 +462,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     pr.add_argument("--manifest", required=True)
     pr.add_argument("--stage-dir", required=True)
     pr.add_argument("--backend", default=None, choices=("github", "ledger"))
-    st = sub.add_parser("stage", help="fill the eval workspace and sandbox home (run by a case's scaffold.sh)")
+    st = sub.add_parser("stage", help="fill the eval workspace and the global config layer")
     st.add_argument("--case", required=True)
     st.add_argument("--workspace", default=".", help="default: the current directory")
+    st.add_argument("--home", default=None, help="home whose .claude/not-me gets the global layer (default: $HOME)")
     cl = sub.add_parser("clean", help="remove the prepared stage and its token copy")
     cl.add_argument("--stage-dir", default=None)
     sub.add_parser("check", help="validate every scenario's config block")
@@ -483,7 +474,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.cmd == "prepare":
             print(f"stage: {prepare(args.manifest, Path(args.stage_dir), os.environ, backend=args.backend)}")
         elif args.cmd == "stage":
-            home = Path(os.environ.get("HOME") or Path.home())
+            home = Path(args.home or os.environ.get("HOME") or Path.home())
             record = stage_workspace(args.case, Path(args.workspace).resolve(), home)
             print(json.dumps(record, sort_keys=True))
         elif args.cmd == "clean":
