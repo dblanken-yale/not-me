@@ -623,9 +623,23 @@ class DoctorAndPreflightTests(base.CliCase):
     def test_doctor_lists_checks(self):
         payload = self.ok("doctor")
         names = [c["name"] for c in payload["checks"]]
-        self.assertEqual(names, ["python", "git", "gh", "config", "gh auth", "gh scopes", "guard", "spawn depth"])
+        self.assertEqual(names, ["python", "git", "gh", "config", "mode", "gh auth", "gh scopes", "guard",
+                                 "spawn depth"])
         self.assertTrue(payload["ok"])
         self.assertTrue(all({"name", "ok", "detail", "required"} <= set(c) for c in payload["checks"]))
+        self.assertEqual(payload["checks"][4], {"name": "mode", "ok": True, "detail": "live (confirmed)",
+                                                "required": False})
+
+    def test_doctor_warns_about_an_unconfirmed_live(self):
+        from notme import humans
+        humans.clear_live_marker(self.tc.home)
+        payload = self.ok("doctor")
+        mode = next(c for c in payload["checks"] if c["name"] == "mode")
+        self.assertFalse(mode["ok"])
+        self.assertFalse(mode["required"])
+        self.assertIn("not confirmed", mode["detail"])
+        self.assertIn("/not-me:mode live", mode["detail"])
+        self.assertTrue(payload["ok"])
 
     def test_doctor_fails_when_gh_is_missing(self):
         def no_gh(argv):

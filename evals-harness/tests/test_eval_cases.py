@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -273,7 +275,7 @@ class StageTest(unittest.TestCase):
     def git(self, *args, cwd):
         subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True)
 
-    def make_stage(self, sid, config, companion=False):
+    def make_stage(self, sid, config, companion=False, backend="github"):
         stage = self.state / "rid1" / f"{sid}.stage"
         repos = [("repo", stage / "repo")] + ([("companion", stage / "companion")] if companion else [])
         for _, path in repos:
@@ -284,7 +286,7 @@ class StageTest(unittest.TestCase):
             self.git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "init", cwd=path)
         (stage / "gh-token").write_text("not-a-token\n", encoding="utf-8")
         (stage / "stage.json").write_text(json.dumps({
-            "run_id": "rid1", "scenario": sid, "backend": "github", "repo": "acme/x-fixture",
+            "run_id": "rid1", "scenario": sid, "backend": backend, "repo": "acme/x-fixture",
             "companion": "acme/x-fixture-companion" if companion else None, "owner": "acme",
             "operator": "octocat", "operator_id": "1"}), encoding="utf-8")
         (self.state / scaffold.POINTER).write_text(json.dumps({"run_id": "rid1", "scenario": sid,
@@ -293,7 +295,10 @@ class StageTest(unittest.TestCase):
                                                encoding="utf-8")
 
     def stage(self, case):
-        ws, home = self.tmp / "ws", self.tmp / "home"
+        return self.stage_into(case, "ws", "home")
+
+    def stage_into(self, case, ws_name, home_name):
+        ws, home = self.tmp / ws_name, self.tmp / home_name
         record = scaffold.stage_workspace(case, ws, home, state=self.state, scenarios=self.scen)
         return ws, home, record
 
@@ -314,6 +319,41 @@ class StageTest(unittest.TestCase):
         self.assertTrue((self.state / "rid1" / "K9.stage" / ".not-me-eval.json").is_file())
         self.assertFalse((home / ".not-me-eval.json").exists(), "the record must not land in the home")
         self.assertFalse((home / ".config").exists(), "gh is not signed in by the stage step")
+
+    def test_github_backend_signs_live_mode_like_a_person(self):
+        from notme import config as config_mod
+        from notme import humans
+
+        self.make_stage("L9", {})
+        ws, home, record = self.stage("new-L9")
+        gdir = home / ".claude" / "not-me"
+        self.assertTrue(humans.live_confirmed(gdir), "a staged live mode must be signed")
+        token = humans.read_token(gdir)
+        self.assertRegex(token, r"^[A-Za-z0-9_-]{40,}$")
+        if os.name == "posix":
+            for name in (humans.TOKEN_NAME, humans.LIVE_EPOCH, humans.LIVE_MARKER):
+                self.assertEqual(stat.S_IMODE((gdir / name).stat().st_mode), 0o600, name)
+        cfg = config_mod.load(project_dir=str(ws), home=str(gdir), plugin_root=str(PLUGIN))
+        self.assertEqual(cfg.meta["project"]["mode"], "live")
+        self.assertIsNone(cfg.live_unconfirmed)
+        self.assertIn("~/.claude/not-me/" + humans.LIVE_MARKER, record["written"])
+        self.assertNotIn(token, json.dumps(record))
+        self.make_stage("L8", {})  # a second case run gets its own fresh token
+        _, home2, _ = self.stage_into("new-L8", "ws2", "home2")
+        self.assertNotEqual(humans.read_token(home2 / ".claude" / "not-me"), token)
+
+    def test_ledger_backend_and_no_layer_are_not_signed(self):
+        from notme import humans
+
+        self.make_stage("D9", {}, backend="ledger")
+        _, home, _ = self.stage("new-D9")
+        gdir = home / ".claude" / "not-me"
+        self.assertIn("mode: dry-run", (gdir / "project.md").read_text(encoding="utf-8"))
+        self.assertFalse((gdir / humans.LIVE_MARKER).exists())
+        self.assertFalse(humans.token_path(gdir).exists())
+        self.make_stage("D8", {"none": True})
+        _, home2, _ = self.stage_into("new-D8", "ws2", "home2")
+        self.assertFalse((home2 / ".claude" / "not-me" / humans.LIVE_MARKER).exists())
 
     def test_companion_is_nested_and_allowed(self):
         self.make_stage("M9", {"allow_companions": True}, companion=True)

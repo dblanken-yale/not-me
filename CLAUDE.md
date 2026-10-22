@@ -57,8 +57,11 @@ the owner's say-so, not a cleanup.
    groups (other repo, protected branches, force push, destructive/settings
    actions), each relaxable only with `confirm_guard_off` in the same layer
    and never from the repo layer. Self-protection is always on: the allow
-   list, the plugin's own files, the config during a run, `allow-repo
-   add|remove`, `pause off`, and any `notme` call that re-points its project,
+   list, the operator token and the live-mode epoch (neither read nor
+   written), the live-mode marker (`mode-live.sig`, never written), the
+   plugin's own files, the config during a run, `allow-repo add|remove`,
+   `pause off`, `notme mode live` (also as `python -m notme.cli`), and any
+   `notme` call that re-points its project,
    home or run via flags, environment assignments or a `cd` outside the
    checkout. The inactive path is fork-free. Block messages name the exact
    `/not-me:allow-repo owner/name` command.
@@ -85,8 +88,20 @@ the owner's say-so, not a cleanup.
    whole timeline, and fail closed when our own event cannot be found. Stale
    claims are reported, never auto-released.
 
-7. **Mode defaults to dry-run.** A fresh install writes only to the ledger
-   until the operator sets `mode: live` in the global layer. Logs and the
+7. **Mode defaults to dry-run; live is signed by a person.** A fresh install
+   writes only to the ledger. Live needs `notme mode live`, run by a person
+   (decision 4's checks): it sets `mode: live` in the global layer and writes
+   `<not-me home>/mode-live.sig`, an HMAC keyed by the operator token plus
+   the random epoch in `<not-me home>/mode-live.epoch` (key = token, NUL,
+   epoch) over a versioned message and the resolved home. The config loader
+   honours live only when that marker verifies (`notme/config.py`
+   `_confirm_live`); otherwise the effective mode is dry-run with a warning,
+   so no file edit can turn live on, and a new token means going live again.
+   Going back to dry-run in the global layer deletes the marker and replaces
+   the epoch, so a marker copy saved while live never verifies again; the
+   loader does the same whenever the global layer's own `mode` is not `live`
+   (a hand edit included; a repo-layer pin does not revoke). The guard's
+   Edit/Write check on the global `mode` is UX, not the boundary. Logs and the
    active-run marker live under `<git-common-dir>/not-me/` and never move
    with a configured log root, so the guard can always find a running run.
 
