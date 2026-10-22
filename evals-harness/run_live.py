@@ -83,7 +83,8 @@ class Plan:
             flags += ["--companion", args.companion]
         py = sys.executable or "python3"
         self.manifest = STATE_DIR / rid / f"{args.scenario}.json"
-        self.eval_dir = out / f"{args.scenario}-{n}.eval"
+        self.eval_dir = out / f"{args.scenario}-{n}.eval"  # --output-dir: aggregate-result.json lands here
+        self.eval_json = self.eval_dir / "run.json"  # --json needs a path ending in .json
         self.grade_json = out / f"{args.scenario}-{n}.grade.json"
         self.result = out / f"{args.scenario}-{n}.json"
         self.scaffold = out / f"{args.scenario}-{n}.scaffold.json"
@@ -94,7 +95,8 @@ class Plan:
         self.evaluate = ["claude", "plugin", "eval", str(PLUGIN_DIR.relative_to(ROOT)),
                          "--case", f"{args.skill}-{args.scenario}", "--runs", "1", "--scaffold", "--trust-plugin",
                          "--ablation", "none", "--allow-tools", "Bash,Write,Edit",
-                         "--max-cost-usd", f"{args.cap:g}", "--json", str(self.eval_dir), "--no-publish"]
+                         "--max-cost-usd", f"{args.cap:g}", "--output-dir", str(self.eval_dir),
+                         "--json", str(self.eval_json), "--no-publish"]
         if args.keep_temp:
             self.evaluate.append("--keep-temp")
         self.prepare = [py, str(SCAFFOLD), "prepare", "--manifest", str(self.manifest),
@@ -168,6 +170,7 @@ def run_once(args: argparse.Namespace, n: int, runner: Runner, rid_factory: Call
         if runner(plan.prepare, prep_env) != 0:
             raise RuntimeError("prepare failed (is NOT_ME_FIXTURE_TOKEN a dedicated fixture token?)")
         plan.scaffold.write_text(json.dumps(plan.env_extra, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        plan.eval_dir.mkdir(parents=True, exist_ok=True)
         say("+ " + quote(plan.evaluate))
         eval_exit = runner(plan.evaluate, env)
         if eval_exit != 0:
