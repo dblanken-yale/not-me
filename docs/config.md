@@ -360,7 +360,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `commit` | `conventional` | `conventional` or `free` |
 | `pr_title` | `{issue}: {issue_title}` | PR title template |
 | `pr_template` | `auto` | Path to a PR template. `auto` means `.github/pull_request_template.md` if present |
-| `closing_keyword` | `auto` | Keyword that links a PR to its issue. `auto` means `Closes` when the tracker is the same repo |
+| `closing_keyword` | `auto` | Keyword that links a PR to its issue. `auto` means `Closes owner/repo#N` when the tracker is the same repo; the reference is always fully qualified |
 | `issue_template` | `auto` | Path to an issue template. `auto` means `.github/ISSUE_TEMPLATE` if present |
 
 ### verify.md

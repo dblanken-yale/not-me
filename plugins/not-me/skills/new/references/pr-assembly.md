@@ -19,8 +19,8 @@ Make one directory with `mktemp -d "$TMPDIR/not-me.XXXXXX"` and write:
      ran and saw pass. Never inside `<details>`.
    - `## Companion PRs`, only in a companion set.
    - `## References`: the issue as `<owner>/<repo>#N`, with the closing keyword
-     from `standards.closing_keyword` (`auto`: `Closes #N` only when the tracker is
-     this repo, else no keyword and the full ref).
+     from `standards.closing_keyword` (`auto`: `Closes <owner>/<repo>#N` when the
+     tracker is this repo, else no keyword and the full ref). Never a bare `#N`.
    - For a UI diff, the `Visual check:` line from the run, and any accessibility
      finding not auto-fixed, with file and line.
    - Any gate finding left unfixed, with a one-line reason and a named login.

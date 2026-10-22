@@ -26,7 +26,9 @@ these, in order:
 
 Closing keyword (`standards.closing_keyword`):
 
-1. `auto` and the tracker is the same repo as the PR: `Closes #88`.
+1. `auto` and the tracker is the same repo as the PR: `Closes acme/app#88`. Always the
+   full `owner/repo#N`, never a bare `#88`: a bare number is ambiguous across a
+   companion set, and GitHub honours the qualified form in the same repository.
 2. `auto` and the tracker is another repo: no keyword. List `acme/tracker#88` under
    References only.
 3. Any other value: use it as the keyword with the full ref, `Fixes acme/tracker#88`.
@@ -70,7 +72,7 @@ The pager dropped the last item when the total was a multiple of the page size.
 
 ## References
 
-- Closes #88
+- Closes acme/app#88
 ```
 
 ## Checklist

@@ -311,13 +311,15 @@ def pr_body(cfg: Any, issue_number: int, issue_title: str, description: str, tes
 
     tracker = _tracker(cfg, repo)
     local = _same(tracker, repo) or _meta(cfg, "project").get("tracker") in (None, "auto")
-    issue_ref = f"#{issue_number}" if local else f"{tracker}#{issue_number}"
+    # Always owner/repo#N, even in the same repo: a bare #N is ambiguous across a companion set and GitHub
+    # honours a qualified closer in the same repository just the same.
+    issue_ref = f"{tracker or repo}#{issue_number}" if (tracker or repo) else f"#{issue_number}"
     keyword = standards.get("closing_keyword", "auto")
     if keyword in (None, "", "auto"):
         keyword = "Closes" if local else "Refs"
     qualified = []
     for ref in refs:
-        ref = f"{tracker}{ref}" if re.fullmatch(r"#\d+", ref) and not local and tracker else str(ref)
+        ref = f"{tracker or repo}{ref}" if re.fullmatch(r"#\d+", ref) and (tracker or repo) else str(ref)
         if ref != issue_ref and ref not in qualified:
             qualified.append(ref)
     references = [f"{keyword} {issue_ref}"]
