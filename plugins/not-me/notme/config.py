@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
-from . import migrations, paths, roster
+from . import humans, migrations, paths, roster
 from .frontmatter import FrontmatterError, parse_with_lines
 from .layers import (DOC_NAMES, LAYER_ORDER, SCHEMA, Doc, KeyPath, Layers, Schema, confirmed, discover, dotted,
                      merge_meta, resolve_body, spec_for)
@@ -28,6 +28,9 @@ class Config:
     project_dir: Optional[Path] = None
     home: Optional[Path] = None
     plugin_root: Optional[Path] = None
+    # the warning when the layers say `mode: live` but the token-signed marker does not confirm it (then the
+    # effective mode is dry-run); None otherwise
+    live_unconfirmed: Optional[str] = None
     _errors: List[str] = field(default_factory=list)
 
     def display(self, path: Optional[Path]) -> Optional[str]:
@@ -45,7 +48,7 @@ class Config:
                 "source": {"layer": src["layer"], "path": src["path"], "line": src["line"]},
                 "shadowed": src["shadowed"],
             }
-            for extra in ("contributors", "removed", "ignored"):
+            for extra in ("contributors", "removed", "ignored", "downgraded"):
                 if extra in src:
                     entry[extra] = src[extra]
             keys[name] = copy.deepcopy(entry)
@@ -215,4 +218,23 @@ def load(project_dir: Optional[os.PathLike] = None, home: Optional[os.PathLike] 
         cfg.meta[name] = merged
         cfg.sources.update({f"{name}.{key}": src for key, src in sources.items()})
         cfg.bodies[name], cfg.body_sources[name], cfg.body_layers[name] = resolve_body(name, docs, cfg.warnings)
+    _confirm_live(cfg)
     return cfg
+
+
+def _confirm_live(cfg: Config) -> None:
+    """Live mode needs both `mode: live` in the layers (only the global layer can say it) and the marker that
+    `notme mode live` signs with the operator token. Without a valid marker the effective mode is dry-run, the
+    source records what was configured and why it was downgraded, and a warning says how to go live."""
+    project = cfg.meta.get("project", {})
+    if project.get("mode") != "live" or humans.live_confirmed(cfg.home):
+        return
+    project["mode"] = "dry-run"
+    src = cfg.sources.setdefault("project.mode", {"layer": None, "path": None, "line": None, "shadowed": []})
+    reason = ("not confirmed: no valid live marker for the current operator token (hand-edits and a rotated token "
+              "do not count)")
+    src["downgraded"] = {"configured": "live", "reason": reason}
+    where = f"{src.get('path')}:{src.get('line') or 1}" if src.get("path") else "the config"
+    cfg.live_unconfirmed = (f"mode: live is set in {where} but not confirmed, so not-me runs in dry-run; "
+                            "run /not-me:mode live")
+    cfg.warnings.append(cfg.live_unconfirmed)

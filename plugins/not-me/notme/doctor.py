@@ -1,4 +1,4 @@
-"""The `notme doctor` probes: tools, gh auth and scopes, config, the guard self-test and the spawn depth.
+"""The `notme doctor` probes: tools, gh auth and scopes, config, mode, the guard self-test and the spawn depth.
 
 Each probe gives {name, ok, detail, required}. The CLI exits 7 when the only failed required checks are the gh
 ones (a missing dependency or missing auth), 1 when anything else required failed.
@@ -76,13 +76,23 @@ def depth_check(env: Mapping[str, str]) -> Check:
     return check("spawn depth", ok, detail, required=False)
 
 
+def mode_check(mode: Any, unconfirmed: Optional[str]) -> Check:
+    """A warning when the config says `mode: live` but `notme mode live` never signed it (so it runs dry-run)."""
+    if unconfirmed:
+        return check("mode", False, unconfirmed, required=False)
+    return check("mode", True, "live (confirmed)" if mode == "live" else str(mode or "dry-run"), required=False)
+
+
 def run(runner: Callable[[Sequence[str]], Any], config_errors: List[str], gh: Callable[[], GhClient],
-        guard_state: Callable[[], Mapping[str, Any]], env: Mapping[str, str]) -> List[Check]:
+        guard_state: Callable[[], Mapping[str, Any]], env: Mapping[str, str],
+        mode: Optional[Check] = None) -> List[Check]:
     """Every probe in order. gh and guard_state are called only when needed (gh needs a valid config)."""
     checks = [python_check(), git_check(), gh_check(runner)]
     installed = checks[-1]["ok"]
     detail = "valid" if not config_errors else f"{len(config_errors)} error(s): {config_errors[0]}"
     checks.append(check("config", not config_errors, detail))
+    if mode is not None:
+        checks.append(mode)
     if installed and not config_errors:
         checks += auth_checks(gh())
     checks += [guard_check(guard_state()), depth_check(env)]
