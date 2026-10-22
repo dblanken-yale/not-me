@@ -33,8 +33,9 @@ def write_case(root, verb="PR"):
 class Recorder:
     """A runner that records argv, env and options per step and fakes what each step leaves behind."""
 
-    def __init__(self, home, fail=(), grade_ok=True, last_message="PR acme/x#1 opened", session_id="sess-1",
-                 raise_on=None):
+    def __init__(self, home, fail=(), grade_ok=True, last_message="PR acme/x#1 opened", session_id="0f8b1c2e-1111-4222-8333-444455556666",
+                 raise_on=None, transcript_name=None):
+        self.transcript_name = transcript_name
         self.home = Path(home)
         self.calls = []
         self.fail = set(fail)
@@ -83,7 +84,7 @@ class Recorder:
                 Path(opts["stdout_path"]).write_text(json.dumps(
                     {"type": "result", "session_id": self.session_id, "result": self.last_message,
                      "total_cost_usd": 1.5, "num_turns": 7, "is_error": False}), encoding="utf-8")
-                self.transcript(ws, self.session_id)
+                self.transcript(ws, self.transcript_name or self.session_id)
             else:
                 self.transcript(ws, "older")
                 self.transcript(ws, "newest")
@@ -204,9 +205,9 @@ class RunLiveTest(unittest.TestCase):
         self.assertNotIn("eval", merged)
         self.assertEqual(merged["cost_usd"], 1.5)
         self.assertEqual(merged["session"]["mode"], "print")
-        self.assertEqual(merged["session"]["session_id"], "sess-1")
+        self.assertEqual(merged["session"]["session_id"], "0f8b1c2e-1111-4222-8333-444455556666")
         self.assertEqual(merged["session"]["turns"], 7)
-        self.assertTrue(merged["session"]["transcript"].endswith("sess-1.jsonl"))
+        self.assertTrue(merged["session"]["transcript"].endswith("0f8b1c2e-1111-4222-8333-444455556666.jsonl"))
         self.assertTrue(merged["graders"]["passed"])
         self.assertTrue((Path(self.out) / "N1-1.graders.json").is_file())
         self.assertNotIn("FIXTURETOKEN", json.dumps(merged))
@@ -291,34 +292,213 @@ class RunLiveTest(unittest.TestCase):
         self.assertFalse(self.glob.exists())
         self.assertFalse(list(self.state.glob("*/global-backup.json")))
 
+    def dead_run(self, rid, host=None, pid=999999999, created=None):
+        """A run that died after staging: backup taken, run layer in place, record left behind."""
+        record = self.state / rid / run_live.BACKUP_RECORD
+        run_live.backup_global(self.home, rid, record)
+        data = json.loads(record.read_text(encoding="utf-8"))
+        data.update(pid=pid, host=host or data["host"], **({"created": created} if created else {}))
+        record.write_text(json.dumps(data), encoding="utf-8")
+        self.glob.mkdir(parents=True, exist_ok=True)
+        (self.glob / "project.md").write_text("scenario layer\n", encoding="utf-8")
+        return record
+
     def test_stale_backup_record_is_refused_and_restore_global_fixes_it(self):
         self.operator_config()
+        self.dead_run("dead-1")
         rec = self.rec()
-        # a run that died after staging: backup taken, run layer in place, record left behind
-        run_live.backup_global(self.home, self.state / "dead-1" / run_live.BACKUP_RECORD)
-        self.glob.mkdir(parents=True)
-        (self.glob / "project.md").write_text("scenario layer\n", encoding="utf-8")
         with contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(self.run_main(rec), 2)
         self.assertIn("--restore-global dead-1", err.getvalue())
         self.assertEqual(rec.calls, [])
-        buf = io.StringIO()
-        self.assertEqual(run_live.main(["--restore-global", "dead-1"], out=buf, home=self.home), 0)
+        self.assertEqual(run_live.main(["--restore-global", "dead-1"], out=io.StringIO(), home=self.home), 0)
         self.assert_operator_config()
+        self.assertFalse((self.home / ".claude" / "not-me.backup-dead-1").exists())
         self.assertEqual(self.run_main(self.rec()), 0)
+
+    def test_backup_sits_beside_not_me_under_dot_claude_not_in_the_state_dir(self):
+        self.operator_config()
+        seen = {}
+        rec = self.rec()
+        orig = rec.__call__
+
+        def spy(argv, env, **opts):
+            if argv[0] == "claude":
+                seen["backup"] = (self.home / ".claude" / "not-me.backup-n1-1-test" / "project.md").read_text(
+                    encoding="utf-8")
+                seen["in_state"] = any(self.state.rglob("project.md"))
+            return orig(argv, env, **opts)
+        self.run_main(spy)
+        self.assertEqual(seen["backup"], "operator's own\n")
+        self.assertFalse(seen["in_state"], "the operator's config must not sit under evals/.state")
+
+    def test_a_live_run_is_not_called_dead(self):
+        self.operator_config()
+        self.dead_run("live-1", pid=os.getppid())  # the parent process stands in for a live run
+        data_path = self.state / "live-1" / run_live.BACKUP_RECORD
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.run_main(self.rec()), 2)
+            self.assertIn("still going", err.getvalue())
+            self.assertNotIn("--restore-global", err.getvalue())
+            self.assertEqual(run_live.main(["--restore-global", "live-1"], home=self.home), 1)
+        self.assertIn("still going", err.getvalue())
+        self.assertTrue(data_path.is_file())
+
+    def test_a_record_from_another_host_is_not_live(self):
+        self.operator_config()
+        self.dead_run("far-1", host="some-other-host", pid=os.getppid())
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.run_main(self.rec()), 2)
+        self.assertIn("--restore-global far-1", err.getvalue())
+
+    def test_two_records_restore_newest_first_by_timestamp_not_name(self):
+        self.operator_config()
+        older = self.dead_run("n1-10-x", created=1000.0)
+        # the second run backed up the first run's scenario layer as the "original"
+        (self.glob / "project.md").write_text("scenario layer\n", encoding="utf-8")
+        self.dead_run("n1-9-x", created=2000.0)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.run_main(self.rec()), 2)
+            self.assertIn("--restore-global n1-9-x", err.getvalue())
+            self.assertEqual(run_live.main(["--restore-global", "n1-10-x"], home=self.home), 1)
+        self.assertIn("newest first", err.getvalue())
+        self.assertTrue(older.is_file())
+        self.assertEqual(run_live.main(["--restore-global", "n1-9-x"], out=io.StringIO(), home=self.home), 0)
+        self.assertEqual(run_live.main(["--restore-global", "n1-10-x"], out=io.StringIO(), home=self.home), 0)
+        self.assert_operator_config()
+
+    def test_run_loop_stops_at_the_first_restore_failure(self):
+        self.operator_config()
+        rec = self.rec()
+
+        real_remove = run_live._force_remove
+
+        def remove_then_recreate(path):
+            real_remove(path)
+            if Path(path) == self.glob:
+                self.glob.mkdir(parents=True)
+                (self.glob / "racer").write_text("x", encoding="utf-8")
+        with mock.patch.object(run_live, "_force_remove", remove_then_recreate), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            code = run_live.main(self.args("--runs", "3"), runner=rec, rid_factory=rids, out=io.StringIO(),
+                                 home=self.home)
+        self.assertEqual(code, 1)
+        self.assertEqual(rec.names().count("reset"), 1, "no second run after a failed restore")
+        self.assertIn("could not be restored", err.getvalue())
+        merged = self.result()
+        self.assertFalse(merged["ok"])
+        self.assertTrue(any("could not restore" in e for e in merged["errors"]))
+        # the operator's config is intact in the backup, not nested inside the recreated directory
+        self.assertEqual((self.home / ".claude" / "not-me.backup-n1-1-test" / "project.md").read_text(
+            encoding="utf-8"), "operator's own\n")
+        self.assertFalse((self.glob / "not-me.backup-n1-1-test").exists())
+        self.assertTrue((self.state / "n1-1-test" / run_live.BACKUP_RECORD).is_file())
+
+    def test_run_restore_ignores_a_rewritten_record(self):
+        self.operator_config()
+        victim = self.tmp / "victim"
+        victim.mkdir()
+        (victim / "keep").write_text("x", encoding="utf-8")
+        rec = self.rec()
+        orig = rec.__call__
+
+        def spy(argv, env, **opts):
+            if argv[0] == "claude":  # the session rewrites the record
+                p = self.state / "n1-1-test" / run_live.BACKUP_RECORD
+                p.write_text(json.dumps({"original": str(victim), "backup": str(self.tmp), "had_original": False}),
+                             encoding="utf-8")
+            return orig(argv, env, **opts)
+        self.run_main(spy)
+        self.assertTrue((victim / "keep").is_file())
+        self.assert_operator_config()
+
+    def test_restore_global_refuses_a_record_that_points_elsewhere(self):
+        self.operator_config()
+        record = self.dead_run("dead-3")
+        data = json.loads(record.read_text(encoding="utf-8"))
+        victim = self.tmp / "victim"
+        victim.mkdir()
+        data["original"] = str(victim)
+        record.write_text(json.dumps(data), encoding="utf-8")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(run_live.main(["--restore-global", "dead-3"], home=self.home), 1)
+        self.assertIn("does not point at", err.getvalue())
+        self.assertTrue(victim.is_dir())
+        self.assertTrue((self.home / ".claude" / "not-me.backup-dead-3").is_dir())
+
+    def test_backup_refuses_when_the_rename_fails_and_moves_nothing(self):
+        self.operator_config()
+        with mock.patch.object(run_live.os, "rename", side_effect=OSError(18, "Invalid cross-device link")):
+            with self.assertRaises(RuntimeError) as ctx:
+                run_live.backup_global(self.home, "x-1", self.state / "x-1" / run_live.BACKUP_RECORD)
+        self.assertIn("same filesystem", str(ctx.exception))
+        self.assertFalse((self.state / "x-1" / run_live.BACKUP_RECORD).exists())
+        self.assert_operator_config()
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_a_dangling_symlink_is_backed_up_and_restored(self):
+        self.glob.parent.mkdir(parents=True)
+        os.symlink(str(self.tmp / "nowhere"), str(self.glob))
+        self.run_main(self.rec())
+        self.assertTrue(os.path.islink(str(self.glob)))
+        self.assertEqual(os.readlink(str(self.glob)), str(self.tmp / "nowhere"))
 
     def test_restore_global_unknown_run_is_an_error(self):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(run_live.main(["--restore-global", "nope"], home=self.home), 1)
 
+    def test_restore_global_rejects_a_path_like_run_id(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(run_live.main(["--restore-global", "../x"], home=self.home), 2)
+
+    def test_scenario_must_look_like_an_id(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = run_live.main(self.args("--scenario", "../../x"), runner=self.rec(), out=io.StringIO(),
+                                 home=self.home)
+        self.assertEqual(code, 2)
+
     def test_restore_after_crash_before_the_move_keeps_the_operators_config(self):
         self.operator_config()
         record = self.state / "dead-2" / run_live.BACKUP_RECORD
         record.parent.mkdir(parents=True)
-        record.write_text(json.dumps({"original": str(self.glob), "backup": str(record.parent / "global-backup"),
-                                      "had_original": True}), encoding="utf-8")
-        run_live.restore_global(record)
+        record.write_text(json.dumps({"original": str(self.glob.absolute()),
+                                      "backup": str((self.home / ".claude" / "not-me.backup-dead-2").absolute()),
+                                      "had_original": True, "pid": 999999999, "host": "h", "created": 1.0}),
+                          encoding="utf-8")
+        run_live.restore_global(self.state, "dead-2", self.home)
         self.assert_operator_config()
+
+    # credentials
+
+    def test_launch_env_blocks_global_git_config_and_ssh(self):
+        rec = self.rec()
+        with mock.patch.dict(os.environ, {"SSH_AUTH_SOCK": "/agent", "GIT_CONFIG_PARAMETERS": "'x=y'"}):
+            self.run_main(rec)
+        env = rec.call("launch")[2]
+        self.assertNotIn("SSH_AUTH_SOCK", env)
+        self.assertNotIn("GIT_CONFIG_PARAMETERS", env)
+        self.assertEqual(env["GIT_SSH_COMMAND"], "false")
+        self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(PurePath(env["GIT_CONFIG_GLOBAL"]).parts[-3:], ("n1-1-test", "N1.stage", "gitconfig-empty"))
+
+    def test_staged_token_file_is_gone_before_the_session_starts(self):
+        rec = self.rec()
+        seen = {}
+        orig = rec.__call__
+
+        def spy(argv, env, **opts):
+            if argv[0] == "claude":
+                seen["exists"] = (self.state / "n1-1-test" / "N1.stage" / "gh-token").exists()
+            return orig(argv, env, **opts)
+        self.assertEqual(self.run_main(spy), 0)
+        self.assertFalse(seen["exists"])
+
+    def test_session_id_that_is_not_a_uuid_is_ignored(self):
+        rec = self.rec(session_id="../../etc/passwd", transcript_name="abc")
+        self.assertEqual(self.run_main(rec), 0)
+        merged = self.result()
+        self.assertIsNone(merged["session"]["session_id"])
+        self.assertTrue(merged["session"]["transcript"].endswith(".jsonl"))
 
     # launch modes and grading
 

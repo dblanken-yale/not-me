@@ -20,6 +20,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -44,6 +45,10 @@ PLUGIN_DIR = ROOT / "plugins" / "not-me"
 STATE_DIR = ROOT / "evals" / ".state"
 CASES_DIR = graders.CASES
 BACKUP_RECORD = "global-backup.json"
+RESTORE_FAILED = 3  # run_once's code when the global layer could not be put back: stop the loop
+SCENARIO_RE = re.compile(r"^[A-Z]\d+$")
+RID_RE = re.compile(r"^[a-z0-9-]+$")
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 DEFAULT_TIMEOUT = 1800
 # Credentials the session must not see: it uses the interactive Claude login and the fixture GH_TOKEN only.
 STRIPPED_ENV = ("NOT_ME_FIXTURE_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
@@ -102,20 +107,59 @@ def global_dir(home: Path) -> Path:
     return home / ".claude" / "not-me"
 
 
-def backup_global(home: Path, record_path: Path) -> None:
-    """Move the operator's ~/.claude/not-me aside and record where it went. The record is written first, so a
-    crash at any point leaves enough to put everything back with --restore-global."""
-    gdir = global_dir(home)
-    backup = record_path.parent / "global-backup"
-    if backup.exists():
+def backup_path(home: Path, rid: str) -> Path:
+    """Where the operator's config waits: a sibling of ~/.claude/not-me, so the rename stays on one filesystem,
+    and outside the run's state directory, which the session can read."""
+    if not RID_RE.match(rid):
+        raise RuntimeError(f"unsafe run id {rid!r}")
+    return global_dir(home).parent / f"not-me.backup-{rid}"
+
+
+def _present(path: Path) -> bool:
+    return path.exists() or path.is_symlink()  # a dangling symlink is still the operator's
+
+
+def pid_alive(pid: int) -> bool:
+    """Whether a process with this pid exists on this host. Unsure means alive."""
+    try:
+        if os.name == "nt":
+            import ctypes
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))  # QUERY_LIMITED_INFORMATION
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return ctypes.windll.kernel32.GetLastError() == 5  # access denied: it exists
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except Exception:  # PermissionError, OSError, ctypes trouble: do not call a live run dead
+        return True
+
+
+def backup_global(home: Path, rid: str, record_path: Path) -> bool:
+    """Rename the operator's ~/.claude/not-me to ~/.claude/not-me.backup-RID and write an informational record
+    (pid and host mark the run as live). Returns whether there was something to move. The record is written
+    first, so a crash at any point leaves enough for --restore-global. If the rename fails nothing has moved
+    and the record is removed again."""
+    gdir, backup = global_dir(home), backup_path(home, rid)
+    if _present(backup):
         raise RuntimeError(f"{backup} already exists; run --restore-global first")
+    had = _present(gdir)
     record_path.parent.mkdir(parents=True, exist_ok=True)
-    record = {"original": str(gdir.absolute()), "backup": str(backup.absolute()), "had_original": gdir.exists(),
-              "run_id": record_path.parent.name,
-              "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    now = time.time()
+    record = {"original": str(gdir.absolute()), "backup": str(backup.absolute()), "had_original": had,
+              "run_id": rid, "pid": os.getpid(), "host": socket.gethostname(), "created": now,
+              "timestamp": datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
     record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    if gdir.exists():
-        shutil.move(str(gdir), str(backup))
+    if had:
+        try:
+            os.rename(str(gdir), str(backup))
+        except OSError as exc:
+            record_path.unlink()
+            raise RuntimeError(f"cannot move {gdir} to {backup}: {exc}. The backup must be on the same "
+                               "filesystem as ~/.claude; nothing was moved")
+    return had
 
 
 def _force_remove(path: Path) -> None:
@@ -128,22 +172,68 @@ def _force_remove(path: Path) -> None:
         path.unlink()
 
 
-def restore_global(record_path: Path) -> str:
-    """Undo backup_global: remove what the run wrote, move the backup back, then drop the record.
-    The backup is never deleted before it is back in place."""
-    record = json.loads(record_path.read_text(encoding="utf-8"))
-    original, backup = Path(record["original"]), Path(record["backup"])
-    if backup.exists():
+def restore_dirs(original: Path, backup: Path, had_original: bool) -> str:
+    """Remove what the run wrote at `original` and rename `backup` back over it. Callers pass trusted values,
+    never ones read from the record file. os.rename refuses a non-empty target, so a directory that appears
+    after the removal makes this fail instead of nesting the backup inside it; the backup is then intact."""
+    if _present(backup):
         _force_remove(original)
-        original.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(backup), str(original))
-        what = f"restored {original}"
-    elif record.get("had_original"):
-        what = f"{original} was never moved; left as it is"  # crashed before the move
-    else:
-        _force_remove(original)
-        what = f"removed the layer the run wrote at {original} (there was none before)"
-    record_path.unlink()
+        try:
+            os.rename(str(backup), str(original))
+        except OSError as exc:
+            raise RuntimeError(f"could not rename {backup} back to {original}: {exc}. Your config is intact in "
+                               f"{backup}")
+        return f"restored {original}"
+    if had_original:
+        return f"{original} was never moved; left as it is"  # crashed before the rename
+    _force_remove(original)
+    return f"removed the layer the run wrote at {original} (there was none before)"
+
+
+def read_records(state: Path) -> List[Dict[str, Any]]:
+    """Every backup record under `state`, newest first by the time written inside it (not by name)."""
+    found = []
+    for path in state.glob(f"*/{BACKUP_RECORD}"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            created = float(data.get("created") or 0)
+        except (OSError, ValueError, AttributeError, TypeError):
+            data, created = {}, 0.0
+        data = data if isinstance(data, dict) else {}
+        found.append({"path": path, "rid": path.parent.name, "created": created, "data": data})
+    return sorted(found, key=lambda r: (r["created"], r["rid"]), reverse=True)
+
+
+def record_is_live(data: Dict[str, Any]) -> bool:
+    """A record whose run is still going: its pid is alive on this host (and is not this process)."""
+    pid = data.get("pid")
+    return (isinstance(pid, int) and pid != os.getpid() and data.get("host") == socket.gethostname()
+            and pid_alive(pid))
+
+
+def restore_global(state: Path, rid: str, home: Path) -> str:
+    """--restore-global RID. The record is checked against what this machine expects and then only read for
+    `had_original`; the paths always come from `home` and the run id."""
+    if not RID_RE.match(rid):
+        raise RuntimeError(f"{rid!r} is not a run id")
+    records = read_records(state)
+    mine = next((r for r in records if r["rid"] == rid), None)
+    if mine is None:
+        raise RuntimeError(f"no backup record at {state / rid / BACKUP_RECORD}")
+    data = mine["data"]
+    if len(records) > 1 and records[0]["rid"] != rid:
+        listing = ", ".join(f"{r['rid']} ({r['data'].get('timestamp', 'unknown time')})" for r in records)
+        raise RuntimeError(f"{len(records)} backup records exist: {listing}. Restore the newest first, "
+                           f"{records[0]['rid']}, then run this again for the next")
+    if record_is_live(data):
+        raise RuntimeError(f"run {rid} is still going (pid {data.get('pid')} on this host). Let it finish, or stop "
+                           "it, before restoring")
+    original, backup = global_dir(home), backup_path(home, rid)
+    if Path(str(data.get("original"))) != original.absolute() or Path(str(data.get("backup"))) != backup.absolute():
+        raise RuntimeError(f"the record for {rid} does not point at {original} and {backup}; not touching "
+                           "anything. Move the backup back by hand")
+    what = restore_dirs(original, backup, bool(data.get("had_original")))
+    mine["path"].unlink()
     return what
 
 
@@ -164,7 +254,7 @@ class Plan:
         self.gh_config = self.stage_dir / "gh-config"
         self.token_file = self.stage_dir / "gh-token"
         self.backup_record = run_dir / BACKUP_RECORD
-        self.backup_dir = run_dir / "global-backup"
+        self.backup_dir = backup_path(home, rid)
         self.session_json = out / f"{sid}-{n}.session.json"
         self.graders_json = out / f"{sid}-{n}.graders.json"
         self.grade_json = out / f"{sid}-{n}.grade.json"
@@ -207,9 +297,16 @@ class Plan:
         login is invisible, and none of the other credentials. Claude uses the interactive login."""
         env = {k: v for k, v in base.items() if k not in STRIPPED_ENV}
         self.gh_config.mkdir(parents=True, exist_ok=True)
+        empty_gitconfig = self.stage_dir / "gitconfig-empty"
+        empty_gitconfig.write_text("", encoding="utf-8")
+        for key in ("SSH_AUTH_SOCK", "GIT_CONFIG_PARAMETERS", "GIT_SSH"):
+            env.pop(key, None)
         env.update(self.env_extra)
         env.update({"GH_TOKEN": token, "GH_CONFIG_DIR": str(self.gh_config), "GH_PROMPT_DISABLED": "1",
                     "GIT_TERMINAL_PROMPT": "0",
+                    # no global or system git config (a url.*.insteadOf could route pushes over the operator's
+                    # SSH agent), and no ssh at all
+                    "GIT_CONFIG_GLOBAL": str(empty_gitconfig), "GIT_CONFIG_NOSYSTEM": "1", "GIT_SSH_COMMAND": "false",
                     # git asks gh for credentials, and gh answers from GH_TOKEN, not from a keychain login
                     "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "",
                     "GIT_CONFIG_KEY_1": "credential.helper", "GIT_CONFIG_VALUE_1": "!gh auth git-credential"})
@@ -221,7 +318,7 @@ class Plan:
 
 def find_session_transcript(plan: Plan, session_id: Optional[str], since: float, home: Path) -> Optional[Path]:
     ws = plan.workspace.resolve()
-    if session_id:
+    if session_id and isinstance(session_id, str) and UUID_RE.match(session_id):
         found = transcript_mod.find_transcripts(ws, since=since, home=home, session_id=session_id)
         if found:
             return found[0]
@@ -272,6 +369,8 @@ def run_once(args: argparse.Namespace, n: int, runner: Runner, rid_factory: Call
     session: Dict[str, Any] = {"mode": args.launch, "command": quote(plan.launch)}
     report: Optional[graders.Report] = None
     cost: Optional[float] = None
+    attempted = restore_failed = False
+    had = _present(global_dir(home))  # in memory: the finally block never trusts the record file
     try:
         for label, cmd in (("reset", plan.reset), ("seed", plan.seed)):
             say("+ " + quote(cmd))
@@ -281,7 +380,8 @@ def run_once(args: argparse.Namespace, n: int, runner: Runner, rid_factory: Call
         if runner(plan.prepare, prep_env) != 0:
             raise RuntimeError("prepare failed (is NOT_ME_FIXTURE_TOKEN a dedicated fixture token?)")
         say(f"+ (moving {global_dir(home)} to {plan.backup_dir})")
-        backup_global(home, plan.backup_record)
+        attempted = True
+        backup_global(home, rid, plan.backup_record)
         say("+ " + quote(plan.stage))
         if runner(plan.stage, env) != 0:
             raise RuntimeError("stage failed")
@@ -291,6 +391,10 @@ def run_once(args: argparse.Namespace, n: int, runner: Runner, rid_factory: Call
             raise RuntimeError(f"cannot read the staged token: {exc}")
         if not token:
             raise RuntimeError("the staged token file is empty")
+        try:
+            plan.token_file.unlink()  # the session must not find the token on disk
+        except OSError as exc:
+            raise RuntimeError(f"cannot remove the staged token file: {exc}")
         child_env = plan.session_env(base, token)
         since = time.time() - 2
         say("+ " + quote(plan.launch))
@@ -305,7 +409,8 @@ def run_once(args: argparse.Namespace, n: int, runner: Runner, rid_factory: Call
             if info.get("is_error"):
                 errors.append("claude reported is_error in its result")
             cost = info.get("total_cost_usd") if isinstance(info.get("total_cost_usd"), (int, float)) else None
-            session.update({"session_id": info.get("session_id"), "turns": info.get("num_turns"),
+            sid = info.get("session_id")
+            session.update({"session_id": sid if isinstance(sid, str) and UUID_RE.match(sid) else None, "turns": info.get("num_turns"),
                             "is_error": info.get("is_error")})
         else:
             code = runner(plan.launch, child_env, cwd=plan.workspace)
@@ -338,11 +443,13 @@ def run_once(args: argparse.Namespace, n: int, runner: Runner, rid_factory: Call
                 _force_remove(plan.workspace)
             except OSError as exc:
                 errors.append(f"could not delete the workspace {plan.workspace}: {exc}")
-        if plan.backup_record.is_file():
+        if attempted:
             try:
-                say("+ " + restore_global(plan.backup_record))
-            except (OSError, ValueError, KeyError) as exc:
-                errors.append(f"could not restore {global_dir(home)}: {exc}. Run "
+                say("+ " + restore_dirs(global_dir(home), plan.backup_dir, had))
+                plan.backup_record.unlink(missing_ok=True)
+            except (OSError, RuntimeError) as exc:
+                restore_failed = True
+                errors.append(f"could not restore {global_dir(home)}: {exc}. Stopping. Run "
                               f"`run_live.py --restore-global {rid}` before anything else")
         say("+ " + quote(plan.teardown))
         try:
@@ -353,6 +460,8 @@ def run_once(args: argparse.Namespace, n: int, runner: Runner, rid_factory: Call
     result = merge_result(args, plan, session, report, cost, errors)
     plan.result.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     say(f"result: {plan.result} ok={result['ok']}")
+    if restore_failed:
+        return RESTORE_FAILED
     return 0 if result["ok"] else 1
 
 
@@ -389,20 +498,24 @@ def main(argv: Optional[Sequence[str]] = None, runner: Runner = subprocess_runne
         print(redact(line), file=stream)
 
     if args.restore_global:
-        record = STATE_DIR / args.restore_global / BACKUP_RECORD
-        if not record.is_file():
-            print(f"error: no backup record at {record}", file=sys.stderr)
-            return 1
+        if not RID_RE.match(args.restore_global):
+            print(f"error: {args.restore_global!r} is not a run id (lowercase letters, digits and dashes)",
+                  file=sys.stderr)
+            return 2
         try:
-            say(restore_global(record))
-        except (OSError, ValueError, KeyError) as exc:
-            print(f"error: could not restore: {exc}", file=sys.stderr)
+            say(restore_global(STATE_DIR, args.restore_global, home))
+        except (OSError, RuntimeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
             return 1
         return 0
     missing = [f"--{k}" for k in ("skill", "scenario", "repo", "owner") if not getattr(args, k)]
     if missing:
         print(f"error: {', '.join(missing)} required (--repo and --owner also come from "
               "NOT_ME_FIXTURE_REPO / NOT_ME_FIXTURE_OWNER)", file=sys.stderr)
+        return 2
+    if not SCENARIO_RE.match(args.scenario):
+        print(f"error: --scenario {args.scenario!r} must look like N1 (one capital letter, then digits)",
+              file=sys.stderr)
         return 2
     case_dir = CASES_DIR / f"{args.skill}-{args.scenario}"
     try:
@@ -411,11 +524,18 @@ def main(argv: Optional[Sequence[str]] = None, runner: Runner = subprocess_runne
         print(f"error: no usable case {case_dir.name}: {exc}", file=sys.stderr)
         return 2
     if not args.dry_run:
-        stale = sorted(STATE_DIR.glob(f"*/{BACKUP_RECORD}"))
-        if stale:
-            rid = stale[0].parent.name
-            print(f"error: a previous run ({rid}) died with your ~/.claude/not-me moved aside. Run "
-                  f"`python3 evals-harness/run_live.py --restore-global {rid}` before anything else.", file=sys.stderr)
+        records = read_records(STATE_DIR)
+        live = [r for r in records if record_is_live(r["data"])]
+        if live:
+            print(f"error: run {live[0]['rid']} is still going on this machine (pid {live[0]['data'].get('pid')}); "
+                  "it has your ~/.claude/not-me moved aside. Wait for it to finish. Do not restore it now.",
+                  file=sys.stderr)
+            return 2
+        if records:
+            listing = ", ".join(f"{r['rid']} ({r['data'].get('timestamp', 'unknown time')})" for r in records)
+            print(f"error: a previous run died with your ~/.claude/not-me moved aside: {listing}. Restore the "
+                  f"newest first: `python3 evals-harness/run_live.py --restore-global {records[0]['rid']}`, "
+                  "then the next, before anything else.", file=sys.stderr)
             return 2
         if not os.environ.get("NOT_ME_FIXTURE_TOKEN"):
             print("error: NOT_ME_FIXTURE_TOKEN is not set (a fine-grained token for the fixture repos only; "
@@ -430,7 +550,12 @@ def main(argv: Optional[Sequence[str]] = None, runner: Runner = subprocess_runne
     first = max(taken, default=0) + 1  # a second invocation the same day adds runs instead of overwriting
     worst = 0
     for n in range(first, first + args.runs):
-        worst = max(worst, run_once(args, n, runner, rid_factory, outdir, say, home, case))
+        code = run_once(args, n, runner, rid_factory, outdir, say, home, case)
+        if code == RESTORE_FAILED:
+            print("error: stopped after the first run because your ~/.claude/not-me could not be restored "
+                  "(see the result file); no further run was started", file=sys.stderr)
+            return 1
+        worst = max(worst, code)
     return worst
 
 

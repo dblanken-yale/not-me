@@ -34,8 +34,8 @@ Drop `--dry-run` to run. Per run, in order:
 2. **Prepare**: `scaffold/scaffold.py prepare --manifest ... --stage-dir evals/.state/RID/ID.stage`.
    It checks the token (sees the fixture repo, cannot see the plugin repo), clones the fixture at the manifest's
    SHAs and stages the token there, mode 600.
-3. **Stage the workspace**: your real `~/.claude/not-me/` is moved to `evals/.state/RID/global-backup/` and
-   recorded in `evals/.state/RID/global-backup.json`, then `scaffold.py stage --case <skill>-<ID>
+3. **Stage the workspace**: your real `~/.claude/not-me/` is renamed to `~/.claude/not-me.backup-RID` and
+   recorded (with the run's pid) in `evals/.state/RID/global-backup.json`, then `scaffold.py stage --case <skill>-<ID>
    --workspace evals/.state/RID/ID.workspace --home ~` copies the clone there and writes the scenario's config
    layers. The global layer has to land in your real home because inside a session the `notme` CLI and the guard
    read `~/.claude/not-me/` directly. It is restored afterwards, also when the run failed.
@@ -59,8 +59,13 @@ Drop `--dry-run` to run. Per run, in order:
 7. The two grades and the session facts are merged into `<out>/<ID>-<n>.json` (the file `gate_report.py`
    reads): `ok` is true only when the state grade passed, the transcript graders passed and nothing errored.
 
-If a run is killed, your own `~/.claude/not-me/` may still be in `evals/.state/RID/global-backup/`. The next
-run refuses (exit 2) until you run `python3 evals-harness/run_live.py --restore-global RID`.
+While a run is live, any other Claude Code session you have open reads the scenario's global layer, and the
+restore removes anything those sessions wrote there; close other not-me sessions first.
+
+If a run is killed, your own `~/.claude/not-me/` may still be in `~/.claude/not-me.backup-RID`. The next run
+refuses (exit 2) until you run `python3 evals-harness/run_live.py --restore-global RID`; it refuses that too
+while the run's process is alive, and with several records it restores the newest first. A failed restore stops
+the run loop. Details in `docs/testing.md`.
 
 `--out` defaults to `results/evals/<today>`. A second invocation on the same day adds runs (`N1-2.json`) instead
 of overwriting. Runs go one at a time, because a skill scans the whole fixture repo.
