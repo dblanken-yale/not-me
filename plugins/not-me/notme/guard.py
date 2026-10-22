@@ -334,106 +334,67 @@ def strip_heredocs(cmd: str) -> Tuple[str, Optional[str]]:
 # a message literal after git commit/tag -m (or -am, --message[=]); group 1 is the literal with its quotes
 _MSG_LITERAL = re.compile(r"(?<![A-Za-z0-9_-])(?:-[A-Za-z]*m|--message)(?:=|[ \t]+)('[^']*'|\"(?:[^\"\\]|\\.)*\")")
 _DATA_GIT = re.compile(r"^git(?:\.exe)?(?:\s+-C\s+[^\s;|&<>()$`]+)?\s+(commit|tag)(?:\s|$)")
-_DATA_PROGS = {"cat", "tee"}
-_MESSAGE_FILE = re.compile(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.(?:md|txt)$")
-_REDIR_OP = re.compile(r"^(?:\d*>>?|&>>?)")
-_OPTION = re.compile(r"^-[A-Za-z]+$|^--[a-z][a-z-]*$")  # a cat/tee option word, never a path
 _DATA_GIT_SUBS = {"add", "commit", "tag", "status", "diff"}
-_DATA_SINKS = re.compile(r"^(?:cat|tee)(?:\s|$)")
-_HEREDOC_REST = re.compile(r"[|&;()`$\\]|<<")
 _STDIN_FILE = re.compile(r"(?<![A-Za-z0-9_-])(?:-F|--file)(?:=|\s+)-(?:\s|$)")
 
 
 def _statement(before: str) -> Optional[str]:
     """The current simple command up to here (after the last ; & | newline or ( outside quotes), or None
-    when a quote is still open at the end."""
-    start, quote, k = 0, "", 0
-    while k < len(before):
-        c = before[k]
-        if c == "\\" and quote != "'":
-            k += 2
-            continue
+    when a quote is still open at the end. Callers have already refused any backslash."""
+    start, quote = 0, ""
+    for k, c in enumerate(before):
         if quote:
             quote = "" if c == quote else quote
         elif c in "'\"":
             quote = c
         elif c in ";&|\n(":
             start = k + 1
-        k += 1
     return None if quote else before[start:].lstrip()
 
 
-def _unquoted(text: str) -> Optional[str]:
-    """text with its quoted spans removed; None when a quote is left open."""
-    out, quote = [], ""
+def _only_git_data_commands(cmd: str) -> bool:
+    """True when every command in cmd is a plain git add/commit/tag/status/diff (only -C before the
+    subcommand), with no pipe, substitution, backslash, or comment outside quotes: then no message in it
+    can be run."""
+    text, _ = strip_heredocs(cmd)
+    if "\\" in text or "|" in text.replace("||", "") or any(s in text for s in ("$(", "`", "<(", ">(")):
+        return False
+    stmt = _statement(text + "\n")
+    if stmt is None:
+        return False
+    bare, quote = [], ""
     for c in text:
         if quote:
             quote = "" if c == quote else quote
         elif c in "'\"":
             quote = c
         else:
-            out.append(c)
-    return None if quote else "".join(out)
-
-
-def _inert_target(word: str, cwd: str) -> bool:
-    """A plain relative *.md or *.txt path (no glob, ~, $, .., .git or hooks part) that is not an existing
-    symlink: a message file nothing runs."""
-    if not _MESSAGE_FILE.match(word):
-        return False
-    parts = word.lower().split("/")
-    if ".." in parts or any(x.startswith(".git") or "hook" in x for x in parts):
-        return False
-    path = _path.join(cwd, word)
-    return not _path.islink(path) and ".git" not in Path(_path.realpath(path)).parts
-
-
-def _only_data_commands(cmd: str, cwd: str) -> bool:
-    """True when every command in cmd is cat or tee writing only plain *.md/*.txt files, or a git
-    add/commit/tag/status/diff, with no pipe, substitution, backslash, or comment outside quotes: then nothing
-    in it can run a message or a written file afterwards."""
-    text, _ = strip_heredocs(cmd)
-    bare = _unquoted(text)
-    if "\\" in text or bare is None or "#" in bare:
-        return False  # a comment or an escape can turn a seeming heredoc into commands bash runs
-    if "|" in text.replace("||", "") or any(s in text for s in ("$(", "`", "<(", ">(")):
-        return False
+            bare.append(c)
+    if "#" in "".join(bare):
+        return False  # a comment can turn a seeming heredoc into lines bash runs
     for seg in segments(text):
         t = tokens(seg)
-        if t and _prog(t[0]) == "git":
-            k = 1
-            while t[k:k + 1] == ["-C"] and len(t) > k + 1:
-                k += 2
-            if t[k:k + 1] and t[k] not in _DATA_GIT_SUBS:
-                return False
+        if not t:
             continue
-        if t and t[0] not in _DATA_PROGS:
+        if _prog(t[0]) != "git":
             return False
-        target = False  # the next word follows a bare > or >>
-        for raw in seg.split()[1 if t else 0:]:  # every word a cat/tee (or a bare redirect) names
-            raw = raw.replace('"', "").replace("'", "")
-            w = _REDIR_OP.sub("", raw)
-            after_redirect, target = target or w != raw, False
-            if not w:
-                target = after_redirect or raw != ""
-                continue
-            if w.startswith("<<") and not after_redirect:
-                continue
-            if _OPTION.match(w) and not after_redirect:
-                continue
-            if not _inert_target(w, cwd):
-                return False
+        k = 1
+        while t[k:k + 1] == ["-C"] and len(t) > k + 1:
+            k += 2
+        if t[k:k + 1] and t[k] not in _DATA_GIT_SUBS:
+            return False
     return True
 
 
-def _data_only(cmd: str, cwd: str) -> str:
-    """cmd without text that is only data: commit/tag messages and heredocs fed to cat, tee or git commit -F -.
+def _data_only(cmd: str) -> str:
+    """cmd without the git commit/tag messages in it: -m literals and a quoted-delimiter heredoc fed to
+    git commit -F -.
 
     Used for the self-protection word scans, so a message that names not-me commands is not mistaken for
-    running them. Text is kept when it could run: $ or backtick inside it, an unquoted heredoc delimiter
-    with $ or backtick in the body, or any doubt about where the command starts.
+    running them. Only a line of plain git add/commit/tag/status/diff commands qualifies, and a literal
+    with $ or a backtick is kept; anything else returns cmd unchanged.
     """
-    if not _only_data_commands(cmd, cwd):
+    if not _only_git_data_commands(cmd):
         return cmd
     lines = cmd.split("\n")
     out: List[str] = []
@@ -449,11 +410,9 @@ def _data_only(cmd: str, cwd: str) -> str:
                 body.append(lines[i])
                 i += 1
             stmt = _statement(prior + line[: m.start()])
-            text = "\n".join(body)
-            rest = line[m.end():]  # a pipe, list, substitution or continuation here could run the body
-            data = stmt is not None and not _HEREDOC_REST.search(rest) and (
-                _DATA_SINKS.match(stmt) or (_DATA_GIT.match(stmt) and _STDIN_FILE.search(stmt + rest)))
-            if not data or (not m.group(1) and ("$" in text or "`" in text)):
+            data = (m.group(1) and not line[m.end():].strip() and stmt is not None
+                    and _DATA_GIT.match(stmt) and _STDIN_FILE.search(stmt))
+            if not data:
                 out.extend(body)
             if i < len(lines):
                 out.append(lines[i])  # terminator
@@ -854,7 +813,7 @@ def _git_config(ctx: GuardContext, st: _State, d: str, key: str) -> Optional[str
 
 def _bash(cmd: str, cwd: str, ctx: GuardContext) -> Iterator[Block]:
     blk = _blk(_short(cmd))
-    plain = _unshell(_data_only(cmd, cwd))
+    plain = _unshell(_data_only(cmd))
     if "allow-repo" in plain and any(m.group(1) or "--everywhere".startswith(m.group(2))
                                      for m in _ALLOW_EDIT.finditer(plain)):
         yield blk(SELF, "only the operator changes the not-me allow list", "ask the operator to run /not-me:allow-repo")
