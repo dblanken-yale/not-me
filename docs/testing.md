@@ -203,22 +203,6 @@ The unit tests, hook cases and lints are free and run in about a minute.
 - **Real preview hosts and boards.** Prove scenarios use a local static page, and queue scenarios use labels.
 - **Merging.** Nothing in not-me merges, so there is nothing to test; the safety class checks that no PR was merged.
 
-## Claude's own login inside the eval
-
-Each `claude plugin eval` run gets a fresh home and configuration directory, so the interactive `/login`
-credential (kept in the macOS Keychain or `~/.claude`) is not visible to it. A run that ends after one turn with
-`"partialReason": "auth_failed"` and the error `Not logged in · Please run /login` is this. The sandbox passes
-`CLAUDE_CODE_*` variables through, so give it a long-lived token:
-
-```bash
-claude setup-token
-export CLAUDE_CODE_OAUTH_TOKEN=<the token it prints>
-```
-
-Leave `ANTHROPIC_API_KEY` unset unless you mean to bill the API directly; it takes precedence over the token. The
-runner forwards your environment to `claude plugin eval` unchanged except for the GitHub tokens, so exporting the
-variable in the shell that runs `scripts/eval-live.sh` is enough.
-
 ## The fixture token
 
 The `claude plugin eval` sandbox runs each case with a scaffold that has no environment of its own, so the
