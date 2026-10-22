@@ -29,12 +29,14 @@ def main(raw: "str | None" = None) -> int:
             return 0
         cwd = event.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
         ctx = guard.GuardContext.from_project(cwd)
-        if not guard.is_active(ctx):
-            return 0
+        active = guard.is_active(ctx)
+        if not active:
+            ctx.self_only()  # outside a not-me project only self-protection applies
         block = guard.decide(event, ctx)
         if block is None:
             return 0
-        guard.log_block(ctx, block)
+        if active:  # never write a log into a repo that is not a not-me project
+            guard.log_block(ctx, block)
         print(block.message, file=sys.stderr)
         return 2
     except Exception as exc:  # noqa: BLE001 - any failure must still produce a decision

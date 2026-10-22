@@ -9,16 +9,16 @@ The guard is a safety net for an agent that is trying to follow the rules. It is
 - Claude Code calls the hook before every `Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and GitHub MCP tool call.
 - The hook looks at the call and either lets it through (exit code 0) or blocks it (exit code 2, with a message that goes back to Claude).
 - A blocked call does not run. Claude reads the message, does not retry, and records a question for you.
-- Every block is also appended to `<git-common-dir>/not-me/logs/guard.jsonl` with the time, tool, rule, reason, and target.
+- Every block in a not-me project is also appended to `<git-common-dir>/not-me/logs/guard.jsonl` with the time, tool, rule, reason, and target.
 
 ## Activation
 
-The guard only does something when not-me is in play:
+The four rule groups only apply when not-me is in play:
 
 - The checkout has a `.claude/not-me/` folder (or, in a linked worktree, the main checkout does), or
 - A not-me run is in progress. A run drops a marker file at `<git-common-dir>/not-me/active-run`. A marker older than 6 hours is ignored, so a crashed run cannot keep a repo locked.
 
-In any other repo the hook returns "allow" straight away.
+Anywhere else (outside any git repo, or in a git repo that is not a not-me project, such as one nested inside a not-me checkout) the rule groups are off and only [self-protection](#self-protection) is checked. Those checks start no process and read no config, and their blocks are not logged.
 
 It is also cheap. A Bash command that mentions none of `git`, `gh`, `rm`, `curl`, a shell or interpreter, `$`, backticks, or a script path is allowed after one text check, with no process started and no config read. Ordinary commands cost tens of milliseconds.
 
@@ -230,10 +230,12 @@ Why you usually should not:
 
 ## Self-protection
 
-Self-protection is always on while the guard is active. It does not depend on the four rules and cannot be switched off. It blocks:
+Self-protection is always on, in every directory, whether or not the guard is active there. It does not depend on the four rules and cannot be switched off. It blocks:
 
 - Any Write or Edit of `allowed-repos.json`, and any Bash command that mentions that file or its full path.
 - Any Bash command containing `allow-repo` together with `add`, `remove`, or `--everywhere`, for example `notme allow-repo add acme/other`.
+- Turning a pause off (`notme pause off`), and driving the not-me CLI through a pseudo-terminal or a detached process.
+- Reading, listing, copying, or writing the operator token in your global folder, by any tool, glob, or redirection.
 - Writes to the plugin's own code: its `hooks`, `bin`, `notme`, `cli`, and `skills` folders.
 - Writes to not-me config while a run is in progress: the repo's `.claude/not-me/` folder and the `.md` files in your global folder.
 

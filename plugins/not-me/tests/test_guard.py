@@ -56,8 +56,10 @@ class GuardTableTests(_Fixtures):
             with self.subTest(cid=cid, tool=tool, input=tin, variant=variant):
                 if variant not in ctxs:
                     ctxs[variant] = self.ctx(variant)
+                    if not guard.is_active(ctxs[variant]):
+                        ctxs[variant].self_only()  # as the hook does
                 ctx = ctxs[variant]
-                result = guard.decide(gc.event_for(case, self.root), ctx) if guard.is_active(ctx) else None
+                result = guard.decide(gc.event_for(case, self.root), ctx)
                 self.assertEqual("block" if isinstance(result, Block) else "allow", want,
                                  getattr(result, "message", ""))
                 if isinstance(result, Block):
@@ -102,6 +104,30 @@ class ContextTests(_Fixtures):
         self.assertFalse(guard.is_active(ctx))
         self.assertIsNone(guard.log_root(ctx.common_dir))
         guard.log_block(ctx, Block("force_push", "r"))  # nowhere to log: no exception, no file
+
+    def test_self_only_never_forks_or_loads_config(self):
+        def boom(args, cwd):
+            raise AssertionError(f"git {args} called")
+        home = self.root / "homes" / "h0"
+        for where in (self.root / "nogit", self.root / "app" / "vendor" / "nested"):
+            ctx = GuardContext.from_project(where, home=home, env=self.env, git=boom)
+            self.assertFalse(guard.is_active(ctx))
+            ctx.self_only()
+            calls = [("Bash", {"command": "git push origin feature/x && git commit -m x && git pp"}, None),
+                     ("Bash", {"command": "gh pr comment 1 --repo acme/other -b x"}, None),
+                     ("Bash", {"command": "notme pause off"}, guard.SELF),
+                     ("Write", {"file_path": str(home / writes.ALLOWLIST_FILE)}, guard.SELF),
+                     ("Write", {"file_path": "notes.txt"}, None),
+                     ("Read", {"file_path": str(home / guard.OPERATOR_TOKEN)}, guard.SELF),
+                     ("Read", {"file_path": "README.md"}, None)]
+            with mock.patch("subprocess.run", boom), mock.patch("subprocess.Popen", boom), \
+                    mock.patch("notme.config.load", boom):
+                for tool, tin, rule in calls:
+                    with self.subTest(where=where.name, tool=tool, input=tin):
+                        event = {"tool_name": tool, "tool_input": tin, "cwd": str(where)}
+                        self.assertEqual(getattr(guard.decide(event, ctx), "rule", None), rule)
+            # write_ctx is the empty stub self_only() put in place, never one built from config
+            self.assertEqual(ctx.__dict__["write_ctx"], writes.GuardContext())
 
 
 class TokenizerTests(unittest.TestCase):
@@ -344,7 +370,8 @@ class HookTests(_Fixtures):
         ctx = self.ctx("app")
         self.assertTrue(guard.selftest([sys.executable, str(HOOK)], ctx, env=self.env))
         self.assertFalse(guard.selftest([sys.executable, "-c", "pass"], ctx, env=self.env))
-        self.assertFalse(guard.selftest([sys.executable, str(HOOK)], self.ctx("bare"), env=self.env))
+        # self-protection applies outside a not-me project too, so the canned allow-list write is blocked there
+        self.assertTrue(guard.selftest([sys.executable, str(HOOK)], self.ctx("bare"), env=self.env))
 
 
 class HooksJsonTests(unittest.TestCase):

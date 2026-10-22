@@ -6,14 +6,19 @@ working directory (push URLs, current branch, aliases) lazily through
 context (`GuardContext.from_project`) and the inactive path start no
 processes: the checkout is found by walking up for `.git`.
 
+Outside a not-me project (`is_active` false) the four rule groups are off, but
+self-protection still applies: the hook calls `ctx.self_only()`, which stubs
+git and config so nothing forks, and `decide` keeps only self_protect blocks.
+
 Rule groups, each switched by `guard.<rule>` in project.md:
   other_repo          writes may only target allowed repos
   protected_branches  no commits, pushes, merges or resets on protected branches
   force_push          no history rewrites or remote branch deletion
   destructive_git     shown as "destructive": hard resets, forced branch deletes,
                       clean -x, rm -rf .git, and GitHub settings, secrets and deletions
-Self-protection (the allow list, the plugin's own files, and not-me config
-during a run) is always on.
+Self-protection (the operator token, the allow list, allow-repo and pause
+off, the plugin's own files, and not-me config during a run) is always on, in
+every directory, whether or not the guard is active.
 
 Residual risk: a token file readable by the same OS user cannot be fully hidden
 from an agent running as that user; this guard is the enforcement, and the
@@ -457,8 +462,16 @@ class GuardContext:
         self.active_run = active_run
         self.plugin_root = Path(plugin_root) if plugin_root else paths.plugin_root(self.env)
         self.git = git
+        self.only_self = False
         if write_ctx is not None:
             self.__dict__["write_ctx"] = write_ctx  # shadows the cached property
+
+    def self_only(self) -> "GuardContext":
+        """Outside a not-me project: keep only self-protection; git and config are stubbed so nothing forks."""
+        self.only_self = True
+        self.git = _no_git
+        self.__dict__["write_ctx"] = writes.GuardContext()  # no config: the rules it feeds are dropped anyway
+        return self
 
     @classmethod
     def from_project(cls, project_dir: Any, home: Optional[Any] = None, env: Optional[Mapping[str, str]] = None,
@@ -513,6 +526,10 @@ class GuardContext:
     @cached_property
     def protected_branches(self) -> FrozenSet[str]:
         return frozenset(self.write_ctx.protected_branches)
+
+
+def _no_git(args: List[str], cwd: str) -> Optional[str]:
+    return None
 
 
 def is_active(ctx: GuardContext) -> bool:
@@ -574,7 +591,13 @@ def decide(event: Mapping[str, Any], ctx: GuardContext) -> Decision:
         cands = _mcp(tool, tin, ctx)
     else:
         return None
+    # outside a project an unreadable command still blocks when it could drive the not-me CLI or its trust inputs
+    drives = ctx.only_self and tool == "Bash" and bool(_PTY_TRIGGER.search(_unshell(str(tin.get("command") or ""))))
     for block in cands:
+        if ctx.only_self and block.rule == OPAQUE and drives:
+            block.rule = SELF
+        if ctx.only_self and block.rule != SELF:
+            continue
         if block.rule == OPAQUE:
             enabled = [r for r in RULES if ctx.rules.get(r, True)]
             if not enabled:
