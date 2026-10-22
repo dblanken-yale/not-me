@@ -336,14 +336,22 @@ def prepare(manifest_path: Any, stage: Path, env: Mapping[str, str], runner: Run
 
 
 def clean(state: Path = STATE, stage_dir: Optional[Path] = None) -> List[Path]:
-    """Remove the stage (token copy included) and the pointer. Safe to call when nothing was prepared."""
+    """Remove the stage (token copy included) and the pointer. Safe to call when nothing was prepared.
+
+    With `stage_dir` the pointer is not consulted for what to delete: a session can rewrite it. Without it, a
+    pointer's stage is removed only when it resolves inside `state`.
+    """
     pointer = state / POINTER
     removed: List[Path] = []
     stages = [Path(stage_dir)] if stage_dir else []
-    if pointer.is_file():
+    if pointer.is_file() and not stage_dir:
         try:
-            stages.append(state / json.loads(pointer.read_text(encoding="utf-8"))["stage"])
-        except (ValueError, KeyError):
+            candidate = state / json.loads(pointer.read_text(encoding="utf-8"))["stage"]
+            base = state.resolve()
+            inside = candidate.resolve()
+            if inside != base and base in inside.parents:
+                stages.append(candidate)
+        except (ValueError, KeyError, TypeError, OSError):
             pass
     for stage in stages:
         if stage.exists():

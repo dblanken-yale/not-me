@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -248,6 +249,26 @@ class PrepareTest(unittest.TestCase):
         self.prepare(FakeRun())
         scaffold.clean(self.state)
         self.assertFalse(self.stage.exists())
+
+    def test_clean_ignores_a_rewritten_pointer_when_given_a_stage_dir(self):
+        self.prepare(FakeRun())
+        victim = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(victim), True)
+        (self.state / scaffold.POINTER).write_text(json.dumps({"stage": str(victim)}), encoding="utf-8")
+        scaffold.clean(self.state, self.stage)
+        self.assertTrue(victim.is_dir())
+        self.assertFalse((self.state / scaffold.POINTER).exists())
+
+    def test_clean_without_a_stage_dir_ignores_a_pointer_outside_the_state(self):
+        self.prepare(FakeRun())
+        victim = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(victim), True)
+        (self.state / scaffold.POINTER).write_text(json.dumps({"stage": str(victim)}), encoding="utf-8")
+        scaffold.clean(self.state)
+        self.assertTrue(victim.is_dir())
+        (self.state / scaffold.POINTER).write_text(json.dumps({"stage": "../.."}), encoding="utf-8")
+        scaffold.clean(self.state)
+        self.assertTrue(self.state.is_dir())
 
     def test_stage_info_names_the_fixture_bot_as_operator(self):
         self.prepare(FakeRun())
