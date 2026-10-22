@@ -197,10 +197,11 @@ _CD_HINT = ("use git -C <path> or gh -R owner/name instead of cd; if a cd is nee
             "call first")
 _HTTP_CLIENTS = {"curl", "wget", "http", "https", "xh"}
 # programs that never run their arguments: a gh or git word there is data (anything else naming gh/git blocks)
-_INERT = {"echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "cat", "ls", "head", "tail", "wc", "test", "[", "[[",
-          "true", "false", ":", "which", "type", "whereis", "man", "less", "more", "file", "stat", "sort", "uniq",
+# (not man, less, more, sort, rg or yq: a pager, --compress-program or --pre can run a command)
+_INERT = {"echo", "printf", "grep", "egrep", "fgrep", "cat", "ls", "head", "tail", "wc", "test", "[", "[[",
+          "true", "false", ":", "which", "type", "whereis", "file", "stat", "uniq",
           "cut", "tr", "diff", "cmp", "basename", "dirname", "realpath", "readlink", "touch", "mkdir", "cp", "mv",
-          "ln", "chmod", "jq", "yq", "tee", "comm", "column", "nl", "od", "xxd", "hexdump", "strings", "base64",
+          "ln", "chmod", "jq", "tee", "comm", "column", "nl", "od", "xxd", "hexdump", "strings", "base64",
           "shasum", "sha256sum", "md5", "md5sum", "date", "pwd", "whoami", "id", "uname", "sleep", "rmdir",
           "cd", "pushd", "popd", "export", "unset", "local", "read", "set"}
 # git subcommands that change nothing, provided every option is on _GIT_READ_OPTS. A git call is a read
@@ -242,12 +243,11 @@ _GIT_READ_VALUE_OPTS = set("""
 --inter-hunk-context --src-prefix --dst-prefix --line-prefix --submodule --column --count
 """.split())
 _GIT_SAFE_SHORT = frozenset("pusvqnizwblLMCBDRartdcehHEFIoWUAm1234567890")  # letters in -sb style clusters
-_GIT_SHORT_VALUE = re.compile(r"-(?:\d+|[nUABCSGLM]\S+)")  # -n5, -U3, -L10,20:f, -Sfoo
 # git -c keys (and git config writes) that cannot run code or redirect a repo; every other key blocks
 _GIT_SAFE_KEYS = {"user.name", "user.email", "core.quotepath", "core.abbrev", "init.defaultbranch", "safe.directory",
                   "commit.gpgsign", "tag.gpgsign", "log.showsignature", "log.decorate", "diff.renames",
                   "diff.noprefix", "pull.rebase", "pull.ff", "merge.ff", "rebase.autosquash", "rebase.autostash",
-                  "push.autosetupremote", "push.default", "fetch.prune", "status.short", "status.branch"}
+                  "fetch.prune", "status.short", "status.branch"}
 _GIT_SAFE_KEY_PREFIXES = ("color.", "advice.", "column.", "i18n.")
 # git options before the subcommand that are understood; any other one blocks
 _GIT_GLOBALS = {"--no-pager", "-p", "-P", "--paginate", "--no-optional-locks", "--literal-pathspecs",
@@ -269,9 +269,15 @@ _GIT_LISTING: Dict[str, Tuple[Set[str], bool]] = {
     "worktree": ({"list"}, False),
     "reflog": ({"", "show", "list"}, False),
 }
-# variables that make git or gh run a program; only these values are known to be safe
-_EXEC_ENV = re.compile(r"(?<![A-Za-z0-9_])(GIT_[A-Z0-9_]*|EDITOR|VISUAL|PAGER|GH_PAGER|GH_EDITOR|GH_BROWSER|BROWSER"
-                       r"|LESSOPEN|LESSCLOSE|SSH_ASKPASS)=(\S*)")
+# variables that can make git or gh run a program or read other config: setting them by any means next to a
+# git or gh call blocks, except the values below
+_ENV_NAMES = (r"GIT_[A-Z0-9_]*|EDITOR|VISUAL|PAGER|MANPAGER|GH_[A-Z0-9_]*|XDG_CONFIG_HOME|HOME|LD_PRELOAD"
+              r"|LD_LIBRARY_PATH|DYLD_[A-Z0-9_]*|PATH|BASH_ENV|ENV|PROMPT_COMMAND|IFS|LESSOPEN|LESSCLOSE|BROWSER"
+              r"|SSH_ASKPASS")
+_ENV_ASSIGN = re.compile(r"(" + _ENV_NAMES + r")(?:\[[^\[\]]*\])?\+?=(.*)", re.S)
+_ENV_WORD = re.compile(r"(?:-[A-Za-z]*)?(?:" + _ENV_NAMES + r")")
+_ENV_SETTERS = {"export", "declare", "typeset", "local", "readonly", "integer", "float", "private", "unset", "read",
+                "mapfile", "readarray", "getopts", "let", "for", "select", "printf", "env"}
 _SAFE_EXEC_ENV = {"PAGER": {"", "cat", "less", "more"}, "GH_PAGER": {"", "cat", "less", "more"},
                   "GIT_PAGER": {"", "cat", "less", "more"}}
 _SAFE_GIT_ENV = {"GIT_TERMINAL_PROMPT", "GIT_OPTIONAL_LOCKS"}
@@ -1298,6 +1304,7 @@ class _State:
 
     def __init__(self, cwd: str, parsed: Parsed, raw: str):
         self.dir = cwd
+        self.parsed = parsed
         self.text = parsed.code + "\n" + parsed.code.replace("\\\n", "")
         self.raw = raw + "\n" + raw.replace("\\\n", "")  # with here-document bodies, for the pty checks
         self.background = bool(_BACKGROUND.search(self.text))
@@ -1378,12 +1385,6 @@ def _dir_change(words: List[str], cwd: str) -> Optional[str]:
                                               and _path.isdir(_norm(name, cwd)))):
         return name  # zsh auto_cd: a directory named on its own changes into it
     return None
-
-
-def _names_gh_git(word: str) -> bool:
-    """The word is gh or git (or a path to them), or a string whose first word is."""
-    first = word.split(None, 1)[0] if word.strip() else ""
-    return _head(first) in ("gh", "git")
 
 
 @lru_cache(maxsize=256)
@@ -1542,7 +1543,7 @@ def _command(t: List[str], seg: str, st: _State, ctx: GuardContext) -> Iterator[
         yield blk(OPAQUE, f"{head} to GitHub bypasses gh's repo checks", "use gh with --repo owner/name")
     elif prefixed and has_gh_git(seg):
         yield blk(OPAQUE, f"cannot tell what '{word}' runs", "run gh/git directly, without the wrapper")
-    elif _prog(word) not in _INERT and any(_names_gh_git(a) for a in t):
+    elif _prog(word) not in _INERT and any(has_gh_git(a) for a in t):  # awk system(), sed e, vim -c '!git'
         yield blk(OPAQUE, f"{_prog(word)} may run gh/git with words the guard cannot check",
                   "run gh/git directly, without the wrapper")
 
@@ -1888,7 +1889,7 @@ def _wrapped(takes_value: Set[str], stop: Tuple[str, ...] = ()):
         if st.moved and has_gh_git(_unshell(seg)):
             yield _moved_write(st, blk, f"gh/git through {_prog(t[0])}")
             return
-        if _prog(t[0]) in ("xargs", "parallel") and any(_names_gh_git(a) for a in t[1:]):
+        if _prog(t[0]) in ("xargs", "parallel") and any(has_gh_git(a) for a in t[1:]):
             yield blk(OPAQUE, f"{_prog(t[0])} adds words from its input to gh/git, so they cannot be checked",
                       "run gh/git directly with every argument spelled out")
             return
@@ -2018,13 +2019,26 @@ def _safe_git_key(key: str) -> bool:
 
 
 def _exec_env(st: _State) -> Optional[str]:
-    """An assignment in the command that makes git or gh run another program, or None."""
+    """How the command sets a variable that can make git or gh run another program or read other config
+    (assignment, export, read, printf -v, mapfile, declare, local, unset, a computed name), or None."""
     def find() -> Optional[str]:
-        for m in _EXEC_ENV.finditer(st.plain_text):
-            name, value = m.group(1), m.group(2)
-            if name in _SAFE_GIT_ENV or value in _SAFE_EXEC_ENV.get(name, ()):
+        for c in st.parsed.commands:
+            words = c.words
+            for w in words:
+                m = _ENV_ASSIGN.match(w)
+                if m and not (m.group(1) in _SAFE_GIT_ENV or m.group(2) in _SAFE_EXEC_ENV.get(m.group(1), ())):
+                    return f"{m.group(1)}={_short(m.group(2), 30)}"
+            setters = [_prog(w) for w in words if _prog(w) in _ENV_SETTERS]
+            if not setters:
                 continue
-            return f"{name}={_short(value, 30)}"
+            for w in words:
+                if _ENV_WORD.fullmatch(w):
+                    return f"{setters[0]} {w}"
+            if "printf" in setters and any(w.startswith("-v") for w in words):
+                return "printf -v"
+            if set(setters) - {"printf", "for", "select", "env"} and any(
+                    ("$" in w.split("=", 1)[0] or "`" in w.split("=", 1)[0]) for w in words if not w.startswith("-")):
+                return f"{setters[0]} with a computed name"
         return None
     return st.once(("exec-env",), find)
 
@@ -2043,31 +2057,45 @@ def _git_exec_option(sub: str, args: List[str]) -> Optional[str]:
                 if "=" in a and a.split("=", 1)[0] in _GIT_READ_VALUE_OPTS:
                     continue
                 return a
-            if _GIT_SHORT_VALUE.fullmatch(a) or set(a[1:]) <= _GIT_SAFE_SHORT:
+            if _git_short_ok(sub, a):
                 continue
             return a
         return None
     for a in args:
         if a == "--":
             break
+        name = a.split("=", 1)[0]
+        abbrev = a.startswith("--") and len(name) >= 5  # git accepts any unambiguous prefix of a long option
         for opt in _GIT_EXEC_OPTS.get(sub, ()):
-            long_hit = opt.startswith("--") and (a == opt or a.startswith(opt + "="))
+            long_hit = opt.startswith("--") and abbrev and opt.startswith(name)
             short_hit = not opt.startswith("--") and a.startswith("-") and not a.startswith("--") and opt[1] in a
             if long_hit or short_hit:
                 return a
         strategy = None
-        if a.startswith("--strategy="):
+        if abbrev and "--strategy".startswith(name) and "=" in a:
             strategy = a.split("=", 1)[1]
-        elif a == "--strategy" or (a == "-s" and sub in ("merge", "pull", "rebase")):
+        elif (abbrev and "--strategy".startswith(name)) or (a == "-s" and sub in ("merge", "pull", "rebase")):
             nxt = args[args.index(a) + 1:args.index(a) + 2]
             strategy = nxt[0] if nxt else ""
         elif a.startswith("-s") and len(a) > 2 and not a.startswith("--") and sub in ("merge", "pull", "rebase"):
             strategy = a[2:]
         if strategy is not None and strategy not in _MERGE_STRATEGIES:
             return a
-        if sub == "push" and a.startswith("--recurse-submodules") and a.split("=", 1)[-1] not in ("no", "check"):
-            return a
     return None
+
+
+_PICKAXE_SUBS = {"log", "diff", "show", "whatchanged", "diff-tree", "diff-files", "diff-index", "blame", "annotate"}
+
+
+def _git_short_ok(sub: str, a: str) -> bool:
+    """A short option on a read: a count (-5, -n5, -U3), a pickaxe or range value where it takes one (-Sfoo,
+    -L1,9:f), or a cluster of letters that are each safe (so -nO'cmd' fails on the O)."""
+    body = a[1:]
+    if re.fullmatch(r"\d+|[nUABCMm]\d+%?", body):
+        return True
+    if sub in _PICKAXE_SUBS and re.fullmatch(r"[SGL].+", body, re.S):
+        return True
+    return set(body) <= _GIT_SAFE_SHORT
 
 
 def _git_writes(sub: str, args: List[str]) -> bool:
@@ -2222,18 +2250,63 @@ def _git_update_ref(c: _GitCall) -> Iterator[Block]:
         yield c.blk("destructive_git", "git update-ref -d deletes a ref", "ask the operator to delete refs by hand")
 
 
+_PUSH_LONG = {"--set-upstream", "--force", "--force-with-lease", "--no-force-with-lease", "--force-if-includes",
+              "--no-force-if-includes", "--delete", "--mirror", "--all", "--branches", "--tags", "--follow-tags",
+              "--no-follow-tags", "--verify", "--no-verify", "--dry-run", "--porcelain", "--quiet", "--verbose",
+              "--progress", "--no-progress", "--atomic", "--no-atomic", "--signed", "--no-signed", "--prune",
+              "--thin", "--no-thin", "--ipv4", "--ipv6", "--repo", "--push-option", "--receive-pack", "--exec",
+              "--recurse-submodules", "--no-recurse-submodules"}
+
+
+def _push_default_target(c: _GitCall, current: Optional[str], remote: Optional[str]) -> Iterator[Block]:
+    """A push with no refspec goes where the repo config says: remote.<name>.push, push.default and the
+    branch's upstream. Block when that is a protected branch or cannot be told."""
+    ctx, st, blk, d = c.ctx, c.st, c.blk, c.d
+    if current is None:
+        yield blk("protected_branches", "git push with no branch named, on a detached HEAD, cannot be checked",
+                  "name the branch: git push origin <branch>")
+        return
+    name = remote if remote and parse_origin(remote) is None and "://" not in remote else None
+    name = name or _git_config(ctx, st, d, f"branch.{current}.pushRemote") \
+        or _git_config(ctx, st, d, "remote.pushDefault") or _git_config(ctx, st, d, f"branch.{current}.remote") \
+        or "origin"
+    if _git_config(ctx, st, d, f"remote.{name}.push"):
+        yield blk("protected_branches", f"remote.{name}.push decides what a bare git push sends",
+                  "name the branch: git push origin <branch>")
+        return
+    mode = (_git_config(ctx, st, d, "push.default") or "simple").strip().lower()
+    if mode not in ("simple", "current", "upstream", "tracking", "nothing"):
+        yield blk("protected_branches", f"push.default={mode} can push other branches",
+                  "name the branch: git push origin <branch>")
+        return
+    upstream = _git_config(ctx, st, d, f"branch.{current}.merge") if mode != "current" else None
+    up = (upstream or "").strip()
+    up = up[len("refs/heads/"):] if up.startswith("refs/heads/") else up
+    if up in ctx.protected_branches:
+        yield blk("protected_branches", f"{current} pushes to its upstream, the protected branch {up}",
+                  "name the branch: git push origin <branch>")
+
+
 def _git_push(c: _GitCall) -> Iterator[Block]:
     ctx, st, blk, d = c.ctx, c.st, c.blk, c.d
     force = delete = mirror = all_ = False
     positional: List[str] = []
     repo_opt: Optional[str] = None
     for a in c.args:
+        name = a.split("=", 1)[0]
+        if a.startswith("--") and name not in _PUSH_LONG:  # also git's abbreviations, such as --rec or --for
+            yield blk("other_repo", f"git push {name}: option not known to the guard", "spell out a plain option")
+            return
         if a.startswith("--repo="):
             repo_opt = a[len("--repo="):]
         elif a in ("-o", "--push-option", "--receive-pack", "--exec", "--repo") or \
-                a.startswith(("--receive-pack=", "--exec=")):
+                a.startswith(("--receive-pack=", "--exec=", "--push-option=")):
             yield blk("other_repo", f"git push {a.split('=')[0]}: option not supported by the guard",
                       "push without that option")
+            return
+        elif name == "--recurse-submodules" and a.split("=", 1)[-1] not in ("no", "check"):
+            yield blk("other_repo", "git push --recurse-submodules also pushes submodule repos",
+                      "push without it")
             return
         elif a.startswith("--force"):
             force = True
@@ -2276,6 +2349,8 @@ def _git_push(c: _GitCall) -> Iterator[Block]:
             yield blk("protected_branches", f"pushes to the protected branch {dst} are not allowed",
                       "push a feature branch and open a pull request")
             break
+    if not refspecs and not (mirror or all_):
+        yield from _push_default_target(c, current, remote)
 
     if c.has_c:
         yield blk("other_repo", "git -c with push can rewrite the push URL", "push without -c")

@@ -71,6 +71,9 @@ REPOS: Dict[str, Tuple[str, str, Optional[str], str]] = {
     "host": (GH + "acme/app.git", "feature/x", "", ""),
     "host/.not-me-companion/comp": (GH + "acme/friend.git", "feature/x", "", ""),
     "recurse": (GH + "acme/app.git", "feature/x", "", "recurse"),
+    "matching": (GH + "acme/app.git", "feature/x", "", "matching"),
+    "upmain": (GH + "acme/app.git", "feature/x", "", "upmain"),
+    "pushspec": (GH + "acme/app.git", "feature/x", "", "pushspec"),
 }
 
 # The repo layer may only tighten guard.*, mode, enabled and protected_branches, and its
@@ -152,6 +155,14 @@ def build_fixtures(root: Path) -> Dict[str, str]:
             _git(["remote", "set-url", "--push", "origin", "git@github.com:acme/lib.git"], repo, env)
         elif extra == "recurse":
             _git(["config", "push.recurseSubmodules", "on-demand"], repo, env)
+        elif extra == "matching":
+            _git(["config", "push.default", "matching"], repo, env)
+        elif extra == "upmain":
+            _git(["config", "branch.feature/x.remote", "origin"], repo, env)
+            _git(["config", "branch.feature/x.merge", "refs/heads/main"], repo, env)
+            _git(["config", "push.default", "upstream"], repo, env)
+        elif extra == "pushspec":
+            _git(["config", "remote.origin.push", "refs/heads/*:refs/heads/*"], repo, env)
         elif extra == "pushdefault":
             _git(["remote", "add", "up", GH + "acme/lib.git"], repo, env)
             _git(["config", "remote.pushDefault", "up"], repo, env)
@@ -995,7 +1006,7 @@ bash(A, None, "cd scripts && git log --oneline && git branch -a && git remote -v
 bash(A, None, "gh pr create -R acme/app --title x --body y")
 bash(A, None, "cd scripts && cat clean.sh && grep -r x sub && rm -rf build")
 bash(A, None, "cd scripts && python3 -m pytest")
-bash(A, None, 'export PATH="$PATH:/x"; printf "%s\\n" x; git push')
+bash(B, OR, 'export PATH="$PATH:/x"; printf "%s\\n" x; git push')  # PATH can swap the git that runs
 bash(A, None, 'git commit -m "fix (x; cd {F}/other "; git push')  # the cd is quoted data
 bash(A, None, "bash -c 'true; cd {F}/other '; git push")  # a child shell's cd
 bash(A, None, "echo 'a (b' && git push")
@@ -1063,6 +1074,39 @@ for cmd in ("git log --oneline", "git diff --stat", "git -c color.ui=always log"
             "grep -rn git .", "gh api graphql -f query='query { viewer { login } }'", "git grep -n foo",
             "git diff --name-only HEAD~1 -- src", "PAGER=cat git log", "git rev-parse --abbrev-ref HEAD",
             "git remote get-url origin", "git branch --show-current", "timeout 30 git status"):
+    bash(A, None, cmd)
+
+# Fix round 2: programs that run a command from an argument, git option abbreviations and clusters,
+# variables set by any means, and where a push with no refspec really goes.
+ROUND2_START = len(CASES)
+for cmd in (
+        f"awk 'BEGIN{{system(\"git push {OTHER}\")}}'", f"sed -n '1e git push {OTHER}' README.md",
+        f"vim -c '!git push {OTHER}' -c q", f"tar -cf - README.md --to-command='git push {OTHER}'",
+        f"less +'!git push {OTHER}' README.md", "man -P 'gh pr comment 1 -R acme/other -b x' ls",
+        "sort --compress-program=git README.md", "rg --pre 'gh pr comment 1 -R acme/other -b x' foo",
+        "more README.md /usr/bin/git",
+        # git long-option abbreviations and short clusters
+        "git ls-remote --upload-p='sh -c y' origin", "git fetch --upload-p='sh -c y' origin",
+        "git rebase --exe=true main", "git grep --open-files=sh x", "git push --recurse-sub origin feature/x",
+        "git log --ext-d -p", "git clone --templ=/tmp/t https://github.com/acme/app", "git push --for origin feature/x",
+        "git merge --strat=evil feature/y", "git grep -nO'sh -c y' x", "git grep -GO'sh -c y' x",
+        # exec and config variables set by any means
+        'export PATH="/tmp:$PATH"; git status', "read EDITOR < f; git commit", "printf -v PAGER %s sh; git log",
+        "mapfile GIT_DIR < f; git log", "declare -x XDG_CONFIG_HOME=/tmp/c; gh pr view 1",
+        "local GH_CONFIG_DIR=/tmp; gh pr view 1", "unset GIT_CONFIG_NOSYSTEM; git log",
+        "export LD_PRELOAD=/tmp/x.so; git status", "DYLD_INSERT_LIBRARIES=/tmp/x git status", "IFS=x; git status",
+        "export PROMPT_COMMAND=x; git status", 'declare "$v"=1; git log', "export BASH_ENV; git status",
+        # push.default and the upstream decide a bare push
+        "git -c push.default=matching push", "git config push.default matching"):
+    bash(B, OR, cmd)
+for variant in ("matching", "upmain", "pushspec"):
+    bash(B, PB, "git push", variant)
+ROUND2_END = len(CASES)
+for cmd in ("git log --oneline -5", "git diff main...HEAD --stat", "git log --format=%H -1", "git status --porcelain",
+            "git rev-parse --abbrev-ref HEAD", "git branch --show-current", "git diff --cached", "git show HEAD:f",
+            "git fetch origin", "gh pr view 5 --json state", "git commit -F f", "git push -u origin feature/x",
+            "git push", "git log -S foo -p", "git blame -L 10,20 README.md", "git grep -n -C3 foo", "LC_ALL=C git log",
+            "awk '{print $1}' README.md", "sed -n 1p README.md"):
     bash(A, None, cmd)
 
 # Substrings a block message must contain, by case id.
