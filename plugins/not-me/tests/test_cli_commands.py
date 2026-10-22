@@ -5,6 +5,8 @@ import io
 import json
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import unittest
@@ -13,6 +15,7 @@ from unittest import mock
 
 from notme import claims
 from notme import feedback as feedback_mod
+from notme import gh as gh_mod
 from notme import git as git_mod
 from tests import PLUGIN_ROOT, TempCase
 from tests import test_cli_contract as base
@@ -766,6 +769,25 @@ def init_repo(path):
     (Path(path) / "a.txt").write_text("one\n", encoding="utf-8")
     git(path, "add", "a.txt")
     git(path, "commit", "-q", "-m", "init")
+
+
+class TmpDirTests(base.CliCase):
+    def test_tmp_dir_is_fresh_private_and_accepted_as_input(self):
+        first = self.ok("tmp-dir")["path"]
+        second = self.ok("tmp-dir")["path"]
+        self.addCleanup(shutil.rmtree, first, True)
+        self.addCleanup(shutil.rmtree, second, True)
+        self.assertNotEqual(first, second)
+        root = os.path.realpath(str(gh_mod.notme_tmp_dir()))
+        for path in (first, second):
+            self.assertTrue(os.path.isdir(path))
+            self.assertEqual(os.path.dirname(os.path.realpath(path)), root)
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o700)
+            self.assertEqual(os.listdir(path), [])
+        body = Path(first) / "body.md"
+        body.write_text("hello\n", encoding="utf-8")
+        gh_mod.check_input_path(str(body), self.project)
 
 
 class GitTests(base.CliCase):
