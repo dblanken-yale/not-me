@@ -23,7 +23,7 @@ GRADER = "---\ntype: regex\n---\nx\n"
 
 def lint_root(case, scenario=None, module=None):
     root = Path(tempfile.mkdtemp())
-    case_dir = root / "plugins" / "not-me" / "evals" / case
+    case_dir = root / "evals-harness" / "cases" / case
     (case_dir / "graders").mkdir(parents=True)
     (case_dir / "prompt.md").write_text(PROMPT.format(name=case), encoding="utf-8")
     (case_dir / "graders" / "g.md").write_text(GRADER, encoding="utf-8")

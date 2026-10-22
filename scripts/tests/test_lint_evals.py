@@ -26,13 +26,13 @@ class LintEvalsTest(unittest.TestCase):
         code, out = run("evals_dirty", "--json")
         self.assertEqual(code, 1)
         data = json.loads(out)
-        self.assertEqual({v["rule"] for v in data["violations"]}, {"E1", "E2", "E3", "E4", "E5"})
+        self.assertEqual({v["rule"] for v in data["violations"]}, {"E1", "E2", "E4", "E5"})
         for v in data["violations"]:
             self.assertGreaterEqual(v["line"], 1)
 
     def test_only_filters(self):
-        _, out = run("evals_dirty", "--only", "E3", "--json")
-        self.assertEqual({v["rule"] for v in json.loads(out)["violations"]}, {"E3"})
+        _, out = run("evals_dirty", "--only", "E2", "--json")
+        self.assertEqual({v["rule"] for v in json.loads(out)["violations"]}, {"E2"})
 
     def test_no_evals_dir_is_a_notice(self):
         code, out = run("clean")

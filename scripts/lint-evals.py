@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Static lint for plugins/not-me/evals/*/prompt.md and their graders.
+"""Static lint for evals-harness/cases/*/prompt.md and their graders.
 
 Prints ``path:line: RULE: message`` per violation and exits 1, or exits 0.
-Rules: E1 frontmatter parses, E2 tags, E3 ablation, E4 graders, E5 live assertions,
-E6 live scenario grading.
+Rules: E1 frontmatter parses, E2 tags, E4 graders, E5 live assertions, E6 live scenario grading.
+(E3, the old ablation rule, went with `claude plugin eval`; the ids are not renumbered.)
 """
 from __future__ import annotations
 
@@ -20,10 +20,10 @@ REPO = HERE.parent
 sys.path.insert(0, str(REPO / "plugins" / "not-me"))
 from notme import frontmatter  # noqa: E402
 
-RULES = {"E1", "E2", "E3", "E4", "E5", "E6"}
+RULES = {"E1", "E2", "E4", "E5", "E6"}
 SCENARIO_ID = re.compile(r"(?:^|-)([A-Z]\d+)(?:-|$)")
 CLASSES = {"safety", "outcome", "quality"}
-GRADER_TYPES = {"regex", "tool_used", "tool_order", "file_exists", "llm", "baseline"}
+GRADER_TYPES = {"regex", "tool_used", "tool_order", "file_exists", "llm"}
 
 Violation = Tuple[str, int, str, str]
 
@@ -65,8 +65,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         ap.error(f"unknown rule id(s): {', '.join(sorted(only - RULES))}")
 
     root = Path(args.root).resolve()
-    plugin = root / "plugins" / "not-me"
-    evals = plugin / "evals"
+    evals = root / "evals-harness" / "cases"
+    harness = root / "evals-harness"
     violations: List[Violation] = []
     notices: List[str] = []
 
@@ -78,10 +78,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     prompts = sorted(evals.glob("*/prompt.md")) if evals.is_dir() else []
     if not prompts:
-        notices.append("no evals: plugins/not-me/evals/ has no cases")
-    harness = next((b for b in (root / "evals-harness", plugin / "evals-harness") if b.is_dir()), None)
-    if prompts and harness is None:
-        notices.append("E5 skipped: evals-harness/ is absent")
+        notices.append("no evals: evals-harness/cases/ has no cases")
 
     for prompt in prompts:
         case = prompt.parent.name
@@ -105,9 +102,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         if len(classes) != 1 or classes[0][6:] not in CLASSES:
             add(prompt, at, "E2", "tags must contain exactly one class:safety|outcome|quality")
 
-        if "ablation" in meta and meta["ablation"] != "none":
-            add(prompt, lines.get(("ablation",), 1), "E3", f"ablation must be 'none' (found {meta['ablation']!r})")
-
         graders = sorted((prompt.parent / "graders").glob("*.md"))
         if not graders:
             add(prompt, 1, "E4", "graders/ needs at least one grader file")
@@ -122,7 +116,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 add(grader, glines.get(("type",), 1), "E4",
                     f"grader type {gmeta.get('type')!r} is not one of {', '.join(sorted(GRADER_TYPES))}")
 
-        if harness is not None and "live" in tags:
+        if "live" in tags:
             found = SCENARIO_ID.search(case)
             sid = found.group(1) if found else None
             modules = [harness / "assertions" / f"{name}.py" for name in (case, sid) if name]
