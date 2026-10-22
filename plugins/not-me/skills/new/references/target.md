@@ -13,7 +13,7 @@ the issue is chosen, how its text is read and screened, and how epics chain.
    log. A summary that says "committed but NOT PUSHED" names a branch: check it out,
    confirm its commits are still there, and continue at step 8 with that issue.
    Anything else in the last log is history, not work.
-3. **Queue.** `notme pick-issue`. It already skips issues that are assigned, carry
+3. **Queue.** `notme pick-issue`. It already skips issues that are assigned to someone else, carry
    `paused`, `blocked` or `epic`, lack the pick label, or were written by an author
    the roster does not trust. `{"none": true}` is NONE.
 

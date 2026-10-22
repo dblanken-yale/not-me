@@ -106,10 +106,17 @@ class CandidateTests(QueueTestCase):
         add_issue(self.fake, 8, labels=["to do", "epic"])
         self.assertEqual(self.numbers(), [5])
 
-    def test_assigned_issues_are_excluded(self):
+    def test_issues_assigned_to_someone_else_are_excluded(self):
         add_issue(self.fake, 5)
         add_issue(self.fake, 6, assignees=["hubot"])
+        add_issue(self.fake, 7, assignees=["octocat", "hubot"])
         self.assertEqual(self.numbers(), [5])
+
+    def test_issues_assigned_to_me_are_pickable(self):
+        # A lead assigns work to the operator before labeling it; that is still the operator's queue.
+        add_issue(self.fake, 5, assignees=["octocat"])
+        add_issue(self.fake, 6, assignees=["OctoCat"])
+        self.assertEqual(self.numbers(), [5, 6])
 
     def test_untrusted_authors_are_excluded(self):
         add_issue(self.fake, 5, author="hubot")
