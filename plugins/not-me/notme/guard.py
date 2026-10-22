@@ -154,34 +154,99 @@ _PREFIX_WORDS: Dict[str, Set[str]] = {
 # A command that changes the shell's directory anywhere may not also write with git or gh: the guard judges
 # writes in the hook's real working directory and does not follow cd (see _dir_change).
 _DIR_WORDS = {"cd", "pushd", "popd", "chdir"}  # as any word: also caught behind xargs, env, nohup, sudo, find
-_DIR_NAMES = {"source", ".", "eval", "exec", "alias", "function", "trap"}  # as the command name
+_DIR_NAMES = {"source", ".", "eval", "exec", "alias", "function", "trap", "emulate", "zle", "sched"}  # command name
 _DIR_VARS = "PWD|OLDPWD|CDPATH|HOME|DIRSTACK|cdpath|dirstack"
-_DIR_VAR_SET = re.compile(r"(?<![A-Za-z0-9_$])(?:" + _DIR_VARS + r")(?:\[[^\[\]]*\])?\s*(?:[-+*/%&|^]|<<|>>)?=(?!=)")
+# zsh special arrays that define functions, aliases or options (auto_cd) when assigned to
+_ZSH_TABLES = "functions|aliases|galiases|saliases|options"
+_DIR_VAR_SET = re.compile(r"(?<![A-Za-z0-9_$])(?:" + _DIR_VARS + "|" + _ZSH_TABLES
+                          + r")(?:\[[^\[\]]*\])?\s*(?:[-+*/%&|^]|<<|>>)?=(?!=)")
 _DIR_VAR_WORD = re.compile(r"(?:-[A-Za-z]*)?(?:" + _DIR_VARS + r")")
+_GLOB_QUALIFIER = re.compile(r"\((?:#q)?[^()\s|;&]*?(?:e[^A-Za-z0-9_\s]|\+[A-Za-z_])")  # zsh *(e:'cd x':), *(+f)
 _DIR_VAR_DEFAULT = re.compile(r"\$\{(?:" + _DIR_VARS + r")(?:\[[^\[\]]*\])?:?=")
 _DECLARE = {"declare", "typeset", "local", "export", "readonly", "integer", "float", "private"}
 _NAME_ARGS = {"read", "mapfile", "readarray", "unset", "let", "getopts"}
 _CD_HINT = ("use git -C <path> or gh -R owner/name instead of cd; if a cd is needed, run it in a separate Bash "
             "call first")
 _HTTP_CLIENTS = {"curl", "wget", "http", "https", "xh"}
-_GIT_READ = {"", "status", "log", "diff", "show", "fetch", "pull", "add", "restore", "stash", "tag", "rev-parse",
-             "ls-files", "worktree", "init", "clone", "cherry-pick", "revert", "mv", "rm", "grep", "blame",
-             "describe", "shortlog", "ls-remote"}
-# git subcommands that change nothing; any other one counts as a write next to a directory change or GIT_*
+# programs that never run their arguments: a gh or git word there is data (anything else naming gh/git blocks)
+_INERT = {"echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "cat", "ls", "head", "tail", "wc", "test", "[", "[[",
+          "true", "false", ":", "which", "type", "whereis", "man", "less", "more", "file", "stat", "sort", "uniq",
+          "cut", "tr", "diff", "cmp", "basename", "dirname", "realpath", "readlink", "touch", "mkdir", "cp", "mv",
+          "ln", "chmod", "jq", "yq", "tee", "comm", "column", "nl", "od", "xxd", "hexdump", "strings", "base64",
+          "shasum", "sha256sum", "md5", "md5sum", "date", "pwd", "whoami", "id", "uname", "sleep", "rmdir",
+          "cd", "pushd", "popd", "export", "unset", "local", "read", "set"}
+# git subcommands that change nothing, provided every option is on _GIT_READ_OPTS. A git call is a read
+# only when proven to be one; an unknown subcommand, option or -c key blocks.
 _GIT_READ_ONLY = {"", "status", "log", "diff", "show", "rev-parse", "ls-files", "ls-tree", "ls-remote", "cat-file",
                   "grep", "blame", "annotate", "describe", "shortlog", "rev-list", "merge-base", "show-ref",
                   "for-each-ref", "show-branch", "check-ignore", "name-rev", "cherry", "range-diff", "diff-tree",
                   "diff-files", "diff-index", "whatchanged", "count-objects", "var", "help", "version"}
+_GIT_READ_OPTS = set("""
+-- -p -u -s -z -v -q -n -i -w -b -l -L -M -C -B -D -R -a -r -t -d -c -e -E -F -G -S -h -H -I -o -W -U -A -m -1
+--oneline --stat --shortstat --numstat --name-only --name-status --patch --no-patch --raw --graph --decorate
+--no-decorate --all --branches --tags --remotes --abbrev-commit --no-abbrev-commit --pretty --reverse --first-parent
+--merges --no-merges --follow --cached --staged --color --no-color --check --exit-code --quiet --summary --full-index
+--minimal --patience --histogram --pickaxe-all --pickaxe-regex --no-renames --no-ext-diff --no-textconv --left-right
+--cherry-pick --cherry-mark --boundary --ancestry-path --simplify-by-decoration --topo-order --date-order
+--author-date-order --full-history --source --mailmap --no-mailmap --use-mailmap --show-signature --no-walk
+--walk-reflogs --log-size --full-diff --short --branch --porcelain --long --ignored --show-stash --ahead-behind
+--no-ahead-behind --column --no-column --renames --find-renames --find-copies --irreversible-delete
+--ignore-all-space --ignore-space-change --ignore-blank-lines --ignore-cr-at-eol --ignore-space-at-eol
+--invert-grep --all-match --regexp-ignore-case --basic-regexp --extended-regexp --fixed-strings --perl-regexp
+--line-number --ignore-case --files-with-matches --files-without-match --count --word-regexp --invert-match
+--untracked --no-index --heading --break --only-matching --full-name --null --show-toplevel --git-dir
+--git-common-dir --absolute-git-dir --abbrev-ref --verify --symbolic-full-name --symbolic --is-inside-work-tree
+--is-inside-git-dir --is-bare-repository --show-prefix --show-cdup --show-superproject-working-tree --sq --others
+--exclude-standard --modified --deleted --stage --directory --unmerged --error-unmatch --killed --full-tree --heads
+--refs --get-url --symref --is-ancestor --octopus --independent --fork-point --hash --dereference --exists --head
+--contains --merged --no-merged --points-at --non-matching --verbose --always --dirty --broken --exact-match
+--numbered --email --committer --line-porcelain --incremental --root --show-email --show-number --show-name --list
+--no-notes --left-only --right-only --not --and --or --unified --word-diff --color-words --relative --no-relative
+--function-context --text --expand-tabs --no-expand-tabs --batch-check --no-prefix --max-count
+""".split())
+# --name=value forms accepted on reads
+_GIT_READ_VALUE_OPTS = set("""
+--format --pretty --date --since --until --after --before --author --committer --grep --max-count --skip --stat
+--dirstat --abbrev --diff-filter --unified --word-diff --word-diff-regex --color --color-words --relative --decorate
+--find-renames --find-copies --untracked-files --ignore-submodules --porcelain --sort --max-depth --context
+--after-context --before-context --exclude --encoding --min-parents --max-parents --branches --tags --remotes
+--glob --candidates --match --default --short --points-at --contains --merged --no-merged --group --type
+--inter-hunk-context --src-prefix --dst-prefix --line-prefix --submodule --column --count
+""".split())
+_GIT_SAFE_SHORT = frozenset("pusvqnizwblLMCBDRartdcehHEFIoWUAm1234567890")  # letters in -sb style clusters
+_GIT_SHORT_VALUE = re.compile(r"-(?:\d+|[nUABCSGLM]\S+)")  # -n5, -U3, -L10,20:f, -Sfoo
+# git -c keys (and git config writes) that cannot run code or redirect a repo; every other key blocks
+_GIT_SAFE_KEYS = {"user.name", "user.email", "core.quotepath", "core.abbrev", "init.defaultbranch", "safe.directory",
+                  "commit.gpgsign", "tag.gpgsign", "log.showsignature", "log.decorate", "diff.renames",
+                  "diff.noprefix", "pull.rebase", "pull.ff", "merge.ff", "rebase.autosquash", "rebase.autostash",
+                  "push.autosetupremote", "push.default", "fetch.prune", "status.short", "status.branch"}
+_GIT_SAFE_KEY_PREFIXES = ("color.", "advice.", "column.", "i18n.")
+# git options before the subcommand that are understood; any other one blocks
+_GIT_GLOBALS = {"--no-pager", "-p", "-P", "--paginate", "--no-optional-locks", "--literal-pathspecs",
+                "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--no-replace-objects",
+                "--no-lazy-fetch", "--version", "--help", "--html-path", "--man-path", "--info-path"}
+# local writes allowed outside a directory change; their code-running options block (see _git_exec_option)
+_GIT_LOCAL = {"fetch", "pull", "add", "restore", "stash", "tag", "worktree", "init", "clone", "cherry-pick",
+              "revert", "mv", "rm", "apply", "format-patch", "reflog"}
+_GIT_EXEC_OPTS: Dict[str, Tuple[str, ...]] = {
+    "clone": ("--upload-pack", "-u", "--template", "-c", "--config"), "init": ("--template",),
+    "fetch": ("--upload-pack",), "pull": ("--upload-pack",), "rebase": ("-x", "--exec"), "ls-remote": ("-u",),
+}
+_MERGE_STRATEGIES = {"ort", "recursive", "resolve", "octopus", "ours", "subtree"}
 # subcommands that only list with these arguments: (words, True = every argument, False = the first one)
 _GIT_LISTING: Dict[str, Tuple[Set[str], bool]] = {
     "branch": ({"-a", "-r", "-v", "-vv", "-l", "--list", "--all", "--remotes", "--verbose", "--show-current"}, True),
     "tag": ({"-l", "--list", "-n"}, True),
-    "remote": ({"", "-v", "--verbose", "show", "get-url"}, False),
     "stash": ({"list", "show"}, False),
     "worktree": ({"list"}, False),
-    "config": ({"--get", "--get-all", "--get-regexp", "--list", "-l"}, False),
+    "reflog": ({"", "show", "list"}, False),
 }
-_GIT_CONFIG_KEYS =("remote.", "url.", "branch.", "alias.", "include.", "includeif.", "credential.")
+# variables that make git or gh run a program; only these values are known to be safe
+_EXEC_ENV = re.compile(r"(?<![A-Za-z0-9_])(GIT_[A-Z0-9_]*|EDITOR|VISUAL|PAGER|GH_PAGER|GH_EDITOR|GH_BROWSER|BROWSER"
+                       r"|LESSOPEN|LESSCLOSE|SSH_ASKPASS)=(\S*)")
+_SAFE_EXEC_ENV = {"PAGER": {"", "cat", "less", "more"}, "GH_PAGER": {"", "cat", "less", "more"},
+                  "GIT_PAGER": {"", "cat", "less", "more"}}
+_SAFE_GIT_ENV = {"GIT_TERMINAL_PROMPT", "GIT_OPTIONAL_LOCKS"}
 _GH_READ_VERBS = {"view", "list", "diff", "checks", "search", "browse", "clone", "download", "watch", "checkout",
                   "status", ""}
 _GH_READ_GROUPS = {"config", "help", "completion", "search", "version", "status"}
@@ -405,7 +470,7 @@ class _Lexer:
     def __init__(self, text: str):
         self.s, self.i, self.n = text, 0, len(text)
         self.commands: List[SimpleCommand] = []
-        self.sub_spans: List[Tuple[int, int]] = []
+        self.sub_spans: List[Tuple[int, int, bool]] = []  # (start, end, is ${ })
         self.cuts: List[Tuple[int, int]] = []  # here-document bodies, as (start, end) spans
         self.pending: List[Tuple[str, bool, bool, SimpleCommand]] = []  # (delimiter, strip tabs, quoted, cmd)
         self.funcdef = False
@@ -534,7 +599,7 @@ class _Lexer:
             elif c == "$" and s.startswith("(", self.i + 1):
                 self.dollar_paren()
             elif c == "$" and s.startswith("{", self.i + 1):
-                self.param()
+                self.param(dq=True)
             else:
                 self.i += 1
         if self.i > end:
@@ -627,7 +692,7 @@ class _Lexer:
             elif c == "$" and s.startswith("(", self.i + 1):
                 out.append(self.dollar_paren())
             elif c == "$" and s.startswith("{", self.i + 1):
-                out.append(self.param())
+                out.append(self.param(dq=True))
             else:
                 out.append(c)
                 self.i += 1
@@ -650,7 +715,7 @@ class _Lexer:
         body = self.i
         self.parse(close)
         self.nest(-1)
-        self.sub_spans.append((body, self.i - 1))
+        self.sub_spans.append((body, self.i - 1, False))
         return self.without_bodies(start, self.i)
 
     def dollar_paren(self) -> str:
@@ -679,7 +744,7 @@ class _Lexer:
             j += 1
         raise Unparsed("no closing )) for $((")
 
-    def param(self) -> str:
+    def param(self, dq: bool = False) -> str:
         s, start = self.s, self.i
         self.nest(1)
         self.i += 2
@@ -692,7 +757,7 @@ class _Lexer:
                 break
             if c == "\\":
                 self.i += 2
-            elif c == "'":
+            elif c == "'" and not dq:  # inside double quotes a ' is a plain character
                 end = s.find("'", self.i + 1)
                 if end < 0:
                     raise Unparsed("a single quote is not closed")
@@ -704,10 +769,11 @@ class _Lexer:
             elif c == "$" and s.startswith("(", self.i + 1):
                 self.dollar_paren()
             elif c == "$" and s.startswith("{", self.i + 1):
-                self.param()
+                self.param(dq)
             else:
                 self.i += 1
         self.nest(-1)
+        self.sub_spans.append((start + 2, self.i - 1, True))  # its text is checked like a substitution's
         return s[start:self.i]
 
     def without_bodies(self, a: int, b: int) -> str:
@@ -731,8 +797,13 @@ def lex(cmd: str) -> Parsed:
     lx.read_bodies()  # a here-document opened on the last line has an empty body
     for c in lx.commands:
         c.raw = lx.without_bodies(*c.span)
-    return Parsed(lx.commands, [lx.without_bodies(a, b) for a, b in lx.sub_spans],
-                  lx.without_bodies(0, len(cmd)), lx.funcdef)
+    subs = [lx.without_bodies(a, b) for a, b, _ in lx.sub_spans]
+    subs = [_PARAM_OP.sub(" ", s, count=1) if p else s for s, (_, _, p) in zip(subs, lx.sub_spans)]
+    return Parsed(lx.commands, subs, lx.without_bodies(0, len(cmd)), lx.funcdef)
+
+
+# the name and operator at the start of a ${...} body, so the word after ${x:-word} reads as a word
+_PARAM_OP = re.compile(r"^[#!]?[A-Za-z0-9_@*?$-]*?(?:\[[^\[\]]*\])?(?::?[-=+?]|##?|%%?|//?|\^\^?|,,?)")
 
 
 def needs_check(event: Mapping[str, Any]) -> bool:
@@ -1084,7 +1155,7 @@ def _moves(parsed: Parsed, raw: str, cwd: str) -> Optional[str]:
     """The first thing in the command that may change the shell's directory, or None."""
     if parsed.funcdef:
         return "a function definition"
-    m = _DIR_VAR_DEFAULT.search(raw)
+    m = _DIR_VAR_DEFAULT.search(raw) or _GLOB_QUALIFIER.search(parsed.code)
     if m:
         return m.group(0)
     for c in parsed.commands:
@@ -1137,6 +1208,12 @@ def _dir_change(words: List[str], cwd: str) -> Optional[str]:
     return None
 
 
+def _names_gh_git(word: str) -> bool:
+    """The word is gh or git (or a path to them), or a string whose first word is."""
+    first = word.split(None, 1)[0] if word.strip() else ""
+    return _head(first) in ("gh", "git")
+
+
 @lru_cache(maxsize=256)
 def _on_path(name: str) -> bool:
     return shutil.which(name) is not None
@@ -1185,11 +1262,11 @@ def _bash(cmd: str, cwd: str, ctx: GuardContext) -> Iterator[Block]:
         yield blk(SELF, f"the guard cannot read this command with confidence: {exc}",
                   "split it into shorter, simpler commands with plain quoting")
         return
-    for c in parsed.commands:
-        fed = any(_prog(w) in _FED_PROGS or _INTERP.match(_prog(w)) for w in c.words)
-        if fed and any(_mentions_github(b) for b in c.bodies):
-            yield blk(OPAQUE, "a heredoc fed to a shell or interpreter runs gh/git that cannot be checked",
-                      "run gh/git directly")
+    # a here-document anywhere may reach a shell anywhere in the command (cat <<EOF | bash): checked together
+    feeds = any(_prog(w) in _FED_PROGS or _INTERP.match(_prog(w)) for c in parsed.commands for w in c.words)
+    if feeds and any(_mentions_github(b) for c in parsed.commands for b in c.bodies):
+        yield blk(OPAQUE, "a here-document in a command that runs a shell or interpreter mentions gh/git, which "
+                          "cannot be checked", "run gh/git directly")
     if any(has_gh_git(_unshell(s)) for s in parsed.subs):
         yield blk(OPAQUE, "gh/git inside $(...), backticks or <(...) cannot be checked",
                   "run gh/git directly, not inside $(...)")
@@ -1289,6 +1366,9 @@ def _command(t: List[str], seg: str, st: _State, ctx: GuardContext) -> Iterator[
         yield blk(OPAQUE, f"{head} to GitHub bypasses gh's repo checks", "use gh with --repo owner/name")
     elif prefixed and has_gh_git(seg):
         yield blk(OPAQUE, f"cannot tell what '{word}' runs", "run gh/git directly, without the wrapper")
+    elif _prog(word) not in _INERT and any(_names_gh_git(a) for a in t):
+        yield blk(OPAQUE, f"{_prog(word)} may run gh/git with words the guard cannot check",
+                  "run gh/git directly, without the wrapper")
 
 
 def _pty_wrapper(t: List[str], seg: str, st: _State) -> Optional[str]:
@@ -1578,6 +1658,10 @@ def _wrapped(takes_value: Set[str], stop: Tuple[str, ...] = ()):
         if st.moved and has_gh_git(_unshell(seg)):
             yield _moved_write(st, blk, f"gh/git through {_prog(t[0])}")
             return
+        if _prog(t[0]) in ("xargs", "parallel") and any(_names_gh_git(a) for a in t[1:]):
+            yield blk(OPAQUE, f"{_prog(t[0])} adds words from its input to gh/git, so they cannot be checked",
+                      "run gh/git directly with every argument spelled out")
+            return
         rest = _skip_options(t[1:], takes_value)
         for k, a in enumerate(rest):
             if a in stop:
@@ -1658,41 +1742,150 @@ def _cmd_git(t, seg, st, ctx, blk, gitenv):
         elif a == "-c":
             c_values.append(t[i + 1] if i + 1 < len(t) else "")
             i += 2
-        else:
-            if a.split("=")[0] in ("--git-dir", "--work-tree", "--config-env", "--namespace", "--exec-path",
-                                   "--super-prefix"):
-                yield blk(OPAQUE, f"git {a.split('=')[0]} cannot be checked", "use git -C <checkout> instead")
+        elif a in _GIT_GLOBALS:
             i += 1
-    sub = t[i] if i < len(t) else ""
-    known = sub in _GIT_READ or sub in _GIT_RULES
-    if not known or _git_writes(sub, t[i + 1:]):
+        else:
+            yield blk(OPAQUE, f"git {a.split('=')[0]} cannot be checked", "use git -C <checkout> and no other "
+                                                                          "options before the subcommand")
+            return
+    sub, args = (t[i] if i < len(t) else ""), t[i + 1:]
+    known = sub in _GIT_READ_ONLY or sub in _GIT_LOCAL or sub in _GIT_RULES or sub in _GIT_LISTING
+    if not known:
+        yield blk(OPAQUE, f"git {sub} is not a subcommand the guard knows (an alias, extension or command that can "
+                          "run programs)", "use a plain git command the guard knows, or ask the operator")
+        return
+    bad_key = next((v for v in c_values if not _safe_git_key(v.split("=", 1)[0])), None)
+    if bad_key is not None:
+        yield blk(OPAQUE, f"git -c {_short(bad_key, 40)} can run programs or redirect git",
+                  "run git without -c, or only with keys such as user.name or color.ui")
+        return
+    env = _exec_env(st)
+    if env:
+        yield blk(OPAQUE, f"{env} makes git run another program or read another repo", "run git without it")
+        return
+    bad = _git_exec_option(sub, args)
+    if bad:
+        yield blk(OPAQUE, f"git {sub} {bad} runs a program or reaches past the guard",
+                  "run git without that option")
+        return
+    if _git_writes(sub, args):
         if st.moved:
             yield _moved_write(st, blk, f"git {sub}".strip())
             return
         if "GIT_" in st.plain_text:
             yield blk(OPAQUE, "GIT_* variables in a command with a git write can change where git reads its repo "
                               "or config", "run git without GIT_* variables")
-    if any(v.lower().startswith("alias.") for v in c_values) or (c_values and not known):
-        yield blk(OPAQUE, "git -c defining or calling an alias cannot be checked", "run the git command directly")
-    if not known:
-        alias = _git_config(ctx, st, d, f"alias.{sub}")
-        if alias and ("push" in alias or alias.startswith("!") or "send-pack" in alias):
-            yield blk("other_repo", f"git alias '{sub}' runs '{alias}'", "run the underlying git command directly")
+    elif sub in _GIT_READ_ONLY:
+        return
     handler = _GIT_RULES.get(sub)
     if handler is not None:
-        yield from handler(_GitCall(ctx, st, blk, d, sub, t[i + 1:], bool(c_values)))
+        yield from handler(_GitCall(ctx, st, blk, d, sub, args, bool(c_values)))
+
+
+def _safe_git_key(key: str) -> bool:
+    key = key.lower()
+    return key in _GIT_SAFE_KEYS or key.startswith(_GIT_SAFE_KEY_PREFIXES)
+
+
+def _exec_env(st: _State) -> Optional[str]:
+    """An assignment in the command that makes git or gh run another program, or None."""
+    def find() -> Optional[str]:
+        for m in _EXEC_ENV.finditer(st.plain_text):
+            name, value = m.group(1), m.group(2)
+            if name in _SAFE_GIT_ENV or value in _SAFE_EXEC_ENV.get(name, ()):
+                continue
+            return f"{name}={_short(value, 30)}"
+        return None
+    return st.once(("exec-env",), find)
+
+
+def _git_exec_option(sub: str, args: List[str]) -> Optional[str]:
+    """The first option that lets this git call run a program or escape the read allow-list, or None."""
+    if sub in _GIT_READ_ONLY:
+        for a in args:
+            if a == "--":
+                break
+            if sub == "ls-remote" and not a.startswith("--") and "u" in a:
+                return a  # ls-remote -u is --upload-pack
+            if not a.startswith("-") or a == "-" or a in _GIT_READ_OPTS:
+                continue
+            if a.startswith("--"):
+                if "=" in a and a.split("=", 1)[0] in _GIT_READ_VALUE_OPTS:
+                    continue
+                return a
+            if _GIT_SHORT_VALUE.fullmatch(a) or set(a[1:]) <= _GIT_SAFE_SHORT:
+                continue
+            return a
+        return None
+    for a in args:
+        if a == "--":
+            break
+        for opt in _GIT_EXEC_OPTS.get(sub, ()):
+            long_hit = opt.startswith("--") and (a == opt or a.startswith(opt + "="))
+            short_hit = not opt.startswith("--") and a.startswith("-") and not a.startswith("--") and opt[1] in a
+            if long_hit or short_hit:
+                return a
+        strategy = None
+        if a.startswith("--strategy="):
+            strategy = a.split("=", 1)[1]
+        elif a == "--strategy" or (a == "-s" and sub in ("merge", "pull", "rebase")):
+            nxt = args[args.index(a) + 1:args.index(a) + 2]
+            strategy = nxt[0] if nxt else ""
+        elif a.startswith("-s") and len(a) > 2 and not a.startswith("--") and sub in ("merge", "pull", "rebase"):
+            strategy = a[2:]
+        if strategy is not None and strategy not in _MERGE_STRATEGIES:
+            return a
+        if sub == "push" and a.startswith("--recurse-submodules") and a.split("=", 1)[-1] not in ("no", "check"):
+            return a
+    return None
 
 
 def _git_writes(sub: str, args: List[str]) -> bool:
     """True unless this git subcommand only reads (a listing form such as `git branch -a` counts as a read)."""
     if sub in _GIT_READ_ONLY:
         return False
+    if sub == "remote":
+        return not _remote_lists(args)
+    if sub == "config":
+        return not _config_reads(args)
     if sub not in _GIT_LISTING:
         return True
     words, every = _GIT_LISTING[sub]
     if every:
         return not all(a in words for a in args)
     return (args[0] if args else "") not in words
+
+
+def _remote_lists(args: List[str]) -> bool:
+    """git remote [-v], git remote get-url [--push|--all] <name>, git remote show [-n] <name>."""
+    rest = [a for a in args if a not in ("-v", "--verbose")]
+    if not rest:
+        return True
+    verb, more = rest[0], rest[1:]
+    opts = {"get-url": {"--push", "--all"}, "show": {"-n"}}.get(verb)
+    if opts is None:
+        return False
+    names = [a for a in more if not a.startswith("-")]
+    return all(a in opts for a in more if a.startswith("-")) and (len(names) == 1 or verb == "show")
+
+
+_CONFIG_READ_OPTS = {"--get", "--get-all", "--get-regexp", "--list", "-l", "--show-origin", "--show-scope", "--global",
+                     "--local", "--system", "--worktree", "-z", "--null", "--name-only", "--includes",
+                     "--no-includes", "--bool", "--int", "--path"}
+
+
+def _config_reads(args: List[str]) -> bool:
+    """git config --get k, --get-all k, --get-regexp re, --list, `get k`, `list`, or a bare key."""
+    opts = [a for a in args if a.startswith("-")]
+    pos = [a for a in args if not a.startswith("-")]
+    if not all(a in _CONFIG_READ_OPTS or a.startswith(("--type=", "--default=")) for a in opts):
+        return False
+    if {"--list", "-l"} & set(opts) or pos[:1] == ["list"]:
+        return len(pos) <= (1 if pos[:1] == ["list"] else 0)
+    if pos[:1] == ["get"]:
+        pos = pos[1:]
+    limit = 2 if "--get-regexp" in opts else 1
+    return 1 <= len(pos) <= limit
 
 
 def _git_switch(c: _GitCall) -> Iterator[Block]:
@@ -1738,10 +1931,19 @@ def _git_remote(c: _GitCall) -> Iterator[Block]:
 
 
 def _git_config_cmd(c: _GitCall) -> Iterator[Block]:
-    for a in c.args:
-        k = a.lower()
-        if k.startswith(_GIT_CONFIG_KEYS) or k == "core.sshcommand":
-            yield c.blk("other_repo", f"git config {a} can redirect pushes", "ask the operator to change git config")
+    """Reads pass; a write may only set or unset a key from the safe list, in the repo or global file."""
+    if _config_reads(c.args):
+        return
+    opts = [a for a in c.args if a.startswith("-")]
+    pos = [a for a in c.args if not a.startswith("-")]
+    if pos[:1] in (["set"], ["unset"]):
+        pos = pos[1:]
+    ok_opts = all(a in ("--global", "--local", "--add", "--unset", "--unset-all", "--replace-all", "--bool",
+                        "--int", "--path") or a.startswith("--type=") for a in opts)
+    if not (ok_opts and pos and _safe_git_key(pos[0])):
+        what = pos[0] if pos else " ".join(c.args)
+        yield c.blk("other_repo", f"git config {_short(what, 40)} can run programs or redirect pushes",
+                    "ask the operator to change git config")
 
 
 def _git_move(c: _GitCall) -> Iterator[Block]:
@@ -1830,6 +2032,10 @@ def _git_push(c: _GitCall) -> Iterator[Block]:
         yield blk("destructive_git", "git push --mirror overwrites every remote ref", "push one feature branch")
     if all_ and ctx.protected_branches:
         yield blk("protected_branches", "git push --all would push protected branches", "push one feature branch")
+    recurse = (_git_config(ctx, st, d, "push.recurseSubmodules") or "").strip().lower()
+    if recurse not in ("", "no", "check", "false"):
+        yield blk("other_repo", f"push.recurseSubmodules={recurse} also pushes submodule repos",
+                  "ask the operator to unset push.recurseSubmodules")
     current = _branch(ctx, st, d)
     for r in refspecs or [""]:
         s = r.lstrip("+")
@@ -1884,6 +2090,10 @@ _GIT_RULES: Dict[str, Callable[[_GitCall], Iterator[Block]]] = {
 
 def _cmd_gh(t, seg, st, ctx, blk, gitenv):
     group = t[1] if len(t) > 1 else ""
+    env = _exec_env(st)
+    if env:
+        yield blk(OPAQUE, f"{env} makes gh run another program", "run gh without it")
+        return
     if group in ("--version", "--help", "-h", "") or group in _GH_READ_GROUPS:
         return
     if group.startswith("-"):
@@ -2006,6 +2216,11 @@ def _gh_api(t, seg, st, ctx, blk):
     mutation = any("mutation" in a.lower() for a in t[2:])
     ep = (endpoint or "").lstrip("/")
     if ep == "graphql":
+        queries = [f.split("=", 1)[1] for f in fields if f.split("=", 1)[0] == "query" and "=" in f]
+        if inputs or len(queries) != 1 or any(c in queries[0] for c in "$`") or queries[0].startswith("@"):
+            yield blk("other_repo", "gh api graphql without one literal query cannot be checked",
+                      "pass the query inline with -f query='...'")
+            return
         atfile = any("@" in f for f in fields)
         if (mutation or atfile or inputs) and st.moved:
             yield _moved_write(st, blk, "gh api graphql")
@@ -2019,6 +2234,10 @@ def _gh_api(t, seg, st, ctx, blk):
         return
     if st.moved:
         yield _moved_write(st, blk, f"gh api {method}")
+        return
+    if ".." in ep or "//" in ep or "\\" in ep or re.search(r"%(?:2e|2f|5c)", ep, re.I):
+        yield blk("other_repo", f"gh api {method} {_short(ep, 60)}: dot segments or encoded separators can reach "
+                                "another repo", "spell out repos/owner/name/... plainly")
         return
     m = _REPO_PATH.match(ep)
     repo_root = bool(m) and not ep[m.end():].strip("/")
