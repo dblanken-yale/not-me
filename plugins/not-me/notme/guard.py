@@ -335,6 +335,8 @@ def strip_heredocs(cmd: str) -> Tuple[str, Optional[str]]:
 _MSG_LITERAL = re.compile(r"(?<![A-Za-z0-9_-])(?:-[A-Za-z]*m|--message)(?:=|[ \t]+)('[^']*'|\"(?:[^\"\\]|\\.)*\")")
 _DATA_GIT = re.compile(r"^git(?:\.exe)?(?:\s+-C\s+[^\s;|&<>()$`]+)?\s+(commit|tag)(?:\s|$)")
 _DATA_PROGS = {"cat", "tee"}
+_MESSAGE_FILE = re.compile(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.(?:md|txt)$")
+_REDIR_OP = re.compile(r"^(?:\d*>>?|&>>?)")
 _DATA_GIT_SUBS = {"add", "commit", "tag", "status", "diff"}
 _DATA_SINKS = re.compile(r"^(?:cat|tee)(?:\s|$)")
 _HEREDOC_REST = re.compile(r"[|&;()`$\\]|<<")
@@ -373,47 +375,43 @@ def _unquoted(text: str) -> Optional[str]:
     return None if quote else "".join(out)
 
 
-def _writes_somewhere_live(seg: str, cwd: str) -> bool:
-    """A cat/tee segment whose words name git's own files (hooks, config) or an existing symlink: what it
-    writes there can run later, so its text is not inert data."""
-    for w in seg.split():
-        w = re.sub(r"^\d*>>?\|?", "", w.replace('"', "").replace("'", ""))
-        low = w.lower().replace("\\", "/")
-        if not w or w.startswith("-"):
-            continue
-        if ".git" in low or "config/git" in low or "hooks" in low:
-            return True
-        p = _path.join(cwd, w)
-        if _path.islink(p) or ".git" in Path(_path.realpath(p)).parts:
-            return True
-    return False
+def _inert_target(word: str, cwd: str) -> bool:
+    """A plain relative *.md or *.txt path (no glob, ~, $, .., .git or hooks part) that is not an existing
+    symlink: a message file nothing runs."""
+    if not _MESSAGE_FILE.match(word):
+        return False
+    parts = word.lower().split("/")
+    if ".." in parts or any(x.startswith(".git") or "hook" in x for x in parts):
+        return False
+    path = _path.join(cwd, word)
+    return not _path.islink(path) and ".git" not in Path(_path.realpath(path)).parts
 
 
 def _only_data_commands(cmd: str, cwd: str) -> bool:
-    """True when every command in cmd is cat, tee or a git add/commit/tag/status/diff, with no pipe,
-    substitution, comment or backslash outside quotes, and cat/tee write nowhere that runs code: then nothing
+    """True when every command in cmd is cat or tee writing only plain *.md/*.txt files, or a git
+    add/commit/tag/status/diff, with no pipe, substitution, backslash, or comment outside quotes: then nothing
     in it can run a message or a written file afterwards."""
     text, _ = strip_heredocs(cmd)
     bare = _unquoted(text)
-    if bare is None or "#" in bare or "\\" in bare:
+    if "\\" in text or bare is None or "#" in bare:
         return False  # a comment or an escape can turn a seeming heredoc into commands bash runs
     if "|" in text.replace("||", "") or any(s in text for s in ("$(", "`", "<(", ">(")):
         return False
     for seg in segments(text):
         t = tokens(seg)
-        if not t:
-            continue
-        if _prog(t[0]) in _DATA_PROGS:
-            if _writes_somewhere_live(seg, cwd):
+        if t and _prog(t[0]) == "git":
+            k = 1
+            while t[k:k + 1] == ["-C"] and len(t) > k + 1:
+                k += 2
+            if t[k:k + 1] and t[k] not in _DATA_GIT_SUBS:
                 return False
             continue
-        if _prog(t[0]) != "git":
+        if t and t[0] not in _DATA_PROGS:
             return False
-        k = 1
-        while t[k:k + 1] == ["-C"] and len(t) > k + 1:
-            k += 2
-        if t[k:k + 1] and t[k] not in _DATA_GIT_SUBS:
-            return False
+        for w in seg.split()[1 if t else 0:]:  # every word a cat/tee (or a bare redirect) names
+            w = _REDIR_OP.sub("", w.replace('"', "").replace("'", ""))
+            if w and not w.startswith(("-", "<<")) and not _inert_target(w, cwd):
+                return False
     return True
 
 
