@@ -258,6 +258,8 @@ class ScenarioTests(unittest.TestCase):
         fake.on("git/ref/tags/fixture-baseline", "commit basesha")
         fake.on("--jq .login", "octo\n")
         fake.on("--paginate", "main mainsha\ndevelop basesha\n")
+        fake.on("issue list --repo %s --state open --json number" % REPO,
+                json.dumps([{"number": n} for n in range(1, 20)]))
         return fake
 
     def test_n1_gh_calls_and_manifest(self):
@@ -300,6 +302,8 @@ class ScenarioTests(unittest.TestCase):
             return ok(json.dumps([{"databaseId": 100 if runs["n"] == 1 else 101}]))
 
         fake.rules.insert(0, ("run list", run_list))
+        fake.rules.insert(0, ("--json number --limit 200 --label to do",
+                                json.dumps([{"number": n} for n in range(1, 20)])))
         fake.rules.insert(0, ("issue list --repo %s --state open --limit 200" % REPO, json.dumps(
             [{"number": 8, "title": "[eval:r1:N8] Urgent maintenance"}])))
         with tempfile.TemporaryDirectory() as tmp:
@@ -352,6 +356,55 @@ class ScenarioTests(unittest.TestCase):
             branches = {p["branch"] for p in spec.get("patches", []) if "branch" in p}
             for pr in spec.get("prs", []):
                 self.assertIn(pr["head"], branches, f.name)
+
+
+class VisibilityTests(unittest.TestCase):
+    SPEC = {"prs": [{"head": "h", "title": "t", "labels": ["needs work"],
+                     "assignee": "octo"}],
+            "issues": [{"title": "i", "labels": ["to do"]}, {"title": "plain"}]}
+    CREATED = {"issues": [{"number": 4}, {"number": 5}], "prs": [{"number": 7}]}
+
+    def run_wait(self, fake, dry=False, polls=30):
+        sleeps = []
+        client = make_client(fake, dry=dry)
+        client.sleep = sleeps.append
+        sf.Fixture(client, REPO).wait_visible(self.SPEC, self.CREATED, polls=polls)
+        return sleeps
+
+    def test_visible_at_once(self):
+        fake = Fake()
+        fake.on("pr list", json.dumps([{"number": 7}]))
+        fake.on("issue list", json.dumps([{"number": 4}]))
+        self.assertEqual(self.run_wait(fake), [])
+        lines = fake.lines()
+        pr = [l for l in lines if "pr list" in l][0]
+        self.assertIn("--label needs work", pr)
+        self.assertIn("--assignee octo", pr)
+        self.assertEqual(len([l for l in lines if "issue list" in l]), 1)
+
+    def test_visible_after_polls(self):
+        fake = Fake()
+        count = {"n": 0}
+
+        def pr_list(argv):
+            count["n"] += 1
+            return ok(json.dumps([{"number": 7}] if count["n"] > 2 else []))
+
+        fake.on("pr list", pr_list)
+        fake.on("issue list", json.dumps([{"number": 4}]))
+        self.assertEqual(self.run_wait(fake), [3, 3])
+
+    def test_timeout_raises(self):
+        fake = Fake()
+        fake.on("issue list", json.dumps([{"number": 4}]))
+        with self.assertRaises(sf.SeedError) as ctx:
+            self.run_wait(fake, polls=4)
+        self.assertIn("pr #7", str(ctx.exception))
+
+    def test_dry_run_does_not_poll(self):
+        fake = Fake()
+        self.assertEqual(self.run_wait(fake, dry=True), [])
+        self.assertEqual(fake.calls, [])
 
 
 class BootstrapTests(unittest.TestCase):
