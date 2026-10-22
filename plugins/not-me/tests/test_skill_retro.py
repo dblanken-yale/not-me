@@ -20,7 +20,7 @@ VERBS = "NONE | PR | PUSHED | PARKED | HELD | REVIEWED | PROVED | FAILED | STOP"
 MARKER = "<!-- not-me:retro -->"
 PROHIBITIONS = "${CLAUDE_PLUGIN_ROOT}/references/prohibitions.md"
 EM_DASH = "\u2014"
-GROUPS = {"log", "git", "guard", "allow-repo"}
+GROUPS = {"log", "git", "guard", "allow-repo", "retro"}
 FORBIDDEN = ["/Users/", "/home/", "C:\\", "~/code", "Dave", "Mike", "gh pr create", "gh pr comment",
              "gh pr edit", "gh issue edit", "gh issue comment", "gh pr review", "pytest", "npm test", "ruff",
              "phpunit", "composer"]

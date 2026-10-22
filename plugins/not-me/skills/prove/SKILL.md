@@ -22,8 +22,7 @@ Arguments: `$ARGUMENTS`. A PR reference (`N` or `owner/repo#N`, required),
 - With `--dry-run`, pass `--dry-run` to every `notme` call and say `dry-run` in
   the result note.
 - Every GitHub write goes through `notme`, with `--log <path>` once the log
-  exists. Text goes in files under a directory made with
-  `mktemp -d "$TMPDIR/not-me.XXXXXX"`, never in a shell argument.
+  exists. Text goes in files under the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/references/autonomy-and-logging.md` (Text to GitHub, rule 2), never in a shell argument.
 - Never change the repository. No edits, commits, pushes, branch switches, or
   checkouts of the PR head. Never run a project command that writes (installs,
   migrations, builds into the tree). The only files this run writes are its temp
