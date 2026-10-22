@@ -183,9 +183,10 @@ def plugin_repo(env: Mapping[str, str], runner: Runner) -> str:
 
 
 def check_token(token: str, repos: Sequence[str], plugin: str, runner: Runner, env: Mapping[str, str]) -> Dict[str, Any]:
-    """Refuse anything but a fine-grained token that can push to the fixture repos and gets an explicit
-    HTTP 404 for the plugin repo. Any other failure on the plugin repo (network, 401, 403, 5xx, gh missing)
-    also refuses, because it proves nothing about visibility. Returns the user."""
+    """Refuse anything but a fine-grained token that can push to the fixture repos and has no write access
+    to the plugin repo: an explicit HTTP 404 (private plugin repo) or a 200 whose permissions.push and
+    permissions.admin are both false (public plugin repo). Any other failure on the plugin repo (network,
+    401, 403, 5xx, gh missing) also refuses, because it proves nothing about access. Returns the user."""
     if not token.startswith("github_pat_"):
         kind = "a classic or OAuth token" if token.startswith(("ghp_", "gho_", "ghu_", "ghs_")) else \
             "not a fine-grained token"
@@ -204,12 +205,22 @@ def check_token(token: str, repos: Sequence[str], plugin: str, runner: Runner, e
         if not (info.get("permissions") or {}).get("push") is True:
             raise ScaffoldError(f"{TOKEN_ENV} cannot push to the fixture repo {repo} (permissions.push is not true)")
     try:
-        runner(["gh", "api", f"repos/{plugin}"], env=env)
+        raw = runner(["gh", "api", f"repos/{plugin}"], env=env).stdout
     except ScaffoldError as exc:
         if re.search(r"HTTP 404\b", str(exc)):
             return user
-        raise ScaffoldError(f"cannot confirm {TOKEN_ENV} is blind to {plugin}: expected HTTP 404, got: {exc}")
-    raise ScaffoldError(f"{TOKEN_ENV} can see {plugin}, the plugin repo. Refusing: it must be a fine-grained "
+        raise ScaffoldError(f"cannot confirm {TOKEN_ENV} has no access to {plugin}: expected HTTP 404 or a "
+                            f"200 without push, got: {exc}")
+    try:
+        perms = json.loads(raw).get("permissions") or {}
+    except (ValueError, AttributeError):
+        raise ScaffoldError(f"cannot confirm {TOKEN_ENV} has no access to {plugin}: unreadable reply")
+    if not isinstance(perms, dict):
+        raise ScaffoldError(f"cannot confirm {TOKEN_ENV} has no access to {plugin}: unreadable reply")
+    # A public plugin repo answers 200 to every token; what matters is that this one cannot write to it.
+    if perms.get("push") is False and perms.get("admin") is False:
+        return user
+    raise ScaffoldError(f"{TOKEN_ENV} can write to {plugin}, the plugin repo. Refusing: it must be a fine-grained "
                         "token limited to the fixture repos (see docs/testing.md)")
 
 
