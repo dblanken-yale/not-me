@@ -163,10 +163,15 @@ class TokenizerTests(unittest.TestCase):
 
     def test_substitutions(self):
         p = guard.lex("echo $(a $(b) c) `d` <(e) \"$(f)\" ${x:-$(g)} $((1 + (2))) '$(h)'")
-        self.assertEqual(sorted(p.subs), sorted(["a $(b) c", "b", "d", "e", "f", "g"]))
+        self.assertEqual(sorted(p.subs), sorted(["a $(b) c", "b", "d", "e", "f", "g", " $(g)"]))  # ${ } too
         self.assertEqual([c.words for c in p.commands if c.nested], [["b"], ["a", "$(b)", "c"], ["d"], ["e"], ["f"],
                                                                      ["g"]])
         self.assertEqual(guard.lex("echo $( (a) )").subs, [" (a) "])
+        # inside double quotes a ' in ${ } is a plain character, not a quote
+        self.assertEqual(guard.lex("echo \"${x:-'}\"; git push").commands[-1].words, ["git", "push"])
+        # <<- strips leading tabs from the body and the delimiter line
+        self.assertEqual(guard.lex("cat <<-EOF\n\tx\n\tEOF\ngit push").commands[-1].words, ["git", "push"])
+        self.assertEqual(self.words("cd\t\tx"), [["cd", "x"]])
 
     def test_heredocs(self):
         p = guard.lex("cat <<'EOF'\ngit push\nEOF\necho done")
