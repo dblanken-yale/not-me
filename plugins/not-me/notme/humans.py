@@ -4,13 +4,15 @@ A model can fake a terminal (a pty wrapper such as `script`, `expect`, `unbuffer
 makes stdin a tty) and can look up the operator's public gh login. It cannot change which processes started it.
 So a command counts as human only when stdin is a terminal, no Claude Code variable is set, no ancestor process is
 Claude Code (the CLI, its node entry point, or the desktop app, whose own terminal panel is a child of it), and
-NOT_ME_OPERATOR_CONFIRM equals the private operator token in <not-me home>/operator-token.
+the private operator token in <not-me home>/operator-token is given: in NOT_ME_OPERATOR_CONFIRM, or, when that is
+unset, typed at a hidden prompt.
 
 The PreToolUse guard is the enforcement; this check is a second layer.
 """
 from __future__ import annotations
 
 import csv
+import hashlib
 import hmac
 import io
 import os
@@ -18,6 +20,7 @@ import re
 import secrets
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
@@ -188,6 +191,149 @@ def read_token(home: os.PathLike) -> Optional[str]:
     return text or None
 
 
+def ask_token(prompt: str = "not-me operator token (input hidden): ") -> Optional[str]:
+    """Read the token from the terminal without echoing it; None when it cannot be read without echo. getpass
+    writes the prompt to the terminal (or stderr), never to stdout."""
+    import getpass
+    import warnings
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", getpass.GetPassWarning)  # its fallback would echo the token
+            return getpass.getpass(prompt)
+    except (EOFError, OSError, getpass.GetPassWarning):
+        return None
+
+
 def token_matches(home: os.PathLike, given: Optional[str]) -> bool:
     expected = read_token(home)
     return bool(expected and given) and hmac.compare_digest(expected, str(given).strip())
+
+
+# --- the live-mode marker ---------------------------------------------------------
+#
+# `mode: live` in the global project.md takes effect only next to <not-me home>/mode-live.sig, which holds an
+# HMAC-SHA256 over LIVE_MESSAGE and the resolved not-me home, keyed by the operator token and the epoch: the
+# random hex in <not-me home>/mode-live.epoch (key = token bytes + NUL + epoch bytes). Only `notme mode live`,
+# after the person check, writes the marker (creating the epoch when it is missing); going back to dry-run in the
+# global layer deletes the marker and replaces the epoch, so a copy of an old marker saved while live never
+# verifies again. Rotating the token or moving the home invalidates it too. The guard keeps the agent from
+# reading or writing the epoch, exactly as it does for the token.
+
+LIVE_MARKER = "mode-live.sig"
+LIVE_EPOCH = "mode-live.epoch"
+LIVE_MESSAGE = b"not-me mode live v2\0"
+_MARKER_LIMIT = 256  # a hex SHA-256 is 64 characters; anything much longer is not ours
+_EPOCH_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def live_marker_path(home: os.PathLike) -> Path:
+    return Path(home) / LIVE_MARKER
+
+
+def live_epoch_path(home: os.PathLike) -> Path:
+    return Path(home) / LIVE_EPOCH
+
+
+def _live_mac(token: str, epoch: str, home: os.PathLike) -> str:
+    bound = os.path.normcase(os.path.realpath(str(home)))
+    key = token.encode("utf-8") + b"\0" + epoch.encode("ascii")
+    return hmac.new(key, LIVE_MESSAGE + bound.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _write_private(path: Path, text: str, prefix: str) -> None:
+    """Write text to path atomically through a mode-0600 temp file in the same directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=str(path.parent))  # mkstemp: 0600
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def read_live_epoch(home: os.PathLike) -> Optional[str]:
+    """The epoch, or None when it is missing, a symlink, garbled, or (POSIX) readable by others or not ours."""
+    path = live_epoch_path(home)
+    try:
+        if path.is_symlink():
+            return None
+        st = path.stat()
+        if os.name == "posix" and (st.st_mode & 0o077 or st.st_uid != os.getuid()):
+            return None
+        with open(str(path), "rb") as fh:
+            data = fh.read(_MARKER_LIMIT + 1)
+        text = data.decode("ascii").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return text if _EPOCH_RE.match(text) else None
+
+
+def new_live_epoch(home: os.PathLike) -> str:
+    """Replace the epoch with a new random one (mode 0600, atomic) and return it."""
+    epoch = secrets.token_hex(32)
+    _write_private(live_epoch_path(home), epoch + "\n", ".mode-live-epoch-")
+    return epoch
+
+
+def write_live_marker(home: os.PathLike) -> Path:
+    """Sign live mode for home with the operator token and the epoch (created when missing or unusable): write
+    the marker atomically (mode 0600 where the platform has it) and return its path. ValueError when there is no
+    usable token."""
+    token = read_token(home)
+    if not token:
+        raise ValueError("no usable operator token; create one with `notme doctor --init-token`")
+    epoch = read_live_epoch(home) or new_live_epoch(home)
+    path = live_marker_path(home)
+    _write_private(path, _live_mac(token, epoch, home) + "\n", ".mode-live-")
+    return path
+
+
+def clear_live_marker(home: os.PathLike) -> bool:
+    """Remove the marker (whatever sits at its path) and replace the epoch, so no saved copy of an old marker
+    verifies again; True when there was a marker. When the epoch cannot be replaced it is removed (best effort):
+    a missing epoch is unconfirmed, and the next `notme mode live` makes a new one."""
+    try:
+        live_marker_path(home).unlink()
+        had = True
+    except FileNotFoundError:
+        had = False
+    try:
+        new_live_epoch(home)
+    except OSError:
+        try:
+            live_epoch_path(home).unlink()
+        except OSError:
+            pass
+    return had
+
+
+def live_confirmed(home: Optional[os.PathLike]) -> bool:
+    """True only when the marker exists and matches the current operator token and epoch for this home. With no
+    marker neither the token nor the epoch is read. Never raises for a missing or garbled file."""
+    if home is None:
+        return False
+    path = live_marker_path(home)
+    try:
+        if not path.is_file():
+            return False
+        with open(str(path), "rb") as fh:
+            given = fh.read(_MARKER_LIMIT + 1)
+    except OSError:
+        return False
+    if len(given) > _MARKER_LIMIT:
+        return False
+    token = read_token(home)
+    epoch = read_live_epoch(home)
+    if not token or not epoch:
+        return False
+    try:
+        text = given.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return False
+    return hmac.compare_digest(_live_mac(token, epoch, home), text)

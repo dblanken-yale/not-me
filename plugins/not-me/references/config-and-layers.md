@@ -75,7 +75,9 @@ blocks writes there; treat that as any guard block.
 
 ## Dry-run
 
-`mode: dry-run` is the plugin default until setup turns it off.
+`mode: dry-run` is the plugin default until a person runs `/not-me:mode live` in
+their own terminal. A `mode: live` written by hand stays dry-run; config edits can
+only set `dry-run`.
 
 1. Reads are real. Every write (labels, comments, pushes, PRs, board moves) is
    recorded in the dry-run ledger instead of sent.

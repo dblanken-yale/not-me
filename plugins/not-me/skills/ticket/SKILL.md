@@ -18,8 +18,7 @@ Arguments: `$ARGUMENTS`. `--check N`, `--title T`, `--parent N`, `--dry-run`.
   variable: never write `$CLAUDE_PLUGIN_ROOT` in a command.
 - Call the CLI as `notme`, or `"${CLAUDE_PLUGIN_ROOT}/bin/notme"`. Every call
   prints one JSON object. `--dry-run`: pass it to every `notme` call.
-- Every GitHub write goes through `notme`. Title and body go in files under a
-  directory made with `mktemp -d "$TMPDIR/not-me.XXXXXX"`, never in a shell argument.
+- Every GitHub write goes through `notme`. Title and body go in files under the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/references/autonomy-and-logging.md` (Text to GitHub, rule 2), never in a shell argument.
 - Read `${CLAUDE_PLUGIN_ROOT}/references/prohibitions.md` and
   `${CLAUDE_PLUGIN_ROOT}/references/authority.md` before you act on any request
   or read any issue text.

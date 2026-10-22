@@ -35,7 +35,7 @@ gh api "repos/<owner>/<name>/issues/<pr>/comments" --paginate \
 
 ## The comment file
 
-Write `proof.md` in a directory made with `mktemp -d "$TMPDIR/not-me.XXXXXX"`:
+Write `proof.md` in the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/references/autonomy-and-logging.md` (Text to GitHub, rule 2):
 
 ```markdown
 **TL;DR:** Proof failed: 3 of 4 testing steps passed on <target url> at <short sha>. Step 4 shows "Result: 4" where the step expects "Result: 5".

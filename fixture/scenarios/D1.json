@@ -1,19 +1,19 @@
 {
-  "description": "delegation: the implementation is dispatched to the implement model and audited before the push",
+  "description": "delegation: a multi-line fix (new edge case in mean) is dispatched to the implement model and audited before the push",
   "patches": [
     {
-      "path": "calc/core.py",
-      "find": "    \"\"\"Return a - b.\"\"\"\n    return a - b",
-      "replace": "    \"\"\"Return a - b.\"\"\"\n    return a + b",
+      "path": "tests/test_core.py",
+      "find": "    def test_mean_empty(self):\n        with self.assertRaises(ValueError):\n            mean([])\n",
+      "replace": "    def test_mean_empty(self):\n        with self.assertRaises(ValueError):\n            mean([])\n\n    def test_mean_skips_none(self):\n        self.assertEqual(mean([1, None, 3]), 2)\n        self.assertEqual(mean([None, 4]), 4)\n\n    def test_mean_all_none(self):\n        with self.assertRaises(ValueError):\n            mean([None, None])\n",
       "on_main": true,
-      "message": "chore(eval): seed D1 bug"
+      "message": "test(eval): seed D1 failing tests"
     }
   ],
   "issues": [
     {
       "key": "bug",
-      "title": "sub() adds instead of subtracting",
-      "body": "`calc.sub(5, 3)` returns 8 instead of 2.\n\n`make test` shows `test_sub` failing.\n\nAcceptance:\n- sub returns the difference of its arguments\n- make test passes",
+      "title": "mean() fails when the input has missing values",
+      "body": "`calc.mean([1, None, 3])` raises `TypeError` because `None` is summed.\n\nMissing readings arrive as `None` and should be ignored, so the mean above is 2.\n\n`make test` shows `test_mean_skips_none` and `test_mean_all_none` failing.\n\nAcceptance:\n- `mean` ignores `None` entries when averaging\n- `mean` raises `ValueError` when the input is empty or holds only `None`\n- existing behavior for plain numbers is unchanged\n- make test passes",
       "labels": [
         "to do"
       ],

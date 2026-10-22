@@ -98,8 +98,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/skills/retro/references/altitude.md`.
    in the audit log and the session output, with the evidence.
 4. The edit is already in the doc (an earlier retro of the same log made it):
    skip it and count no edit.
-5. Before editing, copy each file you will touch into a directory made with
-   `mktemp -d "$TMPDIR/not-me.XXXXXX"`. Edit with the Edit tool. A repo-layer doc
+5. Before editing, copy each file you will touch into the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/references/autonomy-and-logging.md` (Text to GitHub, rule 2). Edit with the Edit tool. A repo-layer doc
    that does not exist yet may be created with `schema: 1` and `extends: default`
    in its frontmatter and only the new section in its body.
 
@@ -124,8 +123,10 @@ Read `${CLAUDE_PLUGIN_ROOT}/skills/retro/references/altitude.md`.
 
 ## Step 7: Audit log
 
-Write `<common>/not-me/retro/<run_id>.md` with the Write tool, then append the
-run id to `reviewed.txt`. The audit log holds, in order:
+Write the audit log as `audit.md` in the temp directory, then save it with
+`notme retro save --run-id <run_id> --audit-file <temp>/audit.md --reviewed`. The
+CLI copies it to `<common>/not-me/retro/<run_id>.md` and adds the run id to
+`reviewed.txt`. Never write under `.git` yourself. The audit log holds, in order:
 
 1. The log path, its run id and ref, and the date.
 2. Each lesson: category, evidence, the edit made or `no edit` and why.
@@ -133,10 +134,9 @@ run id to `reviewed.txt`. The audit log holds, in order:
 4. The rollback: the full unified diff from step 5 in a `diff` block. Applying it
    in reverse restores the docs.
 
-The guard may block writes under the git directory. That block is final: print
-the audit log in the session instead, leave `reviewed.txt` unchanged and add the
-note `audit not saved`. A later run of the same log then finds the edits already
-made (step 4, item 4).
+If `notme retro save` fails, print the audit log in the session instead, leave
+`reviewed.txt` unchanged and add the note `audit not saved`. A later run of the
+same log then finds the edits already made (step 4, item 4).
 
 ## Step 8: Finish
 

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from notme import writes
+from notme import humans, writes
 from notme.writes import Decision, GuardContext, WriteTarget, check_write
 from tests import TempCase
 
@@ -150,9 +150,17 @@ class FromConfigTests(unittest.TestCase):
         self.addCleanup(self.tc.cleanup)
         self.tc.write("repo", "project", PROJECT_MD)
         self.tc.write("global", "project", GLOBAL_MD)
+        self.tc.sign_live()
 
     def ctx(self, url="git@github.com:acme/app.git"):
         return GuardContext.from_config(self.tc.load(), origin_url=url)
+
+    def test_unconfirmed_live_builds_a_dry_run_context(self):
+        humans.clear_live_marker(self.tc.home)
+        ctx = self.ctx()
+        self.assertEqual(ctx.mode, "dry-run")
+        self.assertTrue(ctx.dry_run)
+        self.assertTrue(any("not confirmed" in w for w in ctx.warnings), ctx.warnings)
 
     def test_allowed_set_from_config(self):
         writes.allowlist_add(self.tc.home, "acme/app", "acme/app-ui")  # confirms the repo-layer companion

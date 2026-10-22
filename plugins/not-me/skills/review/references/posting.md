@@ -9,7 +9,7 @@ earlier fixed threads get resolved. The general shape of every post is in
 
 ## Files
 
-Make one directory with `mktemp -d "$TMPDIR/not-me.XXXXXX"` and write:
+Make one work directory in the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/references/autonomy-and-logging.md` (Text to GitHub, rule 2) and write:
 
 1. `body.md`, in this order:
    - `<!-- not-me:review -->` on the first line. The CLI also adds the run marker.

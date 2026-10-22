@@ -14,7 +14,9 @@
     scaffold.py stage --case NAME --workspace DIR [--home DIR]
                                    Copies the staged clones into the workspace, writes the scenario's config
                                    layers (the global layer under HOME/.claude/not-me), the pause file and the
-                                   allow list. It does not sign gh in: the session gets the token as GH_TOKEN
+                                   allow list. A github-backend `mode: live` is signed with a fresh operator
+                                   token, epoch and marker, as `notme mode live` would. It does not sign gh in:
+                                   the session gets the token as GH_TOKEN
                                    from run_live.py. A record of what was written goes into the stage dir.
     scaffold.py clean [--stage-dir DIR]
                                    After the run. Removes the stage and its token copy.
@@ -146,7 +148,8 @@ def layer_files(config: Optional[Mapping[str, Any]], backend: str, values: Mappi
     """{"global": {name: text}, "repo": {name: text}} for a scenario config, placeholders filled.
 
     Every scenario gets `mode: live` (github backend) or `mode: dry-run` (ledger) in the global project.md,
-    except one with `none`, which gets no layer at all: a fresh install, which is dry-run by default.
+    except one with `none`, which gets no layer at all: a fresh install, which is dry-run by default. The live
+    mode counts only once stage_workspace signs it (sign_live).
     """
     config = dict(config or {})
     if config.get("none"):
@@ -384,6 +387,25 @@ def _identity(repo_dir: Path, info: Mapping[str, str], runner: Runner) -> None:
     runner(["git", "-C", str(repo_dir), "config", "--add", "credential.helper", "!gh auth git-credential"])
 
 
+def sign_live(global_dir: Path) -> List[str]:
+    """Make the staged `mode: live` count, the way a person's `notme mode live` does: a fresh random operator
+    token (unless the scratch layer already holds one), an epoch and the signed marker, all written by the
+    plugin's own helpers so the format cannot drift. Returns the file names written (never their contents).
+    Without them the CLI downgrades the staged live mode to dry-run and github-backend scenarios open no PRs."""
+    if str(PLUGIN) not in sys.path:
+        sys.path.insert(0, str(PLUGIN))
+    from notme import humans  # noqa: E402  (the plugin's own token and marker writers)
+
+    if humans.read_token(global_dir) is None:
+        try:
+            humans.create_token(global_dir)
+        except FileExistsError:
+            raise ScaffoldError(f"{humans.token_path(global_dir)} exists but is not a usable operator token; "
+                                "move it aside and stage again") from None
+    humans.write_live_marker(global_dir)
+    return [humans.TOKEN_NAME, humans.LIVE_EPOCH, humans.LIVE_MARKER]
+
+
 def stage_workspace(case: str, workspace: Path, home: Path, state: Path = STATE, runner: Runner = run,
                     scenarios: Path = SCENARIOS) -> Dict[str, Any]:
     """Fill `workspace` and `home` (its global layer) for one case run. Returns what was written (no secrets).
@@ -431,6 +453,8 @@ def stage_workspace(case: str, workspace: Path, home: Path, state: Path = STATE,
     for name, text in layers["global"].items():
         _write(global_dir / name, text)
         written.append(f"~/.claude/not-me/{name}")
+    if layers["global"] and info["backend"] != "ledger":
+        written += [f"~/.claude/not-me/{name}" for name in sign_live(global_dir)]
     for name, text in layers["repo"].items():
         _write(workspace / ".claude" / "not-me" / name, text)
         written.append(f".claude/not-me/{name}")

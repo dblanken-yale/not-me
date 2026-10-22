@@ -62,6 +62,8 @@ REPOS: Dict[str, Tuple[str, str, Optional[str], str]] = {
     "bare": (GH + "acme/app.git", "main", None, ""),
     "ssh": ("git@github.com:acme/app.git", "feature/x", "", ""),
     "sshurl": ("ssh://git@github.com/acme/app.git", "feature/x", "", ""),
+    "gdry": (GH + "acme/app.git", "feature/x", "", ""),
+    "gdryrun": (GH + "acme/app.git", "feature/x", "", "run"),
 }
 
 # The repo layer may only tighten guard.*, mode, enabled and protected_branches, and its
@@ -74,6 +76,9 @@ GLOBAL_LAYER: Dict[str, str] = {
     "offnoconfirm": "guard: {other_repo: off}",
     "alloff": "guard: {other_repo: off, protected_branches: off, force_push: off, destructive_git: off}\n"
               "confirm_guard_off: [other_repo, protected_branches, force_push, destructive_git]",
+    # a global layer in dry-run, for the live-mode cases (outside and inside a run)
+    "gdry": "mode: dry-run",
+    "gdryrun": "mode: dry-run",
 }
 
 # home -> allowed-repos.json text (None = no file)
@@ -121,6 +126,7 @@ def build_fixtures(root: Path) -> Dict[str, str]:
         (home / "project.md").write_text(f"---\nschema: 1\n{front}\n---\n# Project\n", encoding="utf-8")
     for home in (root / "homes").iterdir():  # a real token, so globs that expand to it are caught for real
         (home / "operator-token").write_text("fixture-token\n", encoding="utf-8")
+        (home / "mode-live.epoch").write_text("0" * 64 + "\n", encoding="utf-8")  # and a real epoch
     for name, (origin, branch, front, extra) in REPOS.items():
         repo = root / name
         repo.mkdir(parents=True, exist_ok=True)
@@ -561,6 +567,7 @@ bash(B, OR, "gh pr comment https://evil.example#@github.com/acme/app/pull/1 -b x
 # The not-me CLI trusts its project, home and operator: nothing may re-point them (always on).
 bash(A, None, "notme config")
 bash(A, None, "notme status")
+bash(A, None, "notme tmp-dir")
 bash(A, None, "notme allow-repo list")
 bash(A, None, "{P}/bin/notme status", "alloff")
 bash(A, None, "LC_ALL=C git status")
@@ -750,6 +757,169 @@ for _where in ("nogit", "app/vendor/nested"):
     write(A, None, "Edit", ".git/config", _where)
     mcp(A, None, "Grep", {"pattern": "x"}, _where)
     mcp(A, None, "mcp__github__create_issue", {"owner": "acme", "repo": "other"}, _where)
+    # the live-mode epoch and marker, and going live, are self-protection too
+    write(B, SP, "Read", "{H}/mode-live.epoch", _where)
+    bash(B, SP, "cat {H}/mode-live.e*", _where)
+    write(B, SP, "Write", "{H}/mode-live.sig", _where)
+    bash(B, SP, "cp /tmp/saved {H}/mode-live.sig", _where)
+    bash(B, SP, "notme mode live", _where)
+    bash(B, SP, '"$CLAUDE_PLUGIN_ROOT/bin/notme" mode live', _where)
+    mcp(B, SP, "Write", {"file_path": "{H}/project.md", "content": "---\nschema: 1\nmode: live\n---\n"}, _where)
+    bash(B, SP, "$P mode live", _where)
+    bash(B, SP, "X=$(printf %s no tme); $X mode live", _where)
+    bash(A, None, "notme mode show", _where)
+    bash(A, None, "$P mode show", _where)
+    bash(A, None, "$EDITOR mode.txt", _where)
+
+# Live mode is signed: `mode: live` counts only next to the marker `notme mode live` writes with the operator
+# token, so no file write by the agent can turn it on. The guard keeps a friendly early refusal for Edit/Write of a
+# live global project.md, protects the marker itself, and blocks `notme mode live` in every spelling.
+LIVE_FRONT = "---\nschema: 1\nmode: live\n---\n# Project\n"
+DRY_FRONT = "---\nschema: 1\nmode: dry-run\n---\n# Project\n"
+
+
+def edit(want: str, rule: Optional[str], tool: str, tin: Dict[str, Any], variant: str = "gdry") -> None:
+    _add(want, rule, tool, tin, variant)
+
+
+edit(B, SP, "Edit", {"file_path": "{H}/project.md", "old_string": "mode: dry-run", "new_string": "mode: live"})
+_mode_edit_id = CASES[-1][0]
+edit(B, SP, "Edit", {"file_path": "{H}/project.md", "old_string": "dry-run", "new_string": "live"})
+edit(B, SP, "Edit", {"file_path": "{H}/project.md", "old_string": "dry-run", "new_string": "'live'  # go",
+                     "replace_all": True})
+edit(B, SP, "Write", {"file_path": "{H}/project.md", "content": LIVE_FRONT})
+edit(B, SP, "Write", {"file_path": "{H}/PROJECT.MD", "content": LIVE_FRONT})
+edit(B, SP, "Write", {"file_path": "{H}/../g-gdry/project.md", "content": LIVE_FRONT})
+edit(B, SP, "MultiEdit", {"file_path": "{H}/project.md", "edits": [
+    {"old_string": "schema: 1", "new_string": "schema: 1"}, {"old_string": "dry-run", "new_string": "live"}]})
+edit(B, SP, "Edit", {"file_path": "{H}/project.md", "old_string": "not in the file", "new_string": "x"})
+edit(B, SP, "NotebookEdit", {"notebook_path": "{H}/project.md", "new_source": "x"})
+edit(B, SP, "Write", {"file_path": "{H}/project.md", "content": LIVE_FRONT}, "app")  # no global file yet
+edit(B, SP, "Edit", {"file_path": "{H}/project.md", "old_string": "dry-run", "new_string": "live"}, "gdryrun")
+edit(B, SP, "Write", {"file_path": "{H}/project.md", "content": LIVE_FRONT}, "gdryrun")
+edit(A, None, "Write", {"file_path": "{H}/project.md", "content": DRY_FRONT})
+edit(A, None, "Edit", {"file_path": "{H}/project.md", "old_string": "mode: dry-run",
+                       "new_string": "mode: dry-run\nenabled: false"})
+edit(A, None, "Edit", {"file_path": "{H}/project.md", "old_string": "# Project", "new_string": "mode: live"})
+edit(A, None, "Write", {"file_path": "{F}/gdry/.claude/not-me/project.md", "content": LIVE_FRONT})
+# A shell write of the global project.md is no longer the guard's business: a hand-set live runs as dry-run.
+bash(A, None, "echo 'mode: live' >> {H}/project.md", "gdry")
+bash(A, None, "cat {H}/project.md", "gdry")
+bash(B, SP, "notme mode live")
+_mode_cli_id = CASES[-1][0]
+bash(B, SP, "{P}/bin/notme mode live")
+bash(B, SP, "bash {P}/bin/notme mode live")
+bash(B, SP, "python3 {P}/cli/notme.py mode live")
+bash(B, SP, "notme --dry-run mode live", "alloff")
+bash(B, SP, "notme mode 'li've'")
+bash(B, SP, "notme mode live", "running")
+bash(B, SP, "{P}/bin/notme mode live", "running")
+bash(B, SP, "python3 {P}/cli/notme.py mode live", "running")
+bash(A, None, "notme mode show")
+bash(A, None, "{P}/bin/notme mode dry-run")
+bash(A, None, "notme mode dry-run --global")
+bash(A, None, "python3 {P}/cli/notme.py mode show", "running")
+bash(A, None, "notme mode dry-run", "running")
+# `python -m notme.cli` and `python -m notme` are notme calls too, for mode, pause and the allow list alike.
+bash(B, SP, "python3 -m notme.cli mode live")
+bash(B, SP, "python3 -mnotme.cli mode live")
+bash(B, SP, "python3 -m notme mode live", "running")
+bash(B, SP, "python3 -m notme.cli pause off")
+bash(B, SP, "python -m notme pause off", "running")
+bash(B, SP, "python3 -m notme.cli allow-repo remove acme/x")
+bash(A, None, "python3 -m notme.cli mode show")
+bash(A, None, "python3 -m notme.cli pause on")
+bash(A, None, "python3 -m json.tool x.json")
+# The marker is the operator's signature: the agent may not write, copy over or delete it, in or out of a run.
+edit(B, SP, "Write", {"file_path": "{H}/mode-live.sig", "content": "0" * 64}, "app")
+_marker_id = CASES[-1][0]
+edit(B, SP, "Write", {"file_path": "{H}/mode-live.sig", "content": "0" * 64}, "running")
+edit(B, SP, "Edit", {"file_path": "{H}/MODE-LIVE.SIG", "old_string": "a", "new_string": "b"}, "app")
+edit(B, SP, "Write", {"file_path": "{F}/elsewhere/mode-live.sig", "content": "x"}, "app")
+bash(B, SP, "cp /tmp/saved {H}/mode-live.sig")
+bash(B, SP, "cp /tmp/saved {H}/mode-live.sig", "running")
+bash(B, SP, "echo 0 > {H}/mode-l\\ive.sig")
+bash(B, SP, "cd {H} && mv x mode-live.sig")
+# ... also through globs, redirections and parts the guard cannot resolve, matched against the marker's path (it
+# need not exist yet). The Read tool may still read it.
+for _variant in ("app", "running"):
+    bash(B, SP, "cp /tmp/saved {H}/mode-live.s*", _variant)
+    bash(B, SP, "cp /tmp/saved {H}/mode-l?ve.sig", _variant)
+    bash(B, SP, "cp /tmp/saved {H}/mode-live.$EXT", _variant)
+    bash(B, SP, "mv x {H}/mode-live.{sig,bak}", _variant)
+    bash(B, SP, "cp /tmp/saved {H}/mode-live.s`echo ig`", _variant)
+    bash(B, SP, "echo 0 > {H}/m*.sig", _variant)
+    bash(B, SP, "printf 0 2>{H}/mode-live.s?g", _variant)
+    bash(B, SP, "tee {H}/mode-live.s* < x", _variant)
+    bash(B, SP, "dd if=x of={H}/mode-l*", _variant)
+    bash(B, SP, "cp /tmp/saved ${NOT_ME_HOME:-x}/mode-live.s[i]g", _variant)
+    write(A, None, "Read", "{H}/mode-live.sig", _variant)
+# The epoch keys the marker with the token and is replaced on every return to dry-run, so a saved marker cannot be
+# replayed. Like the token, the agent may neither read nor write it, in any spelling, in or out of a run.
+for _variant in ("app", "running"):
+    write(B, SP, "Read", "{H}/mode-live.epoch", _variant)
+    write(B, SP, "Write", "{H}/mode-live.epoch", _variant)
+    write(B, SP, "Edit", "{F}/app/MODE-LIVE.EPOCH", _variant)
+    mcp(B, SP, "NotebookRead", {"notebook_path": "{H}/mode-live.epoch"}, _variant)
+    bash(B, SP, "cat {H}/mode-live.epoch", _variant)
+    bash(B, SP, "cat {H}/mode-live.e*", _variant)
+    bash(B, SP, "cp {H}/mode-*.epoch /tmp/x", _variant)
+    bash(B, SP, "cp /tmp/old {H}/mode-live.e?och", _variant)
+    bash(B, SP, "head {H}/../*/mode-live.e*", _variant)
+    bash(B, SP, "cd {H} && base64 mode-live.e*", _variant)
+    bash(B, SP, "cat {H}/mode-live.e$X", _variant)
+    bash(B, SP, "cat {H}/mode-live.{epoch,x}", _variant)
+    bash(B, SP, "cat {H}/mode-live.e`echo poch`", _variant)
+    bash(B, SP, "cat {H}/mode-live.e$(echo poch)", _variant)
+    bash(B, SP, "cat $NOT_ME_HOME/mode-live.e*", _variant)
+    bash(B, SP, "xxd ${NOT_ME_HOME:-/x}/*.epoch", _variant)
+    bash(B, SP, "cat {H}/$NAME", _variant)
+    bash(B, SP, "echo 0 > {H}/mode-live.e*", _variant)
+    bash(B, SP, "python3 -c \"print(open('{H}/mode-live.epoch').read())\"", _variant)
+    mcp(B, SP, "Grep", {"pattern": "x", "path": "{H}/..", "glob": "mode-live.e*"}, _variant)
+    mcp(B, SP, "Glob", {"pattern": "{H}/../*/mode-live.e*"}, _variant)
+    mcp(B, SP, "Glob", {"pattern": "{H}/mode-live.e?och"}, _variant)
+_epoch_id = next(c[0] for c in CASES if c[3] == "Read" and c[4]["file_path"].endswith("mode-live.epoch"))
+# Arguments the guard cannot place anywhere near the not-me home stay allowed.
+bash(A, None, "cat $FILE")
+bash(A, None, "cp $SRC $DST")
+bash(A, None, "cat scripts/$f")
+bash(A, None, "cat {F}/app/$f.md")
+bash(A, None, "echo hi > out.txt")
+bash(A, None, "make 2>&1 | tee log.txt")
+bash(A, None, "awk '{print $1}' README.md")
+bash(A, None, "cat README.md > {F}/app/copy.md")
+# Python options that take a value (-W, -X, joined or not) do not hide `-m notme.cli` or the CLI script.
+bash(B, SP, "python3 -W ignore -m notme.cli mode live")
+bash(B, SP, "python3 -Wignore -m notme.cli mode live")
+bash(B, SP, "python3 -X utf8 -m notme.cli mode live", "running")
+bash(B, SP, "python3 -Xutf8 -m notme mode live")
+bash(B, SP, "python3 -bW ignore -m notme.cli mode live")
+bash(B, SP, "python3 -Bm notme.cli mode live")
+bash(B, SP, "python3 -W ignore {P}/cli/notme.py mode live")
+bash(B, SP, "python3 -W ignore -m notme.cli pause off")
+bash(B, SP, "python3 -X utf8 -m notme.cli pause off", "running")
+bash(B, SP, "python3 -W ignore -X utf8 -m notme.cli allow-repo remove acme/x")
+bash(B, SP, "python3 -Xutf8 -m notme.cli allow-repo remove acme/x", "running")
+bash(A, None, "python3 -W ignore -m notme.cli mode show")
+bash(A, None, "python3 -X utf8 -m notme.cli mode show", "running")
+bash(A, None, "python3 -Wignore -Xutf8 -m notme.cli pause on")
+bash(A, None, "python3 -W ignore -m json.tool x.json")
+# Quoted keys are keys to the frontmatter parser: the guard parses the result instead of matching a line.
+for _quoted in ('"mode": live', "'mode': live"):
+    for _variant in ("gdry", "gdryrun"):
+        edit(B, SP, "Write", {"file_path": "{H}/project.md", "content": f"---\nschema: 1\n{_quoted}\n---\n"}, _variant)
+        edit(B, SP, "Edit", {"file_path": "{H}/project.md", "old_string": "mode: dry-run", "new_string": _quoted},
+             _variant)
+edit(B, SP, "Write", {"file_path": "{H}/project.md", "content": "---\nschema: 1\nmode: null\n---\n"})
+edit(B, SP, "Write", {"file_path": "{H}/project.md", "content": "---\nmode: dry-run\nlist: [open\n---\n"})
+edit(A, None, "Write", {"file_path": "{H}/project.md", "content": "---\nschema: 1\n'mode': dry-run\n---\n"})
+# A result too deeply nested for the parser is unknown, so blocked (the hook must not crash and fail open).
+edit(B, SP, "Write", {"file_path": "{H}/project.md",
+                      "content": "---\nschema: 1\nx: " + "[" * 2000 + "]" * 2000 + "\nmode: live\n---\n"})
+edit(B, SP, "Write", {"file_path": "{H}/project.md",
+                      "content": "---\nschema: 1\nx: " + "[" * 2000 + "]" * 2000 + "\nmode: live\n---\n"},
+     "gdryrun")
 
 # Substrings a block message must contain, by case id.
 MESSAGE_CHECKS: Dict[str, List[str]] = {
@@ -757,4 +927,8 @@ MESSAGE_CHECKS: Dict[str, List[str]] = {
                    "This repo (acme/app) may write only to: acme/app."],
     _repo_allow_id: ["/not-me:allow-repo acme/friend"],
     _unconfirmed_id: ["/not-me:allow-repo acme/web"],
+    _mode_edit_id: ["/not-me:mode live"],
+    _mode_cli_id: ["/not-me:mode live"],
+    _marker_id: ["live-mode marker", "/not-me:mode live"],
+    _epoch_id: ["live-mode epoch", "/not-me:mode live"],
 }

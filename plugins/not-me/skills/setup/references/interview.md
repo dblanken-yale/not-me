@@ -24,13 +24,14 @@ doc is not in scope for this run.
 | 13 | Where is the URL to test a PR found, in what order? | `target` | prove |
 | 14 | A command to run when a run ends? | `notify.command` | project |
 | 15 | Add to the global docs, or replace them? (only when a global doc exists) | `extends` | each doc |
-| 16 | Turn on live mode at the end if doctor passes? | `mode` in the global layer | project (global) |
+| 16 | Turn on live mode at the end if doctor passes? | none: the user runs `/not-me:mode live` | none (signed by the user) |
 
 ## Global layer questions (`--global`)
 
 Ask only operator-level keys: `mode`, `attribution`, `limits`, `models`, `router`,
-`notify`, `logs.root`. Never ask `allow_repos`; the allow list is changed only with
-`/not-me:allow-repo`.
+`notify`, `logs.root`. Setup writes `mode` only as `dry-run`; live is turned on by
+the user with `/not-me:mode live`. Never ask `allow_repos`; the allow list is
+changed only with `/not-me:allow-repo`.
 
 Refuse repo-only keys in the global layer, and say why: `tracker`, `repos`,
 `queue`, `labels`, `reviewers`, the roster table, verify commands, and the

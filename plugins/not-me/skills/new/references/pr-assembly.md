@@ -8,7 +8,7 @@ rules themselves are in `pr-shape.md`, `companions.md` and `write-back.md`.
 
 ## Files
 
-Make one directory with `mktemp -d "$TMPDIR/not-me.XXXXXX"` and write:
+Make one work directory in the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/references/autonomy-and-logging.md` (Text to GitHub, rule 2) and write:
 
 1. `title.txt`: one line from `standards.pr_title`, default `{issue}: {issue_title}`.
 2. `body.md`: the template at `standards.pr_template` when it resolves, else the

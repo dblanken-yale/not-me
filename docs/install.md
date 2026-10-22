@@ -126,6 +126,22 @@ Auto mode is supported. The guard hook runs before every matching tool call in e
 
 Do this when a new release is announced. If a release raises the config `schema` number, `/not-me:config` warns about older docs, and `/not-me:setup --upgrade` shows a diff before it changes them.
 
+## The operator token
+
+Some actions must be confirmed by a person, not by the program: allowing a repo (`allow-repo add` and `remove`), removing a pause (`pause off`) and going live (`mode live`). The operator token is how not-me tells the difference. It is a random secret kept in `~/.claude/not-me/operator-token`, readable only by you. Claude Code cannot run these actions and the guard blocks any attempt to read the file.
+
+Create it once, in your own terminal app (for example the macOS Terminal app, not the terminal panel inside Claude Code):
+
+```
+<path to notme> doctor --init-token
+```
+
+`/not-me:mode` prints the exact path to use. The token is shown once. Save it in a password manager. When an action needs it, the command asks for the token and hides what you type. Scripts can set `NOT_ME_OPERATOR_CONFIRM` to the token instead.
+
+If you lose it, delete `~/.claude/not-me/operator-token` and run `doctor --init-token` again. While the file exists, `--init-token` refuses and tells you to delete it first.
+
+A new token also turns live mode off, because the live switch is signed with the old one (see [Going live](#going-live)). Run `/not-me:mode live` again after you make a new token.
+
 ## 4. First run
 
 Run these in the repo you want to automate, in a Claude Code session started in that repo:
@@ -138,16 +154,15 @@ Read the ledger before you trust it. It is `<git-common-dir>/not-me/logs/intende
 
 ### Going live
 
-Not-me starts in `mode: dry-run`. A repo file can set `dry-run` but can never set `live`, because a repo file is committed by anyone with push access. To go live, set it in your own global layer:
+Not-me starts in `mode: dry-run`. A repo file can set `dry-run` but can never set `live`, because a repo file is committed by anyone with push access. Only you can switch to live, from your own terminal.
 
-```yaml
----
-schema: 1
-mode: live
----
-```
+Run `/not-me:mode live`. It checks whether you have an [operator token](#the-operator-token) and gives you one command to paste into your own terminal app. That command asks for the token and hides what you type. Then run `/not-me:mode` again to confirm it shows `live` with source `global`.
 
-Put that in `~/.claude/not-me/project.md`. Then `/not-me:config` should show `mode` as `live` with source `global`. See [config.md](config.md).
+That command is the only way to go live. It sets `mode: live` in `~/.claude/not-me/project.md` and writes a small signature file next to it, `~/.claude/not-me/mode-live.sig`, made with your operator token and a random secret in `~/.claude/not-me/mode-live.epoch` (created the first time). Not-me runs live only when both are there and the signature matches your current token and epoch. Typing `mode: live` into the file by hand is not enough: not-me keeps running in dry-run and `/not-me:mode`, `/not-me:config` and `/not-me:doctor` warn that live is set but not confirmed. A new operator token makes the old signature invalid, so run `/not-me:mode live` again after you rotate it.
+
+`/not-me:mode dry-run --global` switches back at any time: it deletes the signature and replaces the epoch with a new random one, so a copy of an old signature can never turn live back on. You can also set `mode: dry-run` by hand. Returning to dry-run by any means revokes the signature (the next time not-me reads its config), so going live again needs `/not-me:mode live`.
+
+Upgrading from an older version: if your global `project.md` already says `mode: live`, not-me runs in dry-run until you run `/not-me:mode live` once.
 
 ## Uninstall cleanly
 
