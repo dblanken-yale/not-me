@@ -232,7 +232,12 @@ def restore_global(state: Path, rid: str, home: Path) -> str:
     if Path(str(data.get("original"))) != original.absolute() or Path(str(data.get("backup"))) != backup.absolute():
         raise RuntimeError(f"the record for {rid} does not point at {original} and {backup}; not touching "
                            "anything. Move the backup back by hand")
-    what = restore_dirs(original, backup, bool(data.get("had_original")))
+    if not _present(backup):
+        # The record lives where a session could rewrite it, so it never authorises a deletion. With no backup
+        # to put back there is nothing safe to do automatically.
+        raise RuntimeError(f"no backup at {backup}. Whatever is at {original} now is left alone; check it by "
+                           f"hand, then delete {mine['path']} to clear this record")
+    what = restore_dirs(original, backup, True)
     mine["path"].unlink()
     return what
 

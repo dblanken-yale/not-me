@@ -443,6 +443,21 @@ class RunLiveTest(unittest.TestCase):
         self.assertTrue(os.path.islink(str(self.glob)))
         self.assertEqual(os.readlink(str(self.glob)), str(self.tmp / "nowhere"))
 
+    def test_restore_global_never_deletes_when_the_backup_is_missing(self):
+        # A session can rewrite the record; had_original: false must not turn into a delete of the real config.
+        self.operator_config()
+        record = self.dead_run("dead-9")
+        shutil.rmtree(str(run_live.backup_path(self.home, "dead-9")))
+        data = json.loads(record.read_text(encoding="utf-8"))
+        data["had_original"] = False
+        record.write_text(json.dumps(data), encoding="utf-8")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(run_live.main(["--restore-global", "dead-9"], home=self.home), 1)
+        self.assertIn("no backup", err.getvalue())
+        self.assertTrue((self.glob / "project.md").is_file())  # left alone, whatever it holds
+        self.assertTrue(record.is_file())  # the record stays until a person clears it
+
     def test_restore_global_unknown_run_is_an_error(self):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(run_live.main(["--restore-global", "nope"], home=self.home), 1)
@@ -465,8 +480,10 @@ class RunLiveTest(unittest.TestCase):
                                       "backup": str((self.home / ".claude" / "not-me.backup-dead-2").absolute()),
                                       "had_original": True, "pid": 999999999, "host": "h", "created": 1.0}),
                           encoding="utf-8")
-        run_live.restore_global(self.state, "dead-2", self.home)
-        self.assert_operator_config()
+        with self.assertRaisesRegex(RuntimeError, "no backup"):
+            run_live.restore_global(self.state, "dead-2", self.home)
+        self.assertEqual((self.glob / "project.md").read_text(encoding="utf-8"), "operator's own\n")  # untouched
+        self.assertTrue(record.is_file())  # the person checks the config and clears the record by hand
 
     # credentials
 
