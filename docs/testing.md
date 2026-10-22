@@ -141,6 +141,12 @@ Drop `--dry-run` to run for real. Per run, in order:
    - `--launch interactive`: plain `claude` in your terminal. You watch, answer permission prompts, and exit the session when the skill is done.
 
    The session gets the fixture token only as `GH_TOKEN`, with an empty `GH_CONFIG_DIR` so your own `gh` login is invisible to it. `NOT_ME_FIXTURE_TOKEN`, `GITHUB_TOKEN`, `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` are removed from its environment.
+
+   What this does not do: the session is a normal Claude Code session on your machine, with your home directory
+   and your login, because a throwaway home cannot see the interactive login and the alternative is a long-lived
+   token. So it has the same reach as any session you start by hand: your files, your shell environment minus
+   the credentials above. The repo guard hook is active inside it and the only GitHub credential it holds is the
+   fixture token. Run it on a machine and in a shell you would start Claude Code in anyway.
 5. **Grade twice.** `graders.py` grades the session transcript against the case's graders (`<out>/<ID>-<n>.graders.json`). `grade_state.py --manifest ... --scenario ID --backend B` reads what the run left on GitHub, or in the ledger, and checks each assertion.
 6. **Clean up.** `scaffold.py clean` removes the stage and the token copy, the workspace is deleted (`--keep-temp` keeps it), your `~/.claude/not-me/` is put back, and `seed_fixture.py --teardown RID` runs. This also happens when a step failed.
 7. **Merge.** Both grades and the session facts (mode, session id, turns, transcript path) go into `<out>/<ID>-<n>.json`, the file the gate report reads. `ok` needs the state grade, the transcript graders and an empty error list.
