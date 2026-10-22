@@ -426,6 +426,31 @@ class StaleTests(QueueTestCase):
         self.assertEqual(self.thing(1)["assignees"], ["octocat"])
 
 
+class BotMarkerTests(QueueTestCase):
+    """A bot's claim marker reads the same in the stale checks as on the REST path: `<slug>[bot]`."""
+
+    def setUp(self):
+        super().setUp()
+        self.roster = Roster(entries=[Member("octocat", tier="lead"), Member("renovate[bot]", tier="lead")],
+                             operator="octocat")
+        self.q = self.queue("run-1")
+        self.thing(1)["labels"] = ["in progress"]
+        old = claims.iso(NOW - timedelta(hours=30))
+        self.fake.post_comment(REPO, 1, "renovate[bot]", claims.marker_body("renovate[bot]", "r", old))
+
+    def test_queue_stale_sees_the_bot_marker(self):
+        self.assertTrue(self.q.stale(1, branches=[]))
+
+    def test_stale_claims_sees_the_bot_marker(self):
+        found = queue.stale_claims(self.gh, REPO, self.q.labels, 8, [], is_trusted=self.q.marker_trusted)
+        self.assertEqual([c["number"] for c in found], [1])
+
+    def test_unlisted_bot_marker_still_ignored(self):
+        self.roster = Roster(entries=[Member("octocat", tier="lead")], operator="octocat")
+        q = self.queue("run-2")
+        self.assertFalse(q.stale(1, branches=[]))
+
+
 class FactoryTests(QueueTestCase):
     def test_labels_source_gives_a_label_queue(self):
         q = queue.make_queue(self.cfg, self.gh, self.roster, "octocat", "run-1", project_dir=self.project)

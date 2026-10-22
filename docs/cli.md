@@ -258,7 +258,7 @@ notme bundle REF [--review]
 | `REF` | required |  |
 | `--review` | optional | for reviewing the PR: also return a roster member's title and body, flagged text_is_data |
 
-Output: the feedback.Bundle fields (repo, number, title, body, head_ref, head_sha, base, state, author, author_tier, author_trusted, text_is_data, labels, review_requests, linked_issue, companions, checks, ...)
+Output: the feedback.Bundle fields (repo, number, title, body, head_ref, head_sha, base, state, author, author_tier, author_trusted, text_is_data, labels, review_requests, linked_issue, linked_issue_source, companions, checks, ...)
 
 ### `notme wait-checks`
 

@@ -154,7 +154,9 @@ class FakeGitHub:
             "author": thing["author"] if isinstance(thing["author"], dict) else {"login": thing["author"]},
             "url": f"https://github.com/acme/app/issues/{thing['number']}",
             "createdAt": thing.get("created_at", f"2026-01-01T00:00:{thing['number'] % 60:02d}Z"),
-            "comments": [{"id": c["id"], "author": {"login": c["user"]}, "authorAssociation": c["assoc"],
+            # `gh --json comments` drops the type and the "[bot]" suffix, as the real gh does.
+            "comments": [{"id": c["id"], "author": {"login": c["user"][:-5] if c["user"].endswith("[bot]") else c["user"]},
+                          "authorAssociation": c["assoc"],
                           "body": c["body"]} for c in thing["comments"]],
         }
         if thing["kind"] == "pr":
@@ -355,7 +357,9 @@ class FakeGitHub:
         return [{"name": n} for n in wanted]
 
     def _r_comments(self, g, flags):
-        return [{"id": c["id"], "user": {"login": c["user"]}, "author_association": c["assoc"], "body": c["body"],
+        # REST spells a bot "<slug>[bot]" and gives its type, as GitHub does.
+        return [{"id": c["id"], "user": {"login": c["user"], "type": "Bot" if c["user"].endswith("[bot]") else "User"},
+                 "author_association": c["assoc"], "body": c["body"],
                  "created_at": c["created_at"], "updated_at": c["created_at"],
                  "html_url": f"https://github.com/{g[0]}/issues/{g[1]}#issuecomment-{c['id']}"}
                 for c in self._thing(*g)["comments"]]

@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 from . import writes
 from .dryrun import Ledger
 from .redact import redact
+from .roster import bot_login
 from .writes import Decision, GuardContext, WriteTarget
 
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
@@ -111,23 +112,6 @@ def _login(value: str) -> str:
 def names_of(items: Any) -> List[str]:
     """Names from a list of {name} objects or plain strings (labels as gh returns them)."""
     return [x.get("name") if isinstance(x, dict) else str(x) for x in items or []]
-
-
-def bot_login(login: Any, bot: bool = False) -> str:
-    """One spelling for every account: a bot is always `<slug>[bot]`, as the REST API writes it.
-
-    `gh pr/issue --json author` gives an app as `app/<slug>` with is_bot true, GraphQL gives `<slug>` with
-    __typename Bot. Only GitHub sets those signals, and a person's login can contain neither "/" nor "[", so a
-    person never becomes a bot login and a bot never matches a person's roster row. "" when absent.
-    """
-    if not isinstance(login, str) or not login:
-        return ""
-    if login[:4].lower() == "app/":
-        slug = login[4:]
-        return f"{slug}[bot]" if slug and "/" not in slug else ""
-    if bot and not login.endswith("[bot]"):
-        return f"{login}[bot]"
-    return login
 
 
 def login_of(value: Any) -> str:
@@ -491,10 +475,15 @@ class GhClient:
         self._repo(repo)
         return _dig(self.read(["repo", "view", repo, "--json", "defaultBranchRef"]), "defaultBranchRef", "name")
 
-    def issue(self, repo: str, n: int) -> Dict[str, Any]:
+    def issue(self, repo: str, n: int, comments: bool = False) -> Dict[str, Any]:
+        """The issue's facts; with comments, its comments as comments() returns them (REST, so a bot's
+        author carries its type and reads `<slug>[bot]`; `gh issue --json comments` drops the type)."""
         self._repo(repo)
-        return self.read(["issue", "view", str(_num(n)), "-R", repo, "--json",
-                          "number,title,body,state,labels,assignees,author,comments,url"])
+        data = self.read(["issue", "view", str(_num(n)), "-R", repo, "--json",
+                          "number,title,body,state,labels,assignees,author,url"])
+        if comments and isinstance(data, dict):
+            data["comments"] = self.comments(repo, n)
+        return data
 
     def labels(self, repo: str, n: int) -> List[str]:
         self._repo(repo)

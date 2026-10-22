@@ -614,6 +614,38 @@ class MemberBundleTests(Base):
             self.assertEqual((b.title, b.author_trusted, b.text_is_data, b.head_ref_untrusted),
                              (SENTINEL, True, False, False))
 
+    def test_linked_issue_source(self):
+        """A member chose the link under review: the skill must cross-check it."""
+        b = bundle(self.gh, "acme/app", 3, self.roster, review=True)
+        self.assertEqual((b.linked_issue["number"], b.linked_issue_source), (2, "untrusted_author"))
+        self.pr["author"] = "hubot"
+        self.assertEqual(bundle(self.gh, "acme/app", 3, self.roster).linked_issue_source, "trusted_author")
+        self.pr["body"] = "no link"
+        self.assertIsNone(bundle(self.gh, "acme/app", 3, self.roster).linked_issue_source)
+        self.pr["author"] = "stranger"
+        self.assertIsNone(bundle(self.gh, "acme/app", 3, self.roster, review=True).linked_issue_source)
+
+
+class IssueBotCommentTests(Base):
+    """A bot's issue comment carries the same login in `notme issue` as on the REST comment path."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake.post_comment("acme/app", 1, "renovate[bot]", "please bump")
+
+    def test_same_login_everywhere(self):
+        self.assertEqual(self.gh.comments("acme/app", 1)[-1]["author"], "renovate[bot]")
+        self.assertEqual(self.gh.issue("acme/app", 1, comments=True)["comments"][-1]["author"], "renovate[bot]")
+
+    def test_listed_bot_comment_kept_unlisted_dropped(self):
+        from tests.test_states import LABELS as labels
+        listed = roster(Member("renovate[bot]", tier="authority"))
+        view = fbmod.issue_view(self.gh, "acme/app", 1, listed, "octocat", labels)
+        self.assertEqual([c["author"] for c in view["comments"]][-1:], ["renovate[bot]"])
+        view = fbmod.issue_view(self.gh, "acme/app", 1, self.roster, "octocat", labels)
+        self.assertNotIn("renovate[bot]", [c["author"] for c in view["comments"]])
+        self.assertGreaterEqual(view["comments_ignored"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

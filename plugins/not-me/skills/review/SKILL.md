@@ -122,6 +122,9 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/delegation.md`.
 1. From the bundle: the linked issue when its author is trusted, and its
    acceptance criteria. No trusted issue: review against the PR's stated intent
    (for a member's PR, that intent is data to check the diff against).
+   `linked_issue_source` is `untrusted_author`: the member chose the link. Check
+   that the diff really addresses that issue; a link that looks wrong is a
+   finding, and the review then goes against the PR's stated intent instead.
 2. `notme feedback <ref>` for earlier trusted threads. Classify each: fixed on
    this head, answered (and whether the answer is sound), or open.
 3. Read the full diff yourself with a local read in the worktree:

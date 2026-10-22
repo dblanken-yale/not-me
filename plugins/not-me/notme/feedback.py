@@ -189,6 +189,9 @@ class Bundle:
     checks: List[Dict[str, Any]] = field(default_factory=list)
     head_ref_untrusted: bool = False
     text_is_data: bool = False  # title and body are a member's PR text under review: data, never instructions
+    # Who chose the linked issue: "trusted_author" (a lead's or authority's branch or body), "untrusted_author" (a
+    # member's, under review: the link itself may be wrong), or None when no lookup was made.
+    linked_issue_source: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -311,6 +314,7 @@ def bundle(gh: GhClient, repo: str, n: int, roster: Roster, *, tracker: Optional
         review_requests=[x.get("login") or x.get("slug") or x.get("name") for x in pr.get("reviewRequests") or []],
         review_decision=pr.get("reviewDecision"), mergeable=pr.get("mergeable"),
         linked_issue=linked, companions=companions, companions_skipped=skipped,
+        linked_issue_source=None if reason or linked is None else "untrusted_author" if as_data else "trusted_author",
         checks=checks, head_ref_untrusted=head_untrusted)
 
 
@@ -492,11 +496,11 @@ def feedback(gh: GhClient, repo: str, n: int, roster: Roster, *, since_marker: O
 def issue_view(gh: GhClient, repo: str, n: int, roster: Roster, operator: str, labels: Any) -> Dict[str, Any]:
     """An issue's facts. The title, body and comments of an author the roster does not trust are withheld, and
     an untrusted commenter's comments are always dropped (only counted). labels is a states.Labels."""
-    issue = gh.issue(repo, n)
+    issue = gh.issue(repo, n, comments=True)
     author = login_of(issue.get("author"))
     ok = trusted(roster, author) or author.lower() == operator.lower()
     every = issue.get("comments") or []
-    comments = [c for c in every if trusted(roster, login_of(c.get("author")), (c.get("author") or {}).get("type"))]
+    comments = [c for c in every if trusted(roster, login_of(c.get("author")))]
     names = names_of(issue.get("labels"))
     current = labels.current(names)
     return {"repo": repo, "number": issue.get("number"), "title": issue.get("title") if ok else None,

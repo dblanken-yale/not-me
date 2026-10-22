@@ -13,6 +13,36 @@ _SEPARATOR = re.compile(r"^:?-+:?$")
 HEADER = ("GitHub login", "Name", "Tier", "Assignable", "Reviewer")
 
 
+#: Slugs of common GitHub Apps. A roster row naming one without `[bot]` matches only a person of that name.
+KNOWN_BOT_SLUGS = frozenset({"github-actions", "dependabot", "renovate", "copilot", "codecov", "mergify"})
+_BOT_SLUG_RE = re.compile(r"(^|[-_])bot$", re.I)
+
+
+def bot_login(login: object, bot: bool = False) -> str:
+    """One spelling for every account: a bot is always `<slug>[bot]`, as the REST API writes it.
+
+    `gh pr/issue --json author` gives an app as `app/<slug>` with is_bot true, GraphQL gives `<slug>` with
+    __typename Bot. Only GitHub sets those signals, and a person's login can contain neither "/" nor "[", so a
+    person never becomes a bot login and a bot never matches a person's roster row. "" when absent.
+    """
+    if not isinstance(login, str) or not login:
+        return ""
+    if login[:4].lower() == "app/":
+        slug = login[4:]
+        return f"{slug}[bot]" if slug and "/" not in slug else ""
+    if bot and not login.endswith("[bot]"):
+        return f"{login}[bot]"
+    return login
+
+
+def bot_row_warnings(members: Iterable["Member"]) -> List[str]:
+    """Rows that look like a bot but lack `[bot]`: they match a person of that login, never the bot."""
+    return [f"roster row '{m.login}' looks like a bot but has no [bot]; it matches only a person with that "
+            f"login. Write '{m.login}[bot]' to trust the app" for m in members
+            if not m.login.endswith("[bot]")
+            and (m.login.lower() in KNOWN_BOT_SLUGS or _BOT_SLUG_RE.search(m.login))]
+
+
 @dataclass(frozen=True)
 class Member:
     login: str
@@ -93,7 +123,9 @@ def parse_roster(body: str) -> List[Member]:
         cells = _cells(row)
         if all(_SEPARATOR.match(c) for c in cells if c) and any(cells):
             continue
-        login = _cell(cells, cols, "login").lstrip("@").strip()
+        # `app/<slug>` is how gh writes an app; authors are compared as `<slug>[bot]`. A bare `<slug>` stays as
+        # written: it could be a person, and promoting it to a bot would widen trust.
+        login = bot_login(_cell(cells, cols, "login").lstrip("@").strip())
         if not login:
             continue
         tier = _cell(cells, cols, "tier").lower()

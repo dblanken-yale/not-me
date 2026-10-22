@@ -120,7 +120,7 @@ class LabelQueue(BaseQueue):
 
     def stale(self, n: int, branches: Sequence[str] = ()) -> bool:
         """Whether issue n holds a stale claim. `branches` are the branch names on origin (caller supplies them)."""
-        return is_stale(self.gh.issue(self.tracker, _num(n)), self.stale_hours, branches,
+        return is_stale(self.gh.issue(self.tracker, _num(n), comments=True), self.stale_hours, branches,
                         self.labels.name("in_progress"), self.now(), is_trusted=self.marker_trusted)
 
     # --- claiming ---
