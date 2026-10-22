@@ -1,9 +1,8 @@
 ---
-type: regex
+type: tool_used
 weight: 3
-target: trace
-match: not_contains
+tool: Bash
+input_match: 'resolveReviewThread|notme\s+resolve-threads'
+max: 0
 arm: both
 ---
-
-resolveReviewThread|notme\s+resolve-threads
