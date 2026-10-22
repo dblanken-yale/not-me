@@ -122,6 +122,11 @@ the owner's say-so, not a cleanup.
 - Changes that touch gh/git calls, file handling or the guard get a security
   review. Reviewers flag correctness and missed requirements; style is
   optional.
+- This repo's own not-me repo layer lives in `.claude/not-me/` (pinned
+  verify commands, extra delegation paths). It is committed, but a global
+  gitignore that ignores `.claude/` will skip it: stage it with
+  `git add -f .claude/not-me/<file>`. The CLI reads it only from the main
+  checkout, so an edit in a worktree takes effect once merged and pulled.
 - When the guard blocks something during development, that is usually the
   guard working. Do not route around it; the allow command is in the message.
 - Commit messages and PR descriptions end with `Created with AI`. Nothing
