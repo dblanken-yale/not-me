@@ -493,12 +493,18 @@ def feedback(gh: GhClient, repo: str, n: int, roster: Roster, *, since_marker: O
 # --- issue view and review candidates -------------------------------------------
 
 
+def author_trusted(roster: Roster, author: str, operator: str) -> bool:
+    """An issue's author is trusted when the roster trusts the login or the author is the operator. A missing
+    author is never trusted, even when the operator is configured empty."""
+    return bool(author) and (trusted(roster, author) or author.lower() == operator.lower())
+
+
 def issue_view(gh: GhClient, repo: str, n: int, roster: Roster, operator: str, labels: Any) -> Dict[str, Any]:
     """An issue's facts. The title, body and comments of an author the roster does not trust are withheld, and
     an untrusted commenter's comments are always dropped (only counted). labels is a states.Labels."""
     issue = gh.issue(repo, n, comments=True)
     author = login_of(issue.get("author"))
-    ok = trusted(roster, author) or author.lower() == operator.lower()
+    ok = author_trusted(roster, author, operator)
     every = issue.get("comments") or []
     comments = [c for c in every if trusted(roster, login_of(c.get("author")))]
     names = names_of(issue.get("labels"))

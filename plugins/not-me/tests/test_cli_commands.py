@@ -101,6 +101,49 @@ class IssueTests(base.CliCase):
         self.assertIsNone(payload["body"])
         self.assertIsNone(payload["title"])
 
+    def test_issue_body_replaces_the_body_of_a_trusted_author(self):
+        body = self.write_file("b.md", "## Goal\n\nFixed body.\n")
+        payload = self.ok("issue-body", "1", "--body-file", body)
+        self.assertEqual(payload, {"repo": REPO, "number": 1, "updated": True})
+        self.assertIn("Fixed body.", things(self.fake)["1"]["body"])
+
+    def test_issue_body_refuses_an_untrusted_author_without_writing(self):
+        things(self.fake)["1"]["author"] = "mallory"
+        body = self.write_file("b.md", "Fixed body.\n")
+        code, payload, _ = self.cli("issue-body", "1", "--body-file", body)
+        self.assertEqual((code, payload["kind"]), (1, "untrusted_author"))
+        self.assertEqual(self.fake.writes_made(), [])
+        self.assertEqual(things(self.fake)["1"]["body"], "Body of First issue")
+
+    def test_issue_body_restores_a_dropped_marker(self):
+        things(self.fake)["1"]["body"] = "Old\n\n<!-- not-me:claim octocat r-1 -->\n<!-- not-me:ticket -->"
+        body = self.write_file("b.md", "Fixed body.\n\n<!-- not-me:ticket -->\n")
+        self.ok("issue-body", "1", "--body-file", body)
+        new = things(self.fake)["1"]["body"]
+        self.assertEqual(new.count("<!-- not-me:ticket -->"), 1)
+        self.assertEqual(new.count("<!-- not-me:claim octocat r-1 -->"), 1)
+        self.assertTrue(new.rstrip().endswith("<!-- not-me:claim octocat r-1 -->"))
+
+    def test_issue_body_refuses_text_that_fails_the_check_without_writing(self):
+        body = self.write_file("b.md", "See /Users/someone/notes.md for details.\n")
+        code, payload, _ = self.cli("issue-body", "1", "--body-file", body)
+        self.assertEqual((code, payload["kind"]), (1, "text_lint"))
+        self.assertTrue(payload["problems"])
+        self.assertEqual(self.fake.writes_made(), [])
+
+    def test_issue_body_dry_run_writes_nothing(self):
+        body = self.write_file("b.md", "Fixed body.\n")
+        payload = self.ok("issue-body", "1", "--body-file", body, "--dry-run")
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(self.fake.writes_made(), [])
+        self.assertEqual(things(self.fake)["1"]["body"], "Body of First issue")
+
+    def test_issue_body_read_back_mismatch_fails(self):
+        body = self.write_file("b.md", "Fixed body.\n")
+        with mock.patch.object(gh_mod.GhClient, "issue_edit_body"):
+            code, payload, _ = self.cli("issue-body", "1", "--body-file", body)
+        self.assertEqual((code, payload["kind"]), (5, "readback_mismatch"))
+
     def test_labels_sync_add_remove_and_check(self):
         payload = self.ok("labels-sync", "1", "--add", "extra", "--remove", "to do", "--check")
         self.assertFalse(payload["in_sync"])
@@ -480,25 +523,20 @@ class PullRequestTests(base.CliCase):
         self.assertEqual((code, payload["blocked"]), (6, True))
         self.assertEqual(self.fake.writes_made(), [])
 
-    def test_issue_edit_body(self):
-        body = self.write_file("b.md", "New body\n")
-        payload = self.ok("issue-edit-body", "1", "--body-file", body)
-        self.assertEqual(payload, {"repo": REPO, "number": 1, "updated": True})
-        self.assertEqual(things(self.fake)["1"]["body"], "New body\n")
-
-    def test_issue_edit_body_full_ref_blocked_and_unsafe_file(self):
+    def test_issue_body_full_ref_blocked_and_unsafe_file(self):
         body = self.write_file("b.md", "New body\n")
         things(self.fake, "acme/other")["1"] = dict(things(self.fake)["1"], number=1)
-        self.ok("issue-edit-body", "acme/other#1", "--body-file", body)
-        self.assertEqual(things(self.fake, "acme/other")["1"]["body"], "New body\n")
+        self.ok("issue-body", "acme/other#1", "--body-file", body)
+        self.assertIn("New body", things(self.fake, "acme/other")["1"]["body"])
         self.tc.write("global", "project", base.NO_OTHERS_PROJECT)
-        code, payload, _ = self.cli("issue-edit-body", "acme/app-ui#1", "--body-file", body)
+        things(self.fake, "acme/app-ui")["1"] = dict(things(self.fake)["1"], number=1)
+        code, payload, _ = self.cli("issue-body", "acme/app-ui#1", "--body-file", body)
         self.assertEqual((code, payload["blocked"]), (6, True))
         outside = TempCase()
         self.addCleanup(outside.cleanup)
         path = outside.root / "b.md"
         path.write_text("x", encoding="utf-8")
-        code, payload, _ = self.cli("issue-edit-body", "1", "--body-file", str(path))
+        code, payload, _ = self.cli("issue-body", "1", "--body-file", str(path))
         self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
         self.assertEqual(things(self.fake)["1"]["body"], "Body of First issue")
 

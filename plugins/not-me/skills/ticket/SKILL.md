@@ -25,8 +25,9 @@ Arguments: `$ARGUMENTS`. `--check N`, `--title T`, `--parent N`, `--dry-run`.
 - This skill never assigns anyone, never sets a milestone, project field or
   board column, and never changes labels other than adding `todo` and the
   `queue.opt_in_label` value. It never posts a comment, and never on an issue by
-  an untrusted author. Its marker `<!-- not-me:ticket -->` is reserved for this
-  skill's kind; nothing it does today carries it. Issues it creates carry the
+  an untrusted author. It edits the body of an existing issue only through
+  `notme issue-body`, only after the operator says yes. Its marker
+  `<!-- not-me:ticket -->` is reserved for this skill's kind; nothing it does today carries it. Issues it creates carry the
   follow-up marker that `notme followup` adds, which is expected.
 - Never mention an AI, a model or an assistant in the title or body.
 
@@ -95,11 +96,13 @@ notme followup --title-file "$d/title.txt" --body-file "$d/body.md" \
 3. Nothing missing: offer to add `todo` (and the opt-in label) when absent. On a
    yes: `notme labels-sync N --add "<todo>,<opt-in>"`. Change no other label.
 4. Something missing: draft the edits, ask the operator for the missing facts in
-   the same single question batch, and offer to apply them. The CLI has no
-   command that edits an issue body, so do not invent one and do not reach for
-   another tool: on a yes, write the full proposed body to `body.md` in the temp
-   dir, run `notme check-text --file body.md`, and give the operator the file path
-   to paste from. Do not add `todo` until the body is updated.
+   the same single question batch, and offer to apply them. On a yes, write the
+   full proposed body to `body.md` in the temp dir, run
+   `notme check-text --file body.md`, then apply it with
+   `notme issue-body N --body-file <temp>/body.md`. It refuses an untrusted
+   author, keeps every not-me marker already in the body, and reads the body
+   back; on a refusal, report it and change nothing else. Do not add `todo`
+   until the body is updated; once it succeeds, the offer in step 3 applies.
 5. Result: `TICKET <tracker>#N checked - <k> of <m> ready items missing`.
 
 ## Result line
@@ -113,5 +116,5 @@ The last line of every run: `TICKET <tracker>#N created|checked|-[ - note]`.
 - [ ] Asked only for missing readiness items, in at most one batch.
 - [ ] Passed the body through `notme check-text`; created only through `notme followup`.
 - [ ] Never assigns, touched no label but `todo` and opt-in, posted nothing.
-- [ ] Wrote a proposed body to a file instead of inventing an edit command.
+- [ ] Wrote a proposed body to a file and applied it only with `notme issue-body`, after a yes.
 - [ ] Printed one `TICKET` result line.

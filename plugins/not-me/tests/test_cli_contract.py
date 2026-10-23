@@ -119,7 +119,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual({" ".join(path) for path in cli.leaf_parsers(parser)}, known)
         self.assertEqual({k.split()[0] for k in known}, found)
         for name in ("me", "config", "preflight", "pick-issue", "claim-issue", "release-issue", "move-issue", "issue",
-                     "pick-needs-work", "pr-children", "pr-by-head", "wait-checks", "issue-edit-body", "retro", "claim-pr", "release-pr", "bundle", "feedback", "transition", "labels-sync",
+                     "pick-needs-work", "pr-children", "pr-by-head", "wait-checks", "issue-body", "retro", "claim-pr", "release-pr", "bundle", "feedback", "transition", "labels-sync",
                      "labels-ensure", "reply-thread", "comment-upsert", "request-review", "pr-body", "pr-open",
                      "companion-prs", "testing-steps", "review-post", "resolve-threads", "pick-reviews",
                      "prove-target", "followup", "check-text", "log", "allow-repo", "guard", "git", "status",
@@ -186,7 +186,7 @@ class ExitCodeTests(CliCase):
                      ["move-issue", "1", "--to", "nope"], ["pr-by-head"], ["pr-by-head", "a..b"],
                      ["pr-by-head", "-x"], ["pr-children"], ["wait-checks", "3", "--minutes", "-1"],
                      ["wait-checks", "3", "--minutes", "soon"], ["retro", "save"], ["retro", "save", "--run-id", "r"],
-                     ["retro", "is-reviewed"], ["log", "list", "--limit", "x"], ["issue-edit-body", "1"], ["git", "remote-branch-exists"],
+                     ["retro", "is-reviewed"], ["log", "list", "--limit", "x"], ["issue-body", "1"], ["git", "remote-branch-exists"],
                      ["git", "remote-branch-exists", "a..b"], ["pick-needs-work", "--exclude", "x"]):
             with self.subTest(argv=argv):
                 code, payload, _ = self.cli(*argv)
@@ -349,7 +349,7 @@ class DryRunTests(CliCase):
             "review-post": ["review-post", "3", "--event", "COMMENT", "--body-file", body],
             "resolve-threads": ["resolve-threads", "3", "--ids-file", str(self.project / "ids.json")],
             "followup": ["followup", "--title-file", title, "--body-file", body, "--parent", "1"],
-            "issue-edit-body": ["issue-edit-body", "1", "--body-file", body],
+            "issue-body": ["issue-body", "1", "--body-file", body],
             "claim-pr": ["claim-pr", "3"],
             "release-pr": ["release-pr", "3"],
         }
