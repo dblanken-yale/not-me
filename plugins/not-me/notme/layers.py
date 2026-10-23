@@ -197,8 +197,20 @@ def _loosens(spec: KeySpec, value: Any, current: Any) -> bool:
     if spec.tighten_only == "false":
         return value is not False and current is False
     if spec.tighten_only == "superset":
-        return isinstance(current, list) and not (isinstance(value, list) and all(i in value for i in current))
+        kept = current if isinstance(current, list) else []
+        return not (isinstance(value, list) and all(i in value for i in kept))
     return False
+
+
+def _invalid_list(spec: KeySpec, value: Any) -> bool:
+    """True when a key with item rules gets a value that is not a list of allowed items with the required ones."""
+    if not (spec.items_enum or spec.required_items):
+        return False
+    if not isinstance(value, list):
+        return True
+    if spec.items_enum and any(i not in spec.items_enum for i in value):
+        return True
+    return any(i not in value for i in spec.required_items)
 
 
 def _tighten_union(spec: KeySpec, value: Any) -> Tuple[Any, List[Any]]:
@@ -228,9 +240,16 @@ def _apply(target: Dict[str, Any], sources: Dict[str, dict], meta: Mapping[str, 
         if not confirmed(spec, value, key, p.root):
             src = sources.setdefault(name, _source(None, None, None, []))
             src.setdefault("ignored", []).append({"layer": p.layer, "value": value, "reason": "not confirmed"})
-        elif p.layer == "repo" and spec.tighten_only and spec.merge != "union" and not isinstance(value, dict) \
+        elif p.layer == "repo" and spec.tighten_only and spec.merge != "union" \
+                and (spec.tighten_only == "superset" or not isinstance(value, dict)) \
                 and _loosens(spec, value, target.get(key)):
             _ignore_loosening(sources, name, value, p, line)
+        elif _invalid_list(spec, value):
+            src = sources.setdefault(name, _source(None, None, None, []))
+            src.setdefault("ignored", []).append({"layer": p.layer, "value": value, "reason": "invalid value"})
+            p.warnings.append(f"{p.layer} {p.path}:{line or 1}: {name} = {value!r} is ignored: it must be a list of "
+                              f"{', '.join(map(str, spec.items_enum))} that includes "
+                              f"{', '.join(map(str, spec.required_items))}")
         elif spec.merge == "union" and value is not None and p.layer == "repo" and spec.tighten_only \
                 and _tighten_union(spec, value)[1]:
             allowed, dropped = _tighten_union(spec, value)

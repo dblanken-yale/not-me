@@ -252,3 +252,17 @@ class ReviewBlockOnTests(unittest.TestCase):
         self.review("global", "[major]")
         errors = self.tc.load().check()
         self.assertTrue(any("block_on must include blocker" in e for e in errors), errors)
+
+    def test_repo_non_list_or_missing_blocker_is_ignored(self):
+        for value in ("{a: b}", "major", "null", "[major]"):
+            with self.subTest(value):
+                self.review("repo", value)
+                cfg = self.tc.load()
+                self.assertEqual(cfg.meta["review"]["block_on"], ["blocker", "major"])
+                self.assertTrue(any("block_on" in w and "ignored" in w for w in cfg.warnings), cfg.warnings)
+
+    def test_global_invalid_value_is_not_applied(self):
+        self.review("global", "[major]")
+        cfg = self.tc.load()
+        self.assertEqual(cfg.meta["review"]["block_on"], ["blocker", "major"])
+        self.assertTrue(cfg.check())
