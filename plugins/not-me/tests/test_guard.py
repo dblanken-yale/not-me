@@ -15,6 +15,7 @@ from notme import guard, runlog, writes
 from notme.guard import Block, GuardContext
 from tests import PLUGIN_ROOT
 from tests import guard_cases as gc
+from tests import winsim
 
 HOOK = PLUGIN_ROOT / "hooks" / "repo_guard.py"
 
@@ -68,44 +69,27 @@ class GuardTableTests(_Fixtures):
                         self.assertIn(text, result.message)
 
 
-def _backslash_path_module():
-    """os.path for this file system, but splitting on backslashes as well, as ntpath does on Windows."""
-    import posixpath
-    import types
-
-    def fwd(x):
-        return x.replace("\\", "/") if isinstance(x, str) else x
-    mod = types.ModuleType("backslash_path")
-    for name in dir(posixpath):
-        value = getattr(posixpath, name)
-        if callable(value) and not name.startswith("_"):
-            value = (lambda f: lambda *a, **k: f(*[fwd(x) for x in a], **k))(value)
-        if not name.startswith("__"):
-            setattr(mod, name, value)
-    mod.altsep = "\\"
-    import glob as real_glob
-    globber = types.SimpleNamespace(iglob=lambda p, **k: real_glob.iglob(fwd(p), **k))
-    return mod, globber
-
-
 class WindowsTypedPathTableTests(_Fixtures):
     """Table cases that name a fixture path, with the path typed the Windows way (C:\\Users\\x\\home). Bash drops
     unquoted backslashes, so before the guard judged words in both spellings these self-protection blocks came back
     allowed on Windows (fail open). Each case must decide as the table says both as written and, where it holds no
-    quotes, with every path quoted (the shell keeps the backslashes). Runs on every platform: a path module that
-    splits on backslashes too stands in for ntpath on the real disk."""
+    quotes, with every path quoted (the shell keeps the backslashes). On Windows this runs on the real disk; elsewhere
+    tests/winsim.py shows the fixture tree to the guard under Windows names with ntpath as its path module."""
 
     def setUp(self):
         self.ctxs = {}
-        module, globber = _backslash_path_module()
-        for patch in (mock.patch.object(guard, "_path", module), mock.patch.object(guard, "glob", globber)):
-            patch.start()
-            self.addCleanup(patch.stop)
+        self.sim = None if os.name == "nt" else winsim.fixture_sim(self.root, self.env)
+        if self.sim is not None:
+            self.sim.start()
+            self.addCleanup(self.sim.stop)
+
+    def win(self, path) -> str:
+        return str(path) if self.sim is None else self.sim.to_win(path)
 
     def typed(self, value, home, quote=False):
         if isinstance(value, str):
             for key, path in (("{F}", self.root), ("{H}", home), ("{P}", gc.PLUGIN)):
-                win = str(path).replace("/", "\\")
+                win = self.win(path).replace("/", "\\")
                 value = value.replace(key, f"'{win}'" if quote else win)
             return value
         if isinstance(value, dict):
@@ -114,11 +98,18 @@ class WindowsTypedPathTableTests(_Fixtures):
 
     def decide(self, variant, tool, tin):
         if variant not in self.ctxs:
-            self.ctxs[variant] = self.ctx(variant)
-            if not guard.is_active(self.ctxs[variant]):
-                self.ctxs[variant].self_only()  # as the hook does
+            if self.sim is not None:
+                self.sim.stop()  # the context is built on the real tree, then shown the Windows way
+            ctx = self.ctx(variant)
+            if not guard.is_active(ctx):
+                ctx.self_only()  # as the hook does
+            ctx.write_ctx  # config is read on the real tree
+            if self.sim is not None:
+                self.sim.start()
+                ctx = self.sim.context(ctx)
+            self.ctxs[variant] = ctx
         cwd, _ = gc.variant_paths(self.root, variant)
-        return guard.decide({"tool_name": tool, "tool_input": tin, "cwd": str(cwd), "session_id": gc.SESSION},
+        return guard.decide({"tool_name": tool, "tool_input": tin, "cwd": self.win(cwd), "session_id": gc.SESSION},
                             self.ctxs[variant])
 
     def test_cases_with_backslash_paths(self):
@@ -328,6 +319,8 @@ class TokenizerTests(unittest.TestCase):
         ctx = GuardContext(cwd="/nonexistent/app", root="/nonexistent/app", active_run=True, env={},
                            home="/nonexistent/home", plugin_root="/nonexistent/plugin", git=lambda a, c: None,
                            write_ctx=writes.GuardContext(origin_repo="acme/app", allowed_repos=("acme/app",)))
+        # the hook's watchdog is 8 s; Windows runners are slower per call, so they get more of that budget
+        limit = 3.0 if os.name == "nt" else 1.0
         n = 100 * 1024
         near = guard.MAX_COMMAND - 16
         for cmd in ("$(" * (n // 2), "${X-" * (n // 4), "cat/" * (n // 4) + " -", "-u " * (n // 3),
@@ -339,7 +332,7 @@ class TokenizerTests(unittest.TestCase):
             block = guard.decide(event, ctx)
             took = time.perf_counter() - start
             with self.subTest(cmd=cmd[:20], size=len(cmd)):
-                self.assertLess(took, 1.0)
+                self.assertLess(took, limit)
                 if len(cmd) > guard.MAX_COMMAND:
                     self.assertEqual(block.rule, "self_protect")
 
@@ -428,6 +421,17 @@ class WindowsPathTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.decide("Edit", {"file_path": path}).rule, "self_protect")
         self.assertIsNone(self.decide("Edit", {"file_path": "C:/Work/App/src/main.py"}))
+
+    def test_norm_and_under_compare_whole_components(self):
+        norm = guard._norm
+        self.assertEqual(norm("c:/WORK\\app/./x/../", "D:\\"), norm("C:\\Work\\App", "D:\\"))
+        self.assertEqual(norm("sub/f", "C:\\Work\\App"), norm("C:/work/app/SUB/F", "D:\\"))
+        base = norm("C:\\a", "D:\\")
+        for path, under in (("C:\\a", True), ("C:\\a\\b", True), ("c:/A/b/", True), ("C:\\ab", False),
+                            ("C:\\a.b\\c", False), ("D:\\a\\b", False), ("C:\\", False)):
+            with self.subTest(path=path):
+                self.assertIs(guard._under(norm(path, "D:\\"), base), under)
+        self.assertTrue(guard._under(norm("C:\\x\\y", "D:\\"), norm("c:/", "D:\\")))
 
     def test_unquoted_backslash_paths(self):
         """Bash reads C:\\Work\\App as C:WorkApp; the guard judges the word as typed too."""

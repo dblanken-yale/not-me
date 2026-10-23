@@ -501,12 +501,27 @@ def _resolve(p: str) -> str:
     return _path.join(here, *reversed(tail)) if tail else here
 
 
+# _norm results for the decision in progress (decide() sets and clears it): one command can name the same path
+# thousands of times, and each miss costs file-system calls (realpath is slow on Windows). The disk does not change
+# while one call is judged; outside decide() nothing is cached.
+_norm_memo: Optional[Dict[Tuple[Any, str, str], str]] = None
+
+
 def _norm(p: str, base: str) -> str:
-    """The single path normaliser: unquote, expand ~, make absolute against base, resolve, normcase."""
-    p = _path.expanduser(p.replace('"', "").replace("'", ""))
-    if not _path.isabs(p):
-        p = _path.join(base, p)
-    return _path.normcase(_path.normpath(_resolve(p)))
+    """The single path normaliser: unquote, expand ~, make absolute against base, resolve, normcase. Every
+    comparison normalises both sides with it (then _under compares whole components), so on Windows drive-letter
+    case, "/" against "\\" and short names all compare equal."""
+    memo = _norm_memo
+    key = (_path, str(p), str(base))
+    if memo is not None and key in memo:
+        return memo[key]
+    q = _path.expanduser(p.replace('"', "").replace("'", ""))
+    if not _path.isabs(q):
+        q = _path.join(base, q)
+    out = _path.normcase(_path.normpath(_resolve(q)))
+    if memo is not None:
+        memo[key] = out
+    return out
 
 
 _BACKSLASH_HINT = "put the path in quotes ('C:\\Users\\x') or write it with forward slashes (C:/Users/x)"
@@ -1043,7 +1058,7 @@ def find_checkout(start: str) -> Optional[Tuple[str, Path, Path]]:
 
     Raises _Ambiguous when a .git file cannot be read as `gitdir: <path>`.
     """
-    here = Path(os.path.realpath(os.path.abspath(start)))
+    here = Path(_path.realpath(_path.abspath(start)))
     for d in (here, *here.parents):
         g = d / ".git"
         if g.is_dir():
@@ -1063,7 +1078,7 @@ def find_checkout(start: str) -> Optional[Tuple[str, Path, Path]]:
                 common = c if c.is_absolute() else gd / c
             except OSError:
                 pass
-            return str(d), Path(os.path.realpath(gd)), Path(os.path.realpath(common))
+            return str(d), Path(_path.realpath(gd)), Path(_path.realpath(common))
     return None
 
 
@@ -1218,6 +1233,17 @@ def _blk(shown: str) -> Blk:
 
 
 def decide(event: Mapping[str, Any], ctx: GuardContext) -> Decision:
+    global _norm_memo
+    if _norm_memo is not None:
+        return _decide(event, ctx)
+    _norm_memo = {}
+    try:
+        return _decide(event, ctx)
+    finally:
+        _norm_memo = None
+
+
+def _decide(event: Mapping[str, Any], ctx: GuardContext) -> Decision:
     tool = event.get("tool_name") or ""
     tin = event.get("tool_input") or {}
     if not isinstance(tool, str) or not isinstance(tin, dict):
@@ -2300,7 +2326,7 @@ def _orphaning(t: List[str], seen: Set[str], st: _State) -> Optional[str]:
 def _expand_home(arg: str, ctx: GuardContext) -> str:
     """arg with $HOME / ${HOME} and $NOT_ME_HOME / ${NOT_ME_HOME} filled in (~ is left to _norm)."""
     for var in ("${HOME}", "$HOME"):
-        arg = arg.replace(var, ctx.env.get("HOME") or os.path.expanduser("~"))
+        arg = arg.replace(var, ctx.env.get("HOME") or _path.expanduser("~"))
     for var in ("${NOT_ME_HOME}", "$NOT_ME_HOME"):
         arg = arg.replace(var, str(ctx.home))
     return arg
@@ -2315,7 +2341,7 @@ def _reaches(arg: str, base: str, guarded: List[_Guarded], recursive: bool,
     rest pins the pattern near a guarded file; with nothing fixed left the argument cannot be placed at all."""
     arg = _expand_home(arg.replace('"', "").replace("'", ""), ctx)
     arg = _HOME_PARAM.sub(lambda m: str(ctx.home) if m.group(1) == "NOT_ME_HOME"
-                          else (ctx.env.get("HOME") or os.path.expanduser("~")), arg)
+                          else (ctx.env.get("HOME") or _path.expanduser("~")), arg)
     if _UNRESOLVED.search(arg):
         pattern = _UNRESOLVED.sub("*", arg)
         return _pattern_hit(pattern, base, guarded, recursive) if pattern.strip("*/\\.") else None
@@ -2401,7 +2427,7 @@ def _read_script(path: str, st: Optional[_State] = None) -> Optional[str]:
     if st is not None:
         return st.once(("read", path), lambda: _read_script(path))
     try:
-        if not os.path.isfile(path):
+        if not _path.isfile(path):
             return None
         with open(path, "rb") as fh:
             return fh.read(SCRIPT_READ_LIMIT).decode("utf-8", "replace")
@@ -2409,9 +2435,10 @@ def _read_script(path: str, st: Optional[_State] = None) -> Optional[str]:
         return None
 
 
+@lru_cache(maxsize=4096)  # pure, and called for every word by several checks
 def _prog(word: str) -> str:
     """Program name for matching: basename, backslashes removed, lowercased, without .exe."""
-    low = _base(word.replace("\\", "")).lower()
+    low = _base(str(word).replace("\\", "")).lower()
     return low[:-4] if low.endswith(".exe") else low
 
 
@@ -2971,7 +2998,7 @@ def _git_switch(c: _GitCall) -> Iterator[Block]:
         c.st.switched[c.d] = new[0]
     elif c.sub == "switch" and pos:
         c.st.switched[c.d] = pos[0]
-    elif len(pos) == 1 and "--" not in c.args and not os.path.exists(os.path.join(c.d, pos[0])):
+    elif len(pos) == 1 and "--" not in c.args and not _path.exists(_path.join(c.d, pos[0])):
         c.st.switched[c.d] = pos[0]
     return iter(())
 
