@@ -473,6 +473,19 @@ class LiveMarkerTests(unittest.TestCase):
                 self.assertTrue(guard.needs_check({"tool_name": "Bash", "tool_input": {"command": cmd}}))
 
 
+class InterpreterPrefilterTests(unittest.TestCase):
+    def test_every_interpreter_name_reaches_the_check(self):
+        import re
+        body = guard._INTERP_NAMES[len("(?:"):guard._INTERP_NAMES.index(")")]
+        for name in body.split("|"):
+            for spelled in (name, name + "3", name + "3.12", name.upper(), name.capitalize()):
+                with self.subTest(name=spelled):
+                    self.assertTrue(guard._INTERP.match(spelled.lower()))
+                    event = {"tool_name": "Bash", "tool_input": {"command": f"{spelled} x.txt"}}
+                    self.assertTrue(guard.needs_check(event))
+        self.assertTrue(re.search(r"\(\?i:", guard._PREFILTER.pattern))
+
+
 class OwnScriptsTests(unittest.TestCase):
     """The live-mode heuristics for interpreter code must not block this repository's own check commands."""
 

@@ -160,7 +160,10 @@ _UNRESOLVED = re.compile(r"\$\([^)]*\)?|`[^`]*`?|\$\{[^}]*\}?|\$[A-Za-z0-9_@*#?!
 _HOME_PARAM = re.compile(r"\$\{(NOT_ME_HOME|HOME)(?![A-Za-z0-9_])[^}]*\}")
 _GLOB = re.compile(r"[*?\[]")
 _LOCALHOST = re.compile(r"^(?:[^@]+@)?(?:localhost|127(?:\.\d+){3}|::1|\[::1\]|0\.0\.0\.0)$", re.IGNORECASE)
-_INTERP = re.compile(r"^(python[0-9.]*|pythonw|py|node|nodejs|perl|ruby|php|deno|bun)$")
+# interpreter program names (lowercased, versioned or not); the prefilter is built from the same pattern
+_INTERP_NAMES = (r"(?:python|pythonw|py|node|nodejs|perl|ruby|php|deno|bun|lua|luajit|rscript|osascript|pwsh"
+                 r"|powershell|julia|tclsh|wish)[0-9.]*")
+_INTERP = re.compile(r"^" + _INTERP_NAMES + r"$")
 _REPO_PATH = re.compile(r"^repos/([^/]+)/([^/?]+)(/|\?|$)")
 _PULL_MERGE = re.compile(r"/pulls/\d+/merge/?$")
 _PROTECTION = re.compile(r"/branches/[^/]+/protection(/|$)")
@@ -172,11 +175,13 @@ _MCP_WRITE_WORDS = re.compile(
     r"reopen|fork|edit|lock|unlock|cancel|enable|disable|trigger|mark|star|approve|comment|upload|transfer)(_|$)")
 # Bash commands that cannot matter to any rule skip the full check (applied with quotes/backslashes removed).
 _PREFILTER = re.compile(
-    r"(?<![A-Za-z0-9_-])(gh|git|github|rm|find|xargs|parallel|curl|wget|python[0-9.]*|py|node|nodejs|perl|ruby|"
-    r"php|deno|bun|bash|sh|zsh|dash|ksh|fish|source|exec|eval)(?![A-Za-z0-9_-])"
+    r"(?<![A-Za-z0-9_-])(gh|git|github|rm|find|xargs|parallel|curl|wget|(?i:" + _INTERP_NAMES + r")|bash|sh|zsh|"
+    r"dash|ksh|fish|source|exec|eval|NODE_OPTIONS|NODE_PATH|RUBYOPT|RUBYLIB|PERL5OPT|PERL5LIB|PERLLIB|PYTHONPATH"
+    r"|PYTHONSTARTUP|PYTHONINSPECT|PYTHONHOME|PYTHONUSERBASE)(?![A-Za-z0-9_-])"
     r"|(?:^|[\s;|&(])\.(?:\s|$)|\./|\.(?:sh|bash|zsh)\b|\$|`|allow-repo|allowed-repos|GIT_|\.git|notme|not-me|NOT_ME_|operator-token"
     r"|mode-live"  # LIVE_MARKER_NAME
     r"|merge-grants"  # GRANT_NAME
+    r"|(?<![A-Za-z0-9_-])(?:vim|vi|nvim|ex|view|vimdiff|gvim|rvim|evim)(?![A-Za-z0-9_-])"
     r"|(?<![A-Za-z0-9_-])(?:script|expect|unbuffer|socat|ssh|tmux|screen|pause)(?![A-Za-z0-9_-])"
     # any file reader, copier or < redirection, or a > redirection to a glob, brace or ~ path: its arguments may
     # expand into the not-me home (a plain > target that does not spell a guarded name cannot reach it)
@@ -1918,12 +1923,8 @@ def _command(t: List[str], seg: str, st: _State, ctx: GuardContext) -> Iterator[
         yield from handler(t, seg, st, ctx, blk, unsafe)
     elif word.startswith(("./", "../", ".\\", "..\\")) or word.endswith(SCRIPT_SUFFIXES):
         yield from _script(word, st, blk)
-    elif _INTERP.match(head):
-        inline = any(a in ("--eval", "--print") or (a.startswith("-") and not a.startswith("--")
-                                                     and set(a[1:]) & set("ceEpr")) for a in t[1:])
-        if inline and st.once(("github",), lambda: _mentions_github(st.text)):
-            yield blk(OPAQUE, f"{head} inline code that runs gh/git or calls GitHub cannot be checked",
-                      "run gh/git directly")
+    elif _INTERP.match(_prog(word)):
+        yield from _interp_call(_prog(word), list(t[1:]), st, bool(assigned) or "env" in seen, blk)
     elif head in _HTTP_CLIENTS and _GITHUB.search(seg):
         yield blk(OPAQUE, f"{head} to GitHub bypasses gh's repo checks", "use gh with --repo owner/name")
     elif prefixed and has_gh_git(seg):
@@ -1931,6 +1932,93 @@ def _command(t: List[str], seg: str, st: _State, ctx: GuardContext) -> Iterator[
     elif _prog(word) not in _INERT and any(has_gh_git(a) or has_gh_git(_unshell(a)) for a in t):  # man -P, watch
         yield blk(OPAQUE, f"{_prog(word)} may run gh/git with words the guard cannot check",
                   "run gh/git directly, without the wrapper")
+
+
+# --- interpreters ----------------------------------------------------------------
+#
+# A text scan cannot tell what a program does, and every option table had gaps, so an interpreter call is allowed
+# only in one of a few exact shapes: run an existing script file (with a tiny set of options that cannot load
+# code), run a listed tool module with python -m, or print the version or help. Running a file is the documented
+# limit of text inspection. Everything else, including any environment assignment or env wrapper in front, blocks.
+
+# per interpreter family: options that cannot load or run code
+_SAFE_OPTS: Dict[str, FrozenSet[str]] = {
+    "python": frozenset({"-u", "-B", "-O", "-OO", "-Wignore", "-Werror", "-Wdefault"}),
+    "node": frozenset({"--no-warnings"}),
+    "perl": frozenset({"-w", "-W", "-X", "-T"}),
+    "ruby": frozenset({"-w"}),
+}
+_INFO_ONLY = frozenset({"--version", "-V", "--help"})
+# python -m modules that run tools, not code taken from their arguments (timeit, pdb, cProfile, trace, code, runpy
+# and the like do, so they are not here)
+# words a script an interpreter runs may not contain: the not-me secrets and the merge grants (narrower than
+# _SCRIPT_SELF, since this repository's own Python tools import notme)
+_INTERP_SELF = re.compile(r"operator-token|mode-live\.(?:sig|epoch)|merge-grants|allowed-repos\.json"
+                          r"|NOT_ME_OPERATOR_CONFIRM")
+_PY_MODULES = frozenset({"pytest", "pip", "venv", "json.tool", "unittest", "http.server", "py_compile", "compileall",
+                         "ensurepip", "build", "twine", "mypy", "black", "ruff", "flake8", "isort", "pylint",
+                         "pyflakes", "tabnanny", "zipfile", "tarfile", "gzip", "base64", "calendar", "uuid",
+                         "sysconfig", "site", "platform", "this"})
+# variables that make an interpreter load code, also when exported earlier in the command
+_CODE_ENV = re.compile(r"(?<![A-Za-z0-9_])(NODE_OPTIONS|NODE_PATH|RUBYOPT|RUBYLIB|PERL5OPT|PERL5LIB|PERLLIB|PERL5DB"
+                       r"|PYTHON[A-Z0-9_]*|LUA_INIT[A-Z0-9_]*|LUA_PATH[A-Z0-9_]*|LUA_CPATH[A-Z0-9_]*|JULIA_[A-Z0-9_]*"
+                       r"|PHPRC|PHP_INI_SCAN_DIR|R_PROFILE[A-Z_]*|R_ENVIRON[A-Z_]*|R_LIBS[A-Z_]*|TCLLIBPATH"
+                       r"|DENO_[A-Z0-9_]*|BUN_[A-Z0-9_]*)(?:\[[^\[\]]*\])?\+?=")
+
+
+def _interp_family(prog: str) -> str:
+    if prog.startswith("py"):
+        return "python"
+    if prog.startswith(("powershell", "pwsh")):
+        return "pwsh"
+    return next((f for f in ("node", "perl", "ruby") if prog.startswith(f)), prog)
+
+
+def _interp_shape(prog: str, args: List[str]) -> Tuple[str, str]:
+    """Which allowed shape an interpreter call has, from its words alone: ("info", ""), ("module", name),
+    ("script", path), or ("bad", why). The single parser for both the allow decision (_interp_call) and the
+    self-protection read of the script (_primitives), so the two always agree on which file runs."""
+    family = _interp_family(prog)
+    if len(args) == 1 and args[0] in _INFO_ONLY:
+        return "info", ""
+    rest = list(args)
+    if family == "pwsh":
+        while rest and rest[0].lower() in ("-noprofile", "-noninteractive"):
+            rest = rest[1:]
+        if len(rest) < 2 or rest[0].lower() != "-file":
+            return "bad", f"{prog} runs only as -NoProfile -NonInteractive -File <file>"
+        rest = rest[1:]
+    else:
+        safe = _SAFE_OPTS.get(family, frozenset())
+        while rest and (rest[0] in safe or (family == "python" and rest[0] == "-W" and len(rest) > 1
+                                            and rest[1] in ("ignore", "error", "default"))):
+            rest = rest[2:] if rest[0] == "-W" else rest[1:]
+        if family == "python" and rest[:1] == ["-m"]:
+            module = rest[1] if len(rest) > 1 else ""
+            # a local file shadowing a listed module only runs a file, which is allowed anyway
+            if module not in _PY_MODULES:
+                return "bad", f"python -m {module or '(none)'} may run code the guard cannot check"
+            return "module", module
+    script = rest[0] if rest else ""
+    if not script or script.startswith("-"):
+        return "bad", f"{prog} with {f'option {script}' if script else 'no script file (code from stdin or a prompt)'}" \
+                      " may run code the guard cannot check"
+    return "script", script
+
+
+def _interp_call(prog: str, args: List[str], st: _State, envd: bool, blk: Blk) -> Iterator[Block]:
+    """Allow an interpreter only in the shapes _interp_shape accepts, with no environment in front and an existing
+    script file; block everything else. (_primitives reads the same script for self-protection.)"""
+    why = f"write the code to a script file and run `{prog} file`"
+    if envd or _CODE_ENV.search(st.text):
+        yield blk(OPAQUE, f"an environment setting in front of {prog} can make it load code the guard cannot check",
+                  f"run {prog} without it; {why}")
+        return
+    kind, value = _interp_shape(prog, args)
+    if kind == "bad":
+        yield blk(OPAQUE, value, why)
+    elif kind == "script" and ((st.moved and not _path.isabs(value)) or not _path.isfile(_norm(value, st.dir))):
+        yield blk(OPAQUE, f"{prog} runs '{_short(value, 40)}', which is not a script file the guard can read", why)
 
 
 def _pty_wrapper(t: List[str], seg: str, st: _State) -> Optional[str]:
@@ -1959,30 +2047,79 @@ def _pty_wrapper(t: List[str], seg: str, st: _State) -> Optional[str]:
     return None
 
 
+_FILE_WRITERS = {"tee", "cp", "mv", "install", "ln", "rsync", "patch", "unzip", "wget", "scp"}
+_WRITE_REDIRS = {">", ">>", ">|", "&>", "&>>", "<>"}
+_NULL_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"}
+
+
+def _writes_files(st: _State, seg: str) -> bool:
+    """Some other part of the command (or this command's input side) writes a file: a > or >> redirection, tee, cp,
+    mv, install, ln, dd of=, sed -i, curl -o/-O, wget and the like. The interpreter's own output redirection does
+    not count (the shell truncates it before the interpreter starts)."""
+    for c in st.commands:
+        words = [str(w) for w in c.words]
+        own = c.raw == seg
+        if not own and any(op in _WRITE_REDIRS and tgt not in _NULL_TARGETS for op, tgt in c.redirs):
+            return True
+        core = _core(words)
+        if not core:
+            continue
+        p, rest = _prog(core[0]), core[1:]
+        if p in _FILE_WRITERS or (p == "dd" and any(a.startswith("of=") for a in rest)):
+            return True
+        if p in ("sed", "gsed", "perl") and any(a.startswith("-i") or a.startswith("--in-place") for a in rest):
+            return True
+        if p == "curl" and any(a in ("-o", "-O", "--output", "--remote-name", "--remote-name-all")
+                               or a.startswith(("--output=", "-o")) or (a.startswith("-") and not a.startswith("--")
+                                                                         and "O" in a) for a in rest):
+            return True
+        if p == "tar" and any(not a.startswith("--") and "x" in a.lstrip("-") for a in rest[:1]) or \
+                (p == "tar" and any(a in ("--extract", "--get") for a in rest)):
+            return True
+    return False
+
+
 def _primitives(t: List[str], seg: str, st: _State, blk: Blk) -> Iterator[Block]:
-    """Interpreter code (inline or a script file) that forges a terminal or detaches from the session."""
+    """Interpreter code (inline or a script file) that forges a terminal or detaches from the session, and a script
+    file that reaches the not-me secrets or the merge grants. The script is the one _interp_shape names, the same
+    file _interp_call allows."""
     prog, args = _prog(t[0]), t[1:]
     if not _INTERP.match(prog):
         return
     why = "{} can forge a terminal or leave this session's process tree ({}), which would pass not-me's human check"
     hint = "do this without pty, fork, setsid or daemon code"
-    inline = any(a in ("-", "--eval", "--print") or (a.startswith("-") and not a.startswith("--")
-                                                    and set(a[1:]) & set("ceEpr")) for a in args)
-    pos = _positionals(args)
-    if inline or "<<" in seg or not pos:
+    kind, script = _interp_shape(prog, list(args))
+    if kind == "info":
+        return
+    if kind == "bad":
         m = st.find(_PRIMITIVES, st.raw)
         if m:
             yield blk(SELF, why.format(f"{prog} inline code", m.group(0)), hint)
-        return
-    if st.moved and "-m" not in args and any(not _path.isabs(a) for a in pos):
+            return
+    # a script, or every file argument of a module call (pytest x_test.py) or a rejected call (outside a not-me
+    # project the shape block is dropped); imported modules and conftest.py are the documented file-run limit
+    files = [script] if kind == "script" else [a for a in _positionals(list(args)) if a != script]
+    if kind != "bad" and st.moved and any(not _path.isabs(f) for f in files):
         yield blk(SELF, f"{prog} runs a file named by a relative path in a command that changes directory, so the "
                         "guard cannot read it", _CD_HINT)
         return
-    for a in pos:  # the script is the first file among them; option values are rarely files
-        text = _read_script(_norm(a, st.dir), st)
-        m = _PRIMITIVES.search(text) if text is not None else None
+    files = [f for f in files if not (st.moved and not _path.isabs(f))]
+    if kind != "bad" and any(_path.isfile(_norm(f, st.dir)) for f in files) and _writes_files(st, seg):
+        yield blk(SELF, f"this command writes files and runs {prog} on a file in the same call, so the file may change "
+                        "after the guard reads it", "write the file in one Bash call and run it in the next")
+        return
+    for f in files:
+        text = _read_script(_norm(f, st.dir), st)
+        if text is None:
+            continue  # not a readable file: _interp_call blocks a script like that
+        m = _PRIMITIVES.search(text)
         if m:
-            yield blk(SELF, why.format(a, m.group(0)), hint)
+            yield blk(SELF, why.format(f, m.group(0)), hint)
+            return
+        m = _INTERP_SELF.search(text)
+        if m:
+            yield blk(SELF, f"{f} reaches not-me's own secrets or merge grants ({m.group(0)}), which the agent may "
+                            "not touch", "ask the operator")
             return
 
 

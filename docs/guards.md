@@ -57,7 +57,19 @@ git -c remote.origin.pushurl=git@github.com:acme/lib.git push
 bash -c "gh pr comment 5 --repo acme/lib --body x"
 echo $(gh pr comment 1 -R acme/other -b hi)
 python3 -c 'import subprocess; subprocess.run(["gh", "pr", "comment", "5", "-R", "acme/other", "-b", "x"])'
+perl -e 'system("g"."it push https://gith"."ub.com/acme/other HEAD")'
+vim -c 'exe "!g"."it push https://gith"."ub.com/acme/other HEAD"'
 ```
+
+Interpreters (python, node, deno, bun, perl, ruby, php, lua, Rscript, osascript, pwsh and powershell, julia, tclsh, also with a version in the name such as `python3.12`) are allowed only in these shapes:
+
+- `<interpreter> [safe options] <existing script file> [arguments]`. The safe options cannot load code: python `-u`, `-B`, `-O`, `-OO`, `-W ignore|error|default`; node `--no-warnings`; perl `-w`, `-W`, `-X`, `-T`; ruby `-w`; none for the others. pwsh and powershell: only `-NoProfile -NonInteractive -File <file> [arguments]`.
+- `python3 -m <module> [arguments]` for a short list of tool modules: `pytest`, `pip`, `venv`, `json.tool`, `unittest`, `http.server`, `py_compile`, `compileall` and similar. `timeit`, `pdb`, `cProfile`, `trace`, `code` and `runpy` run code taken from their arguments and are not on it.
+- `<interpreter> --version`, `-V` or `--help`.
+
+The script file an allowed call runs is read before it runs, and is blocked (self-protection, in every directory) when it can forge a terminal or detach, or names the operator token, the live-mode files, the allow list or the merge-grant folder. One parser decides both which shape a call has and which file that is, so the two cannot disagree. The file arguments of a `python3 -m` call (`python3 -m pytest tests/x_test.py`) are read the same way; the modules those files import and a `conftest.py` are not, which is the same limit as running a file. A command that writes a file (`>`, `>>`, `tee`, `cp`, `mv`, `install`, `ln`, `dd of=`, `sed -i`, `curl -o`, `wget`, a `cat <<EOF >` here-document) and also runs an interpreter on a file is blocked, because the guard reads the file before the write happens: write in one Bash call and run in the next. The interpreter's own output redirection (`python3 x.py > out.txt`) does not count.
+
+Everything else is blocked, whatever the code holds: inline code (`-c`, `-e`, `--eval`, attached forms, `deno eval`), no script file (code from stdin, a pipe, a here-document, `-`, `/dev/stdin`, `-i`, a prompt), any other option (`-M`, `-r`, `--require`, `-d`, `-I`, `php -d`), a script path that is not an existing regular file, and any environment assignment or `env` wrapper in front of the interpreter (also a variable such as `PYTHONSTARTUP`, `NODE_OPTIONS`, `PERL5OPT` or `LUA_INIT` exported earlier in the command). The guard cannot tell what a program does from its text. Write the code to a script file and run `<interpreter> file`; `npm test` is unaffected. In vim, `exe`, `execute`, `call system(...)` and similar are blocked.
 
 Edits to `.git/config`, `.git/hooks/*`, and `~/.gitconfig` are blocked too, because they change where git sends things.
 
@@ -86,7 +98,7 @@ gh pr view 5 --repo acme/other                  # reads work anywhere
 gh api repos/acme/lib/pulls
 gh pr comment 5 --repo acme/app --body hi       # the checkout's own repo
 git push -u origin feature
-python3 -c 'print(1)'                           # inline code that does not touch git or GitHub
+python3 scripts/report.py                       # a script file: run, not opened
 sh scripts/clean.sh                             # a script that does not mention git or gh
 git commit -m "$(cat <<'EOF'
 fix: x
@@ -300,7 +312,7 @@ The guard splits a command into words the way the shell does: quotes, backslashe
 
 What it does not cover:
 
-- Programs and scripts it cannot read. A shell script is scanned for `git`, `gh`, and `github.com`, but a file run as `python3 tool.py` is not opened, and a script that builds its command from pieces will not match. A file such a program writes into the merge-grant folder is not signed with your operator token, so it does not count as a grant.
+- Programs and scripts it cannot read. A shell script is scanned for `git`, `gh`, and `github.com`, but a file run as `python3 tool.py` is not opened, and a script that builds its command from pieces will not match. Running a file is the limit of text inspection: whatever a script file does is out of reach, which is why inline interpreter code, which could be any program, is blocked outright. A file such a program writes into the merge-grant folder is not signed with your operator token, so it does not count as a grant.
 - Tools outside its matcher. Only Bash, the file-editing tools, and MCP tools with `github` in the name are checked. Other MCP servers and your own terminal are not.
 - Reads. Any repo your token can read can be read.
 - Time of check. It looks at your git config when it checks. Something that changes the config between the check and the command is out of reach.
