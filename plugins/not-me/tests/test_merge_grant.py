@@ -97,15 +97,19 @@ class PromptHookTests(_Home):
         self.assertEqual(self.grant("s1")["number"], 5)
         self.assertIsNone(self.grant("s2"))
 
-    def test_session_ids_are_sanitised_and_required(self):
-        self.prompt("/not-me:allow-merge acme/app#5", sid="../../x y")
-        self.assertEqual(sorted(p.name for p in merge_grant.grant_dir(self.home).iterdir()), ["xy.json"])
-        self.assertIsNone(merge_grant.session_key(""))
-        self.assertIsNone(merge_grant.session_key("../"))
+    def test_session_ids_must_be_plain_and_are_never_stripped(self):
+        for sid in ("../../x y", "S/1", "s1\n", "x" * 129, "", "é"):
+            with self.subTest(sid=sid):
+                self.assertIsNone(merge_grant.session_key(sid))
+                self.prompt("/not-me:allow-merge acme/app#5", sid=sid)
+                self.assertFalse(merge_grant.grant_dir(self.home).exists())
         self.assertIsNone(merge_grant.session_key(None))
-        shutil.rmtree(str(merge_grant.grant_dir(self.home)))
-        self.prompt("/not-me:allow-merge acme/app#5", sid="")
-        self.assertFalse(merge_grant.grant_dir(self.home).exists())
+        self.assertEqual(merge_grant.session_key("S-1_a"), "S-1_a")
+
+    def test_a_stripped_lookalike_session_gets_no_grant(self):
+        self.prompt("/not-me:allow-merge acme/app#5", sid="S1")
+        self.assertIsNotNone(self.grant("S1"))
+        self.assertIsNone(merge_grant.read(self.home, merge_grant.session_key("S/1")))
 
     def test_other_events_and_bad_input_do_nothing(self):
         self.prompt("/not-me:allow-merge acme/app#5", event="PreToolUse")

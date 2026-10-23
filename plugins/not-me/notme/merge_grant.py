@@ -57,7 +57,7 @@ def _mac(token: str, data: Dict[str, Any], home: PathLike) -> str:
     return hmac.new(key, _MESSAGE + bound.encode("utf-8") + b"\0" + payload.encode("utf-8"),
                     hashlib.sha256).hexdigest()
 
-_SID_DROP = re.compile(r"[^A-Za-z0-9_-]")
+_SID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _STARTS = re.compile(r"\A\s*" + re.escape(COMMAND) + r"(?![A-Za-z0-9_:./-])")
 # owner: GitHub's rules (letters, digits, single hyphens, 1-39); name: letters, digits, . _ - (not . or ..)
 _ARG = re.compile(r"\A([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/([A-Za-z0-9._-]{1,100})#([1-9][0-9]{0,9})"
@@ -67,11 +67,11 @@ PathLike = Union[str, Path]
 
 
 def session_key(session_id: Any) -> Optional[str]:
-    """The session id reduced to [A-Za-z0-9_-] (at most 128 characters); None when nothing is left."""
-    if not isinstance(session_id, str):
+    """The session id when it is 1 to 128 characters of [A-Za-z0-9_-]; None otherwise (never stripped, so two ids
+    cannot map to one grant file)."""
+    if not isinstance(session_id, str) or not _SID.fullmatch(session_id):
         return None
-    key = _SID_DROP.sub("", session_id)[:128]
-    return key or None
+    return session_id
 
 
 def grant_dir(home: PathLike) -> Path:

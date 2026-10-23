@@ -6,7 +6,7 @@ The guard is a safety net for an agent that is trying to follow the rules. It is
 
 ## How it works in one minute
 
-- Claude Code calls the hook before every `Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and GitHub MCP tool call.
+- Claude Code calls the hook before every `Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, read and MCP tool call (the GitHub write rules apply to GitHub MCP tools; every MCP tool gets the check below for grant prompts and Claude Code invocations).
 - The hook looks at the call and either lets it through (exit code 0) or blocks it (exit code 2, with a message that goes back to Claude).
 - A blocked call does not run. Claude reads the message, does not retry, and records a question for you.
 - Every block in a not-me project is also appended to `<git-common-dir>/not-me/logs/guard.jsonl` with the time, tool, rule, reason, and target.
@@ -293,6 +293,7 @@ Self-protection is always on, in every directory, whether or not the guard is ac
 - Going live: `notme mode` with anything but `show` or `dry-run`, however it is started (`notme`, `bin/notme`, `python3 cli/notme.py`, `python3 -m notme.cli`, also after python options such as `-W ignore` or `-X utf8`). Also any Write or Edit of `mode-live.sig`, any Bash command that mentions it, and any Bash copy, move or redirection that reaches it through a glob or a part the guard cannot work out. That file is the signature `/not-me:mode live` writes with your operator token and epoch; without it a `mode: live` setting runs as dry-run, so no file edit can turn live mode on. Going back to dry-run with `/not-me:mode dry-run --global` replaces the epoch, so a saved copy of an old signature stops working.
 - A Write or Edit that would leave `mode: live` (or anything but `dry-run`) in your global `project.md`. This one is a courtesy: it stops the attempt early with a pointer to `/not-me:mode live`. The signature above is what actually keeps live mode off.
 - Creating, changing or reading a merge grant: anything under `~/.claude/not-me/merge-grants/`. This covers the Read, Grep, Glob and LS tools, Write and Edit (also through a symlink, a `..` step after a symlink, or a hard link to a grant), and any Bash command that names the folder or reaches it through a glob, a directory or a redirection. Only your own `/not-me:allow-merge` message creates one (see [Merge grants](#merge-grants)).
+- Sending a grant prompt any other way: any Bash command, script or pty wrapper that names `allow-merge`, and any run of the Claude Code CLI (`claude`, `claude -p`, `claude --resume <id>`, `npx @anthropic-ai/claude-code`, behind `env`, `nohup`, `xargs` or `bash -c`), because a resumed session keeps its session id and its prompt hook would grant the merge to this session. Any MCP tool (session, terminal or prompt tools included) whose input names `allow-merge`, the operator token, the live-mode files, the merge-grant folder or a Claude Code invocation is refused too. The prompt hook cannot tell an interactive prompt from a `claude -p` one: Claude Code's hook input has no such field (it carries `session_id`, `transcript_path`, `cwd`, `permission_mode`, `hook_event_name` and `prompt`), so these blocks are what keeps a session from granting itself a merge.
 
 The block message in each case says to ask the operator, which is you.
 
@@ -313,7 +314,7 @@ The guard splits a command into words the way the shell does: quotes, backslashe
 What it does not cover:
 
 - Programs and scripts it cannot read. A shell script is scanned for `git`, `gh`, and `github.com`, but a file run as `python3 tool.py` is not opened, and a script that builds its command from pieces will not match. Running a file is the limit of text inspection: whatever a script file does is out of reach, which is why inline interpreter code, which could be any program, is blocked outright. A file such a program writes into the merge-grant folder is not signed with your operator token, so it does not count as a grant.
-- Tools outside its matcher. Only Bash, the file-editing tools, and MCP tools with `github` in the name are checked. Other MCP servers and your own terminal are not.
+- Tools outside its matcher, and what other MCP tools do. Only Bash, the file tools and MCP tools are checked, and an MCP tool other than a GitHub one is refused only when its input names `allow-merge`, the not-me secrets or a Claude Code invocation; a terminal or session tool can otherwise run anything. Your own terminal is not checked.
 - Reads. Any repo your token can read can be read.
 - Time of check. It looks at your git config when it checks. Something that changes the config between the check and the command is out of reach.
 - The repo layer's `tracker` and `repos`. The hook allows the repos named there without looking at your allow list, while the `notme` CLI requires you to confirm them. Review changes to those two keys the way you would review code.

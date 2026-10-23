@@ -129,13 +129,21 @@ GRANT_WHY = "merge grants come only from the person typing " + merge_grant.COMMA
 GRANT_HINT = f"ask the operator; to allow one merge they send {merge_grant.COMMAND} owner/name#N"
 # words that make a forged terminal dangerous: driving the not-me CLI or its human checks through a pty
 _NOTME_HOME_PATH = r"\.claude[/\\]+not-me(?![A-Za-z0-9_.-])"  # the global not-me home (and the repo layer)
-_PTY_TRIGGER = re.compile(r"notme|allow-repo|(?<![A-Za-z0-9_-])pause(?![A-Za-z0-9_-])|operator-token"
-                          r"|mode-live\.(?:sig|epoch)|NOT_ME_|merge-grants|" + _NOTME_HOME_PATH)
+# the Claude Code CLI as a word (not ~/.claude or claude.ai): starting or resuming a session from inside one could
+# deliver a prompt (such as /not-me:allow-merge) as if the person typed it
+_CLAUDE_WORD = r"(?<![A-Za-z0-9_.-])claude(?:-code)?(?:\.exe)?(?![A-Za-z0-9_.-])|@anthropic-ai/claude-code"
+_PTY_TRIGGER = re.compile(r"notme|allow-repo|allow-merge|(?<![A-Za-z0-9_-])pause(?![A-Za-z0-9_-])|operator-token"
+                          r"|mode-live\.(?:sig|epoch)|NOT_ME_|merge-grants|" + _NOTME_HOME_PATH + "|" + _CLAUDE_WORD)
 # `mode` followed by anything but show or dry-run: the live switch, when the command word is a $VAR
 _MODE_LIVE = re.compile(r"(?<![A-Za-z0-9_-])mode\s+(?!(?:show|dry-run)(?![A-Za-z0-9_-]))\S")
 # words a script file run through a shell may not contain (they drive the not-me CLI where the guard cannot see)
-_SCRIPT_SELF = re.compile(r"notme|allow-repo|operator-token|mode-live\.(?:sig|epoch)|NOT_ME_|merge-grants|"
-                          + _NOTME_HOME_PATH)
+_SCRIPT_SELF = re.compile(r"notme|allow-repo|allow-merge|operator-token|mode-live\.(?:sig|epoch)|NOT_ME_|merge-grants|"
+                          + _NOTME_HOME_PATH + "|" + _CLAUDE_WORD)
+# what a non-Bash tool's input (MCP session, terminal or prompt tools) may not carry: a grant prompt, the not-me
+# secrets, or a Claude Code CLI invocation (the word followed by an option, the end, or a shell separator)
+_TOOL_MARKERS = re.compile(r"allow-merge|operator-token|merge-grants|mode-live\.(?:sig|epoch)"
+                           r"|(?<![A-Za-z0-9_.-])(?:[^\s'\"]*/)?claude(?:-code)?(?:\.exe)?(?=\s+-|\s*$|\s*[;&|)])"
+                           r"|@anthropic-ai/claude-code", re.IGNORECASE)
 _PTY_CODE = re.compile(r"(?<![A-Za-z])pty(?![A-Za-z])|openpty|forkpty|spawn\s*\(")
 # code that forges a terminal or leaves the session's process tree: blocked in inline code and scripts outright
 _PRIMITIVES = re.compile(r"(?<![A-Za-z_])pty(?![A-Za-z_])|openpty|forkpty|os\.fork\b|(?<![A-Za-z_.])fork\s*\(|setsid"
@@ -180,7 +188,8 @@ _PREFILTER = re.compile(
     r"|PYTHONSTARTUP|PYTHONINSPECT|PYTHONHOME|PYTHONUSERBASE)(?![A-Za-z0-9_-])"
     r"|(?:^|[\s;|&(])\.(?:\s|$)|\./|\.(?:sh|bash|zsh)\b|\$|`|allow-repo|allowed-repos|GIT_|\.git|notme|not-me|NOT_ME_|operator-token"
     r"|mode-live"  # LIVE_MARKER_NAME
-    r"|merge-grants"  # GRANT_NAME
+    r"|merge-grants|allow-merge"  # GRANT_NAME, merge_grant.COMMAND
+    r"|(?<![A-Za-z0-9_.-])claude(?![A-Za-z0-9_.])|claude-code"  # the Claude Code CLI
     r"|(?<![A-Za-z0-9_-])(?:vim|vi|nvim|ex|view|vimdiff|gvim|rvim|evim)(?![A-Za-z0-9_-])"
     r"|(?<![A-Za-z0-9_-])(?:script|expect|unbuffer|socat|ssh|tmux|screen|pause)(?![A-Za-z0-9_-])"
     # any file reader, copier or < redirection, or a > redirection to a glob, brace or ~ path: its arguments may
@@ -1200,8 +1209,8 @@ def decide(event: Mapping[str, Any], ctx: GuardContext) -> Decision:
         cands = _file(tool, str(tin.get("file_path") or tin.get("notebook_path") or ""), cwd, ctx, tin)
     elif tool in _READ_TOOLS:
         cands = _read_tool(tool, tin, cwd, ctx)
-    elif _MCP_TOOL.match(tool):
-        cands = _mcp(tool, tin, ctx)
+    elif tool.startswith("mcp__"):
+        cands = _mcp_any(tool, tin, ctx)
     else:
         return None
     # outside a project an unreadable command still blocks when it could drive the not-me CLI or its trust inputs
@@ -1591,6 +1600,23 @@ def _file(tool: str, fpath: str, cwd: str, ctx: GuardContext, tin: Mapping[str, 
                   "change git settings by hand, outside the agent")
 
 
+def _mcp_any(tool: str, tin: Mapping[str, Any], ctx: GuardContext) -> Iterator[Block]:
+    """Every MCP tool: one whose input carries a grant prompt, the not-me secrets or a Claude Code CLI invocation is
+    refused (session, terminal and prompt tools can deliver text outside Bash). GitHub tools get the write rules."""
+    try:
+        text = json.dumps(tin, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = str(tin)
+    for variant in (text, text.replace("\\n", "\n").replace('\\"', '"')):
+        m = _TOOL_MARKERS.search(variant)
+        if m:
+            yield _blk(_short(tool))(SELF, f"{tool} input names {m.group(0).strip()}, which only the operator may "
+                                           "send or run", "ask the operator")
+            return
+    if _MCP_TOOL.match(tool):
+        yield from _mcp(tool, tin, ctx)
+
+
 def _mcp(tool: str, tin: Mapping[str, Any], ctx: GuardContext) -> Iterator[Block]:
     name = tool.split("__")[-1]
     if name in _READ_MCP or (_READ_MCP_PREFIX.match(name) and not _MCP_WRITE_WORDS.search(name)):
@@ -1747,7 +1773,7 @@ def _bash(cmd: str, cwd: str, ctx: GuardContext) -> Iterator[Block]:
         yield blk(SELF, LIVE_EPOCH_WHY, LIVE_HINT)
     if LIVE_MARKER_NAME in plain.lower():
         yield blk(SELF, LIVE_MARKER_WHY, LIVE_HINT)
-    if GRANT_NAME in plain.lower() or any(GRANT_NAME in v for v in _spellings(plain)):
+    if any(w in v for v in _spellings(plain) for w in (GRANT_NAME, "allow-merge")):
         yield blk(SELF, GRANT_WHY, GRANT_HINT)
     if ALLOWLIST_NAME in cmd.lower() or str(ctx.allowlist_path).lower() in cmd.lower():
         yield blk(SELF, "the not-me allow list is off limits to the agent",
@@ -1898,6 +1924,10 @@ def _command(t: List[str], seg: str, st: _State, ctx: GuardContext) -> Iterator[
         yield from _drives_notme(t, st, blk, f"{orphan} runs it outside this session's process tree, which would "
                                  "escape not-me's human check")
     yield from _token_reads(t, seg, st, ctx, blk)
+    if _prog(t[0]) in ("claude", "claude-code") or any("@anthropic-ai/claude-code" in a for a in t):
+        yield blk(SELF, "starting or resuming a Claude Code session from inside one could send a prompt as if the "
+                        "operator typed it", "ask the operator to run Claude Code themselves")
+        return
     word, head = t[0], _head(t[0])
     if "$" in word or "`" in word:
         yield blk(OPAQUE, "a command name taken from a variable cannot be checked", "spell out the command")

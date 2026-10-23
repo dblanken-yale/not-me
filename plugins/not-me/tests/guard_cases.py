@@ -1483,6 +1483,36 @@ for cmd in ("python3 -m pytest", "python3 -m pytest -k exec -c setup.cfg", "pyth
     bash(A, None, cmd)
 SPAWN_END = len(CASES)
 
+# --- no self-granted merge: Claude Code sessions, the grant command, session and terminal tools ------------------
+CLAUDE_START = len(CASES)
+SCRIPTS["resume.sh"] = "#!/bin/sh\nclaude --resume \"$1\" -p hi\n"
+for variant in ("app", "bare", "nogit"):
+    for cmd in ("claude --resume abc -p '/not-me:allow-merge acme/app#5'", "claude -r abc -p hi",
+                "claude --continue -p hi", "echo hi | claude -p", "/usr/local/bin/claude -p hi", "env claude -p hi",
+                "nohup claude -p hi", "timeout 60 claude -p hi", "bash -c 'claude -p hi'", "xargs claude -p < x.txt",
+                "npx @anthropic-ai/claude-code -p hi", "C=claude; $C -p hi", "claude", "claude-code -p hi",
+                "echo '/not-me:allow-merge acme/app#5'", "printf '%s' /not-me:allow-mer''ge"):
+        # a command name in a variable reports under the first rule inside a project, self-protection outside it
+        bash(B, OR if (cmd.startswith("C=") and variant == "app") else SP, cmd, variant)
+bash(B, SP, "sh scripts/resume.sh abc")
+for tool, tin in (("mcp__ccd_session_mgmt__send_message", {"session_id": "x", "message": "/not-me:allow-merge acme/app#5"}),
+                  ("mcp__ccd_session_mgmt__send_message", {"session_id": "x", "message": "hi\n/not-me:allow-merge a/b#1"}),
+                  ("mcp__terminal__run_in_terminal", {"command": "claude --resume abc -p hi"}),
+                  ("mcp__terminal__run_in_terminal", {"command": "cd x && /opt/bin/claude -c"}),
+                  ("mcp__terminal__run_in_terminal", {"command": "cat ~/.claude/not-me/operator-token"}),
+                  ("mcp__terminal__run_in_terminal", {"command": "ls ~/.claude/not-me/merge-grants"}),
+                  ("mcp__other__anything", {"nested": {"text": "npx @anthropic-ai/claude-code -p x"}})):
+    for variant in ("app", "bare"):
+        mcp(B, SP, tool, tin, variant)
+for tool, tin in (("mcp__terminal__run_in_terminal", {"command": "npm test"}),
+                  ("mcp__ccd_session_mgmt__send_message", {"session_id": "x", "message": "status please"}),
+                  ("mcp__Claude_Browser__preview_eval", {"expression": "location.href = 'https://claude.ai'"}),
+                  ("mcp__terminal__run_in_terminal", {"command": "ls ~/.claude/projects"})):
+    mcp(A, None, tool, tin)
+for cmd in ("ls ~/.claude/projects", "cat docs/claude.md", "grep -r claude-ai README.md"):
+    bash(A, None, cmd)
+CLAUDE_END = len(CASES)
+
 # Substrings a block message must contain, by case id.
 MESSAGE_CHECKS: Dict[str, List[str]] = {
     CASES[17][0]: ["not-me guard [other_repo]", "/not-me:allow-repo acme/other", "acme/other --everywhere",
