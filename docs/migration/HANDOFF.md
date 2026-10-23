@@ -40,7 +40,7 @@ closed. Project specifics live in markdown config docs with three layers
   12 skills, 13 references, user docs, the fixture seeder, 43 eval cases and the
   session-driven proof harness.
 - Checks on `main`: `python3 scripts/run-tests.py` 1168 tests OK;
-  `python3 plugins/not-me/tests/run_guard_cases.py` 419/419;
+  `python3 plugins/not-me/tests/run_guard_cases.py` 774/774;
   `scripts/check-skills.py`, `scripts/lint-evals.py`, `scripts/gen-cli-docs.py
   --check`, `claude plugin validate --strict plugins/not-me` all clean. CI runs
   the same on macOS, Linux and Windows with Python 3.9 and 3.13.
@@ -98,7 +98,10 @@ them without asking him.
    only tighten, one gated write path, fail-closed guard, trust anchor, untrusted
    text never reaches the model, compare-and-set claims, dry-run default, no
    project names in the plugin, abstract labels, CLI for every GitHub action,
-   merging is a human action).
+   merging is a human action). A person can hand one named merge to an
+   interactive session with `/not-me:allow-merge owner/repo#N` (a
+   UserPromptSubmit hook writes the grant; the guard spends it once); runs
+   never merge. Design in `docs/guards.md` "Merge grants".
 
 ## How to work here (the orchestration loop that built this)
 
@@ -150,7 +153,7 @@ Everything below the live runs is runnable from inside a Claude Code session.
 ```bash
 cd ~/code/not-me
 python3 scripts/run-tests.py                      # unit + harness + docs tests
-python3 plugins/not-me/tests/run_guard_cases.py   # 419 hook table cases
+python3 plugins/not-me/tests/run_guard_cases.py   # 774 hook table cases
 python3 scripts/check-skills.py                   # skill lint R1-R14
 python3 scripts/lint-evals.py                     # case lint E1-E6
 python3 scripts/gen-cli-docs.py --check           # docs/cli.md in sync

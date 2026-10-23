@@ -66,6 +66,7 @@ Who acts where:
 - **`/not-me:config`** explains the effective config: every key, its value, and the layer, file and line it came from.
 - **`/not-me:doctor`** checks tools, GitHub auth and scopes, config, the guard self-test and the subagent depth setting. It reports and repairs nothing.
 - **`/not-me:allow-repo`** shows the repos and boards not-me may write to, and prints the exact terminal command a person runs to allow or remove one. It never changes the list itself.
+- **`/not-me:allow-merge owner/name#N`** is how you let Claude merge one PR for you. Only you can type it (Claude cannot run it), it covers exactly that PR once, and it ends with your next message. Autonomous runs never merge. See [guards.md](guards.md#merge-grants).
 
 ## The result line
 

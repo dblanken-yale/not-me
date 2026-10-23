@@ -52,6 +52,7 @@ Update with:
 | `/not-me:doctor` | Check tools, GitHub auth, config, the guard self-test and subagent depth |
 | `/not-me:allow-repo <owner/name> [--everywhere]` | Show the allow list and print the command a person runs to change it (also `--board`, `--list`, `--remove`) |
 | `/not-me:mode [dry-run [--global] \| live]` | Show dry-run or live and where it is set, switch to dry-run, or get the steps to go live in your own terminal |
+| `/not-me:allow-merge <owner/name#N> [--squash\|--merge\|--rebase]` | You grant exactly one merge of that PR, until your next message; Claude runs that one `gh pr merge`. Only you can type it, and runs never merge |
 
 ## Requirements
 

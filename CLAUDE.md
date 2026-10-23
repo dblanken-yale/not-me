@@ -64,7 +64,11 @@ the owner's say-so, not a cleanup.
    `notme` call that re-points its project,
    home or run via flags, environment assignments or a `cd` outside the
    checkout. The inactive path is fork-free. Block messages name the exact
-   `/not-me:allow-repo owner/name` command.
+   `/not-me:allow-repo owner/name` command. The guard does not follow `cd`: a
+   Bash command that changes directory anywhere (cd, pushd, source, eval, env
+   -C, a PWD/HOME/CDPATH assignment, and the like) may not also write with git
+   or gh, so writes are judged in the hook's real working directory or the
+   `git -C` / `gh -R` they name.
 
 4. **The CLI's trust anchor is the checkout it runs in.** Restricted mode is
    the default. It relaxes only when all of these hold: stdin is a terminal,
@@ -122,8 +126,14 @@ the owner's say-so, not a cleanup.
     shell arguments. The `--bg` result is exactly one line in the grammar in
     `references/bg-mode.md`; `NONE` means only "nothing to do".
 
-11. **Merging is a human action.** Nothing here merges PRs, deletes branches,
-    or changes repository settings, even when a lead asks.
+11. **Merging is a human action: a person merges, or grants one named merge
+    from their own prompt (`/not-me:allow-merge owner/repo#N`); runs never
+    merge.** The grant is written only by the UserPromptSubmit hook, signed
+    with the operator token, binds the PR and the merge method, ends with
+    the person's next message (30 minutes at most), covers one plain
+    `gh pr merge N -R owner/repo` in that session, and never applies while a
+    run is active. Nothing here deletes branches or changes repository
+    settings, even when a lead asks.
 
 ## How to work here
 

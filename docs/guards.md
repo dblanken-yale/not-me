@@ -6,7 +6,7 @@ The guard is a safety net for an agent that is trying to follow the rules. It is
 
 ## How it works in one minute
 
-- Claude Code calls the hook before every `Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and GitHub MCP tool call.
+- Claude Code calls the hook before every `Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, read and MCP tool call (the GitHub write rules apply to GitHub MCP tools; every MCP tool gets the check below for grant prompts and Claude Code invocations).
 - The hook looks at the call and either lets it through (exit code 0) or blocks it (exit code 2, with a message that goes back to Claude).
 - A blocked call does not run. Claude reads the message, does not retry, and records a question for you.
 - Every block in a not-me project is also appended to `<git-common-dir>/not-me/logs/guard.jsonl` with the time, tool, rule, reason, and target.
@@ -57,9 +57,39 @@ git -c remote.origin.pushurl=git@github.com:acme/lib.git push
 bash -c "gh pr comment 5 --repo acme/lib --body x"
 echo $(gh pr comment 1 -R acme/other -b hi)
 python3 -c 'import subprocess; subprocess.run(["gh", "pr", "comment", "5", "-R", "acme/other", "-b", "x"])'
+perl -e 'system("g"."it push https://gith"."ub.com/acme/other HEAD")'
+vim -c 'exe "!g"."it push https://gith"."ub.com/acme/other HEAD"'
 ```
 
+Interpreters (python, node, deno, bun, perl, ruby, php, lua, Rscript, osascript, pwsh and powershell, julia, tclsh, also with a version in the name such as `python3.12`) are allowed only in these shapes:
+
+- `<interpreter> [safe options] <existing script file> [arguments]`. The safe options cannot load code: python `-u`, `-B`, `-O`, `-OO`, `-W ignore|error|default`; node `--no-warnings`; perl `-w`, `-W`, `-X`, `-T`; ruby `-w`; none for the others. pwsh and powershell: only `-NoProfile -NonInteractive -File <file> [arguments]`.
+- `python3 -m <module> [arguments]` for a short list of tool modules: `pytest`, `pip`, `venv`, `json.tool`, `unittest`, `http.server`, `py_compile`, `compileall` and similar. `timeit`, `pdb`, `cProfile`, `trace`, `code` and `runpy` run code taken from their arguments and are not on it.
+- `<interpreter> --version`, `-V` or `--help`.
+
+The script file an allowed call runs is read before it runs, and is blocked (self-protection, in every directory) when it can forge a terminal or detach, or names the operator token, the live-mode files, the allow list or the merge-grant folder. One parser decides both which shape a call has and which file that is, so the two cannot disagree. The file arguments of a `python3 -m` call (`python3 -m pytest tests/x_test.py`) are read the same way; the modules those files import and a `conftest.py` are not, which is the same limit as running a file. A command that writes a file (`>`, `>>`, `tee`, `cp`, `mv`, `install`, `ln`, `dd of=`, `sed -i`, `curl -o`, `wget`, a `cat <<EOF >` here-document) and also runs an interpreter on a file is blocked, because the guard reads the file before the write happens: write in one Bash call and run in the next. The interpreter's own output redirection (`python3 x.py > out.txt`) does not count.
+
+Everything else is blocked, whatever the code holds: inline code (`-c`, `-e`, `--eval`, attached forms, `deno eval`), no script file (code from stdin, a pipe, a here-document, `-`, `/dev/stdin`, `-i`, a prompt), any other option (`-M`, `-r`, `--require`, `-d`, `-I`, `php -d`), a script path that is not an existing regular file, and any environment assignment or `env` wrapper in front of the interpreter (also a variable such as `PYTHONSTARTUP`, `NODE_OPTIONS`, `PERL5OPT` or `LUA_INIT` exported earlier in the command). The guard cannot tell what a program does from its text. Write the code to a script file and run `<interpreter> file`; `npm test` is unaffected. In vim, `exe`, `execute`, `call system(...)` and similar are blocked.
+
 Edits to `.git/config`, `.git/hooks/*`, and `~/.gitconfig` are blocked too, because they change where git sends things.
+
+A git or gh call counts as a read only when the guard can prove it is one. An unknown git subcommand or alias, an option before the subcommand other than `-C`, an option on a read that is not on its allow list (`--ext-diff`, `--output`, `grep -O`, `ls-remote -u`), an option that runs a program (`rebase --exec`, `clone --template`, `--upload-pack`, a custom merge strategy, `push --recurse-submodules`), and any `git -c` key or `git config` write outside a short safe list (`user.name`, `user.email`, `color.*` and similar) are blocked. So are abbreviated long options (git accepts `--exe` for `--exec`), setting a variable that can make git or gh run a program or read other config by any means (`GIT_*`, `GH_*`, `EDITOR`, `PATH`, `HOME`, `XDG_CONFIG_HOME`, `LD_PRELOAD`, `IFS`, a `PAGER` other than `cat` or `less`), gh or git named anywhere in the arguments of a program that can run commands (`xargs git`, `awk 'BEGIN{system("git ...")}'`, `vim -c '!git ...'`), a graphql query that is not a literal, and REST endpoints with `..` or encoded separators. A `git push` with no branch named is judged by `remote.<name>.push`, `push.default` and the branch's upstream; it is blocked when that reaches a protected branch or cannot be told.
+
+#### Directory changes and writes
+
+The guard does not follow `cd`. It judges a git write in the working directory Claude Code reports for the call, or in the `git -C <path>` it names, and a gh write by its `-R owner/name`. So a single Bash command that changes directory anywhere may not also write with git or gh:
+
+```
+cd ../app-ui && git commit -F msg.txt           # blocked: cd and a commit in one command
+(cd sub && git push)                            # blocked: a subshell cd counts too
+env -C ../other git push                        # blocked
+git -C ../app-ui commit -F msg.txt              # allowed: the path is named
+gh pr create -R acme/app --title x --body y     # allowed
+cd sub && make test                             # allowed: no write
+cd sub; git status                              # allowed: a read
+```
+
+What counts as changing directory: `cd`, `pushd`, `popd`, `chdir`; `source` and `.`; `eval`, `exec`, `trap`, `alias`, and function definitions; `env -C` (also grouped, as in `-iC`), `sudo -D`, and `find -execdir`; a `cd` behind `xargs`, `nohup`, `env`, `command` or `builtin`; setting or declaring `PWD`, `OLDPWD`, `CDPATH`, `HOME` or `DIRSTACK` (including `declare -n` and computed names); and a directory named on its own, which zsh's `auto_cd` enters. What counts as a write: every git subcommand except plain reads (`status`, `log`, `diff`, `show`, `rev-parse`, and listing forms such as `git branch -a`), and every gh command the rules above treat as a write. A command that changes directory also cannot run `notme`, a relative script, or a relative read, copy or `rm -r` that could reach the operator token or the checkout. Run the `cd` in its own Bash call first if you need it.
 
 Allowed, for example:
 
@@ -68,7 +98,7 @@ gh pr view 5 --repo acme/other                  # reads work anywhere
 gh api repos/acme/lib/pulls
 gh pr comment 5 --repo acme/app --body hi       # the checkout's own repo
 git push -u origin feature
-python3 -c 'print(1)'                           # inline code that does not touch git or GitHub
+python3 scripts/report.py                       # a script file: run, not opened
 sh scripts/clean.sh                             # a script that does not mention git or gh
 git commit -m "$(cat <<'EOF'
 fix: x
@@ -93,7 +123,30 @@ git push --all origin
 gh pr merge 1 --repo acme/app --squash
 ```
 
-`gh pr merge` and the merge endpoint (`gh api -X PUT repos/acme/app/pulls/1/merge`) are blocked whatever the branch, because a person merges.
+`gh pr merge` and the merge endpoint (`gh api -X PUT repos/acme/app/pulls/1/merge`) are blocked whatever the branch, because a person merges. You can hand Claude one merge with a merge grant, below.
+
+#### Merge grants
+
+To let Claude merge one PR for you, type this as your whole message:
+
+```
+/not-me:allow-merge acme/app#12
+/not-me:allow-merge acme/app#12 --rebase     # or --merge; the default is --squash
+```
+
+Claude then runs `gh pr merge 12 -R acme/app --squash` once, and the guard lets exactly that through. How it works:
+
+- Only you can create a grant. A `UserPromptSubmit` hook reads what you submit and nothing Claude does. When your message is exactly `/not-me:allow-merge owner/name#N` (optionally `--squash`, `--merge` or `--rebase`, nothing else, one line), it writes a grant for this session to `~/.claude/not-me/merge-grants/<session>.json`. The command is marked `disable-model-invocation`, so Claude cannot run it through the Skill tool. A malformed argument, or the command anywhere but the start of the message, grants nothing.
+- A grant is signed with your [operator token](install.md#the-operator-token), the same secret `/not-me:mode live` signs with, and the guard checks the signature. A grant file written any other way does not count, and without a token no grant is made (the hook says so; create one with `notme doctor --init-token` in your own terminal).
+- It is granted only from the process shapes a person starts. Before writing, the hook reads the process table and checks, by each process's real executable path (macOS reports it in the process table, Linux in `/proc/<pid>/exe`; never argv0, arguments or a bare name): first the hook's own launch chain, then one Claude Code process, then directly above it either the desktop app (`/Applications/Claude.app/Contents/MacOS/Claude` or one of its Claude Helpers; the app also starts Remote Control sessions) or an interactive shell (`zsh`, `bash`, `sh`, `fish` in a system or Homebrew location) whose own parent is a terminal (Terminal, iTerm, Ghostty, Alacritty, kitty, WezTerm, Warp, Hyper, gnome-terminal and the like), `login`, `sshd`, `tmux` or `screen` in a known location. From there to the system root no process may be Claude Code (by its command, or on Linux by a `CLAUDECODE` or `CLAUDE_CODE_*` variable in its environment). Anything else writes no grant: `claude -p` or `claude --resume <id>` run from inside a session, an orphan, an unknown process in between, a path that cannot be resolved, an unreadable table or a gap. The hook input itself has no field that marks a non-interactive prompt (it carries `session_id`, `transcript_path`, `cwd`, `permission_mode`, `hook_event_name` and `prompt`); the one environment signal found, `CLAUDE_CODE_ENTRYPOINT=sdk-cli` for print mode, is refused too, as a first check only. Known limits: Windows has no executable path in the table, so grants do not work there; a session started inside a `tmux` or `screen` server the agent launched outside the guard's view, or under a terminal app the agent opened, has a valid shape; a renamed copy of the `claude` binary that no longer looks like Claude Code is not recognised above the anchor; IDE terminals (VS Code, Cursor) are not anchors yet, so sessions started there get no grant.
+- A grant lasts until your next message. Any other message in the session deletes it, and it expires after 30 minutes regardless.
+- It covers one merge. The guard deletes the grant when it allows the merge, and logs the use in the guard log, `<git-common-dir>/not-me/logs/guard.jsonl` (`rule: merge_grant`, the PR and the session).
+- It covers one exact command: `gh pr merge <N> -R <owner/name>` (or `--repo`), the method flag, and optionally `--subject` and `--body-file` once each. The method is part of the grant: a grant that names `--merge` or `--rebase` allows only that flag, and one that names none allows only `--squash`. The number and repo must match the grant (the repo ignoring case), and the repo must be on the allowed list. `--admin`, `--auto`, `--delete-branch`, the merge endpoint, a merge without an explicit number or `-R`, a PR URL, a variable, a substitution, a redirection, a comment and any command joined with `;`, `&&`, `|` or a newline stay blocked.
+- It belongs to one session. A grant written in another Claude Code session does not apply.
+- Runs never merge. While a not-me run is active in the checkout, a grant does not apply.
+- Nothing but the hook may touch a grant: the Read, Grep, Glob, LS, Write and Edit tools and any Bash command that names the `merge-grants` folder or reaches it through a glob, a link or a redirection are blocked, in every directory. See [Self-protection](#self-protection).
+
+Outside a not-me project (no `.claude/not-me/` folder and no run) the four rules are off, so `gh pr merge` is not blocked there and a grant is neither needed nor spent. The grant folder is still protected there.
 
 Allowed, for example:
 
@@ -222,7 +275,7 @@ Why you usually should not:
 
 - It applies to every repo on your machine, not just one.
 - `other_repo: off` lets not-me write to any repo your token can reach.
-- `protected_branches: off` also stops blocking `gh pr merge`, so a run could merge.
+- `protected_branches: off` also stops blocking `gh pr merge`, so a run could merge. To merge one PR, use a [merge grant](#merge-grants) instead.
 - `force_push: off` allows history rewrites and remote branch deletion.
 - `destructive_git: off` allows changing repo settings and secrets, and deleting data.
 - When a command is too opaque to check (`bash -c ...`, `$(...)`), the guard reports it under the first rule that is still on. With all four off, those commands are allowed.
@@ -240,6 +293,8 @@ Self-protection is always on, in every directory, whether or not the guard is ac
 - Reading or changing the operator token or the live-mode epoch (`mode-live.epoch`). This covers the Read, Grep, Glob and LS tools, Write and Edit, and Bash commands that name either file or reach it through a glob (`~/.claude/n*me/mode-live.e*`), a directory, a redirection, or a part the guard cannot work out, such as `$VAR`, `$(...)`, backticks or `{a,b}`, when the rest of the path could lead there.
 - Going live: `notme mode` with anything but `show` or `dry-run`, however it is started (`notme`, `bin/notme`, `python3 cli/notme.py`, `python3 -m notme.cli`, also after python options such as `-W ignore` or `-X utf8`). Also any Write or Edit of `mode-live.sig`, any Bash command that mentions it, and any Bash copy, move or redirection that reaches it through a glob or a part the guard cannot work out. That file is the signature `/not-me:mode live` writes with your operator token and epoch; without it a `mode: live` setting runs as dry-run, so no file edit can turn live mode on. Going back to dry-run with `/not-me:mode dry-run --global` replaces the epoch, so a saved copy of an old signature stops working.
 - A Write or Edit that would leave `mode: live` (or anything but `dry-run`) in your global `project.md`. This one is a courtesy: it stops the attempt early with a pointer to `/not-me:mode live`. The signature above is what actually keeps live mode off.
+- Creating, changing or reading a merge grant: anything under `~/.claude/not-me/merge-grants/`. This covers the Read, Grep, Glob and LS tools, Write and Edit (also through a symlink, a `..` step after a symlink, or a hard link to a grant), and any Bash command that names the folder or reaches it through a glob, a directory or a redirection. Only your own `/not-me:allow-merge` message creates one (see [Merge grants](#merge-grants)).
+- Sending a grant prompt any other way: any Bash command, script or pty wrapper that names `allow-merge`, and any run of the Claude Code CLI (`claude`, `claude -p`, `claude --resume <id>`, `npx @anthropic-ai/claude-code`, behind `env`, `nohup`, `xargs` or `bash -c`), because a resumed session keeps its session id and its prompt hook would grant the merge to this session. Any MCP tool (session, terminal or prompt tools included) whose input names `allow-merge`, the operator token, the live-mode files, the merge-grant folder or a Claude Code invocation is refused too. Any MCP string is checked field by field, unquoted and with escapes decoded, for those markers and for `allow-repo`, `NOT_ME_` names, the allow list and the not-me home; every string of an MCP tool that is not a GitHub or read-only tool is then judged as a Bash command, and text the guard cannot read as a command blocks every MCP tool except a short list known only to display text (plans, recaps, widgets, page inspection); inside a not-me project text that only looks like a command, such as browser JavaScript, can block too, and input nested more than 32 levels deep or larger than 256 KB is refused unread. A Write, Edit or NotebookEdit that would leave `/not-me:allow-merge` in the file, in any spelling (an Edit is applied to the current text first, and an Edit whose result cannot be worked out is refused), is refused, so the command cannot be parked in a file and sent later; that also means the agent cannot edit a file that already holds the command. These name checks can be evaded (a copied binary, a name built at run time outside a project); the control that cannot is the prompt hook's provenance check, under [Merge grants](#merge-grants).
 
 The block message in each case says to ask the operator, which is you.
 
@@ -248,18 +303,19 @@ The block message in each case says to ask the operator, which is you.
 The guard fails closed:
 
 - If the hook crashes on a call that mentions `gh`, `git`, GitHub, `.git/`, or the allow list, it blocks the call. The message is `not-me guard failed closed: <error>; run /not-me:doctor`. A crash on a call that has nothing to do with git or GitHub lets the call through.
-- Anything the hook cannot read well enough to check is blocked, not guessed at.
+- Anything the hook cannot read well enough to check is blocked, not guessed at. A Bash command longer than 32 KB, nested more than 64 levels deep, or with quoting it cannot read is blocked unread, whatever rules are on.
+- A check that runs longer than 8 seconds blocks the call, so a slow check cannot run into the hook's 10 second timeout, which would let the call through.
 
 A missing Python is the case the hook cannot report itself. The launcher exits with code 7, and Claude Code treats any exit code other than 2 as a non-blocking error, so the call would run unchecked. To catch this, every autonomous run starts with a self-test. It pipes a command that must always be blocked (a write to the allow list) through the real hook command and checks that the exit code is 2. If it is not, the run stops with `FAILED - guard not working`. `/not-me:doctor` runs the same test.
 
 ## Honest limits
 
-The guard reads the text of a command with a simple tokenizer. It splits on `&&`, `||`, `;`, `|`, `&`, and newlines, then on spaces, and removes quotes and redirections. It understands `git`, `gh`, `rm`, `find`, `xargs`, `sudo`, `env`, `time`, `timeout`, and a few more. It is a net for an agent that follows the rules. A determined or buggy program can get around it.
+The guard splits a command into words the way the shell does: quotes, backslashes, line continuations, `$(...)`, backticks, here-documents and redirections. It does not run anything, expand variables or follow `cd`. It understands `git`, `gh`, `rm`, `find`, `xargs`, `sudo`, `env`, `time`, `timeout`, and a few more. It is a net for an agent that follows the rules. A determined or buggy program can get around it.
 
 What it does not cover:
 
-- Programs and scripts it cannot read. A shell script is scanned for `git`, `gh`, and `github.com`, but a file run as `python3 tool.py` is not opened, and a script that builds its command from pieces will not match.
-- Tools outside its matcher. Only Bash, the file-editing tools, and MCP tools with `github` in the name are checked. Other MCP servers and your own terminal are not.
+- Programs and scripts it cannot read. A shell script is scanned for `git`, `gh`, and `github.com`, but a file run as `python3 tool.py` is not opened, and a script that builds its command from pieces will not match. Running a file is the limit of text inspection: whatever a script file does is out of reach, which is why inline interpreter code, which could be any program, is blocked outright. A file such a program writes into the merge-grant folder is not signed with your operator token, so it does not count as a grant.
+- Tools outside its matcher, and what other MCP tools do. Only Bash, the file tools and MCP tools are checked, and an MCP tool other than a GitHub one is refused only when its input names `allow-merge`, the not-me secrets or a Claude Code invocation; a terminal or session tool can otherwise run anything. Your own terminal is not checked.
 - Reads. Any repo your token can read can be read.
 - Time of check. It looks at your git config when it checks. Something that changes the config between the check and the command is out of reach.
 - The repo layer's `tracker` and `repos`. The hook allows the repos named there without looking at your allow list, while the `notme` CLI requires you to confirm them. Review changes to those two keys the way you would review code.
