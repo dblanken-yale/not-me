@@ -68,6 +68,97 @@ class GuardTableTests(_Fixtures):
                         self.assertIn(text, result.message)
 
 
+def _backslash_path_module():
+    """os.path for this file system, but splitting on backslashes as well, as ntpath does on Windows."""
+    import posixpath
+    import types
+
+    def fwd(x):
+        return x.replace("\\", "/") if isinstance(x, str) else x
+    mod = types.ModuleType("backslash_path")
+    for name in dir(posixpath):
+        value = getattr(posixpath, name)
+        if callable(value) and not name.startswith("_"):
+            value = (lambda f: lambda *a, **k: f(*[fwd(x) for x in a], **k))(value)
+        if not name.startswith("__"):
+            setattr(mod, name, value)
+    mod.altsep = "\\"
+    import glob as real_glob
+    globber = types.SimpleNamespace(iglob=lambda p, **k: real_glob.iglob(fwd(p), **k))
+    return mod, globber
+
+
+class WindowsTypedPathTableTests(_Fixtures):
+    """Every table case that names a fixture path, with the path typed the Windows way: C:\\Users\\x\\home, unquoted.
+    Bash drops unquoted backslashes, so before the guard judged words in both forms these self-protection blocks
+    came back allowed on Windows (fail open) and git -C / worktree-add / source of a real path came back blocked.
+    Runs on every platform: a path module that splits on backslashes too stands in for ntpath on the real disk."""
+
+    def test_cases_with_backslash_paths(self):
+        module, globber = _backslash_path_module()
+        ctxs = {}
+
+        def typed(value, home):
+            if isinstance(value, str):
+                for key, path in (("{F}", self.root), ("{H}", home), ("{P}", gc.PLUGIN)):
+                    value = value.replace(key, str(path).replace("/", "\\"))
+                return value
+            if isinstance(value, dict):
+                return {k: typed(v, home) for k, v in value.items()}
+            return [typed(v, home) for v in value] if isinstance(value, list) else value
+        checked = 0
+        with mock.patch.object(guard, "_path", module), mock.patch.object(guard, "glob", globber):
+            for cid, want, rule, tool, tin, variant in gc.CASES:
+                if not any(k in json.dumps(tin) for k in ("{F}", "{H}", "{P}")):
+                    continue
+                checked += 1
+                with self.subTest(cid=cid, tool=tool, input=tin, variant=variant):
+                    if variant not in ctxs:
+                        ctxs[variant] = self.ctx(variant)
+                        if not guard.is_active(ctxs[variant]):
+                            ctxs[variant].self_only()
+                    cwd, home = gc.variant_paths(self.root, variant)
+                    event = {"tool_name": tool, "tool_input": typed(tin, home), "cwd": str(cwd),
+                             "session_id": gc.SESSION}
+                    result = guard.decide(event, ctxs[variant])
+                    self.assertEqual("block" if isinstance(result, Block) else "allow", want,
+                                     getattr(result, "message", ""))
+                    if isinstance(result, Block):
+                        self.assertEqual(result.rule, rule)
+        self.assertGreater(checked, 100)
+
+
+class CrlfEditTests(unittest.TestCase):
+    """A file with CRLF line endings (Path.write_text on Windows): Claude Code matches old_string against LF text,
+    so the guard checks the edit applied that way too."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="notme-crlf-")).resolve()
+        self.addCleanup(shutil.rmtree, str(self.dir), True)
+        self.ctx = GuardContext(cwd=str(self.dir), root=str(self.dir), home=str(self.dir / "home"), env={})
+
+    def edit(self, text, old, new, name="split.md"):
+        path = self.dir / name
+        path.write_bytes(text.encode("utf-8"))
+        return guard.decide({"tool_name": "Edit", "cwd": str(self.dir),
+                             "tool_input": {"file_path": str(path), "old_string": old, "new_string": new}}, self.ctx)
+
+    def test_grant_command_split_across_crlf(self):
+        for nl in ("\n", "\r\n"):
+            with self.subTest(newline=repr(nl)):
+                result = self.edit(f"/not-me:allow-mer{nl}X{nl}", "\nX", "ge")
+                self.assertIsInstance(result, Block)
+                self.assertEqual(result.rule, "self_protect")
+        self.assertIsNone(self.edit("line one\r\nline two\r\n", "\nline two", "\nline 2"))
+        self.assertEqual(self.edit("a\r\nb\r\n", "missing", "x").rule, "self_protect")  # cannot be worked out
+
+    def test_global_project_mode_with_crlf(self):
+        self.ctx = GuardContext(cwd=str(self.dir), root=str(self.dir), home=str(self.dir), env={})
+        doc = "---\r\nschema: 1\r\nmode: dry-run\r\n---\r\n"
+        self.assertEqual(self.edit(doc, "dry-run\n", "live\n", "project.md").rule, "self_protect")
+        self.assertIsNone(self.edit(doc, "schema: 1\n", "schema: 1\nx: 1\n", "project.md"))
+
+
 class ContextTests(_Fixtures):
     def test_activation(self):
         self.assertTrue(guard.is_active(self.ctx("app")))
@@ -310,6 +401,18 @@ class WindowsPathTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.decide("Edit", {"file_path": path}).rule, "self_protect")
         self.assertIsNone(self.decide("Edit", {"file_path": "C:/Work/App/src/main.py"}))
+
+    def test_unquoted_backslash_paths(self):
+        """Bash reads C:\\Work\\App as C:WorkApp; the guard judges the word as typed too."""
+        words = guard.lex("cat C:\\Users\\op\\x 'C:\\q' \"C:\\d\" e\\ f").commands[0].words
+        self.assertEqual([str(w) for w in words], ["cat", "C:Usersopx", "C:\\q", "C:\\d", "e f"])
+        self.assertEqual([w.raw for w in words], ["cat", "C:\\Users\\op\\x", "C:\\q", "C:\\d", "e\\ f"])
+        wt = "C:\\Work\\App\\.git\\not-me\\worktrees"
+        self.assertIsNone(self.decide("Bash", {"command": f"notme git worktree-add {wt}\\feat-x"}))
+        for cmd in (f"notme git worktree-add {wt}\\..\\..\\hooks", "cat C:\\Users\\op\\.claude\\not-me\\op*",
+                    "cp -r C:\\Users\\op\\.claude\\not-me D:\\x", "cat C:\\Users\\op\\.claude\\not-me\\merge-g*\\*"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.decide("Bash", {"command": cmd}).rule, "self_protect")
 
 
 class MessageTests(unittest.TestCase):

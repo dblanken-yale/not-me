@@ -509,6 +509,18 @@ def _norm(p: str, base: str) -> str:
     return _path.normcase(_path.normpath(_resolve(p)))
 
 
+def _path_word(word: str, base: str) -> str:
+    """The spelling of a path word to resolve for a decision that allows only a resolved path (git -C, a script
+    to read, a worktree to create). Normally the word as the shell reads it. Where paths use backslashes, a word
+    the shell read as C:Usersx (unquoted backslashes dropped) that is not an existing path is taken as typed,
+    C:\\Users\\x, when that form is absolute. Blocking checks see both forms anyway (_judge_commands)."""
+    raw = getattr(word, "raw", "")
+    if (raw and raw != word and "\\" in (_path.sep, _path.altsep or "") and _path.isabs(raw)
+            and not _path.exists(_norm(word, base))):
+        return raw
+    return word
+
+
 def _under(path: str, base: str) -> bool:
     """path is base or inside it; both must come from _norm."""
     sep = _path.sep
@@ -598,10 +610,12 @@ def _data_only(cmd: str) -> str:
 
 
 class _Word(str):
-    """A word with its quoting removed. `glob` and `brace` mark an unquoted glob or {a,b} brace expansion."""
+    """A word with its quoting removed. `glob` and `brace` mark an unquoted glob or {a,b} brace expansion.
+    `raw` is the word with its unquoted backslashes kept, the way a Windows path is typed (C:\\Users\\x)."""
     glob = False
     brace = False
     quoted = False
+    raw = ""
 
 
 @dataclass
@@ -793,6 +807,7 @@ class _Lexer:
     def word(self, stop: Optional[str]) -> _Word:
         s, n = self.s, self.n
         out: List[str] = []
+        escaped: Set[int] = set()  # indexes in out of the characters an unquoted backslash escaped
         glob = quoted = bracket = False
         brace = 0  # 1 after an unquoted {, 2 after a , or .. inside it, 3 after the closing }
         while self.i < n:
@@ -812,6 +827,7 @@ class _Lexer:
                     raise Unparsed("it nests backticks")
                 self.i += 2
                 if nxt != "\n":
+                    escaped.add(len(out))
                     out.append(nxt)
                     quoted = True
             elif c == "'":
@@ -847,6 +863,7 @@ class _Lexer:
                 self.i += 1
         w = _Word("".join(out))
         w.glob, w.brace, w.quoted = glob, brace == 3, quoted
+        w.raw = "".join("\\" + p if k in escaped else p for k, p in enumerate(out)) if escaped else str(w)
         return w
 
     def dquote(self, stop: Optional[str]) -> str:
@@ -1557,6 +1574,15 @@ def _after_edit(tool: str, tin: Mapping[str, Any], current: Optional[str]) -> Op
     return text
 
 
+def _edit_results(tool: str, tin: Mapping[str, Any], current: Optional[str]) -> List[str]:
+    """Every text an Edit or MultiEdit may leave: applied to the file as stored and, for a file with CRLF line
+    endings (as written on Windows), to its text with LF endings, which is how Claude Code matches old_string.
+    Empty when no form can be worked out."""
+    forms = [current] if current is None or "\r\n" not in current else [current, current.replace("\r\n", "\n")]
+    out = [_after_edit(tool, tin, f) for f in forms]
+    return [r for r in out if r is not None]
+
+
 def _global_mode(tool: str, tin: Mapping[str, Any], full: str, blk: Blk) -> Iterator[Block]:
     """An early, friendly refusal (not the security boundary: live mode also needs the token-signed marker, which
     no file edit can make). An agent Write/Edit/MultiEdit of the global project.md is allowed only when, parsed as
@@ -1564,12 +1590,12 @@ def _global_mode(tool: str, tin: Mapping[str, Any], full: str, blk: Blk) -> Iter
     (live, null, any other value, a result that does not parse, an edit that cannot be worked out) is blocked."""
     current = _read_text(full)
     try:
-        after = _mode_of(_after_edit(tool, tin, current))
+        afters = [_mode_of(text) for text in _edit_results(tool, tin, current)] or [_UNKNOWN]
     except Exception:
-        after = _UNKNOWN
-    if after == "dry-run" or (after is _ABSENT and _mode_of(current) is _ABSENT):
+        afters = [_UNKNOWN]
+    if all(a == "dry-run" or (a is _ABSENT and _mode_of(current) is _ABSENT) for a in afters):
         return
-    yield blk(SELF, "only a person turns live mode on" + ("" if after is not _UNKNOWN else
+    yield blk(SELF, "only a person turns live mode on" + ("" if _UNKNOWN not in afters else
                                                           " (this edit to the global project.md cannot be checked)"),
               LIVE_HINT)
 
@@ -1586,12 +1612,12 @@ def _file(tool: str, fpath: str, cwd: str, ctx: GuardContext, tin: Mapping[str, 
     blk = _blk(_short(f"{tool} {fpath}"))
     # the text the file would hold: an Edit applied to the current file (else its new strings), checked in every
     # spelling the shell or a program might decode
-    full_text = _after_edit(tool, tin, _read_text(_norm(fpath, cwd))) if tool in ("Edit", "MultiEdit") else None
-    written = [full_text] + [tin.get(k) for k in ("content", "new_string", "new_source")]
+    full_texts = _edit_results(tool, tin, _read_text(_norm(fpath, cwd))) if tool in ("Edit", "MultiEdit") else []
+    written = full_texts + [tin.get(k) for k in ("content", "new_string", "new_source")]
     edits = tin.get("edits")
     if isinstance(edits, list):
         written += [e.get("new_string") for e in edits if isinstance(e, dict)]
-    if tool in ("Edit", "MultiEdit") and full_text is None and ("old_string" in tin or "edits" in tin):
+    if tool in ("Edit", "MultiEdit") and not full_texts and ("old_string" in tin or "edits" in tin):
         # an edit Claude Code would apply but the guard cannot (an unreadable file, an old_string it cannot find)
         yield blk(SELF, "the text this edit would leave cannot be worked out, so it cannot be checked",
                   "read the file and make the edit with an exact old_string, or use Write")
@@ -1855,9 +1881,38 @@ def _bash(cmd: str, cwd: str, ctx: GuardContext) -> Iterator[Block]:
                   "split it into shorter, simpler commands with plain quoting")
         return
     yield from _parsed_checks(parsed, blk)
-    st = _State(cwd, parsed, cmd)
-    for c in parsed.commands:
-        yield from _command(list(c.words), c.raw, st, ctx)
+    yield from _judge_commands(parsed, cmd, ctx, cwd)
+
+
+def _judge_commands(parsed: Parsed, text: str, ctx: GuardContext, cwd: str,
+                    parent: Optional["_State"] = None) -> Iterator[Block]:
+    """Check every simple command, then, when a word held an unquoted backslash, check them all again with those
+    backslashes kept. Bash drops them (C:\\Users\\x reads as C:Usersx) but a Windows path is typed with them, so a
+    word is judged in both forms and either form reaching a guarded target blocks."""
+    for p in (parsed, _raw_variant(parsed)):
+        if p is None:
+            continue
+        st = _State(cwd, p, text, parent=parent)
+        for c in p.commands:
+            yield from _command(list(c.words), c.raw, st, ctx)
+
+
+def _raw_word(w: str) -> str:
+    raw = getattr(w, "raw", "")
+    if not raw or raw == w:
+        return w
+    out = _Word(raw)
+    out.glob, out.brace, out.quoted, out.raw = w.glob, w.brace, w.quoted, raw  # type: ignore[attr-defined]
+    return out
+
+
+def _raw_variant(parsed: Parsed) -> Optional[Parsed]:
+    """parsed with every word in its backslashes-kept form, or None when no word differs."""
+    if not any(getattr(w, "raw", w) != w for c in parsed.commands for w in c.words):
+        return None
+    commands = [SimpleCommand([_raw_word(w) for w in c.words], c.raw, c.span, c.bodies, c.redirs, c.nested)
+                for c in parsed.commands]
+    return Parsed(commands, parsed.subs, parsed.code, parsed.funcdef)
 
 
 def _parsed_checks(parsed: Parsed, blk: Blk) -> Iterator[Block]:
@@ -1916,9 +1971,7 @@ def _judge_body(body: str, st: _State, ctx: GuardContext, blk: Blk, what: str) -
                           "unquoting, so what it runs cannot be checked", hint)
         return
     yield from _parsed_checks(parsed, blk)
-    inner = _State(st.dir, parsed, body, parent=st)
-    for c in parsed.commands:
-        yield from _command(list(c.words), c.raw, inner, ctx)
+    yield from _judge_commands(parsed, body, ctx, st.dir, parent=st)
 
 
 _RUNS_TEXT = {"eval", "source", ".", "sudo", "doas", "xargs", "parallel"}  # run words they are given as a command
@@ -2457,7 +2510,7 @@ def _cmd_notme(args: List[str], st: _State, ctx: GuardContext, blk: Blk) -> Iter
             yield blk(SELF, "only a person turns live mode on",
                       LIVE_HINT)
     if pos[:2] == ["git", "worktree-add"]:
-        target = _norm(raw_pos[2], st.dir) if len(raw_pos) > 2 else None
+        target = _norm(_path_word(raw_pos[2], st.dir), st.dir) if len(raw_pos) > 2 else None
         base = _norm(_path.join(str(ctx.common_dir), "not-me", "worktrees"), "/") if ctx.common_dir else None
         if target is None or base is None or target == base or not _under(target, base):
             yield blk(SELF, "notme git worktree-add may only create worktrees under <git common dir>/not-me/worktrees/",
@@ -2465,6 +2518,7 @@ def _cmd_notme(args: List[str], st: _State, ctx: GuardContext, blk: Blk) -> Iter
 
 
 def _script(path: str, st: _State, blk: Blk) -> Iterator[Block]:
+    path = _path_word(path, st.dir)
     if st.moved and not _path.isabs(path):
         yield blk(OPAQUE, f"{path} is a relative path in a command that changes directory ({st.moved}), so the "
                           "guard cannot tell which file runs", _CD_HINT)
@@ -2643,7 +2697,7 @@ def _cmd_git(t, seg, st, ctx, blk, gitenv):
     while i < len(t) and t[i].startswith("-"):
         a = t[i]
         if a == "-C":
-            d = _norm(t[i + 1] if i + 1 < len(t) else ".", d)
+            d = _norm(_path_word(t[i + 1], d) if i + 1 < len(t) else ".", d)
             i += 2
         elif a == "-c":
             c_values.append(t[i + 1] if i + 1 < len(t) else "")
@@ -2742,6 +2796,7 @@ def _env_words(words: List[str], st: _State, depth: int) -> Optional[str]:
         path = next((a for a in args if a != "--"), None)
         if path is None:
             return f"{name} of standard input"
+        path = _path_word(path, st.dir)
         if st.moved and not _path.isabs(path):
             return f"{name} {path} in a command that changes directory"
         text = _read_script(_norm(path, st.dir), st)
