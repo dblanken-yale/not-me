@@ -131,24 +131,11 @@ class WindowsTypedPathTableTests(_Fixtures):
                         self.assertEqual(result.rule, rule)
         self.assertGreater(checked, 100)
 
-    def test_unquoted_backslash_path_positions_block(self):
-        """Where only a resolved path allows the command, an unquoted backslash path blocks; quoted, it is allowed."""
-        _, home = gc.variant_paths(self.root, "app")
-        for cmd in ("git -C {F}/live push", "notme git worktree-add {F}/app/.git/not-me/worktrees/feat-x",
-                    "sh {F}/app/scripts/clean.sh", "source {F}/app/scripts/plainenv.sh; git log",
-                    ". {F}/app/scripts/plainenv.sh; git status"):
-            with self.subTest(cmd=cmd):
-                result = self.decide("app", "Bash", {"command": self.typed(cmd, home)})
-                self.assertIsInstance(result, Block)
-                # source changes directory, so its relative-path check (on the shell's spelling) comes first
-                self.assertIn("relative path" if cmd.startswith(("source", ".")) else "unquoted backslashes",
-                              result.message)
-                self.assertIsNone(self.decide("app", "Bash", {"command": self.typed(cmd, home, quote=True)}))
 
 
 class CrlfEditTests(unittest.TestCase):
     """A file with CRLF line endings (Path.write_text on Windows): Claude Code matches old_string against LF text,
-    so the guard checks the edit applied that way too."""
+    so the global-mode check applies the edit that way too. Other edits are not read at all."""
 
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp(prefix="notme-crlf-")).resolve()
@@ -161,14 +148,13 @@ class CrlfEditTests(unittest.TestCase):
         return guard.decide({"tool_name": "Edit", "cwd": str(self.dir),
                              "tool_input": {"file_path": str(path), "old_string": old, "new_string": new}}, self.ctx)
 
-    def test_grant_command_split_across_crlf(self):
+    def test_the_text_of_an_edit_is_not_judged(self):
+        """The text an edit leaves is not judged, and an edit the guard cannot apply is Claude Code's to refuse."""
         for nl in ("\n", "\r\n"):
             with self.subTest(newline=repr(nl)):
-                result = self.edit(f"/not-me:allow-mer{nl}X{nl}", "\nX", "ge")
-                self.assertIsInstance(result, Block)
-                self.assertEqual(result.rule, "self_protect")
+                self.assertIsNone(self.edit(f"notme pause{nl}X{nl}", "\nX", " off"))
         self.assertIsNone(self.edit("line one\r\nline two\r\n", "\nline two", "\nline 2"))
-        self.assertEqual(self.edit("a\r\nb\r\n", "missing", "x").rule, "self_protect")  # cannot be worked out
+        self.assertIsNone(self.edit("a\r\nb\r\n", "missing", "x"))
 
     def test_global_project_mode_with_crlf(self):
         self.ctx = GuardContext(cwd=str(self.dir), root=str(self.dir), home=str(self.dir), env={})
@@ -314,7 +300,8 @@ class TokenizerTests(unittest.TestCase):
                     guard.lex(bad)
 
     def test_adversarial_input_is_fast(self):
-        """Commands far over the hook's budget are judged quickly: linear scans, a size cap and a nesting cap."""
+        """Commands far over the hook's budget are judged quickly: linear scans, a size cap and a nesting cap. Past
+        the caps the text is opaque: allowed when it holds no opaque-text word, blocked when it does."""
         import time
         ctx = GuardContext(cwd="/nonexistent/app", root="/nonexistent/app", active_run=True, env={},
                            home="/nonexistent/home", plugin_root="/nonexistent/plugin", git=lambda a, c: None,
@@ -325,7 +312,8 @@ class TokenizerTests(unittest.TestCase):
         near = guard.MAX_COMMAND - 16
         for cmd in ("$(" * (n // 2), "${X-" * (n // 4), "cat/" * (n // 4) + " -", "-u " * (n // 3),
                     ("$(" * (near // 2))[:near], ("$(a)" * near)[:near], ("notme;" * near)[:near],
-                    ("cat a;" * near)[:near], ("${X-" * near)[:near], ("-u " * near)[:near], ("(" * near)):
+                    ("cat a;" * near)[:near], ("${X-" * near)[:near], ("-u " * near)[:near], ("(" * near),
+                    "rm -r " * (n // 6), "x" * n + " git push origin main"):
             event = {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": "/nonexistent/app"}
             start = time.perf_counter()
             guard.needs_check(event)
@@ -334,19 +322,21 @@ class TokenizerTests(unittest.TestCase):
             with self.subTest(cmd=cmd[:20], size=len(cmd)):
                 self.assertLess(took, limit)
                 if len(cmd) > guard.MAX_COMMAND:
-                    self.assertEqual(block.rule, "self_protect")
+                    self.assertEqual(getattr(block, "rule", None), "protected_branches" if "push" in cmd else None)
 
     def test_prefilter(self):
         def bash(cmd):
             return guard.needs_check({"tool_name": "Bash", "tool_input": {"command": cmd}})
-        for cmd in ("ls -la", "npm test", "cat <<EOF\ngit push\nEOF", "echo hello > out.txt"):
+        for cmd in ("ls -la", "npm test", "cat <<EOF\ngit push\nEOF", "echo hello > out.txt", "cat -n notes"):
             self.assertFalse(bash(cmd), cmd)
         for cmd in ("git status", "g''h pr list", "g\\it log", "${X} y", "./run", "make.sh", "python3 -c 1",
                     "find . -name x", "cat ~/.claude/not-me/allowed-repos.json", "sh <<EOF\ngh pr merge 1\nEOF",
-                    "cp -r /some/home x", "wc < /some/home/op*", "cat -n notes", "echo 0 > /some/home/m*.sig",
-                    "echo 0 >~/x"):
+                    "cp -r /some/home x", "wc < /some/home/op*", "echo 0 > /some/home/m*.sig", "echo 0 >~/x",
+                    "cat operator-token", "nohup make &", "script -q /dev/null make"):
             self.assertTrue(bash(cmd), cmd)
         self.assertTrue(guard.needs_check({"tool_name": "Write", "tool_input": {"file_path": "x"}}))
+        self.assertTrue(guard.needs_check({"tool_name": "mcp__github__create_issue", "tool_input": {}}))
+        self.assertFalse(guard.needs_check({"tool_name": "mcp__terminal__run_in_terminal", "tool_input": {}}))
 
 
 class CheckoutWalkTests(unittest.TestCase):
@@ -403,19 +393,7 @@ class WindowsPathTests(unittest.TestCase):
     def decide(self, tool, tin, cwd="C:\\Work\\App"):
         return guard.decide({"tool_name": tool, "tool_input": tin, "cwd": cwd}, self.ctx)
 
-    def test_worktree_add_containment(self):
-        for path in ("C:/work/app/.git/not-me/worktrees/feat-x", "c:\\WORK\\App\\.git\\not-me\\worktrees\\feat-x",
-                     ".git/not-me/worktrees/feat-x"):
-            with self.subTest(path=path):
-                self.assertIsNone(self.decide("Bash", {"command": f"notme git worktree-add '{path}'"}))
-        for path in ("C:\\Work\\App\\.git\\not-me\\worktrees\\..\\..\\hooks", "D:\\x", "C:/Work/App/.git/not-me/worktrees"):
-            with self.subTest(path=path):
-                self.assertEqual(self.decide("Bash", {"command": f"notme git worktree-add '{path}'"}).rule, "self_protect")
-
-    def test_session_checkout_and_file_self_protection(self):
-        self.assertIsNone(self.decide("Bash", {"command": "notme status"}, cwd="C:/work/APP/sub"))
-        self.assertEqual(self.decide("Bash", {"command": "notme status"}, cwd="D:\\Other").rule, "self_protect")
-        self.assertEqual(self.decide("Bash", {"command": "cd C:/work/APP/sub && notme status"}).rule, "self_protect")
+    def test_file_self_protection(self):
         for path in ("c:/work/app/.claude/not-me/project.md", "C:\\Plugins\\NOT-ME\\hooks\\repo_guard.py",
                      "C:/Users/OP/.claude/not-me/allowed-repos.json"):
             with self.subTest(path=path):
@@ -438,12 +416,9 @@ class WindowsPathTests(unittest.TestCase):
         words = guard.lex("cat C:\\Users\\op\\x 'C:\\q' \"C:\\d\" e\\ f").commands[0].words
         self.assertEqual([str(w) for w in words], ["cat", "C:Usersopx", "C:\\q", "C:\\d", "e f"])
         self.assertEqual([w.raw for w in words], ["cat", "C:\\Users\\op\\x", "C:\\q", "C:\\d", "e\\ f"])
-        wt = "C:\\Work\\App\\.git\\not-me\\worktrees"
-        self.assertIsNone(self.decide("Bash", {"command": f"notme git worktree-add '{wt}\\feat-x'"}))
-        self.assertIn("unquoted backslashes", self.decide("Bash", {"command": "git -C C:\\Work\\App status"}).message)
-        for cmd in (f"notme git worktree-add {wt}\\feat-x", f"notme git worktree-add {wt}\\..\\..\\hooks",
-                    "cat C:\\Users\\op\\.claude\\not-me\\op*",
-                    "cp -r C:\\Users\\op\\.claude\\not-me D:\\x", "cat C:\\Users\\op\\.claude\\not-me\\merge-g*\\*"):
+        self.assertIsNone(self.decide("Bash", {"command": "git -C C:\\Work\\App status"}))
+        for cmd in ("cat C:\\Users\\op\\.claude\\not-me\\op*", "cat 'C:\\Users\\op\\.claude\\not-me\\operator-token'",
+                    "cp -r C:\\Users\\op\\.claude\\not-me D:\\x"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.decide("Bash", {"command": cmd}).rule, "self_protect")
 
@@ -536,7 +511,7 @@ class HookTests(_Fixtures):
         self.assertEqual(proc.returncode, 2)
         self.assertIn(b"guard failed closed", proc.stderr)
         self.assertIn(b"/not-me:doctor", proc.stderr)
-        proc = self.hook(self.event("Bash", "gh pr merge 1"))  # tool_input is not an object
+        proc = self.hook(self.event("Bash", "git push origin main"))  # tool_input is not an object
         self.assertEqual(proc.returncode, 2)
 
     def test_fails_open_otherwise(self):
@@ -586,14 +561,9 @@ class HooksJsonTests(unittest.TestCase):
         self.assertEqual((hook["type"], hook["timeout"]), ("command", 10))
         self.assertIn('bin/notme-python" "${CLAUDE_PLUGIN_ROOT}/hooks/repo_guard.py"', hook["command"])
 
-    def test_declares_the_merge_grant_prompt_hook(self):
+    def test_declares_only_the_guard(self):
         data = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
-        entries = data["hooks"]["UserPromptSubmit"]
-        self.assertEqual(len(entries), 1)
-        self.assertNotIn("matcher", entries[0])  # every prompt: any other prompt must end the grant
-        hook = entries[0]["hooks"][0]
-        self.assertEqual((hook["type"], hook["timeout"]), ("command", 10))
-        self.assertIn('bin/notme-python" "${CLAUDE_PLUGIN_ROOT}/hooks/merge_grant.py"', hook["command"])
+        self.assertEqual(list(data["hooks"]), ["PreToolUse"])
 
 
 class LiveMarkerTests(unittest.TestCase):
@@ -633,7 +603,9 @@ class OwnScriptsTests(unittest.TestCase):
                            plugin_root=str(PLUGIN_ROOT), env={},
                            write_ctx=writes.GuardContext(origin_repo="acme/app", allowed_repos=("acme/app",)))
         for cmd in ("python3 scripts/run-tests.py", "python3 plugins/not-me/tests/run_guard_cases.py",
-                    "python3 scripts/check-skills.py", "python3 scripts/gen-cli-docs.py --check"):
+                    "python3 scripts/check-skills.py", "python3 scripts/gen-cli-docs.py --check",
+                    "bash scripts/validate-plugins.sh", "claude plugin validate --strict plugins/not-me",
+                    "shellcheck $(git ls-files '*.sh')"):
             with self.subTest(cmd=cmd):
                 event = {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(repo)}
                 self.assertIsNone(guard.decide(event, ctx))

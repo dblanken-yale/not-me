@@ -18,7 +18,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Iterator, List, Mapping, Optional, Tuple
 from unittest import mock
 
-from notme import guard, merge_grant, runlog
+from notme import guard, runlog
 
 WIN_TEMP = "C:\\Users\\runneradmin\\AppData\\Local\\Temp"
 WIN_PLUGIN = "D:\\a\\not-me\\not-me\\plugins\\not-me"
@@ -139,7 +139,7 @@ class WinSim:
     def start(self) -> None:
         sim = self
         path_mod = self.path_module()
-        real_read, real_consume, real_append = merge_grant.read, merge_grant.consume, runlog.guard_log_append
+        real_append = runlog.guard_log_append
         globber = types.SimpleNamespace(
             iglob=lambda p, **k: (sim.to_win(m) for m in real_glob.iglob(sim.to_real(p), **k)))
         self._patches = [
@@ -148,8 +148,6 @@ class WinSim:
             mock.patch.object(guard, "Path", self.path_class()),
             mock.patch.object(guard, "glob", globber),
             mock.patch.object(guard, "open", lambda p, *a, **k: builtins.open(sim.to_real(p), *a, **k), create=True),
-            mock.patch.object(merge_grant, "read", lambda home, sid, *a, **k: real_read(sim.to_real(home), sid, *a, **k)),
-            mock.patch.object(merge_grant, "consume", lambda home, sid: real_consume(sim.to_real(home), sid)),
             mock.patch.object(runlog, "guard_log_append", lambda p, f: real_append(sim.to_real(p), f)),
             mock.patch.dict(os.environ, self.env, clear=True),  # ntpath.expanduser reads USERPROFILE here
         ]

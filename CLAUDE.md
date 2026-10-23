@@ -53,22 +53,27 @@ the owner's say-so, not a cleanup.
    Thread replies use REST and never resolve threads. Pushes send an explicit
    refspec, verify every push URL, and never force.
 
-3. **The guard fails closed and cannot be widened by the model.** Four rule
-   groups (other repo, protected branches, force push, destructive/settings
-   actions), each relaxable only with `confirm_guard_off` in the same layer
-   and never from the repo layer. Self-protection is always on: the allow
-   list, the operator token and the live-mode epoch (neither read nor
-   written), the live-mode marker (`mode-live.sig`, never written), the
-   plugin's own files, the config during a run, `allow-repo add|remove`,
-   `pause off`, `notme mode live` (also as `python -m notme.cli`), and any
-   `notme` call that re-points its project,
-   home or run via flags, environment assignments or a `cd` outside the
-   checkout. The inactive path is fork-free. Block messages name the exact
-   `/not-me:allow-repo owner/name` command. The guard does not follow `cd`: a
-   Bash command that changes directory anywhere (cd, pushd, source, eval, env
-   -C, a PWD/HOME/CDPATH assignment, and the like) may not also write with git
-   or gh, so writes are judged in the hook's real working directory or the
-   `git -C` / `gh -R` they name.
+3. **The guard is small and cannot be widened by the model.** Four rule groups
+   (other repo, protected branches, force push, destructive actions), each
+   relaxable only with `confirm_guard_off` in the same layer and never from the
+   repo layer. It keeps a short list (`docs/guards.md`): commits, merges,
+   rebases, cherry-picks, am and hard resets on a protected branch and pushes to
+   one; force pushes and remote deletes; git and gh writes to repos off the
+   allowed list and anything that changes where git pushes; GitHub settings,
+   secrets, rulesets, releases and deletions, `rm -rf .git`, `clean -x` and
+   forced deletes of a protected branch. Text it does not parse (a `bash -c`
+   body too deep, inline code, a script file, a command it cannot lex) is
+   allowed unless it holds one of a few words (`push`, `reset --hard`, a GitHub
+   secrets action, a protected path name and the like), then blocked under the first relevant rule
+   that is on. Self-protection is always on: the operator token, the live-mode
+   epoch and marker and the allow list by path;
+   `notme allow-repo add|remove`, `pause off` and `mode` other than show or
+   dry-run as parsed commands in every invocation form; a pseudo-terminal or
+   detached wrapper around notme; the plugin's own files; the config during a
+   run. The inactive path is fork-free. Block messages name the exact
+   `/not-me:allow-repo owner/name` command. The guard does not follow `cd`, and
+   it is not the last line: GitHub rulesets on protected branches (no deletion,
+   no force push, PR required) are the backstop the docs recommend.
 
 4. **The CLI's trust anchor is the checkout it runs in.** Restricted mode is
    the default. It relaxes only when all of these hold: stdin is a terminal,
@@ -77,9 +82,10 @@ the owner's say-so, not a cleanup.
    off, `NOT_ME_OPERATOR_CONFIRM` equals the random token in
    `~/.claude/not-me/operator-token` that `notme doctor --init-token` creates
    for a person. Env vars never relax anything; `NOT_ME_DRY_RUN` can only
-   turn dry-run on. The guard blocks pseudo-terminal wrappers, detached
-   processes and reads of the token so these checks cannot be spoofed from
-   a session; the CLI checks are the second layer, the guard is the first.
+   turn dry-run on. The guard blocks pseudo-terminal and detached wrappers
+   around notme and reads of the token so these checks cannot be spoofed
+   from a session; the CLI checks are the second layer, the guard is the
+   first.
 
 5. **Untrusted text never reaches the model as instructions.** Authors are
    filtered by login against the roster before any body is read; only counts,
@@ -126,14 +132,13 @@ the owner's say-so, not a cleanup.
     shell arguments. The `--bg` result is exactly one line in the grammar in
     `references/bg-mode.md`; `NONE` means only "nothing to do".
 
-11. **Merging is a human action: a person merges, or grants one named merge
-    from their own prompt (`/not-me:allow-merge owner/repo#N`); runs never
-    merge.** The grant is written only by the UserPromptSubmit hook, signed
-    with the operator token, binds the PR and the merge method, ends with
-    the person's next message (30 minutes at most), covers one plain
-    `gh pr merge N -R owner/repo` in that session, and never applies while a
-    run is active. Nothing here deletes branches or changes repository
-    settings, even when a lead asks.
+11. **Merging is a person's call, never a skill's.** No not-me skill merges,
+    and merging is not part of any skill's flow; autonomous runs never merge.
+    A person merges, by hand or by asking Claude directly in a session. The
+    guard does not block merges, so this rule lives in the skills and
+    `references/prohibitions.md`, backed by GitHub rulesets where a repo wants
+    a review on every merge. Nothing here deletes branches or changes
+    repository settings, even when a lead asks.
 
 ## How to work here
 

@@ -11,40 +11,39 @@ self-protection still applies: the hook calls `ctx.self_only()`, which stubs
 git and config so nothing forks, and `decide` keeps only self_protect blocks.
 
 Rule groups, each switched by `guard.<rule>` in project.md:
-  other_repo          writes may only target allowed repos
-  protected_branches  no commits, pushes, merges or resets on protected branches
+  other_repo          git and gh writes may only target allowed repos, and
+                      nothing may change where git pushes
+  protected_branches  no commits, merges, rebases, cherry-picks, am or hard
+                      resets on a protected branch, and no pushes to one
   force_push          no history rewrites or remote branch deletion
-  destructive_git     shown as "destructive": hard resets, forced branch deletes,
-                      clean -x, rm -rf .git, and GitHub settings, secrets and deletions
-Self-protection (the allow list, the operator token, the live-mode marker,
-allow-repo and pause off, the plugin's own files, not-me config during a run,
-and `notme mode live`) is always on, in every directory, whether or not the
-guard is active. Live mode is signed: `mode: live` counts only next to a marker
+  destructive_git     shown as "destructive": GitHub settings, secrets,
+                      rulesets, releases and deletions, rm -rf .git, clean -x,
+                      forced deletes of protected branches
+Self-protection is always on, in every directory: the operator token, the
+live-mode epoch and marker and the allow list (by
+file path), `notme allow-repo add|remove`, `notme pause off` and `notme mode`
+other than show or dry-run (as parsed commands), a pseudo-terminal or
+detached process around notme, the plugin's own files, and not-me config
+during a run. Live mode is signed: `mode: live` counts only next to a marker
 that `notme mode live` writes with the operator token, so no file edit can
-turn it on. The guard still blocks Edit/Write of `mode: live` into the global
-project.md as an early, friendly refusal; that check is not the security
-boundary. Merge grants (notme/merge_grant.py) are self-protected the same way:
-no tool may touch the merge-grants folder, and `decide` lifts the `gh pr merge`
-block only for the exact PR a person granted from their own prompt, once.
+turn it on; the Edit/Write check on the global project.md is an early,
+friendly refusal, not the boundary. Merging pull requests is not the guard's
+business: no not-me skill merges, and a person may merge or ask Claude to.
+
+Bash commands are split by `lex`, one linear pass that reads quotes,
+backslashes, line continuations, substitutions, here-documents and
+redirections the way the shell does. Every simple command it finds is judged,
+including the ones inside $( ) and backticks. Text the guard does not parse
+(a command it cannot lex, a shell -c body nested too deep, inline interpreter
+code, a script file, a command name it cannot resolve, words xargs adds) is
+opaque: it is allowed unless its decoded text holds one of the words in
+_DANGER or _SELF_TEXT, and then blocked under the first relevant rule that is
+on. The guard does not follow cd: writes are judged in the hook's working
+directory, or the `git -C` / `gh -R` they name.
 
 Residual risk: a token file readable by the same OS user cannot be fully hidden
 from an agent running as that user; this guard is the enforcement, and the
 operator token is a second layer, not a secret.
-
-Bash commands are split by `lex`, one linear pass that reads quotes,
-backslashes, line continuations, substitutions, here-documents and
-redirections the way the shell does; a command it cannot read with confidence,
-longer than MAX_COMMAND or nested deeper than MAX_NESTING is blocked unread.
-The guard does not follow cd: a command that changes directory anywhere (see
-_dir_change) may not also write with git or gh, run notme, or use relative
-paths a rule would have to resolve. Writes are judged in the hook's real
-working directory, or the `git -C` / `gh -R` they name. Anything else it
-cannot see through ($(...) around gh/git, GIT_DIR=..., a command name in a
-variable, inline interpreter code, scripts that mention gh/git) is blocked, so
-it fails closed. A string another program runs as a command (bash -c, eval,
-awk system(), sed e, vim !, tar --to-command) is lexed and judged as a command
-itself (_judge_body); one still obfuscated after lexing is blocked when it
-mentions gh/git/github or the command could reach the network.
 """
 from __future__ import annotations
 
@@ -54,21 +53,20 @@ import glob
 import json
 import os
 import re
-import shutil
 import subprocess
 from dataclasses import dataclass, field
 from functools import cached_property, lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, Iterator, List, Mapping, Optional, Set, Tuple
 
-from . import merge_grant, paths, runlog, writes
+from . import paths, runlog, writes
 from .frontmatter import parse as parse_frontmatter  # stdlib only: no config stack
 from .writes import parse_origin, valid_slug
 
 RULES = writes.GUARD_RULES
 RULE_LABEL = {"destructive_git": "destructive"}
 SELF = "self_protect"
-OPAQUE = "opaque"  # cannot be checked: reported under the first enabled rule
+OPAQUE = "opaque"  # cannot be parsed: reported under the first enabled rule in Block.rules
 
 ALLOWLIST_NAME = writes.ALLOWLIST_FILE
 BOARD_MARKER = "--not-me-board"
@@ -80,39 +78,14 @@ SCRIPT_SUFFIXES = (".sh", ".bash", ".zsh")
 # The global layer's file that holds `mode`: the same name as layers.PROJECT_FILE, kept here so the hook does not
 # import the config modules on every call.
 GLOBAL_DOC = "project.md"
-MAX_COMMAND = 32 * 1024  # longer Bash commands are blocked unread: checking them could outrun the hook timeout
-MAX_NESTING = 64  # deeper $( ), backtick or ${ } nesting is blocked unread
-MAX_BODY_DEPTH = 4  # shell bodies (bash -c, eval, awk system()) nested deeper than this are blocked
+MAX_COMMAND = 32 * 1024  # longer Bash commands are not lexed: their text is judged as opaque
+MAX_NESTING = 64  # deeper $( ), backtick or ${ } nesting is not lexed: its text is judged as opaque
+MAX_BODY_DEPTH = 4  # shell bodies (bash -c, eval) nested deeper than this are judged as opaque text
 PREFILTER_MAX = 2048  # longer commands skip the regex prefilter and always get the full check
+GLOB_LIMIT = 5000  # paths a glob may expand to before the guard stops expanding it
 
 GitFn = Callable[[List[str], str], Optional[str]]
 
-# --- patterns --------------------------------------------------------------
-
-_HOST_SLUG = re.compile(r"^github\.com/([^/]+/[^/]+)$")
-_GH_GIT = re.compile(r"(^|[^A-Za-z0-9_.-])(gh|git)([^A-Za-z0-9_.-]|$)")
-_GITHUB = re.compile(r"github\.com", re.IGNORECASE)
-_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\[\]]*\])?\+?=")
-_PATH_SEP = re.compile(r"[/\\]")
-_SCP_REMOTE = re.compile(r"^[^/]*@[^/]*:")
-_ALLOW_EDIT = re.compile(r"(?:^|[^A-Za-z0-9_-])(?:(add|remove)|(--e[a-z]*))(?:[^A-Za-z0-9_-]|$)")
-_PARAM_DEFAULT = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=+?]([^{}]*)\}")
-_ESC_SEQ = re.compile(r"\\(?:x([0-9A-Fa-f]{1,2})|([0-7]{1,3})|u([0-9A-Fa-f]{4}))")  # \x67, \147, g
-_SHELL_PIECES = re.compile(r"\$\{[^{}]*\}|\$\([^()]*\)|`[^`]*`|\$(?=['\"])")
-_OBFUSCATED = re.compile(r"[$`\\'\"]")  # left in a word after lexing: the shell still expands or unquotes it
-# a command that could reach the network: a URL, a network client, or GitHub
-_NETWORK = re.compile(r"://|github\.com|(?<![A-Za-z0-9_.-])(?:curl|wget|nc|ncat|netcat|ssh|scp|sftp|rsync|telnet|"
-                      r"socat|ftp|http|https|xh|gh|git)(?![A-Za-z0-9_-])", re.IGNORECASE)
-_NOTME_PROGS = {"notme", "notme.py"}
-# variables that re-point the not-me CLI's trust anchor (its project, home, operator or GitHub identity)
-_TRUST_ENV = re.compile(r"(?<![A-Za-z0-9_])(NOT_ME_[A-Za-z0-9_]*|CLAUDE_PROJECT_DIR|CLAUDECODE|HOME|GH_HOST|GH_TOKEN|"
-                        r"GITHUB_TOKEN)=")
-_TRUST_UNSET = re.compile(r"(?<![A-Za-z0-9_-])(?:unset|-u|--unset)\s+(?:-[a-z]+\s+){0,8}(NOT_ME_[A-Za-z0-9_]*|"
-                          r"CLAUDE_PROJECT_DIR|CLAUDECODE|HOME|GH_HOST|GH_TOKEN|GITHUB_TOKEN)\b")
-OPERATOR_CONFIRM = "NOT_ME_OPERATOR_CONFIRM"
-# VAR=value prefixes that may sit in front of gh, git or notme; any other one cannot be checked
-_SAFE_ENV = {"LC_ALL", "LANG", "PYTHONUTF8", "PAGER", "GH_PAGER", "NO_COLOR", "TERM"}
-_PAUSE_OK = ([], ["on"], ["status"])
 OPERATOR_TOKEN = "operator-token"  # the human-confirm token file under the global not-me home
 # the token-signed live-mode marker under the global not-me home (humans.LIVE_MARKER, kept literal so the hook
 # imports no more than it needs); only `notme mode live`, run by a person, writes it
@@ -124,81 +97,74 @@ LIVE_HINT = "the operator runs /not-me:mode live in their own terminal"
 LIVE_EPOCH_NAME = "mode-live.epoch"
 LIVE_EPOCH_WHY = "the live-mode epoch is the operator's own secret"
 TOKEN_WHY, TOKEN_HINT = "the operator token is the operator's own confirmation", "ask the operator to confirm by hand"
-GRANT_NAME = merge_grant.GRANT_DIR  # the merge-grant directory under the global not-me home
-GRANT_WHY = "merge grants come only from the person typing " + merge_grant.COMMAND
-GRANT_HINT = f"ask the operator; to allow one merge they send {merge_grant.COMMAND} owner/name#N"
-# words that make a forged terminal dangerous: driving the not-me CLI or its human checks through a pty
-_NOTME_HOME_PATH = r"\.claude[/\\]+not-me(?![A-Za-z0-9_.-])"  # the global not-me home (and the repo layer)
-# the Claude Code CLI as a word (not ~/.claude or claude.ai): starting or resuming a session from inside one could
-# deliver a prompt (such as /not-me:allow-merge) as if the person typed it
-_CLAUDE_WORD = r"(?<![A-Za-z0-9_.-])claude(?:-code)?(?:\.exe)?(?![A-Za-z0-9_.-])|@anthropic-ai/claude-code"
-_PTY_TRIGGER = re.compile(r"notme|allow-repo|allow-merge|(?<![A-Za-z0-9_-])pause(?![A-Za-z0-9_-])|operator-token"
-                          r"|mode-live\.(?:sig|epoch)|NOT_ME_|merge-grants|" + _NOTME_HOME_PATH + "|" + _CLAUDE_WORD)
-# `mode` followed by anything but show or dry-run: the live switch, when the command word is a $VAR
-_MODE_LIVE = re.compile(r"(?<![A-Za-z0-9_-])mode\s+(?!(?:show|dry-run)(?![A-Za-z0-9_-]))\S")
-# words a script file run through a shell may not contain (they drive the not-me CLI where the guard cannot see)
-_SCRIPT_SELF = re.compile(r"notme|allow-repo|allow-merge|operator-token|mode-live\.(?:sig|epoch)|NOT_ME_|merge-grants|"
-                          + _NOTME_HOME_PATH + "|" + _CLAUDE_WORD)
-# what a non-Bash tool's input (MCP session, terminal or prompt tools) may not carry: a grant prompt, the not-me
-# secrets, or a Claude Code CLI invocation (the word followed by an option, the end, or a shell separator)
-_TOOL_MARKERS = re.compile(r"allow-merge|operator-token|merge-grants|mode-live\.(?:sig|epoch)"
-                           r"|(?<![A-Za-z0-9_.-])(?:[^\s'\"]*/)?claude(?:-code)?(?:\.exe)?(?=\s+-|\s*$|\s*[;&|)])"
-                           r"|@anthropic-ai/claude-code", re.IGNORECASE)
-_PTY_CODE = re.compile(r"(?<![A-Za-z])pty(?![A-Za-z])|openpty|forkpty|spawn\s*\(")
-# code that forges a terminal or leaves the session's process tree: blocked in inline code and scripts outright
-_PRIMITIVES = re.compile(r"(?<![A-Za-z_])pty(?![A-Za-z_])|openpty|forkpty|os\.fork\b|(?<![A-Za-z_.])fork\s*\(|setsid"
-                         r"|(?<![A-Za-z_])daemon(?!\s*=)|start_new_session\s*=\s*True|detached\s*:\s*true")
-GLOB_LIMIT = 5000  # paths a token-read glob may visit before the guard assumes it reaches the token
-_MODE_OK = ("show", "dry-run")  # `notme mode` subcommands the agent may run
-_PY_VALUE_OPTS = "WXQ"  # python short options that take a value (-W ignore, -Xutf8), skipped before -m or the script
-_PTY_PROGS = {"script", "expect", "unbuffer", "socat", "ssh", "tmux", "screen"}
-# running a command outside the session's process tree escapes the CLI's ancestry check
-_ORPHAN_PREFIX = {"nohup", "setsid"}
-_ORPHAN_PROGS = {"disown", "daemon", "start-stop-daemon", "systemd-run", "at", "batch", "cron"}
-_BACKGROUND = re.compile(r"(?<![&<>|])&(?![&>])")  # a lone & (also zsh &! and ( ... ) &), not &&, 2>&1 or &>
-# commands that read, copy or move files: none may reach the operator token through a glob or a directory
-_TOKEN_READERS = {"cat", "head", "tail", "less", "more", "od", "xxd", "base64", "cp", "mv", "ln", "tac", "nl",
-                  "strings", "hexdump", "grep", "egrep", "fgrep", "rg", "sed", "awk", "rsync", "tar", "zip", "scp",
-                  "dd", "install", "diff", "cmp", "sort", "uniq", "cut", "paste", "tee", "file", "stat"}
-_TOKEN_COPIERS = {"cp", "mv", "ln", "rsync", "tar", "zip", "scp", "install"}
-_IN_REDIRECT = re.compile(r"(?<![<\d])\d*<(?![<(&])\s*([^\s;|&<>()]+)")
-_OUT_REDIRECT = re.compile(r"(?:^|[^<>&\d])\d*&?>>?\|?(?![>&(])\s*([^\s;|&<>()]+)")
-# shell text that leaves a path unresolved for the guard: $(...), backticks, ${...}, $VAR, {a,b} and a stray $
-_UNRESOLVED = re.compile(r"\$\([^)]*\)?|`[^`]*`?|\$\{[^}]*\}?|\$[A-Za-z0-9_@*#?!-]+|\{[^}]*\}?|\$")
-_HOME_PARAM = re.compile(r"\$\{(NOT_ME_HOME|HOME)(?![A-Za-z0-9_])[^}]*\}")
+ALLOW_WHY, ALLOW_HINT = "only the operator changes the not-me allow list", "ask the operator to run /not-me:allow-repo"
+HOME_WHY = "the not-me home holds the operator's own secrets"
+
+# --- patterns --------------------------------------------------------------
+
+_HOST_SLUG = re.compile(r"^github\.com/([^/]+/[^/]+)$")
+_GH_GIT = re.compile(r"(^|[^A-Za-z0-9_.-])(gh|git)([^A-Za-z0-9_.-]|$)")
+_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\[\]]*\])?\+?=")
+_PATH_SEP = re.compile(r"[/\\]")
+_SCP_REMOTE = re.compile(r"^[^/]*@[^/]*:")
+_PARAM_DEFAULT = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=+?]([^{}]*)\}")
+_ESC_SEQ = re.compile(r"\\(?:x([0-9A-Fa-f]{1,2})|([0-7]{1,3})|u([0-9A-Fa-f]{4}))")  # \x67, \147, g
+_SHELL_PIECES = re.compile(r"\$\{[^{}]*\}|\$\([^()]*\)|`[^`]*`|\$(?=['\"])")
 _GLOB = re.compile(r"[*?\[]")
+_BACKGROUND = re.compile(r"(?<![&<>|])&(?![&>])")  # a lone & (also zsh &! and ( ... ) &), not &&, 2>&1 or &>
 _LOCALHOST = re.compile(r"^(?:[^@]+@)?(?:localhost|127(?:\.\d+){3}|::1|\[::1\]|0\.0\.0\.0)$", re.IGNORECASE)
+_NOTME_WORD = re.compile(r"notme", re.IGNORECASE)
 # interpreter program names (lowercased, versioned or not); the prefilter is built from the same pattern
 _INTERP_NAMES = (r"(?:python|pythonw|py|node|nodejs|perl|ruby|php|deno|bun|lua|luajit|rscript|osascript|pwsh"
                  r"|powershell|julia|tclsh|wish)[0-9.]*")
 _INTERP = re.compile(r"^" + _INTERP_NAMES + r"$")
 _REPO_PATH = re.compile(r"^repos/([^/]+)/([^/?]+)(/|\?|$)")
-_PULL_MERGE = re.compile(r"/pulls/\d+/merge/?$")
 _PROTECTION = re.compile(r"/branches/[^/]+/protection(/|$)")
-_SECRETS = re.compile(r"/(actions|dependabot|codespaces)/(secrets|variables)(/|$)")
+_SECRETS = re.compile(r"/(actions|dependabot|codespaces)/(secrets|variables)(/|$)"
+                      r"|/environments/[^/]+/(secrets|variables)(/|$)")
+_RULESETS = re.compile(r"/rulesets(/|$)")
 _MCP_TOOL = re.compile(r"^mcp__.*github.*", re.IGNORECASE)
 _READ_MCP_PREFIX = re.compile(r"^(get|list|search)_[a-z0-9_]+$")
 _MCP_WRITE_WORDS = re.compile(
     r"(^|_)(merge|create|update|delete|add|remove|set|write|push|run|rerun|dismiss|request|submit|assign|close|"
     r"reopen|fork|edit|lock|unlock|cancel|enable|disable|trigger|mark|star|approve|comment|upload|transfer)(_|$)")
+
+# Opaque text: what decoded text the guard does not parse may not hold, with the rules a match is reported under
+# (the first one that is on). Matched against every spelling _spellings makes.
+_PB, _FP, _OR, _DG = "protected_branches", "force_push", "other_repo", "destructive_git"
+_DANGER: Tuple[Tuple["re.Pattern[str]", Tuple[str, ...]], ...] = (
+    (re.compile(r"(?<![^\s'\"(\[,;|&{=`])push(?=[\s'\")\],;|&}`]|$)"), (_PB, _FP, _OR)),  # push as a word
+    (re.compile(r"reset\s+(?:\S+\s+)?--hard"), (_PB,)),
+    # gh pr merge|close --delete-branch (or -d) deletes the remote branch
+    (re.compile(r"(?<![A-Za-z0-9_-])pr\s+(?:merge|close)(?![A-Za-z0-9_-])[^;&|\n]{0,200}?"
+                r"(?:--delete-branch|(?<![A-Za-z0-9_-])-[A-Za-z]*d(?![A-Za-z0-9_-]))"), (_FP,)),
+    (re.compile(r"-X\s*=?\s*DELETE|--method[\s=]+DELETE", re.IGNORECASE), (_DG,)),
+    # GitHub secrets: gh secret set|delete|remove and the secrets API paths
+    (re.compile(r"(?<![A-Za-z0-9_-])secret\s+(?:set|delete|remove)(?![A-Za-z0-9_-])"
+                r"|/(?:actions|dependabot|codespaces)/secrets(?![A-Za-z0-9_-])|/environments/[^/\s]+/secrets"
+                r"(?![A-Za-z0-9_-])", re.IGNORECASE), (_DG,)),
+    (re.compile(r"branch\s+(?:\S+\s+)?-[A-Za-z]*D"), (_DG,)),
+    (re.compile(r"clean\s+(?:\S+\s+)?-[A-Za-z]*[xX]"), (_DG,)),
+    (re.compile(r"rm\s+-[A-Za-z]*[rR][^;&|\n]{0,200}?\.git(?![A-Za-z0-9_-])"), (_DG,)),
+)
+# protected path names: self-protection in any opaque text
+_SELF_TEXT = re.compile(r"operator-token|mode-live\.(?:sig|epoch)|allowed-repos\.json", re.IGNORECASE)
+# the not-me CLI's human switches, in text the guard does not parse that sits in the command itself (not in a
+# script file, whose own text may describe them; the CLI's restricted mode is the second layer there)
+_NOTME_TEXT = re.compile(r"allow-repo[\s,]+(?!list(?![A-Za-z0-9_-]))[^\s,]"
+                         r"|(?<![A-Za-z0-9_-])pause[\s,]+-*off(?![A-Za-z0-9_-])|(?<![A-Za-z0-9_-])mode[\s,]+live",
+                         re.IGNORECASE)
+_OPAQUE_HINT = "run the git, gh or notme command directly, with every word spelled out, so the guard can check it"
+
 # Bash commands that cannot matter to any rule skip the full check (applied with quotes/backslashes removed).
 _PREFILTER = re.compile(
-    r"(?<![A-Za-z0-9_-])(gh|git|github|rm|find|xargs|parallel|curl|wget|(?i:" + _INTERP_NAMES + r")|bash|sh|zsh|"
-    r"dash|ksh|fish|source|exec|eval|NODE_OPTIONS|NODE_PATH|RUBYOPT|RUBYLIB|PERL5OPT|PERL5LIB|PERLLIB|PYTHONPATH"
-    r"|PYTHONSTARTUP|PYTHONINSPECT|PYTHONHOME|PYTHONUSERBASE)(?![A-Za-z0-9_-])"
-    r"|(?:^|[\s;|&(])\.(?:\s|$)|\./|\.(?:sh|bash|zsh)\b|\$|`|allow-repo|allowed-repos|GIT_|\.git|notme|not-me|NOT_ME_|operator-token"
-    r"|mode-live"  # LIVE_MARKER_NAME
-    r"|merge-grants|allow-merge"  # GRANT_NAME, merge_grant.COMMAND
-    r"|(?<![A-Za-z0-9_.-])claude(?![A-Za-z0-9_.])|claude-code"  # the Claude Code CLI
-    r"|(?<![A-Za-z0-9_-])(?:vim|vi|nvim|ex|view|vimdiff|gvim|rvim|evim)(?![A-Za-z0-9_-])"
-    r"|(?<![A-Za-z0-9_-])(?:script|expect|unbuffer|socat|ssh|tmux|screen|pause)(?![A-Za-z0-9_-])"
-    # any file reader, copier or < redirection, or a > redirection to a glob, brace or ~ path: its arguments may
-    # expand into the not-me home (a plain > target that does not spell a guarded name cannot reach it)
-    r"|>(?!&)\s*[^\s;|&<>()]*[*?\[{~]|(?<![<\d&])<(?![<(&])|(?<![A-Za-z0-9_-])(?:" + "|".join(sorted(_TOKEN_READERS)) + r")(?![A-Za-z0-9_-])"
-    r"(?=[^;|&\n]*?\s(?![-<>\d])\S)")
+    r"(?<![A-Za-z0-9_-])(gh|git|rm|find|xargs|parallel|sudo|doas|notme|bash|sh|zsh|dash|ksh|fish|source|exec|eval"
+    r"|script|expect|unbuffer|socat|ssh|tmux|screen|nohup|setsid|disown|daemon|at|batch|systemd-run"
+    r"|start-stop-daemon|launchctl|crontab|(?i:" + _INTERP_NAMES + r"))(?![A-Za-z0-9_-])"
+    r"|not-me|NOT_ME_|operator-token|mode-live|allowed-repos"
+    r"|[$`/~*?\[\\&]|(?:^|[\s;|&(])\.(?:\s|$)|\.(?:sh|bash|zsh)\b|\.git")
 
 _SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
-_FED_PROGS = _SHELLS | {"eval", "xargs", "sudo", "doas", "source", ".", "env", "parallel"}  # run their stdin
 _KEYWORDS = {"builtin", "{", "}", "if", "then", "else", "elif", "do", "while", "until", "!", "coproc", "-"}
 # prefix words that run the rest of the line, with their options that take a value
 _PREFIX_WORDS: Dict[str, Set[str]] = {
@@ -218,168 +184,56 @@ _PREFIX_WORDS: Dict[str, Set[str]] = {
     "noglob": set(),
     "nocorrect": set(),
 }
-# A command that changes the shell's directory anywhere may not also write with git or gh: the guard judges
-# writes in the hook's real working directory and does not follow cd (see _dir_change).
-_DIR_WORDS = {"cd", "pushd", "popd", "chdir"}  # as any word: also caught behind xargs, env, nohup, sudo, find
-_DIR_NAMES = {"source", ".", "eval", "exec", "alias", "function", "trap", "emulate", "zle", "sched"}  # command name
-_DIR_VARS = "PWD|OLDPWD|CDPATH|HOME|DIRSTACK|cdpath|dirstack"
-# zsh special arrays that define functions, aliases or options (auto_cd) when assigned to
-_ZSH_TABLES = "functions|aliases|galiases|saliases|options"
-_DIR_VAR_SET = re.compile(r"(?<![A-Za-z0-9_$])(?:" + _DIR_VARS + "|" + _ZSH_TABLES
-                          + r")(?:\[[^\[\]]*\])?\s*(?:[-+*/%&|^]|<<|>>)?=(?!=)")
-_DIR_VAR_WORD = re.compile(r"(?:-[A-Za-z]*)?(?:" + _DIR_VARS + r")")
-_GLOB_QUALIFIER = re.compile(r"\((?:#q)?[^()\s|;&]*?(?:e[^A-Za-z0-9_\s]|\+[A-Za-z_])")  # zsh *(e:'cd x':), *(+f)
-_DIR_VAR_DEFAULT = re.compile(r"\$\{(?:" + _DIR_VARS + r")(?:\[[^\[\]]*\])?:?=")
-_DECLARE = {"declare", "typeset", "local", "export", "readonly", "integer", "float", "private"}
-_NAME_ARGS = {"read", "mapfile", "readarray", "unset", "let", "getopts"}
-_CD_HINT = ("use git -C <path> or gh -R owner/name instead of cd; if a cd is needed, run it in a separate Bash "
-            "call first")
-_HTTP_CLIENTS = {"curl", "wget", "http", "https", "xh"}
-# programs that never run their arguments: a gh or git word there is data (anything else naming gh/git blocks)
-# (not man, more, sort or yq: a pager or --compress-program can run a command; rg, awk, sed, vim, tar and less
-# have their own handlers, which look at the options and program text that run one)
-_INERT = {"echo", "printf", "grep", "egrep", "fgrep", "cat", "ls", "head", "tail", "wc", "test", "[", "[[",
-          "true", "false", ":", "which", "type", "whereis", "file", "stat", "uniq",
-          "cut", "tr", "diff", "cmp", "basename", "dirname", "realpath", "readlink", "touch", "mkdir", "cp", "mv",
-          "ln", "chmod", "jq", "tee", "comm", "column", "nl", "od", "xxd", "hexdump", "strings", "base64",
-          "shasum", "sha256sum", "md5", "md5sum", "date", "pwd", "whoami", "id", "uname", "sleep", "rmdir",
-          "cd", "pushd", "popd", "export", "unset", "local", "read", "set", "rg"}
-# git subcommands that change nothing, provided every option is on _GIT_READ_OPTS. A git call is a read
-# only when proven to be one; an unknown subcommand, option or -c key blocks.
-_GIT_READ_ONLY = {"", "status", "log", "diff", "show", "rev-parse", "ls-files", "ls-tree", "ls-remote", "cat-file",
-                  "grep", "blame", "annotate", "describe", "shortlog", "rev-list", "merge-base", "show-ref",
-                  "for-each-ref", "show-branch", "check-ignore", "name-rev", "cherry", "range-diff", "diff-tree",
-                  "diff-files", "diff-index", "whatchanged", "count-objects", "var", "help", "version"}
-_GIT_READ_OPTS = set("""
--- -p -u -s -z -v -q -n -i -w -b -l -L -M -C -B -D -R -a -r -t -d -c -e -E -F -G -S -h -H -I -o -W -U -A -m -1
---oneline --stat --shortstat --numstat --name-only --name-status --patch --no-patch --raw --graph --decorate
---no-decorate --all --branches --tags --remotes --abbrev-commit --no-abbrev-commit --pretty --reverse --first-parent
---merges --no-merges --follow --cached --staged --color --no-color --check --exit-code --quiet --summary --full-index
---minimal --patience --histogram --pickaxe-all --pickaxe-regex --no-renames --no-ext-diff --no-textconv --left-right
---cherry-pick --cherry-mark --boundary --ancestry-path --simplify-by-decoration --topo-order --date-order
---author-date-order --full-history --source --mailmap --no-mailmap --use-mailmap --show-signature --no-walk
---walk-reflogs --log-size --full-diff --short --branch --porcelain --long --ignored --show-stash --ahead-behind
---no-ahead-behind --column --no-column --renames --find-renames --find-copies --irreversible-delete
---ignore-all-space --ignore-space-change --ignore-blank-lines --ignore-cr-at-eol --ignore-space-at-eol
---invert-grep --all-match --regexp-ignore-case --basic-regexp --extended-regexp --fixed-strings --perl-regexp
---line-number --ignore-case --files-with-matches --files-without-match --count --word-regexp --invert-match
---untracked --no-index --heading --break --only-matching --full-name --null --show-toplevel --git-dir
---git-common-dir --absolute-git-dir --abbrev-ref --verify --symbolic-full-name --symbolic --is-inside-work-tree
---is-inside-git-dir --is-bare-repository --show-prefix --show-cdup --show-superproject-working-tree --sq --others
---exclude-standard --modified --deleted --stage --directory --unmerged --error-unmatch --killed --full-tree --heads
---refs --get-url --symref --is-ancestor --octopus --independent --fork-point --hash --dereference --exists --head
---contains --merged --no-merged --points-at --non-matching --verbose --always --dirty --broken --exact-match
---numbered --email --committer --line-porcelain --incremental --root --show-email --show-number --show-name --list
---no-notes --left-only --right-only --not --and --or --unified --word-diff --color-words --relative --no-relative
---function-context --text --expand-tabs --no-expand-tabs --batch-check --no-prefix --max-count
+_NOTME_PROGS = {"notme", "notme.py"}
+_PAUSE_OK = ([], ["on"], ["status"])
+_MODE_OK = ("show", "dry-run")  # `notme mode` subcommands the agent may run
+_PY_VALUE_OPTS = "WXQ"  # python short options that take a value (-W ignore, -Xutf8), skipped before -m or the script
+# wrappers that give their command a pseudo-terminal or run it outside the session's process tree, which would pass
+# the not-me CLI's human check: blocked around notme
+_PTY_PROGS = {"script", "expect", "unbuffer"}
+_ORPHAN_PREFIX = {"nohup", "setsid", "unbuffer"}
+_ORPHAN_PROGS = {"disown", "daemon", "start-stop-daemon", "systemd-run", "at", "batch"}
+# commands that copy or search a directory recursively: one that names a directory holding the not-me home reaches it
+_TOKEN_COPIERS = {"cp", "mv", "ln", "rsync", "tar", "zip", "scp", "install"}
+# git commands that are built in (git never runs an alias of these names); any other subcommand is looked up as an
+# alias, and an external git-<name> program is outside the guard's view
+_GIT_BUILTINS = set("""
+add am annotate apply archive bisect blame branch bundle cat-file check-attr check-ignore check-mailmap
+check-ref-format checkout checkout-index cherry cherry-pick citool clean clone column commit commit-graph commit-tree
+config count-objects credential describe diagnose diff diff-files diff-index diff-tree difftool fast-export
+fast-import fetch fetch-pack filter-branch fmt-merge-msg for-each-ref for-each-repo format-patch fsck gc
+get-tar-commit-id grep gui hash-object help hook index-pack init interpret-trailers log ls-files ls-remote ls-tree
+mailinfo mailsplit maintenance merge merge-base merge-file merge-index merge-tree mergetool mktag mktree
+multi-pack-index
+mv name-rev notes pack-objects pack-refs patch-id prune prune-packed pull push range-diff read-tree rebase reflog
+remote repack replace request-pull rerere reset restore rev-list rev-parse revert rm send-email send-pack shortlog
+show show-branch show-index show-ref sparse-checkout stash status stripspace submodule switch symbolic-ref tag
+unpack-file unpack-objects update-index update-ref update-server-info var verify-commit verify-pack verify-tag
+version whatchanged worktree write-tree
 """.split())
-# --name=value forms accepted on reads
-_GIT_READ_VALUE_OPTS = set("""
---format --pretty --date --since --until --after --before --author --committer --grep --max-count --skip --stat
---dirstat --abbrev --diff-filter --unified --word-diff --word-diff-regex --color --color-words --relative --decorate
---find-renames --find-copies --untracked-files --ignore-submodules --porcelain --sort --max-depth --context
---after-context --before-context --exclude --encoding --min-parents --max-parents --branches --tags --remotes
---glob --candidates --match --default --short --points-at --contains --merged --no-merged --group --type
---inter-hunk-context --src-prefix --dst-prefix --line-prefix --submodule --column --count
-""".split())
-_GIT_SAFE_SHORT = frozenset("pusvqnizwblLMCBDRartdcehHEFIoWUAm1234567890")  # letters in -sb style clusters
-# git -c keys (and git config writes) that cannot run code or redirect a repo; every other key blocks
-_GIT_SAFE_KEYS = {"user.name", "user.email", "core.quotepath", "core.abbrev", "init.defaultbranch", "safe.directory",
-                  "commit.gpgsign", "tag.gpgsign", "log.showsignature", "log.decorate", "diff.renames",
-                  "diff.noprefix", "pull.rebase", "pull.ff", "merge.ff", "rebase.autosquash", "rebase.autostash",
-                  "fetch.prune", "status.short", "status.branch"}
-_GIT_SAFE_KEY_PREFIXES = ("color.", "advice.", "column.", "i18n.")
-# git options before the subcommand that are understood; any other one blocks
-_GIT_GLOBALS = {"--no-pager", "-p", "-P", "--paginate", "--no-optional-locks", "--literal-pathspecs",
-                "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--no-replace-objects",
-                "--no-lazy-fetch", "--version", "--help", "--html-path", "--man-path", "--info-path"}
-# local writes allowed outside a directory change; their code-running options block (see _git_exec_option)
-_GIT_LOCAL = {"fetch", "pull", "add", "restore", "stash", "tag", "worktree", "init", "clone", "cherry-pick",
-              "revert", "mv", "rm", "apply", "format-patch", "reflog"}
-_GIT_EXEC_OPTS: Dict[str, Tuple[str, ...]] = {
-    "clone": ("--upload-pack", "-u", "--template", "-c", "--config"), "init": ("--template",),
-    "fetch": ("--upload-pack",), "pull": ("--upload-pack",), "rebase": ("-x", "--exec"), "ls-remote": ("-u",),
-}
-_MERGE_STRATEGIES = {"ort", "recursive", "resolve", "octopus", "ours", "subtree"}
-# write subcommands with an option that runs a program: only these exact long options pass (git also accepts any
-# unambiguous prefix, so --ex would be --exec); --upload-pack, --template, --config and --exec are left out
-_MERGE_LONG = set("""
---commit --no-commit --edit --no-edit --cleanup --ff --no-ff --ff-only --gpg-sign --no-gpg-sign --log --no-log
---signoff --no-signoff --stat --no-stat --squash --no-squash --verify --no-verify --strategy --strategy-option
---verify-signatures --no-verify-signatures --summary --no-summary --quiet --verbose --progress --no-progress
---autostash --no-autostash --allow-unrelated-histories --rerere-autoupdate --no-rerere-autoupdate
-""".split())
-_FETCH_LONG = set("""
---all --no-all --append --atomic --depth --deepen --shallow-since --shallow-exclude --unshallow --update-shallow
---negotiation-tip --negotiate-only --dry-run --porcelain --write-fetch-head --no-write-fetch-head --force --keep
---multiple --auto-maintenance --no-auto-maintenance --auto-gc --no-auto-gc --write-commit-graph
---no-write-commit-graph --prefetch --prune --no-prune --prune-tags --no-tags --tags --refetch --refmap
---no-recurse-submodules --jobs --set-upstream --update-head-ok --progress --no-progress --server-option
---show-forced-updates --no-show-forced-updates --ipv4 --ipv6 --quiet --verbose --filter
-""".split())
-_GIT_WRITE_LONG: Dict[str, Set[str]] = {
-    "fetch": _FETCH_LONG,
-    "pull": _FETCH_LONG | _MERGE_LONG | {"--rebase", "--no-rebase"},
-    "merge": _MERGE_LONG | {"--abort", "--quit", "--continue", "--message", "--file", "--into-name",
-                            "--overwrite-ignore", "--no-overwrite-ignore"},
-    "rebase": set("""
---onto --keep-base --no-keep-base --continue --skip --abort --quit --edit-todo --show-current-patch --apply --merge
---empty --keep-empty --no-keep-empty --reapply-cherry-picks --no-reapply-cherry-picks --allow-empty-message
---strategy --strategy-option --gpg-sign --no-gpg-sign --quiet --verbose --stat --no-stat --verify --no-verify
---force-rebase --no-ff --fork-point --no-fork-point --ignore-whitespace --whitespace --committer-date-is-author-date
---ignore-date --reset-author-date --signoff --interactive --rebase-merges --no-rebase-merges --update-refs
---no-update-refs --autosquash --no-autosquash --autostash --no-autostash --root --rerere-autoupdate
---no-rerere-autoupdate --reschedule-failed-exec --no-reschedule-failed-exec
-""".split()),
-    "cherry-pick": set("""
---edit --no-edit --cleanup --mainline --no-commit --signoff --gpg-sign --no-gpg-sign --ff --allow-empty
---allow-empty-message --keep-redundant-commits --empty --strategy --strategy-option --rerere-autoupdate
---no-rerere-autoupdate --continue --skip --quit --abort
-""".split()),
-    "revert": set("""
---edit --no-edit --cleanup --mainline --no-commit --signoff --gpg-sign --no-gpg-sign --strategy --strategy-option
---rerere-autoupdate --no-rerere-autoupdate --reference --continue --skip --quit --abort
-""".split()),
-    "clone": set("""
---local --no-local --no-hardlinks --shared --reference --reference-if-able --dissociate --quiet --verbose
---progress --server-option --no-checkout --bare --sparse --filter --also-filter-submodules --mirror --origin
---branch --revision --depth --shallow-since --shallow-exclude --single-branch --no-single-branch --no-tags --tags
---recurse-submodules --shallow-submodules --no-shallow-submodules --remote-submodules --no-remote-submodules
---separate-git-dir --jobs --bundle-uri --ref-format
-""".split()),
-    "init": {"--quiet", "--bare", "--object-format", "--ref-format", "--separate-git-dir", "--initial-branch",
-             "--shared"},
-}
-# subcommands that only list with these arguments: (words, True = every argument, False = the first one)
-_GIT_LISTING: Dict[str, Tuple[Set[str], bool]] = {
-    "branch": ({"-a", "-r", "-v", "-vv", "-l", "--list", "--all", "--remotes", "--verbose", "--show-current"}, True),
-    "tag": ({"-l", "--list", "-n"}, True),
-    "stash": ({"list", "show"}, False),
-    "worktree": ({"list"}, False),
-    "reflog": ({"", "show", "list"}, False),
-}
-# variables that can make git or gh run a program or read other config: setting them by any means next to a
-# git or gh call blocks, except the values below
-_ENV_NAMES = (r"GIT_[A-Z0-9_]*|EDITOR|VISUAL|PAGER|MANPAGER|GH_[A-Z0-9_]*|XDG_CONFIG_HOME|HOME|LD_PRELOAD"
-              r"|LD_LIBRARY_PATH|DYLD_[A-Z0-9_]*|PATH|BASH_ENV|ENV|PROMPT_COMMAND|IFS|LESSOPEN|LESSCLOSE|BROWSER"
-              r"|SSH_ASKPASS")
-_ENV_ASSIGN = re.compile(r"(" + _ENV_NAMES + r")(?:\[[^\[\]]*\])?\+?=(.*)", re.S)
-_ENV_WORD = re.compile(r"(?:-[A-Za-z]*)?(?:" + _ENV_NAMES + r")")
-# ${NAME:=value} or ${NAME=value} assigns NAME from inside any word; ${!ref:=value} assigns a computed name
-_ENV_DEFAULT = re.compile(r"\$\{(?:(?:" + _ENV_NAMES + r")(?:\[[^\[\]]*\])?|![^{}:=]*):?=")
-# an assignment inside (( )) or $(( ))
-_ENV_ARITH = re.compile(r"\(\([^()]*?(?<![A-Za-z0-9_$])(?:" + _ENV_NAMES + r")(?:\[[^\[\]]*\])?\s*"
-                        r"(?:[-+*/%&|^]|<<|>>)?=(?!=)")
-_ENV_SETTERS = {"export", "declare", "typeset", "local", "readonly", "integer", "float", "private", "unset", "read",
-                "mapfile", "readarray", "getopts", "let", "for", "select", "printf", "env"}
-_SAFE_EXEC_ENV = {"PAGER": {"", "cat", "less", "more"}, "GH_PAGER": {"", "cat", "less", "more"},
-                  "GIT_PAGER": {"", "cat", "less", "more"}}
-_SAFE_GIT_ENV = {"GIT_TERMINAL_PROMPT", "GIT_OPTIONAL_LOCKS"}
+# git config keys that change where git pushes or what it pushes (and aliases, which can hide a push): set through
+# git -c, --config-env or a git config write, they block
+_PUSH_KEY = re.compile(r"^(?:remote\..+\.(?:url|pushurl|push|mirror)|url\..+\.(?:insteadof|pushinsteadof)"
+                       r"|remote\.pushdefault|branch\..+\.(?:remote|pushremote|merge)"
+                       r"|push\.(?:default|recursesubmodules)"
+                       r"|include\.path|includeif\..+\.path|alias\..+)$")
+# variables that change which repository or config git uses, or where it finds ~/.gitconfig
+_GIT_ENV_NAMES = r"(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_NAMESPACE|GIT_CONFIG[A-Z0-9_]*|HOME|XDG_CONFIG_HOME)"
+# set by assignment, ${NAME:=value}, or a builtin that sets a variable by name (export, read, printf -v, ...)
+_GIT_ENV = re.compile(r"(?<![A-Za-z0-9_$])" + _GIT_ENV_NAMES + r"(?:\[[^\]]*\])?\s*\+?=|\$\{" + _GIT_ENV_NAMES
+                      + r":?=|(?<![A-Za-z0-9_-])(?:export|declare|typeset|local|readonly|read|mapfile|readarray|unset"
+                        r"|printf)(?![A-Za-z0-9_-])[^;&|\n]*?(?<![A-Za-z0-9_$])" + _GIT_ENV_NAMES
+                      + r"(?![A-Za-z0-9_])")
+# programs whose arguments name git or gh as data, not as a command to run
+_NAMES_ONLY = {"echo", "printf", "grep", "egrep", "fgrep", "rg", "which", "type", "whereis", "man", "command", "hash",
+               "brew", "apt", "apt-get", "dnf", "yum", "pacman", "winget", "choco", "scoop", "npm", "pip", "pip3",
+               "pipx", "test", "[", "[[", "complete", "compgen", "unalias", "alias"}
 _GH_READ_VERBS = {"view", "list", "diff", "checks", "search", "browse", "clone", "download", "watch", "checkout",
                   "status", ""}
-_GH_READ_GROUPS = {"config", "help", "completion", "search", "version", "status"}
+_GH_READ_GROUPS = {"config", "help", "completion", "search", "version", "status", "auth", "alias", "extension",
+                   "ext", "extensions", "gist", "browse", "codespace", "attestation", "gpg-key", "ssh-key"}
 _GH_GROUPS = {"pr", "issue", "repo", "release", "label", "run", "workflow", "secret", "variable", "cache",
-              "project", "ruleset", "browse", "codespace", "org", "attestation", "gpg-key", "ssh-key"}
+              "project", "ruleset", "org"}
 # group -> write verbs that are always blocked (None = every verb): settings, secrets and deletion are human actions
 _GH_DESTRUCTIVE: Dict[str, Optional[Set[str]]] = {
     "secret": {"set", "delete", "remove"},
@@ -430,7 +284,7 @@ class Block:
     suggest_allow: bool = False  # target is a real owner/name the operator could allow
     tool: str = ""
     message: str = ""
-    grantable: bool = False  # the plain `gh pr merge` block a person's merge grant may lift
+    rules: Tuple[str, ...] = ()  # for OPAQUE: the rules it may be reported under, in order
 
 
 Decision = Optional[Block]  # None = allow
@@ -450,10 +304,6 @@ def repo_slug(value: Any) -> Optional[str]:
 
 def has_gh_git(text: str) -> bool:
     return bool(_GH_GIT.search(text))
-
-
-def _mentions_github(text: str) -> bool:
-    return has_gh_git(text) or bool(_GITHUB.search(text))
 
 
 def _base(word: str) -> str:
@@ -518,25 +368,13 @@ def _norm(p: str, base: str) -> str:
     q = _path.expanduser(p.replace('"', "").replace("'", ""))
     if not _path.isabs(q):
         q = _path.join(base, q)
-    out = _path.normcase(_path.normpath(_resolve(q)))
+    try:
+        out = _path.normcase(_path.normpath(_resolve(q)))
+    except (OSError, ValueError):  # a NUL byte or a name the OS refuses: compare it as typed
+        out = _path.normcase(_path.normpath(q))
     if memo is not None:
         memo[key] = out
     return out
-
-
-_BACKSLASH_HINT = "put the path in quotes ('C:\\Users\\x') or write it with forward slashes (C:/Users/x)"
-
-
-def _unquoted_backslash(word: str) -> bool:
-    """word held an unquoted backslash, which bash drops (C:\\Users\\x reads as C:Usersx). A decision that allows
-    only a resolved path (git -C, a script to read, a worktree to create) refuses such a word rather than guess
-    which spelling is meant; blocking checks see both spellings (_judge_commands)."""
-    return getattr(word, "raw", word) != word
-
-
-def _backslash_why(word: str) -> str:
-    return (f"{_short(getattr(word, 'raw', word), 60)} has unquoted backslashes, which bash drops, so the guard "
-            "cannot tell which path is meant")
 
 
 def _under(path: str, base: str) -> bool:
@@ -567,64 +405,35 @@ def _skip_options(args: List[str], takes_value: Set[str]) -> List[str]:
     return args[i:]
 
 
+def _unresolved(word: str) -> bool:
+    """The shell fills in part of this word ($VAR, $(...), backticks), so its value is not known here."""
+    return "$" in word or "`" in word
+
+
+def _spellings(text: str) -> List[str]:
+    """text as the shell or a program may end up reading it: as written, with \\x67 / \\147 / \\u0067 escapes
+    decoded, with quotes and backslashes removed, with ${...}, $(...), backticks and $'/$" markers dropped, and
+    lowercased (git runs as GIT on a case-insensitive file system)."""
+    def esc(m: "re.Match[str]") -> str:
+        hexa, octal, uni = m.groups()
+        code = int(hexa, 16) if hexa else (int(octal, 8) if octal else int(uni, 16))
+        return chr(code)
+    decoded = _ESC_SEQ.sub(esc, text)
+    out = [text, decoded]
+    for v in (text, decoded):
+        out.append(_unshell(v))
+        out.append(_SHELL_PIECES.sub("", v).replace('"', "").replace("'", "").replace("\\", ""))
+    return out + [v.lower() for v in out]
+
+
+def risky_text(text: str) -> bool:
+    """text, read as opaque, holds a word that would block: used by the hook when it cannot decide a call at all."""
+    return any(_SELF_TEXT.search(v) or _NOTME_TEXT.search(v) or any(p.search(v) for p, _ in _DANGER)
+               for v in _spellings(text))
+
+
 class Unparsed(ValueError):
     """The command cannot be split into words with confidence: the caller blocks it."""
-
-
-# git subcommands a line may hold for its commit and tag messages to count as data
-_DATA_GIT_SUBS = {"add", "commit", "tag", "status", "diff"}
-_MSG_OPT = re.compile(r"^(?:-[A-Za-z]*m|--message)$")  # -m, -am, --message: the message is the next word
-_STDIN_FILE_OPTS = (["-F", "-"], ["--file", "-"])
-
-
-def _data_only(cmd: str) -> str:
-    """cmd without the git commit/tag messages in it: -m values and a here-document fed to git commit -F -.
-
-    Used for the self-protection word scans, so a message that names not-me commands is not mistaken for
-    running them. Only a line of plain git add/commit/tag/status/diff commands (only -C before the
-    subcommand) with no pipe, substitution or backslash qualifies, and a message with $ or a backtick is
-    kept; anything else returns cmd unchanged. The lexer splits the words, so a comment or a quote cannot
-    hide a second command.
-    """
-    if "\\" in cmd or "|" in cmd.replace("||", "") or any(x in cmd for x in ("$(", "`", "<(", ">(")):
-        return cmd
-    try:
-        parsed = lex(cmd)
-    except Unparsed:
-        return cmd
-    if parsed.subs or parsed.funcdef:
-        return cmd
-    out: List[str] = []
-    for c in parsed.commands:
-        w = [str(x) for x in c.words]
-        if not w or c.nested or _prog(w[0]) != "git":
-            return cmd
-        k = 1
-        while w[k:k + 1] == ["-C"] and len(w) > k + 1:
-            k += 2
-        sub = w[k] if k < len(w) else ""
-        if sub and sub not in _DATA_GIT_SUBS:
-            return cmd
-        message = sub in ("commit", "tag")
-        stdin_msg = message and ("--file=-" in w or any(w[j:j + 2] in _STDIN_FILE_OPTS for j in range(k, len(w))))
-        if any(op not in ("<<", "<<-") or not stdin_msg for op, _ in c.redirs):
-            return cmd  # the only redirection allowed is a here-document fed to git commit -F -
-        kept: List[str] = []
-        value = False
-        for x in w:
-            raw = "$" in x or "`" in x  # kept: it may expand
-            if value:
-                kept.append(x if raw else "''")
-                value = False
-            elif message and x.startswith("--message="):
-                kept.append(x if raw else "--message=''")
-            else:
-                kept.append(x)
-                value = message and bool(_MSG_OPT.match(x))
-        out.append(" ".join(kept))
-        if not stdin_msg:
-            out.extend(c.bodies)
-    return "\n".join(out)
 
 
 class _Word(str):
@@ -782,7 +591,7 @@ class _Lexer:
             self.pending.append((str(target), op == "<<-", quoted, cmd))
         elif op == "<<<":
             cmd.bodies.append(str(target))
-        cmd.redirs.append((op, str(target)))
+        cmd.redirs.append((op, target))
 
     def read_bodies(self) -> None:
         """Here-document bodies start after the line that opened them."""
@@ -1027,8 +836,12 @@ _PARAM_OP = re.compile(r"^[#!]?[A-Za-z0-9_@*?$-]*?(?:\[[^\[\]]*\])?(?::?[-=+?]|#
 
 
 def needs_check(event: Mapping[str, Any]) -> bool:
-    """False for Bash commands that no rule can care about (cheap, no processes)."""
-    if event.get("tool_name") != "Bash":
+    """False for calls no rule can care about (cheap, no processes): Bash commands that mention nothing the guard
+    judges, and MCP tools other than GitHub ones."""
+    tool = event.get("tool_name")
+    if isinstance(tool, str) and tool.startswith("mcp__"):
+        return bool(_MCP_TOOL.match(tool))
+    if tool != "Bash":
         return True
     tin = event.get("tool_input")
     if not isinstance(tin, dict):
@@ -1227,8 +1040,8 @@ Blk = Callable[..., Block]
 
 def _blk(shown: str) -> Blk:
     def blk(rule: str, reason: str, hint: Optional[str] = None, target: Optional[str] = None,
-            suggest: bool = False) -> Block:
-        return Block(rule, reason, target=target, command=shown, hint=hint, suggest_allow=suggest)
+            suggest: bool = False, rules: Tuple[str, ...] = ()) -> Block:
+        return Block(rule, reason, target=target, command=shown, hint=hint, suggest_allow=suggest, rules=rules)
     return blk
 
 
@@ -1255,32 +1068,15 @@ def _decide(event: Mapping[str, Any], ctx: GuardContext) -> Decision:
         cands = _file(tool, str(tin.get("file_path") or tin.get("notebook_path") or ""), cwd, ctx, tin)
     elif tool in _READ_TOOLS:
         cands = _read_tool(tool, tin, cwd, ctx)
-    elif tool.startswith("mcp__"):
-        cands = _mcp_any(tool, tin, ctx, cwd)
+    elif _MCP_TOOL.match(tool):
+        cands = _mcp(tool, tin, ctx)
     else:
         return None
-    # outside a project an unreadable command still blocks when it could drive the not-me CLI or its trust inputs
-    plain = ""
-    if ctx.only_self and tool == "Bash":
-        plain = _unshell(str(tin.get("command") or ""))
-    elif ctx.only_self and tool.startswith("mcp__"):  # MCP strings are judged as commands too (_mcp_any)
-        try:
-            plain = _unshell("\n".join(v for _, v in _strings(tin)))
-        except ValueError:
-            plain = ""
-    drives = bool(plain) and bool(_PTY_TRIGGER.search(plain) or _MODE_LIVE.search(plain))
-    grant = _merge_grant(event, ctx) if tool == "Bash" else None
-    lifted = False
     for block in cands:
-        if grant is not None and block.grantable:
-            lifted = True  # the person granted exactly this merge; every other check still applies
-            continue
-        if ctx.only_self and block.rule == OPAQUE and drives:
-            block.rule = SELF
         if ctx.only_self and block.rule != SELF:
             continue
         if block.rule == OPAQUE:
-            enabled = [r for r in RULES if ctx.rules.get(r, True)]
+            enabled = [r for r in (block.rules or RULES) if ctx.rules.get(r, True)]
             if not enabled:
                 continue
             block.rule = enabled[0]
@@ -1289,122 +1085,6 @@ def _decide(event: Mapping[str, Any], ctx: GuardContext) -> Decision:
         block.tool = tool
         block.message = render(block, ctx)
         return block
-    if lifted and grant is not None:
-        return _use_grant(ctx, grant, str(tin.get("command") or ""))
-    return None
-
-
-# --- merge grants -------------------------------------------------------------
-#
-# A person grants one named merge with /not-me:allow-merge owner/name#N (see notme/merge_grant.py). The guard lifts
-# its `gh pr merge` block for exactly that PR, once, in that session, outside a not-me run, when the command is the
-# plainest possible form and the repo is allowed.
-
-_MERGE_UNQUOTED = re.compile(r"[A-Za-z0-9 \t_./=:@+,%-]*")  # what may stand outside quotes in a granted merge
-_MERGE_METHODS = {"--squash", "--merge", "--rebase"}
-_MERGE_VALUE_OPTS = {"--subject", "--body-file"}
-
-
-def _merge_command(cmd: str, cwd: str, ctx: GuardContext) -> Optional[Tuple[str, int, Optional[str]]]:
-    """(owner/name, number, method flag or None) when cmd is exactly one simple `gh pr merge <N> -R|--repo
-    <owner/name>` with at most one of --squash, --merge or --rebase and optionally --subject and --body-file once
-    each; else None. No substitution, variable, backslash, redirection, pipe, list, comment, glob or other option
-    anywhere."""
-    if any(c in cmd for c in "$`\\\n\r"):
-        return None
-    outside, quote = [], ""
-    for c in cmd:
-        if quote:
-            quote = "" if c == quote else quote
-        elif c in "'\"":
-            quote = c
-        else:
-            outside.append(c)
-    if quote or not _MERGE_UNQUOTED.fullmatch("".join(outside)):
-        return None
-    try:
-        parsed = lex(cmd)
-    except Unparsed:
-        return None
-    if len(parsed.commands) != 1 or parsed.subs or parsed.funcdef:
-        return None
-    c = parsed.commands[0]
-    if c.nested or c.bodies or c.redirs:
-        return None
-    w = [str(x) for x in c.words]
-    if w[:3] != ["gh", "pr", "merge"]:
-        return None
-    number: Optional[int] = None
-    repo: Optional[str] = None
-    seen: Set[str] = set()
-    i = 3
-    while i < len(w):
-        a = w[i]
-        if a in ("-R", "--repo") or a in _MERGE_VALUE_OPTS:
-            key = "--repo" if a == "-R" else a
-            if key in seen or i + 1 >= len(w) or w[i + 1].startswith("-") or not w[i + 1]:
-                return None
-            seen.add(key)
-            value = w[i + 1]
-            if key == "--repo":
-                if not valid_slug(value):
-                    return None
-                repo = value
-            elif key == "--body-file" and _under(_norm(value, cwd), _norm(str(ctx.home), cwd)):
-                return None  # never post a file from the not-me home
-            i += 2
-            continue
-        if a in _MERGE_METHODS and not (seen & _MERGE_METHODS):
-            seen.add(a)
-        elif number is None and a.isdigit() and a.isascii() and not a.startswith("0"):
-            number = int(a)
-        else:
-            return None
-        i += 1
-    if number is None or repo is None:
-        return None
-    method = next(iter(seen & _MERGE_METHODS), None)
-    return repo, number, method
-
-
-def _merge_grant(event: Mapping[str, Any], ctx: GuardContext) -> Optional[Tuple[str, str, int]]:
-    """(session key, owner/name, number) when a fresh, signed grant for this call's session names exactly the PR
-    this command merges and the method it uses (the grant's method, else --squash), the command is the plain
-    form, the repo is allowed, and no not-me run is active; else None. Outside a not-me project the merge rule is
-    off anyway, so a grant is neither needed nor used there."""
-    tin = event.get("tool_input") or {}
-    cmd = str(tin.get("command") or "")
-    if ctx.only_self or ctx.active_run or "merge" not in cmd:
-        return None
-    cwd = str(event.get("cwd") or ctx.cwd)
-    target = _merge_command(cmd, cwd, ctx)
-    sid = merge_grant.session_key(event.get("session_id"))
-    if target is None or sid is None:
-        return None
-    grant = merge_grant.read(ctx.home, sid)
-    if grant is None:
-        return None
-    repo, number, method = target
-    if grant["repo"].lower() != repo.lower() or grant["number"] != number or repo.lower() not in ctx.allowed_repos:
-        return None
-    if method != merge_grant.required_flag(grant):
-        return None
-    return sid, repo.lower(), number
-
-
-def _use_grant(ctx: GuardContext, grant: Tuple[str, str, int], cmd: str) -> Decision:
-    """Spend the grant (single use) and log it; block when another call spent it first."""
-    sid, repo, number = grant
-    if not merge_grant.consume(ctx.home, sid):
-        block = _blk(_short(cmd))("protected_branches", "this merge grant was already used",
-                                   f"ask the operator to send {merge_grant.COMMAND} {repo}#{number} again")
-        block.tool, block.message = "Bash", render(block, ctx)
-        return block
-    root = log_root(ctx.common_dir)
-    if root is not None:
-        runlog.guard_log_append(runlog.guard_log_path(root), {
-            "tool": "Bash", "rule": "merge_grant", "reason": "a person's merge grant allowed this merge",
-            "target": f"{repo}#{number}", "session": sid})
     return None
 
 
@@ -1428,8 +1108,7 @@ _READ_TOOLS = ("Read", "NotebookRead", "LS", "Grep", "Glob")
 # The not-me home's private files, as (name, why, hint). The agent may neither read nor write the secrets (the
 # operator token and the live-mode epoch); the shell checks also cover the live marker, which the agent may not
 # write (the Read tool may still read it).
-_HOME_SECRETS = ((OPERATOR_TOKEN, TOKEN_WHY, TOKEN_HINT), (LIVE_EPOCH_NAME, LIVE_EPOCH_WHY, LIVE_HINT),
-                 (GRANT_NAME, GRANT_WHY, GRANT_HINT))  # a directory: everything under it is guarded too
+_HOME_SECRETS = ((OPERATOR_TOKEN, TOKEN_WHY, TOKEN_HINT), (LIVE_EPOCH_NAME, LIVE_EPOCH_WHY, LIVE_HINT))
 _HOME_GUARDED = _HOME_SECRETS + ((LIVE_MARKER_NAME, LIVE_MARKER_WHY, LIVE_HINT),)
 # (_norm path, plain normcased path, why, hint) of one guarded file
 _Guarded = Tuple[str, str, str, str]
@@ -1452,9 +1131,7 @@ def _pattern_hit(pattern: str, base: str, guarded: List[_Guarded], recursive: bo
     p = _path.normcase(_path.normpath(p))
     pats = [p] + ([p.rstrip(_path.sep) + _path.sep + "*"] if recursive else [])
     for g in guarded:
-        # a file inside the grant directory, which may not exist yet
-        inside = [_path.join(c, "s.json") for c in g[:2]] if _base(g[0]) == GRANT_NAME else []
-        if any(fnmatch.fnmatchcase(c, q) for c in list(g[:2]) + inside for q in pats):
+        if any(fnmatch.fnmatchcase(c, q) for c in g[:2] for q in pats):
             return g
     return None
 
@@ -1496,31 +1173,6 @@ def _token_file(tool: str, fpath: str, cwd: str, ctx: GuardContext) -> Iterator[
         if _base(fpath).lower() == name or _under(full, g[0]):
             yield _blk(_short(f"{tool} {fpath}"))(SELF, why, hint)
             return
-    if _reaches_grant(fpath, full, cwd, ctx):
-        yield _blk(_short(f"{tool} {fpath}"))(SELF, GRANT_WHY, GRANT_HINT)
-
-
-def _reaches_grant(fpath: str, full: str, cwd: str, ctx: GuardContext) -> bool:
-    """A file tool's path names or reaches the merge-grant directory: by name anywhere in the path, under it
-    after resolving symlinks physically (so `link/..` cannot step around it), or as a hard link to a grant."""
-    if GRANT_NAME in fpath.lower() or GRANT_NAME in full.lower():
-        return True
-    gdir = _norm(_path.join(str(ctx.home), GRANT_NAME), cwd)
-    p = _path.expanduser(fpath)
-    try:
-        physical = _path.normcase(_path.realpath(p if _path.isabs(p) else _path.join(cwd, p)))
-    except (OSError, ValueError):
-        return True
-    if _under(physical, gdir):
-        return True
-    key = _stat_key(physical)
-    if key is None or not _path.isdir(gdir):
-        return False
-    try:
-        names = os.listdir(gdir)
-    except OSError:
-        return True
-    return any(_stat_key(_path.join(gdir, n)) == key for n in names)
 
 
 @dataclass(frozen=True)
@@ -1639,27 +1291,13 @@ def _file(tool: str, fpath: str, cwd: str, ctx: GuardContext, tin: Mapping[str, 
         return
     yield from _token_file(tool, fpath, cwd, ctx)
     blk = _blk(_short(f"{tool} {fpath}"))
-    # the text the file would hold: an Edit applied to the current file (else its new strings), checked in every
-    # spelling the shell or a program might decode
-    full_texts = _edit_results(tool, tin, _read_text(_norm(fpath, cwd))) if tool in ("Edit", "MultiEdit") else []
-    written = full_texts + [tin.get(k) for k in ("content", "new_string", "new_source")]
-    edits = tin.get("edits")
-    if isinstance(edits, list):
-        written += [e.get("new_string") for e in edits if isinstance(e, dict)]
-    if tool in ("Edit", "MultiEdit") and not full_texts and ("old_string" in tin or "edits" in tin):
-        # an edit Claude Code would apply but the guard cannot (an unreadable file, an old_string it cannot find)
-        yield blk(SELF, "the text this edit would leave cannot be worked out, so it cannot be checked",
-                  "read the file and make the edit with an exact old_string, or use Write")
-    elif any(isinstance(w, str) and any(merge_grant.COMMAND in v.lower() for v in _spellings(w)) for w in written):
-        yield blk(SELF, f"a file that holds {merge_grant.COMMAND} could later be sent as a prompt",
-                  "describe the command in words, or ask the operator to make this edit")
     full = _norm(fpath, cwd)
     if _names_live_marker(fpath, full, ctx, cwd):
         yield blk(SELF, LIVE_MARKER_WHY, LIVE_HINT)
     if _is_global_project(full, _global_target(ctx, cwd)):
         yield from _global_mode(tool, tin, full, blk)
     if full == _norm(str(ctx.allowlist_path), cwd) or _base(fpath) == ALLOWLIST_NAME:
-        yield blk(SELF, "only the operator changes the not-me allow list", "ask the operator to run /not-me:allow-repo")
+        yield blk(SELF, ALLOW_WHY, ALLOW_HINT)
     plugin = _norm(str(ctx.plugin_root), cwd)
     if any(_under(full, _norm(d, plugin)) for d in PLUGIN_PROTECTED_DIRS):
         yield blk(SELF, "the not-me plugin's own code is off limits to the agent",
@@ -1676,73 +1314,9 @@ def _file(tool: str, fpath: str, cwd: str, ctx: GuardContext, tin: Mapping[str, 
                   "change git settings by hand, outside the agent")
 
 
-# self-protection markers any MCP string may not carry (beside _TOOL_MARKERS)
-_SELF_MARKERS = re.compile(r"allow-repo|NOT_ME_|allowed-repos\.json|" + _NOTME_HOME_PATH, re.IGNORECASE)
-
-
-MCP_MAX_DEPTH = 32  # deeper tool input is refused unread
-MCP_MAX_BYTES = 256 * 1024  # larger tool input is refused unread
-
-
-def _strings(value: Any, key: str = "", depth: int = 0) -> Iterator[Tuple[str, str]]:
-    """Every string in a tool input (keys included), with the key it sits under, so each field is scanned on its
-    own. Raises ValueError past MCP_MAX_DEPTH: the caller fails closed rather than scan a prefix."""
-    if depth > MCP_MAX_DEPTH:
-        raise ValueError("tool input nested too deep")
-    if isinstance(value, str):
-        yield key, value
-    elif isinstance(value, Mapping):
-        for k, v in value.items():
-            yield str(k), str(k)
-            yield from _strings(v, str(k), depth + 1)
-    elif isinstance(value, (list, tuple)):
-        for v in value:
-            yield from _strings(v, key, depth + 1)
-
-
-_UNREAD = "the guard cannot read this command with confidence"
-# MCP tools known not to run or deliver the text they are given (plans, recaps, widgets, page inspection): text the
-# lexer cannot read does not block them. Every other MCP tool keeps that block.
-_TEXT_ONLY_MCP = re.compile(r"^mcp__(?:ccd_turn__(?:update_plan|wrap_up)|ccd_session__mark_chapter|visualize__\w+"
-                            r"|Claude_Browser__preview_(?:screenshot|snapshot|inspect|list|logs|console_logs|network))$")
-
-
-def _mcp_any(tool: str, tin: Mapping[str, Any], ctx: GuardContext, cwd: str) -> Iterator[Block]:
-    """Every MCP tool. Each string in the input is scanned on its own, through the same unquoting and escape
-    decoding as Bash, for the self-protection markers (a grant prompt, the not-me secrets and home, a Claude Code
-    invocation). Then: GitHub tools get the write rules; read-only tools nothing more; every other tool has each
-    string judged as a Bash command, since session, terminal and prompt tools can run or deliver it (text the
-    lexer cannot read counts against a shell tool's command only). Input too deep or too large is refused."""
-    blk = _blk(_short(tool))
-    try:
-        size = len(json.dumps(tin, default=str))
-        strings = list(_strings(tin))
-    except (ValueError, TypeError, RecursionError):
-        size, strings = -1, []
-    if size < 0 or size > MCP_MAX_BYTES:
-        yield blk(SELF, f"{tool} input is too deep or too large to check", "send smaller, flatter input")
-        return
-    for _, value in strings:
-        for variant in _spellings(value) + [_unshell(value)]:
-            m = _TOOL_MARKERS.search(variant) or _SELF_MARKERS.search(variant)
-            if m:
-                yield blk(SELF, f"{tool} input names {m.group(0).strip()}, which only the operator may send or run",
-                          "ask the operator")
-                return
-    if _MCP_TOOL.match(tool):
-        yield from _mcp(tool, tin, ctx)
-        return
-    name = tool.split("__")[-1]
-    if name in _READ_MCP or (_READ_MCP_PREFIX.match(name) and not _MCP_WRITE_WORDS.search(name)):
-        return
-    text_only = bool(_TEXT_ONLY_MCP.match(tool))
-    for _, value in strings:
-        for block in _bash(value, cwd, ctx):
-            if not (text_only and block.reason.startswith(_UNREAD)):
-                yield block
-
-
 def _mcp(tool: str, tin: Mapping[str, Any], ctx: GuardContext) -> Iterator[Block]:
+    """GitHub MCP tools: read-only names pass; anything else must name an allowed repo, and merging is a human
+    action. Other MCP tools are not judged."""
     name = tool.split("__")[-1]
     if name in _READ_MCP or (_READ_MCP_PREFIX.match(name) and not _MCP_WRITE_WORDS.search(name)):
         return
@@ -1759,35 +1333,26 @@ def _mcp(tool: str, tin: Mapping[str, Any], ctx: GuardContext) -> Iterator[Block
                               "pass owner and repo naming an allowed repo")
 
 
+# --- Bash ----------------------------------------------------------------------
+
+
 class _State:
-    """Per-call state: the hook's real working directory, whether the command changes it, the branch a
-    checkout moved to, and memoised lookups. Text scans see both the source and its line continuations joined.
+    """Per-command state: the hook's real working directory, the command's text (code without here-document
+    bodies, and raw with them), the branch a checkout moved to, and memoised lookups."""
 
-    A shell body judged as a command (bash -c, eval, awk system()) gets a child state: its text, commands,
-    directory change and background are its own plus every parent's, since what the parent set reaches it."""
-
-    def __init__(self, cwd: str, parsed: Parsed, raw: str, parent: Optional["_State"] = None):
+    def __init__(self, cwd: str, parsed: Parsed, raw: str, depth: int = 0):
         self.dir = cwd
-        self.parsed = parsed
-        self.depth = parent.depth + 1 if parent else 0
-        text = parsed.code + "\n" + parsed.code.replace("\\\n", "")
-        own_raw = raw + "\n" + raw.replace("\\\n", "")  # with here-document bodies, for the pty checks
-        self.text = parent.text + "\n" + text if parent else text
-        self.raw = parent.raw + "\n" + own_raw if parent else own_raw
-        self.commands: List[SimpleCommand] = (parent.commands if parent else []) + parsed.commands
-        self.background = bool(_BACKGROUND.search(text)) or bool(parent and parent.background)
-        self.moved = _moves(parsed, raw, cwd) or (parent.moved if parent else None)  # what changes the directory
-        self.switched: Dict[str, str] = parent.switched if parent else {}  # a checkout outlives the child shell
+        self.depth = depth
+        self.text = parsed.code + "\n" + parsed.code.replace("\\\n", "")
+        self.raw = raw
+        self.background = bool(_BACKGROUND.search(parsed.code))
+        self.switched: Dict[str, str] = {}  # checkout dir -> the branch a checkout in this command moved to
         self.memo: Dict[Tuple[str, ...], Any] = {}
 
     def once(self, key: Tuple[str, ...], fn: Callable[[], Any]) -> Any:
         if key not in self.memo:
             self.memo[key] = fn()
         return self.memo[key]
-
-    def find(self, pattern: "re.Pattern[str]", text: str) -> "Optional[re.Match[str]]":
-        """pattern.search(text), once per call: whole-command scans must not repeat per simple command."""
-        return self.once(("find", pattern.pattern, str(id(text))), lambda: pattern.search(text))
 
     @cached_property
     def plain_text(self) -> str:
@@ -1798,132 +1363,22 @@ class _State:
         return _unshell(self.raw)
 
 
-def _moves(parsed: Parsed, raw: str, cwd: str) -> Optional[str]:
-    """The first thing in the command that may change the shell's directory, or None."""
-    if parsed.funcdef:
-        return "a function definition"
-    m = _DIR_VAR_DEFAULT.search(raw) or _GLOB_QUALIFIER.search(parsed.code)
-    if m:
-        return m.group(0)
-    for c in parsed.commands:
-        found = _dir_change(c.words, cwd)
-        if found:
-            return _short(found, 60)
-    return None
-
-
-def _dir_change(words: List[str], cwd: str) -> Optional[str]:
-    """What in one simple command may change the shell's directory, or None. When in doubt, it counts."""
-    for w in words:
-        if w in _DIR_WORDS or _DIR_VAR_SET.search(w) or _DIR_VAR_WORD.fullmatch(w):
-            return w
-    rest = list(words)
-    while rest:  # the command name, past assignments, keywords and prefix words
-        w, p = rest[0], _prog(rest[0])
-        if p in _DIR_NAMES or p in _DIR_WORDS:
-            return w
-        if p in ("env", "sudo", "doas"):
-            flag = "C" if p == "env" else "D"
-            for a in rest[1:]:
-                if a.startswith("--chdir") or (a.startswith("-") and not a.startswith("--") and flag in a):
-                    return f"{p} {a}"
-                if not a.startswith("-") and not _ASSIGN.match(a):
-                    break
-        if _ASSIGN.match(w) or p in _KEYWORDS:
-            rest = rest[1:]
-        elif p in _PREFIX_WORDS:
-            rest = _drop_prefix(p, rest[1:])
-        else:
-            break
-    if not rest:
-        return None
-    name, p, args = rest[0], _prog(rest[0]), rest[1:]
-    if p == "find" and {"-execdir", "-okdir"} & set(args):
-        return "find -execdir"
-    if p in _DECLARE and any((a.startswith("-") and "n" in a[1:] and not a.startswith("--"))
-                             or "$" in a.split("=", 1)[0] or "`" in a.split("=", 1)[0] for a in args):
-        return f"{name} with a reference or a computed name"
-    if p in _NAME_ARGS and any("$" in a or "`" in a for a in args if not a.startswith("-")):
-        return f"{name} with a computed name"
-    if p == "printf" and any(a.startswith("-v") for a in args):
-        return "printf -v"
-    if "$" in name or "`" in name or getattr(name, "glob", False) or getattr(name, "brace", False):
-        return name  # the shell decides what this runs
-    if not args and (name.startswith("~") or (("/" in name or not _on_path(name))
-                                              and _path.isdir(_norm(name, cwd)))):
-        return name  # zsh auto_cd: a directory named on its own changes into it
-    return None
-
-
-@lru_cache(maxsize=256)
-def _on_path(name: str) -> bool:
-    return shutil.which(name) is not None
-
-
-def _moved_write(st: _State, blk: Blk, what: str) -> Block:
-    """The block for a git or gh write in a command that changes directory."""
-    return blk(OPAQUE, f"this command changes directory ({st.moved}) and runs {what}; the guard judges git and gh "
-                       "writes only in the session's working directory", _CD_HINT)
-
-
-def _branch(ctx: GuardContext, st: _State, d: str) -> Optional[str]:
-    if d in st.switched:
-        return st.switched[d]
-
-    def read() -> Optional[str]:
-        try:
-            found = find_checkout(d)
-        except _Ambiguous:
-            found = None
-        if found:
-            return head_branch(found[1])
-        b = ctx.git(["branch", "--show-current"], d)
-        return None if b in (None, "HEAD") else b
-    return st.once(("branch", d), read)
-
-
-def _git_config(ctx: GuardContext, st: _State, d: str, key: str) -> Optional[str]:
-    return st.once(("config", d, key), lambda: ctx.git(["config", "--get", key], d))
-
-
-def _bash(cmd: str, cwd: str, ctx: GuardContext) -> Iterator[Block]:
-    blk = _blk(_short(cmd))
-    plain = _unshell(_data_only(cmd))
-    if "allow-repo" in plain and any(m.group(1) or "--everywhere".startswith(m.group(2))
-                                     for m in _ALLOW_EDIT.finditer(plain)):
-        yield blk(SELF, "only the operator changes the not-me allow list", "ask the operator to run /not-me:allow-repo")
-    if OPERATOR_TOKEN in plain.lower():
-        yield blk(SELF, TOKEN_WHY, TOKEN_HINT)
-    if LIVE_EPOCH_NAME in plain.lower():
-        yield blk(SELF, LIVE_EPOCH_WHY, LIVE_HINT)
-    if LIVE_MARKER_NAME in plain.lower():
-        yield blk(SELF, LIVE_MARKER_WHY, LIVE_HINT)
-    if any(w in v for v in _spellings(plain) for w in (GRANT_NAME, "allow-merge")):
-        yield blk(SELF, GRANT_WHY, GRANT_HINT)
-    if ALLOWLIST_NAME in cmd.lower() or str(ctx.allowlist_path).lower() in cmd.lower():
-        yield blk(SELF, "the not-me allow list is off limits to the agent",
-                  "ask the operator to run /not-me:allow-repo, or read it with /not-me:config")
+def _bash(cmd: str, cwd: str, ctx: GuardContext, depth: int = 0) -> Iterator[Block]:
+    """Judge every simple command in cmd; a command the lexer cannot read is judged as opaque text. When a word
+    held an unquoted backslash, every command is judged again with those backslashes kept: bash drops them
+    (C:\\Users\\x reads as C:Usersx) but a Windows path is typed with them, so either form reaching a guarded path
+    blocks."""
     try:
         parsed = lex(cmd)
-    except Unparsed as exc:  # not even self-protection can be checked: blocked whatever rules are on
-        yield blk(SELF, f"the guard cannot read this command with confidence: {exc}",
-                  "split it into shorter, simpler commands with plain quoting")
+    except Unparsed as exc:
+        yield from _opaque(cmd, _blk(_short(cmd)), f"the guard cannot parse this command ({exc})")
         return
-    yield from _parsed_checks(parsed, blk)
-    yield from _judge_commands(parsed, cmd, ctx, cwd)
-
-
-def _judge_commands(parsed: Parsed, text: str, ctx: GuardContext, cwd: str,
-                    parent: Optional["_State"] = None) -> Iterator[Block]:
-    """Check every simple command, then, when a word held an unquoted backslash, check them all again with those
-    backslashes kept. Bash drops them (C:\\Users\\x reads as C:Usersx) but a Windows path is typed with them, so a
-    word is judged in both forms and either form reaching a guarded target blocks."""
     for p in (parsed, _raw_variant(parsed)):
         if p is None:
             continue
-        st = _State(cwd, p, text, parent=parent)
+        st = _State(cwd, p, cmd, depth)
         for c in p.commands:
-            yield from _command(list(c.words), c.raw, st, ctx)
+            yield from _command(c, st, ctx)
 
 
 def _raw_word(w: str) -> str:
@@ -1937,73 +1392,39 @@ def _raw_word(w: str) -> str:
 
 def _raw_variant(parsed: Parsed) -> Optional[Parsed]:
     """parsed with every word in its backslashes-kept form, or None when no word differs."""
-    if not any(getattr(w, "raw", w) != w for c in parsed.commands for w in c.words):
+    if not any(getattr(w, "raw", w) != w for c in parsed.commands for w in c.words + [t for _, t in c.redirs]):
         return None
-    commands = [SimpleCommand([_raw_word(w) for w in c.words], c.raw, c.span, c.bodies, c.redirs, c.nested)
-                for c in parsed.commands]
+    commands = [SimpleCommand([_raw_word(w) for w in c.words], c.raw, c.span, c.bodies,
+                              [(op, _raw_word(t)) for op, t in c.redirs], c.nested) for c in parsed.commands]
     return Parsed(commands, parsed.subs, parsed.code, parsed.funcdef)
 
 
-def _parsed_checks(parsed: Parsed, blk: Blk) -> Iterator[Block]:
-    """Checks on a lexed command (or shell body) as a whole: here-documents and substitutions."""
-    # a here-document anywhere may reach a shell anywhere in the command (cat <<EOF | bash): checked together
-    feeds = any(_prog(w) in _FED_PROGS or _INTERP.match(_prog(w)) for c in parsed.commands for w in c.words)
-    if feeds and any(_mentions_github(b) for c in parsed.commands for b in c.bodies):
-        yield blk(OPAQUE, "a here-document in a command that runs a shell or interpreter mentions gh/git, which "
-                          "cannot be checked", "run gh/git directly")
-    if any(has_gh_git(_unshell(s)) for s in parsed.subs):
-        yield blk(OPAQUE, "gh/git inside $(...), backticks or <(...) cannot be checked",
-                  "run gh/git directly, not inside $(...)")
+def _opaque(text: str, blk: Blk, what: str, inline: bool = True) -> Iterator[Block]:
+    """Text the guard does not parse: allowed unless a spelling of it names a protected path (or, when it sits in
+    the command itself, a not-me switch), which is self-protection, or holds a word in _DANGER, which blocks under
+    the first of that word's rules that is on."""
+    spellings = _spellings(text)
+    for v in spellings:
+        m = _SELF_TEXT.search(v) or (_NOTME_TEXT.search(v) if inline else None)
+        if m:
+            yield blk(SELF, f"{what}, and it names {_short(m.group(0), 40)}, which only the operator may touch or run",
+                      "ask the operator")
+            return
+    for v in spellings:
+        for pattern, rules in _DANGER:
+            m = pattern.search(v)
+            if m:
+                yield blk(OPAQUE, f"{what}, and it holds `{_short(m.group(0), 40)}`", _OPAQUE_HINT, rules=rules)
+                return
 
 
-def _spellings(text: str) -> List[str]:
-    """text as the shell or a program may end up reading it: as written, with \\x67 / \\147 / \\u0067 escapes
-    decoded, with quotes and backslashes removed, with ${...}, $(...), backticks and $'/$" markers dropped, and
-    lowercased (git runs as GIT on a case-insensitive file system)."""
-    def esc(m: "re.Match[str]") -> str:
-        hexa, octal, uni = m.groups()
-        code = int(hexa, 16) if hexa else (int(octal, 8) if octal else int(uni, 16))
-        return chr(code)
-    decoded = _ESC_SEQ.sub(esc, text)
-    out = [text, decoded]
-    for v in (text, decoded):
-        out.append(_unshell(v))
-        out.append(_SHELL_PIECES.sub("", v).replace('"', "").replace("'", "").replace("\\", ""))
-    return out + [v.lower() for v in out]
-
-
-def _mentions_any(text: str) -> bool:
-    """text names gh, git or github.com in any spelling _spellings knows."""
-    return any(_mentions_github(v) for v in _spellings(text))
-
-
-def _judge_body(body: str, st: _State, ctx: GuardContext, blk: Blk, what: str) -> Iterator[Block]:
-    """Judge a string a program runs as a shell command (bash -c, eval, awk system(), sed e, vim !, tar
-    --to-command) as a command in its own right: lexed with the guard's lexer and checked command by command in a
-    child state. A body nested too deep, one that cannot be lexed, or one whose words still hold $, quotes,
-    backslashes or substitutions after lexing is blocked when it mentions gh/git/github in any spelling or the
-    whole command could reach the network."""
-    hint = "run gh/git directly, with every word spelled out plainly"
+def _body(text: str, st: _State, ctx: GuardContext, blk: Blk, what: str) -> Iterator[Block]:
+    """A string a shell runs as a command (bash -c, eval, a here-document fed to a shell): judged as a command in
+    its own right, or as opaque text past MAX_BODY_DEPTH."""
     if st.depth >= MAX_BODY_DEPTH:
-        yield blk(OPAQUE, f"{what} nests commands more than {MAX_BODY_DEPTH} deep, which cannot be checked", hint)
+        yield from _opaque(text, blk, f"{what} nests commands more than {MAX_BODY_DEPTH} deep")
         return
-    risky = _mentions_any(body) or bool(st.find(_NETWORK, st.text))
-    try:
-        parsed = lex(body)
-    except Unparsed as exc:
-        if risky:
-            yield blk(OPAQUE, f"{what} runs text the guard cannot read with confidence ({exc})", hint)
-        return
-    residual = bool(parsed.subs) or any(_OBFUSCATED.search(w) for c in parsed.commands for w in c.words)
-    if residual and risky:
-        yield blk(OPAQUE, f"{what} runs words that still hold $, quotes, backslashes or substitutions after "
-                          "unquoting, so what it runs cannot be checked", hint)
-        return
-    yield from _parsed_checks(parsed, blk)
-    yield from _judge_commands(parsed, body, ctx, st.dir, parent=st)
-
-
-_RUNS_TEXT = {"eval", "source", ".", "sudo", "doas", "xargs", "parallel"}  # run words they are given as a command
+    yield from _bash(text, st.dir, ctx, st.depth + 1)
 
 
 def _core(words: List[str]) -> List[str]:
@@ -2034,180 +1455,155 @@ def _drop_prefix(word: str, rest: List[str]) -> List[str]:
     return rest
 
 
-def _command(t: List[str], seg: str, st: _State, ctx: GuardContext) -> Iterator[Block]:
-    """Check one simple command given as tokens."""
+def _command(c: SimpleCommand, st: _State, ctx: GuardContext) -> Iterator[Block]:
+    """Check one simple command."""
+    seg = c.raw
     blk = _blk(_short(seg))
-    prefixed = False
-    assigned: List[str] = []
-    wrapper = None
+    yield from _path_checks(c, st, ctx, blk)
+    t = list(c.words)
     seen: Set[str] = set()
     while t:
         head = _head(t[0])
-        if head == "unbuffer":
-            wrapper = "unbuffer"
-        if head in _PREFIX_WORDS:
-            seen.add(head)
-        if _ASSIGN.match(t[0]):
-            assigned.append(t[0].split("=", 1)[0])
+        if _ASSIGN.match(t[0]) or head in _KEYWORDS:
             t = t[1:]
         elif head in _PREFIX_WORDS:
+            seen.add(head)
             t = _drop_prefix(head, t[1:])
-            prefixed = True
-        elif head in _KEYWORDS:
-            t = t[1:]
         else:
             break
-    if OPERATOR_CONFIRM in assigned:
-        yield blk(SELF, f"{OPERATOR_CONFIRM} is the operator's own confirmation", "ask the operator to confirm")
     if not t:
-        yield from _token_reads(t, seg, st, ctx, blk)  # a bare redirection such as $(< file)
         return
-    if getattr(t[0], "glob", False) or getattr(t[0], "brace", False) or t[0].startswith("="):
-        yield blk(OPAQUE, f"the shell expands the command name '{t[0]}', so what it runs cannot be checked",
-                  "spell out the command")
-        return
-    wrapper = wrapper or _pty_wrapper(t, seg, st)
+    wrapper = _wrapper(t, seen, st)
     if wrapper is not None:
-        yield from _drives_notme(t, st, blk, f"{wrapper} gives its command a pseudo-terminal, which would pass "
-                                 "not-me's human check")
-    yield from _primitives(t, seg, st, blk)
-    orphan = _orphaning(t, seen, st)
-    if orphan is not None:
-        yield from _drives_notme(t, st, blk, f"{orphan} runs it outside this session's process tree, which would "
-                                 "escape not-me's human check")
-    yield from _token_reads(t, seg, st, ctx, blk)
-    if _prog(t[0]) in ("claude", "claude-code") or any("@anthropic-ai/claude-code" in a for a in t):
-        yield blk(SELF, "starting or resuming a Claude Code session from inside one could send a prompt as if the "
-                        "operator typed it", "ask the operator to run Claude Code themselves")
-        return
-    word, head = t[0], _head(t[0])
-    if "$" in word or "`" in word:
-        yield blk(OPAQUE, "a command name taken from a variable cannot be checked", "spell out the command")
-        return
+        yield from _around_notme(wrapper, t, st, blk)
     notme_args = _notme_args(t)
-    if (head in ("gh", "git") or notme_args is not None) and any(getattr(a, "brace", False) for a in t[1:]):
-        yield blk(OPAQUE, "the shell expands {a,b} braces in the arguments, so they cannot be checked",
-                  "spell out each argument")
     if notme_args is not None:
-        yield from _cmd_notme(notme_args, st, ctx, blk)
-    unsafe = [a for a in assigned if a not in _SAFE_ENV]
-    if unsafe and (head in ("gh", "git") or notme_args is not None):
-        if any(a.startswith("GIT_") for a in unsafe):
-            yield blk(OPAQUE, "GIT_* variables change where git reads its repo or config",
-                      "run git without GIT_* variables")
-        else:
-            yield blk(OPAQUE, f"{unsafe[0]}=... in front of {_prog(word)} cannot be checked",
-                      "run it without the variable")
-    if notme_args is not None:
+        yield from _cmd_notme(notme_args, blk)
         return
+    word = t[0]
+    if getattr(word, "glob", False) or getattr(word, "brace", False) or _unresolved(word) or word.startswith("="):
+        yield from _opaque(seg, blk, f"the shell decides what '{_short(word, 40)}' runs")
+        return
+    head = _head(word)
     handler = _COMMANDS.get(head)
     if handler is not None:
-        yield from handler(t, seg, st, ctx, blk, unsafe)
+        yield from handler(t, c, st, ctx, blk)
     elif word.startswith(("./", "../", ".\\", "..\\")) or word.endswith(SCRIPT_SUFFIXES):
-        yield from _script(word, st, blk)
+        yield from _script_file(word, st, blk)
     elif _INTERP.match(_prog(word)):
-        yield from _interp_call(_prog(word), list(t[1:]), st, bool(assigned) or "env" in seen, blk)
-    elif head in _HTTP_CLIENTS and _GITHUB.search(seg):
-        yield blk(OPAQUE, f"{head} to GitHub bypasses gh's repo checks", "use gh with --repo owner/name")
-    elif prefixed and has_gh_git(seg):
-        yield blk(OPAQUE, f"cannot tell what '{word}' runs", "run gh/git directly, without the wrapper")
-    elif _prog(word) not in _INERT and any(has_gh_git(a) or has_gh_git(_unshell(a)) for a in t):  # man -P, watch
-        yield blk(OPAQUE, f"{_prog(word)} may run gh/git with words the guard cannot check",
-                  "run gh/git directly, without the wrapper")
+        yield from _interp(_prog(word), list(t[1:]), c, st, ctx, blk)
+    elif _prog(word) not in _NAMES_ONLY:
+        # a program the guard does not know that is handed git or gh as a word (watch, flock, xcrun, mise exec):
+        # judged as the git or gh command it would run
+        k = next((k for k, a in enumerate(t[1:], 1) if _head(a) in ("git", "gh")), None)
+        if k is not None:
+            yield from _command(SimpleCommand(t[k:], " ".join(t[k:])), st, ctx)
 
 
-# --- interpreters ----------------------------------------------------------------
-#
-# A text scan cannot tell what a program does, and every option table had gaps, so an interpreter call is allowed
-# only in one of a few exact shapes: run an existing script file (with a tiny set of options that cannot load
-# code), run a listed tool module with python -m, or print the version or help. Running a file is the documented
-# limit of text inspection. Everything else, including any environment assignment or env wrapper in front, blocks.
-
-# per interpreter family: options that cannot load or run code
-_SAFE_OPTS: Dict[str, FrozenSet[str]] = {
-    "python": frozenset({"-u", "-B", "-O", "-OO", "-Wignore", "-Werror", "-Wdefault"}),
-    "node": frozenset({"--no-warnings"}),
-    "perl": frozenset({"-w", "-W", "-X", "-T"}),
-    "ruby": frozenset({"-w"}),
-}
-_INFO_ONLY = frozenset({"--version", "-V", "--help"})
-# python -m modules that run tools, not code taken from their arguments (timeit, pdb, cProfile, trace, code, runpy
-# and the like do, so they are not here)
-# words a script an interpreter runs may not contain: the not-me secrets and the merge grants (narrower than
-# _SCRIPT_SELF, since this repository's own Python tools import notme)
-_INTERP_SELF = re.compile(r"operator-token|mode-live\.(?:sig|epoch)|merge-grants|allowed-repos\.json"
-                          r"|NOT_ME_OPERATOR_CONFIRM")
-_PY_MODULES = frozenset({"pytest", "pip", "venv", "json.tool", "unittest", "http.server", "py_compile", "compileall",
-                         "ensurepip", "build", "twine", "mypy", "black", "ruff", "flake8", "isort", "pylint",
-                         "pyflakes", "tabnanny", "zipfile", "tarfile", "gzip", "base64", "calendar", "uuid",
-                         "sysconfig", "site", "platform", "this"})
-# variables that make an interpreter load code, also when exported earlier in the command
-_CODE_ENV = re.compile(r"(?<![A-Za-z0-9_])(NODE_OPTIONS|NODE_PATH|RUBYOPT|RUBYLIB|PERL5OPT|PERL5LIB|PERLLIB|PERL5DB"
-                       r"|PYTHON[A-Z0-9_]*|LUA_INIT[A-Z0-9_]*|LUA_PATH[A-Z0-9_]*|LUA_CPATH[A-Z0-9_]*|JULIA_[A-Z0-9_]*"
-                       r"|PHPRC|PHP_INI_SCAN_DIR|R_PROFILE[A-Z_]*|R_ENVIRON[A-Z_]*|R_LIBS[A-Z_]*|TCLLIBPATH"
-                       r"|DENO_[A-Z0-9_]*|BUN_[A-Z0-9_]*)(?:\[[^\[\]]*\])?\+?=")
+# --- self-protection by path ------------------------------------------------------
 
 
-def _interp_family(prog: str) -> str:
-    if prog.startswith("py"):
-        return "python"
-    if prog.startswith(("powershell", "pwsh")):
-        return "pwsh"
-    return next((f for f in ("node", "perl", "ruby") if prog.startswith(f)), prog)
+def _expand_home(arg: str, ctx: GuardContext) -> str:
+    """arg with $HOME / ${HOME} and $NOT_ME_HOME / ${NOT_ME_HOME} filled in (~ is left to _norm)."""
+    for var in ("${HOME}", "$HOME"):
+        arg = arg.replace(var, ctx.env.get("HOME") or _path.expanduser("~"))
+    for var in ("${NOT_ME_HOME}", "$NOT_ME_HOME"):
+        arg = arg.replace(var, str(ctx.home))
+    return arg
 
 
-def _interp_shape(prog: str, args: List[str]) -> Tuple[str, str]:
-    """Which allowed shape an interpreter call has, from its words alone: ("info", ""), ("module", name),
-    ("script", path), or ("bad", why). The single parser for both the allow decision (_interp_call) and the
-    self-protection read of the script (_primitives), so the two always agree on which file runs."""
-    family = _interp_family(prog)
-    if len(args) == 1 and args[0] in _INFO_ONLY:
-        return "info", ""
-    rest = list(args)
-    if family == "pwsh":
-        while rest and rest[0].lower() in ("-noprofile", "-noninteractive"):
-            rest = rest[1:]
-        if len(rest) < 2 or rest[0].lower() != "-file":
-            return "bad", f"{prog} runs only as -NoProfile -NonInteractive -File <file>"
-        rest = rest[1:]
-    else:
-        safe = _SAFE_OPTS.get(family, frozenset())
-        while rest and (rest[0] in safe or (family == "python" and rest[0] == "-W" and len(rest) > 1
-                                            and rest[1] in ("ignore", "error", "default"))):
-            rest = rest[2:] if rest[0] == "-W" else rest[1:]
-        if family == "python" and rest[:1] == ["-m"]:
-            module = rest[1] if len(rest) > 1 else ""
-            # a local file shadowing a listed module only runs a file, which is allowed anyway
-            if module not in _PY_MODULES:
-                return "bad", f"python -m {module or '(none)'} may run code the guard cannot check"
-            return "module", module
-    script = rest[0] if rest else ""
-    if not script or script.startswith("-"):
-        return "bad", f"{prog} with {f'option {script}' if script else 'no script file (code from stdin or a prompt)'}" \
-                      " may run code the guard cannot check"
-    return "script", script
+# what a Bash word may not name: the home's private files and the allow list
+_BASH_GUARDED = _HOME_GUARDED + ((ALLOWLIST_NAME, ALLOW_WHY, ALLOW_HINT),)
+# shell text that leaves a path unresolved for the guard: $(...), backticks, ${...}, $VAR, {a,b} and a stray $
+_UNRESOLVED = re.compile(r"\$\([^)]*\)?|`[^`]*`?|\$\{[^}]*\}?|\$[A-Za-z0-9_@*#?!-]+|\{[^}]*\}?|\$")
+_HOME_PARAM = re.compile(r"\$\{(NOT_ME_HOME|HOME)(?![A-Za-z0-9_])[^}]*\}")
 
 
-def _interp_call(prog: str, args: List[str], st: _State, envd: bool, blk: Blk) -> Iterator[Block]:
-    """Allow an interpreter only in the shapes _interp_shape accepts, with no environment in front and an existing
-    script file; block everything else. (_primitives reads the same script for self-protection.)"""
-    why = f"write the code to a script file and run `{prog} file`"
-    if envd or _CODE_ENV.search(st.text):
-        yield blk(OPAQUE, f"an environment setting in front of {prog} can make it load code the guard cannot check",
-                  f"run {prog} without it; {why}")
-        return
-    kind, value = _interp_shape(prog, args)
-    if kind == "bad":
-        yield blk(OPAQUE, value, why)
-    elif kind == "script" and ((st.moved and not _path.isabs(value)) or not _path.isfile(_norm(value, st.dir))):
-        yield blk(OPAQUE, f"{prog} runs '{_short(value, 40)}', which is not a script file the guard can read", why)
+def _path_checks(c: SimpleCommand, st: _State, ctx: GuardContext, blk: Blk) -> Iterator[Block]:
+    """Words and redirection targets that name a protected file in the not-me home (the operator token, the
+    live-mode epoch and marker, the allow list), the home itself, or for a recursive copy
+    or search a directory that holds it. Globs are matched as patterns and expanded for real."""
+    core = _core(list(c.words))
+    prog = _prog(core[0]) if core else ""
+    recursive = prog in _TOKEN_COPIERS or prog == "rg" or (prog in ("grep", "egrep", "fgrep") and (
+        "r" in _short_flags(core[1:]).lower() or "--recursive" in core[1:]))
+    args: List[str] = []
+    for w in c.words:
+        if not w.startswith("-"):
+            args.append(w)
+        if "=" in w:
+            args.append(w.split("=", 1)[1])
+    args += [target for op, target in c.redirs if op not in ("<<", "<<-", "<<<")]
+    for a in args:
+        found = _protected(a, st, ctx, recursive)
+        if found:
+            yield blk(SELF, found[0], found[1])
+            return
 
 
-def _pty_wrapper(t: List[str], seg: str, st: _State) -> Optional[str]:
-    """The name of a wrapper that gives its command a pseudo-terminal, or None."""
+def _protected(arg: str, st: _State, ctx: GuardContext, recursive: bool) -> Optional[Tuple[str, str]]:
+    """(why, hint) when arg names a protected file: by its name after a path separator (in any directory), by its
+    real path, or through a glob; a part the shell fills in ($VAR, $(...), backticks, {a,b}) counts as * when the
+    rest still pins the pattern near a protected file. For a recursive copy or search, a directory that holds the
+    not-me home counts too."""
+    a = _expand_home(arg.replace('"', "").replace("'", ""), ctx)
+    a = _HOME_PARAM.sub(lambda m: str(ctx.home) if m.group(1) == "NOT_ME_HOME"
+                        else (ctx.env.get("HOME") or _path.expanduser("~")), a)
+    if not a or "\n" in a:
+        return None
+    guarded = st.once(("guarded",), lambda: _guarded(ctx, st.dir, _BASH_GUARDED))
+    parts = [p.lower() for p in _PATH_SEP.split(a)]
+    if len(parts) > 1:
+        for (name, why, hint) in _BASH_GUARDED:
+            if parts[-1] == name:
+                return why, hint
+    home = st.once(("home",), lambda: _norm(str(ctx.home), st.dir))
+
+    def absolute(p: str, unknown_base: bool = False) -> str:
+        p = _path.expanduser(p)  # a pattern that starts with an unresolved part may be anywhere
+        return p if _path.isabs(p) or (unknown_base and p.startswith("*")) else _path.join(st.dir, p)
+
+    def hit(path: str) -> Optional[Tuple[str, str]]:
+        full = _norm(path, st.dir)
+        g = next((g for g in guarded if _under(full, g[0])), None)
+        if g is not None:
+            return g[2], g[3]
+        if recursive and _under(home, full):
+            return HOME_WHY, TOKEN_HINT
+        return None
+    if _UNRESOLVED.search(a):
+        pattern = _UNRESOLVED.sub("*", a)
+        g = _pattern_hit(absolute(pattern, True), st.dir, guarded, recursive) if pattern.strip("*/\\.") else None
+        return (g[2], g[3]) if g is not None else None
+    if not _GLOB.search(a):
+        return hit(a)
+    full = absolute(a)
+    g = _pattern_hit(full, st.dir, guarded, recursive)
+    if g is not None:
+        return g[2], g[3]
+    try:
+        for k, match in enumerate(glob.iglob(full, recursive=True)):
+            if k >= GLOB_LIMIT:
+                break
+            found = hit(match)
+            if found:
+                return found
+    except (OSError, ValueError, re.error):
+        return None
+    return None
+
+
+# --- wrappers around notme ----------------------------------------------------------
+
+
+def _wrapper(t: List[str], seen: Set[str], st: _State) -> Optional[str]:
+    """The name of what gives this command a pseudo-terminal or runs it outside the session's process tree, or
+    None."""
     prog, args = _prog(t[0]), t[1:]
     low = [a.lower() for a in args]
-    if prog in ("script", "expect", "unbuffer"):
+    if seen & _ORPHAN_PREFIX:
+        return sorted(seen & _ORPHAN_PREFIX)[0]
+    if prog in _PTY_PROGS or prog in _ORPHAN_PROGS:
         return prog
     if prog == "socat" and any("pty" in a for a in low):
         return "socat pty"
@@ -2221,204 +1617,30 @@ def _pty_wrapper(t: List[str], seg: str, st: _State) -> Optional[str]:
                                                       "-b", "-c", "-e", "-m", "-O", "-Q", "-S", "-W", "-w"})), "")
         if "t" in flags and _LOCALHOST.match(dest):
             return "ssh -t to this machine"
-    if _INTERP.match(prog):
-        inline = any(a in ("-", "--eval", "--print") or (a.startswith("-") and not a.startswith("--")
-                                                        and set(a[1:]) & set("ceEpr")) for a in args)
-        if (inline or "<<" in seg or len(_positionals(args)) == 0) and st.find(_PTY_CODE, st.raw):
-            return f"{prog} pty code"
-    return None
-
-
-_FILE_WRITERS = {"tee", "cp", "mv", "install", "ln", "rsync", "patch", "unzip", "wget", "scp"}
-_WRITE_REDIRS = {">", ">>", ">|", "&>", "&>>", "<>"}
-_NULL_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"}
-
-
-def _writes_files(st: _State, seg: str) -> bool:
-    """Some other part of the command (or this command's input side) writes a file: a > or >> redirection, tee, cp,
-    mv, install, ln, dd of=, sed -i, curl -o/-O, wget and the like. The interpreter's own output redirection does
-    not count (the shell truncates it before the interpreter starts)."""
-    for c in st.commands:
-        words = [str(w) for w in c.words]
-        own = c.raw == seg
-        if not own and any(op in _WRITE_REDIRS and tgt not in _NULL_TARGETS for op, tgt in c.redirs):
-            return True
-        core = _core(words)
-        if not core:
-            continue
-        p, rest = _prog(core[0]), core[1:]
-        if p in _FILE_WRITERS or (p == "dd" and any(a.startswith("of=") for a in rest)):
-            return True
-        if p in ("sed", "gsed", "perl") and any(a.startswith("-i") or a.startswith("--in-place") for a in rest):
-            return True
-        if p == "curl" and any(a in ("-o", "-O", "--output", "--remote-name", "--remote-name-all")
-                               or a.startswith(("--output=", "-o")) or (a.startswith("-") and not a.startswith("--")
-                                                                         and "O" in a) for a in rest):
-            return True
-        if p == "tar" and any(not a.startswith("--") and "x" in a.lstrip("-") for a in rest[:1]) or \
-                (p == "tar" and any(a in ("--extract", "--get") for a in rest)):
-            return True
-    return False
-
-
-def _primitives(t: List[str], seg: str, st: _State, blk: Blk) -> Iterator[Block]:
-    """Interpreter code (inline or a script file) that forges a terminal or detaches from the session, and a script
-    file that reaches the not-me secrets or the merge grants. The script is the one _interp_shape names, the same
-    file _interp_call allows."""
-    prog, args = _prog(t[0]), t[1:]
-    if not _INTERP.match(prog):
-        return
-    why = "{} can forge a terminal or leave this session's process tree ({}), which would pass not-me's human check"
-    hint = "do this without pty, fork, setsid or daemon code"
-    kind, script = _interp_shape(prog, list(args))
-    if kind == "info":
-        return
-    if kind == "bad":
-        m = st.find(_PRIMITIVES, st.raw)
-        if m:
-            yield blk(SELF, why.format(f"{prog} inline code", m.group(0)), hint)
-            return
-    # a script, or every file argument of a module call (pytest x_test.py) or a rejected call (outside a not-me
-    # project the shape block is dropped); imported modules and conftest.py are the documented file-run limit
-    files = [script] if kind == "script" else [a for a in _positionals(list(args)) if a != script]
-    if kind != "bad" and st.moved and any(not _path.isabs(f) for f in files):
-        yield blk(SELF, f"{prog} runs a file named by a relative path in a command that changes directory, so the "
-                        "guard cannot read it", _CD_HINT)
-        return
-    files = [f for f in files if not (st.moved and not _path.isabs(f))]
-    if kind != "bad" and any(_path.isfile(_norm(f, st.dir)) for f in files) and _writes_files(st, seg):
-        yield blk(SELF, f"this command writes files and runs {prog} on a file in the same call, so the file may change "
-                        "after the guard reads it", "write the file in one Bash call and run it in the next")
-        return
-    for f in files:
-        text = _read_script(_norm(f, st.dir), st)
-        if text is None:
-            continue  # not a readable file: _interp_call blocks a script like that
-        m = _PRIMITIVES.search(text)
-        if m:
-            yield blk(SELF, why.format(f, m.group(0)), hint)
-            return
-        m = _INTERP_SELF.search(text)
-        if m:
-            yield blk(SELF, f"{f} reaches not-me's own secrets or merge grants ({m.group(0)}), which the agent may "
-                            "not touch", "ask the operator")
-            return
-
-
-def _orphaning(t: List[str], seen: Set[str], st: _State) -> Optional[str]:
-    """What detaches this command from the session (nohup, setsid, at, a background &, ...), or None."""
-    prog, low = _prog(t[0]), [a.lower() for a in t[1:]]
-    if seen & _ORPHAN_PREFIX:
-        return sorted(seen & _ORPHAN_PREFIX)[0]
-    if prog in _ORPHAN_PROGS:
-        return prog
     if prog == "launchctl" and {"submit", "bootstrap"} & set(low):
-        return "launchctl " + next(a for a in low if a in ("submit", "bootstrap"))
-    if prog == "crontab":
-        rest = [a for i, a in enumerate(low) if a != "-u" and not (i and low[i - 1] == "-u")]
-        if rest != ["-l"]:  # anything but listing installs or edits a crontab
-            return "crontab"
+        return "launchctl"
+    if prog == "crontab" and [a for i, a in enumerate(low) if a != "-u" and not (i and low[i - 1] == "-u")] != ["-l"]:
+        return "crontab"
     if st.background:
         return "a background &"
     return None
 
 
-def _expand_home(arg: str, ctx: GuardContext) -> str:
-    """arg with $HOME / ${HOME} and $NOT_ME_HOME / ${NOT_ME_HOME} filled in (~ is left to _norm)."""
-    for var in ("${HOME}", "$HOME"):
-        arg = arg.replace(var, ctx.env.get("HOME") or _path.expanduser("~"))
-    for var in ("${NOT_ME_HOME}", "$NOT_ME_HOME"):
-        arg = arg.replace(var, str(ctx.home))
-    return arg
-
-
-def _reaches(arg: str, base: str, guarded: List[_Guarded], recursive: bool,
-             ctx: GuardContext) -> Optional[_Guarded]:
-    """The guarded file that arg (a path or glob, relative to base) names, or that a directory it names holds
-    when recursive; else None. Globs are expanded for real and also matched as a pattern (the file need not
-    exist yet); one that visits more than GLOB_LIMIT paths counts as reaching a file its fixed leading directory
-    holds. Parts the guard cannot resolve ($VAR, $(...), backticks, {a,b}) count as * and fail closed when the
-    rest pins the pattern near a guarded file; with nothing fixed left the argument cannot be placed at all."""
-    arg = _expand_home(arg.replace('"', "").replace("'", ""), ctx)
-    arg = _HOME_PARAM.sub(lambda m: str(ctx.home) if m.group(1) == "NOT_ME_HOME"
-                          else (ctx.env.get("HOME") or _path.expanduser("~")), arg)
-    if _UNRESOLVED.search(arg):
-        pattern = _UNRESOLVED.sub("*", arg)
-        return _pattern_hit(pattern, base, guarded, recursive) if pattern.strip("*/\\.") else None
-    full = _path.join(base, _path.expanduser(arg)) if not _path.isabs(_path.expanduser(arg)) \
-        else _path.expanduser(arg)
-
-    def hit(path: str) -> Optional[_Guarded]:
-        n = _norm(path, base)
-        return next((g for g in guarded if _under(n, g[0]) or (recursive and _under(g[0], n))), None)
-    if not _GLOB.search(arg):
-        return hit(full)
-    try:
-        for k, match in enumerate(glob.iglob(full, recursive=True)):
-            found = hit(match)
-            if found:
-                return found
-            if k >= GLOB_LIMIT:
-                fixed = _PATH_SEP.split(full)
-                fixed = fixed[:next(i for i, part in enumerate(fixed) if _GLOB.search(part))]
-                top = _norm(_path.sep.join(fixed) or _path.sep, base)
-                return next((g for g in guarded if _under(g[0], top)), None)
-    except (OSError, ValueError, re.error):
-        return guarded[0]  # cannot expand: fail closed
-    return _pattern_hit(full, base, guarded, recursive)
-
-
-def _token_reads(t: List[str], seg: str, st: _State, ctx: GuardContext, blk: Blk) -> Iterator[Block]:
-    """Reading, copying or writing commands (and <, > and $(< operands) whose arguments reach the operator token,
-    the live-mode epoch or the live marker."""
-    prog = _prog(t[0]) if t else ""
-    targets = [m.group(1) for m in _IN_REDIRECT.finditer(seg)] + [m.group(1) for m in _OUT_REDIRECT.finditer(seg)]
-    if prog in _TOKEN_READERS:
-        targets += [a[3:] if prog == "dd" and a.startswith(("if=", "of=")) else a
-                    for a in t[1:] if not a.startswith("-")]
-    if not targets:
-        return
-    guarded = st.once(("guarded",), lambda: _guarded(ctx, st.dir, _HOME_GUARDED))
-    recursive = prog in _TOKEN_COPIERS or (prog in ("grep", "egrep", "fgrep", "rg") and (
-        prog == "rg" or "r" in _short_flags(t[1:]).lower() or "--recursive" in t[1:]))
-    for a in targets:
-        if st.moved and not _path.isabs(_expand_home(a, ctx)):
-            found = next((g for g in guarded if _may_reach_token(a, g[0], recursive)), None)
-        else:
-            found = _reaches(a, st.dir, guarded, recursive, ctx)
-        if found:
-            yield blk(SELF, found[2], found[3])
-            return
-
-
-def _may_reach_token(arg: str, token: str, recursive: bool) -> bool:
-    """After a directory change the base of a relative path is unknown: could arg name the guarded file `token`,
-    or (recursive) a directory that holds it? Judged by its last part against the names on the file's path."""
-    last = _PATH_SEP.split(arg.rstrip("/\\"))[-1]
-    if "$" in last or "`" in last:
-        return True
-    if last in ("", ".", "..") or last.startswith("~"):
-        return recursive
-    names = [p for p in _PATH_SEP.split(token) if p]
-    return any(fnmatch.fnmatch(n.lower(), last.lower()) for n in (names if recursive else names[-1:]))
-
-
-def _drives_notme(t: List[str], st: _State, blk: Blk, why: str) -> Iterator[Block]:
-    """A wrapper that hides the caller (a pty, a detached process) may not drive the not-me CLI or its controls."""
+def _around_notme(wrapper: str, t: List[str], st: _State, blk: Blk) -> Iterator[Block]:
+    """A wrapper that hides the caller may not run the not-me CLI: named anywhere in the command, or in a file it
+    is given."""
+    why = (f"{wrapper} would run notme in a pseudo-terminal or a detached process, which passes the not-me CLI's "
+           "human check")
     hint = "the operator runs this not-me step in their own terminal"
-    if st.moved:
-        yield blk(SELF, f"{why}; in a command that changes directory the guard cannot tell which files it runs",
-                  _CD_HINT)
-        return
-    if st.find(_PTY_TRIGGER, st.plain_raw):
+    if any(_NOTME_WORD.search(v) for v in (st.plain_raw, st.raw)):
         yield blk(SELF, why, hint)
         return
-    for a in t:
+    for a in t[1:]:
         if a.startswith("-"):
             continue
         text = _read_script(_norm(a, st.dir), st)
-        if text is not None and _PTY_TRIGGER.search(text):
-            yield blk(SELF, f"{why} ({a} mentions it)", hint)
+        if text is not None and _NOTME_WORD.search(text):
+            yield blk(SELF, f"{why} ({a} names it)", hint)
             return
 
 
@@ -2440,6 +1662,9 @@ def _prog(word: str) -> str:
     """Program name for matching: basename, backslashes removed, lowercased, without .exe."""
     low = _base(str(word).replace("\\", "")).lower()
     return low[:-4] if low.endswith(".exe") else low
+
+
+# --- the not-me CLI -----------------------------------------------------------------
 
 
 def _notme_args(t: List[str]) -> Optional[List[str]]:
@@ -2469,7 +1694,7 @@ def _notme_args(t: List[str]) -> Optional[List[str]]:
                     skip = not rest  # the value is the next word unless it is joined on
                     continue
                 if opt == "c":
-                    return None  # inline code: the interpreter checks handle it
+                    return None  # inline code: judged as opaque text
                 module = rest or (t[k + 1] if k + 1 < len(t) else "")
                 return (t[k + 1:] if rest else t[k + 2:]) if _is_notme_module(module) else None
             if a.startswith("-"):
@@ -2478,7 +1703,7 @@ def _notme_args(t: List[str]) -> Optional[List[str]]:
                 if module is not None and _is_notme_module(module):
                     return t[k + 1:] if len(a) > 2 else t[k + 2:]
                 if a in ("-c", "-m", "-e", "--eval"):
-                    return None  # inline code: the interpreter checks handle it
+                    return None  # inline code: judged as opaque text
                 continue
             return _notme_args(t[k:]) if _prog(a) in _NOTME_PROGS | {"notme-python"} else None
     return None
@@ -2490,89 +1715,32 @@ def _is_notme_module(name: str) -> bool:
     return low == "notme" or low.startswith("notme.")
 
 
-def _worktrees(ctx: GuardContext) -> List[str]:
-    """The session checkout and every worktree of its repo, found without git."""
-    dirs = [ctx.root or ctx.cwd]
-    common = ctx.common_dir
-    if common is not None:
-        if Path(common).name == ".git":
-            dirs.append(str(Path(common).parent))
-        try:
-            entries = list((Path(common) / "worktrees").iterdir())
-        except OSError:
-            entries = []
-        for e in entries:
-            try:
-                dirs.append(_path.dirname((e / "gitdir").read_text(encoding="utf-8").strip()))
-            except OSError:
-                continue
-    return [_norm(d, "/") for d in dirs if d]
-
-
-def _cmd_notme(args: List[str], st: _State, ctx: GuardContext, blk: Blk) -> Iterator[Block]:
-    """Self-protection for the not-me CLI: it trusts its project, home and operator, so nothing may re-point them."""
-    hint = "run notme from the session checkout with no overrides"
+def _cmd_notme(args: List[str], blk: Blk) -> Iterator[Block]:
+    """The not-me CLI's human switches: changing the allow list, turning a pause off, and going live."""
     plain = [_unshell(a) for a in args]
-    if any(a.startswith("--") and len(a) > 2 and "--project-dir".startswith(a.split("=", 1)[0]) for a in plain):
-        yield blk(SELF, "notme --project-dir points the CLI at another project", hint)
-    m = st.find(_TRUST_ENV, st.plain_text) or st.find(_TRUST_UNSET, st.plain_text)
-    if m:
-        yield blk(SELF, f"{m.group(1)} changes which project, home or identity notme trusts", hint)
-    if st.moved:
-        yield blk(SELF, f"notme runs in a command that changes directory ({st.moved}), so the guard cannot tell "
-                        "which checkout it runs in", "run cd in a separate Bash call, then run notme")
-    elif not st.once(("in-checkout",), lambda: any(_under(_norm(st.dir, "/"), w) for w in _worktrees(ctx))):
-        yield blk(SELF, "notme runs outside the session checkout", hint)
     pos = [a for a in plain if not a.startswith("-")]
-    raw_pos = [r for r, a in zip(args, plain) if not a.startswith("-")]  # paths keep their backslashes
-    if pos[:1] == ["allow-repo"] and pos[1:2] != ["list"]:
-        if not ({"--help", "-h"} & set(plain)):
-            yield blk(SELF, "only the operator changes the not-me allow list",
-                      "ask the operator to run /not-me:allow-repo")
+    helping = bool({"--help", "-h"} & set(plain))
+    if pos[:1] == ["allow-repo"] and pos[1:2] != ["list"] and not helping:
+        yield blk(SELF, ALLOW_WHY, ALLOW_HINT)
     if "pause" in plain:
         rest = plain[plain.index("pause") + 1:]
         if rest not in _PAUSE_OK:
             yield blk(SELF, "only a person turns a not-me pause off", "leave the pause for the operator")
-    if "mode" in pos and not ({"--help", "-h"} & set(plain)):
+    if "mode" in pos and not helping:
         # anything but `mode show` or `mode dry-run` (live, an abbreviation, a typo) is the person's switch
         sub = pos[pos.index("mode") + 1:pos.index("mode") + 2]
         if not sub or sub[0] not in _MODE_OK:
-            yield blk(SELF, "only a person turns live mode on",
-                      LIVE_HINT)
-    if pos[:2] == ["git", "worktree-add"]:
-        if len(raw_pos) > 2 and _unquoted_backslash(raw_pos[2]):
-            yield blk(SELF, _backslash_why(raw_pos[2]), _BACKSLASH_HINT)
-            return
-        target = _norm(raw_pos[2], st.dir) if len(raw_pos) > 2 else None
-        base = _norm(_path.join(str(ctx.common_dir), "not-me", "worktrees"), "/") if ctx.common_dir else None
-        if target is None or base is None or target == base or not _under(target, base):
-            yield blk(SELF, "notme git worktree-add may only create worktrees under <git common dir>/not-me/worktrees/",
-                      "let notme pick the worktree path")
+            yield blk(SELF, "only a person turns live mode on", LIVE_HINT)
 
 
-def _script(path: str, st: _State, blk: Blk) -> Iterator[Block]:
-    if st.moved and not _path.isabs(path):
-        yield blk(OPAQUE, f"{path} is a relative path in a command that changes directory ({st.moved}), so the "
-                          "guard cannot tell which file runs", _CD_HINT)
-        return
-    if _unquoted_backslash(path):
-        yield blk(OPAQUE, _backslash_why(path), _BACKSLASH_HINT)
-        return
+# --- shells, scripts and interpreters --------------------------------------------------
+
+
+def _script_file(path: str, st: _State, blk: Blk) -> Iterator[Block]:
+    """A script file runs text the guard does not parse: judged as opaque text (a file it cannot read is allowed)."""
     text = _read_script(_norm(path, st.dir), st)
-    if text is None:
-        yield blk(OPAQUE, f"cannot read {path} to check what it runs", "run its commands directly")
-        return
-    m = _PRIMITIVES.search(text)
-    if m:
-        yield blk(SELF, f"{path} can forge a terminal or leave this session's process tree ({m.group(0)}), which "
-                        "would pass not-me's human check", "do this without pty, fork, setsid or daemon code")
-    m = _SCRIPT_SELF.search(text)
-    if m:
-        yield blk(SELF, f"{path} runs the not-me CLI or touches its controls ({m.group(0)}), which cannot be "
-                        "checked from here", "run the notme command directly")
-    if _mentions_github(text):
-        yield blk(OPAQUE, f"{path} runs gh/git or calls GitHub, which cannot be checked from here",
-                  "run its gh/git commands directly")
+    if text is not None:
+        yield from _opaque(text, blk, f"{_short(path, 60)} is a script the guard does not parse", inline=False)
 
 
 _SHELL_VALUE_OPTS = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
@@ -2608,69 +1776,131 @@ def _shell_bodies(head: str, args: List[str]) -> Tuple[Optional[List[str]], Opti
     return None, (args[i] if i < len(args) else None)
 
 
-def _cmd_shell(t, seg, st, ctx, blk, gitenv):
+def _from_input(c: SimpleCommand, st: _State, ctx: GuardContext, blk: Blk, what: str,
+                shell: bool = True) -> Iterator[Block]:
+    """A shell or interpreter that reads its program from its input: a here-document or here-string is judged
+    (as a command for a shell, as opaque text for an interpreter), a < file is read, and a pipe leaves only the
+    whole command's text to judge."""
+    if c.bodies:
+        for b in c.bodies:
+            yield from (_body(b, st, ctx, blk, what) if shell else _opaque(b, blk, what))
+        return
+    files = [target for op, target in c.redirs if op == "<"]
+    for f in files:
+        yield from _script_file(f, st, blk)
+    if not files:
+        yield from _opaque(st.raw, blk, f"{what} reads its program from a pipe")
+
+
+def _cmd_shell(t, c, st, ctx, blk):
     head = _head(t[0])
     args = t[1:]
     if head in _SHELLS:
         bodies, script = _shell_bodies(head, args)
-        for body in bodies or []:
-            yield from _judge_body(body, st, ctx, blk, f"{head} -c")
         if bodies is not None:
+            for body in bodies:
+                yield from _body(body, st, ctx, blk, f"{head} -c")
             return
     else:  # source and .
         script = next((a for a in args if a != "--"), None)
-    if script is None:  # commands come from its input: a here-document (checked with the command), a file or a pipe
-        redirect = [m.group(1) for m in _IN_REDIRECT.finditer(seg)]
-        if redirect:
-            script = redirect[-1]
-        elif "<<" not in seg:
-            yield blk(OPAQUE, f"{head} reads commands from its input, which cannot be checked",
-                      "run the commands directly, or put them in a script file")
-            return
-    if script is not None:
-        yield from _script(script, st, blk)
+    if script is not None and script != "-":
+        yield from _script_file(script, st, blk)
+    else:
+        yield from _from_input(c, st, ctx, blk, head)
 
 
-def _cmd_eval(t, seg, st, ctx, blk, gitenv):
+def _cmd_eval(t, c, st, ctx, blk):
     # eval joins its words with spaces and runs the result as a command
-    yield from _judge_body(" ".join(t[1:]), st, ctx, blk, "eval")
+    yield from _body(" ".join(t[1:]), st, ctx, blk, "eval")
 
 
-def _wrapped(takes_value: Set[str], stop: Tuple[str, ...] = ()):
-    """Handler for xargs, parallel and sudo: check the command they run."""
-    def handler(t, seg, st, ctx, blk, gitenv):
-        if st.moved and has_gh_git(_unshell(seg)):
-            yield _moved_write(st, blk, f"gh/git through {_prog(t[0])}")
-            return
-        if _prog(t[0]) in ("xargs", "parallel") and any(has_gh_git(a) for a in t[1:]):
-            yield blk(OPAQUE, f"{_prog(t[0])} adds words from its input to gh/git, so they cannot be checked",
-                      "run gh/git directly with every argument spelled out")
-            return
+# per interpreter family: the short option letters and long options that take inline code
+_INLINE_SHORT = {"python": "c", "node": "ep", "perl": "eE", "ruby": "e", "php": "rB", "lua": "e", "julia": "eE",
+                 "rscript": "e", "osascript": "e", "bun": "ep"}
+_INLINE_LONG = {"--eval", "--print", "--command", "--code"}
+_INTERP_VALUE = {"python": {"-W", "-X", "-Q"}, "node": {"-r", "--require", "--import", "--loader"},
+                 "perl": {"-I", "-M", "-m"}, "ruby": {"-I", "-r"}}
+
+
+def _interp_family(prog: str) -> str:
+    if prog.startswith("py"):
+        return "python"
+    if prog.startswith(("powershell", "pwsh")):
+        return "pwsh"
+    return next((f for f in ("node", "perl", "ruby", "php", "lua", "julia", "rscript", "osascript", "bun", "deno")
+                 if prog.startswith(f)), prog)
+
+
+def _interp(prog: str, args: List[str], c: SimpleCommand, st: _State, ctx: GuardContext,
+            blk: Blk) -> Iterator[Block]:
+    """An interpreter runs code the guard does not parse: inline code (with the rest of its arguments) and a
+    script file are judged as opaque text, and so is its input when it reads its program from there. A python -m
+    module is not read (what it imports is out of view, like any program)."""
+    family = _interp_family(prog)
+    what = f"{prog} runs code the guard does not parse"
+    if family == "pwsh":
+        low = [a.lower() for a in args]
+        if "-file" in low and low.index("-file") + 1 < len(args):
+            yield from _script_file(args[low.index("-file") + 1], st, blk)
+        else:
+            yield from _opaque(" ".join(args), blk, what)
+        return
+    letters = _INLINE_SHORT.get(family, "")
+    inline = (family == "deno" and args[:1] == ["eval"]) or any(
+        a in _INLINE_LONG or a.split("=", 1)[0] in _INLINE_LONG
+        or (letters and a.startswith("-") and not a.startswith("--") and set(a[1:]) & set(letters)) for a in args)
+    if inline:
+        yield from _opaque("\n".join([" ".join(args)] + c.bodies), blk, what)
+        return
+    takes_value = _INTERP_VALUE.get(family, set())
+    i = 0
+    while i < len(args) and args[i].startswith("-") and args[i] != "-":
+        a = args[i]
+        if family == "python" and (a == "-m" or (a.startswith("-") and not a.startswith("--") and "m" in a[1:])):
+            return  # a module run
+        i += 2 if a in takes_value else 1
+    rest = args[i:]
+    if family == "deno" and rest[:1] == ["run"]:
+        rest = _positionals(rest[1:])
+    if rest and rest[0] != "-":
+        yield from _script_file(rest[0], st, blk)
+    else:
+        yield from _from_input(c, st, ctx, blk, prog, shell=False)
+
+
+def _wrapped(takes_value: Set[str], stop: Tuple[str, ...] = (), adds_input: bool = True):
+    """Handler for xargs, parallel and sudo: judge the command they run; xargs and parallel add words from their
+    input, so that command's text is also judged as opaque."""
+    def handler(t, c, st, ctx, blk):
         rest = _skip_options(t[1:], takes_value)
         for k, a in enumerate(rest):
             if a in stop:
                 rest = rest[:k]
                 break
-        if _prog(t[0]) in ("xargs", "parallel"):
-            core = _core(rest)
-            p = _prog(core[0]) if core else ""
-            if not core and _prog(t[0]) == "parallel":
-                yield blk(OPAQUE, "parallel with no command runs its input lines as commands, which cannot be checked",
-                          "run the commands directly")
-                return
-            if p in _SHELLS or p in _RUNS_TEXT or _INTERP.match(p):
-                yield blk(OPAQUE, f"{_prog(t[0])} runs {p} with words from its input, which cannot be checked",
-                          "run the command directly with every word spelled out")
-                return
-        if rest:
-            yield from _command(rest, " ".join(rest), st, ctx)
+        if not rest:
+            if _prog(t[0]) == "parallel":
+                yield from _opaque(st.raw, blk, "parallel runs its input lines as commands")
+            return
+        yield from _command(SimpleCommand(rest, " ".join(rest)), st, ctx)
+        if adds_input:  # the words come from its input: the whole command (here-documents too) is the text to judge
+            yield from _opaque(st.raw, blk, f"{_prog(t[0])} adds words from its input")
     return handler
 
 
-def _cmd_find(t, seg, st, ctx, blk, gitenv):
-    if st.moved and has_gh_git(_unshell(seg)):
-        yield _moved_write(st, blk, "gh/git through find")
-        return
+def _cmd_script(t, c, st, ctx, blk):
+    """script runs `-c <command>` (util-linux) or the command after its log file (BSD) in a pseudo-terminal."""
+    args = t[1:]
+    for k, a in enumerate(args):
+        name, eq, val = a.partition("=")
+        if a in ("-c", "--command") or (eq and name == "--command"):
+            yield from _body(val if eq else (args[k + 1] if k + 1 < len(args) else ""), st, ctx, blk, "script -c")
+            return
+    rest = _positionals(_skip_options(args, {"-t", "-T", "-B", "-I", "-O", "-E", "-m"}))
+    if len(rest) > 1:
+        yield from _command(SimpleCommand(rest[1:], " ".join(rest[1:])), st, ctx)
+
+
+def _cmd_find(t, c, st, ctx, blk):
     for k, a in enumerate(t):
         if a in _FIND_EXEC:
             sub: List[str] = []
@@ -2679,33 +1909,18 @@ def _cmd_find(t, seg, st, ctx, blk, gitenv):
                     break
                 sub.append(w)
             if sub:
-                yield from _command(sub, " ".join(sub), st, ctx)
+                yield from _command(SimpleCommand(sub, " ".join(sub)), st, ctx)
 
 
-def _cmd_export(t, seg, st, ctx, blk, gitenv):
-    for w in t[1:]:
-        if w.split("=", 1)[0] == OPERATOR_CONFIRM:
-            yield blk(SELF, f"{OPERATOR_CONFIRM} is the operator's own confirmation", "ask the operator to confirm")
-        if w.startswith("GIT_"):
-            yield blk(OPAQUE, f"{t[0]} {w} changes where git reads its repo or config", "do not set GIT_* variables")
-
-
-def _cmd_rm(t, seg, st, ctx, blk, gitenv):
+def _cmd_rm(t, c, st, ctx, blk):
     args = t[1:]
     flags = _short_flags(args)
     if not ("r" in flags or "R" in flags or "--recursive" in args):
         return
     root = _norm(ctx.root, "/") if ctx.root else None
     for target in _positionals(args):
-        if st.moved and not _path.isabs(target):  # unknown base: could it name the checkout or a directory above?
-            last = _PATH_SEP.split(target.rstrip("/\\"))[-1]
-            if root is not None and (last in ("", ".", "..") or last.startswith(("~", "$", "`"))
-                                     or fnmatch.fnmatch(_path.basename(root).lower(), last.lower())):
-                yield blk("destructive_git", f"rm -r on {target} in a command that changes directory may delete "
-                          "the checkout", "delete by absolute path, or run cd in a separate Bash call")
-            continue
         full = _norm(target, st.dir)
-        hits_root = root is not None and (_under(root, full) or (target in ("*", ".*") and st.dir == root))
+        hits_root = root is not None and (_under(root, full) or (target in ("*", ".*") and _norm(st.dir, "/") == root))
         if ".git" in [p.lower() for p in _PATH_SEP.split(target)] or hits_root:
             yield blk("destructive_git", f"rm -r on {target} would delete the checkout or its git data",
                       "delete specific files instead; ask the operator to remove a checkout")
@@ -2722,270 +1937,96 @@ class _GitCall:
     d: str
     sub: str
     args: List[str] = field(default_factory=list)
-    has_c: bool = False
 
 
-def _cmd_git(t, seg, st, ctx, blk, gitenv):
+def _cmd_git(t, c, st, ctx, blk, depth: int = 0):
     d = st.dir
-    c_values: List[str] = []
+    c_keys: List[str] = []
+    redirect: Optional[str] = None
     i = 1
     while i < len(t) and t[i].startswith("-"):
         a = t[i]
-        if a == "-C":
-            if i + 1 < len(t) and _unquoted_backslash(t[i + 1]):
-                yield blk(OPAQUE, f"git -C: {_backslash_why(t[i + 1])}", _BACKSLASH_HINT)
-                return
-            d = _norm(t[i + 1] if i + 1 < len(t) else ".", d)
+        name, eq, val = a.partition("=")
+        nxt = t[i + 1] if i + 1 < len(t) else ""
+        if a == "-C":  # as typed: with unquoted backslashes bash would hand git a path that does not exist
+            d = _norm(getattr(nxt, "raw", "") or nxt or ".", d)
             i += 2
         elif a == "-c":
-            c_values.append(t[i + 1] if i + 1 < len(t) else "")
+            c_keys.append(nxt.split("=", 1)[0])
             i += 2
-        elif a in _GIT_GLOBALS:
-            i += 1
+        elif name == "--config-env":
+            c_keys.append((val if eq else nxt).split("=", 1)[0])
+            i += 1 if eq else 2
+        elif name in ("--git-dir", "--work-tree"):
+            redirect = name
+            i += 1 if eq else 2
+        elif name in ("--namespace", "--super-prefix"):
+            i += 1 if eq else 2
         else:
-            yield blk(OPAQUE, f"git {a.split('=')[0]} cannot be checked", "use git -C <checkout> and no other "
-                                                                          "options before the subcommand")
-            return
+            i += 1
     sub, args = (t[i] if i < len(t) else ""), t[i + 1:]
-    known = sub in _GIT_READ_ONLY or sub in _GIT_LOCAL or sub in _GIT_RULES or sub in _GIT_LISTING
-    if not known:
-        yield blk(OPAQUE, f"git {sub} is not a subcommand the guard knows (an alias, extension or command that can "
-                          "run programs)", "use a plain git command the guard knows, or ask the operator")
+    if _unresolved(sub) or any(getattr(w, "brace", False) or getattr(w, "glob", False) for w in t[:i + 1]) or \
+            any(getattr(w, "brace", False) for w in args):
+        yield from _opaque(c.raw, blk, "the shell fills in part of this git command")
         return
-    bad_key = next((v for v in c_values if not _safe_git_key(v.split("=", 1)[0])), None)
-    if bad_key is not None:
-        yield blk(OPAQUE, f"git -c {_short(bad_key, 40)} can run programs or redirect git",
-                  "run git without -c, or only with keys such as user.name or color.ui")
+    key = next((k for k in c_keys if _PUSH_KEY.match(k.lower())), None)
+    if key is not None:
+        yield blk("other_repo", f"git -c {_short(key, 40)} can change where or what git pushes",
+                  "run git without it; ask the operator to change git config")
         return
-    env = _exec_env(st)
-    if env:
-        yield blk(OPAQUE, f"{env} makes git run another program or read another repo", "run git without it")
-        return
-    bad = _git_exec_option(sub, args)
-    if bad:
-        yield blk(OPAQUE, f"git {sub} {bad} runs a program or reaches past the guard",
-                  "run git without that option")
-        return
-    if _git_writes(sub, args):
-        if st.moved:
-            yield _moved_write(st, blk, f"git {sub}".strip())
-            return
-        if "GIT_" in st.plain_text:
-            yield blk(OPAQUE, "GIT_* variables in a command with a git write can change where git reads its repo "
-                              "or config", "run git without GIT_* variables")
-    elif sub in _GIT_READ_ONLY:
+    if sub and sub not in _GIT_BUILTINS:
+        alias = st.once(("alias", d, sub), lambda: ctx.git(["config", "--get", f"alias.{sub}"], d))
+        if alias:
+            yield from _git_alias(alias, sub, args, t[:i], c, st, ctx, blk, depth)
+        return  # an external git-<name> program is outside the guard's view
+    redirect = redirect or st.once(("git-env",), lambda: (lambda m: _short(m.group(0), 40) if m else None)(
+        _GIT_ENV.search(st.plain_text)))
+    if redirect and sub in _GIT_RULES and sub not in ("checkout", "switch"):
+        yield blk("other_repo", f"{redirect} changes which repository or config git uses",
+                  "run git without it, in the checkout it should change")
         return
     handler = _GIT_RULES.get(sub)
     if handler is not None:
-        yield from handler(_GitCall(ctx, st, blk, d, sub, args, bool(c_values)))
+        yield from handler(_GitCall(ctx, st, blk, d, sub, args))
 
 
-def _safe_git_key(key: str) -> bool:
-    key = key.lower()
-    return key in _GIT_SAFE_KEYS or key.startswith(_GIT_SAFE_KEY_PREFIXES)
+def _git_alias(alias: str, sub: str, args: List[str], prefix: List[str], c: SimpleCommand, st: _State,
+               ctx: GuardContext, blk: Blk, depth: int) -> Iterator[Block]:
+    """A git alias: a plain one is judged as the git command it stands for; a shell alias (!...) or one nested too
+    deep is opaque text."""
+    what = f"git {sub} is an alias"
+    if alias.startswith("!") or depth >= MAX_BODY_DEPTH:
+        yield from _opaque(alias + " " + " ".join(args), blk, what)
+        return
+    try:
+        parsed = lex(alias)
+    except Unparsed:
+        parsed = None
+    if parsed is None or len(parsed.commands) != 1 or parsed.subs:
+        yield from _opaque(alias + " " + " ".join(args), blk, what)
+        return
+    words = list(prefix) + list(parsed.commands[0].words) + list(args)
+    yield from _cmd_git(words, c, st, ctx, blk, depth + 1)
 
 
-def _exec_env(st: _State) -> Optional[str]:
-    """How the command sets a variable that can make git or gh run another program or read other config
-    (assignment, export, read, printf -v, mapfile, declare, local, unset, a computed name), or None."""
-    return st.once(("exec-env",), lambda: _env_setting(st.commands, st.text, st, 0))
+def _branch(ctx: GuardContext, st: _State, d: str) -> Optional[str]:
+    if d in st.switched:
+        return st.switched[d]
 
-
-def _env_setting(commands: List[SimpleCommand], text: str, st: _State, depth: int) -> Optional[str]:
-    """_exec_env over these commands and their source text; eval bodies and sourced files are read the same way."""
-    if depth > MAX_BODY_DEPTH:
-        return f"eval or source nested more than {MAX_BODY_DEPTH} deep"
-    m = _ENV_DEFAULT.search(text) or _ENV_ARITH.search(text)
-    if m:
-        return _short(m.group(0), 40)
-    for c in commands:
-        found = _env_words(c.words, st, depth)
+    def read() -> Optional[str]:
+        try:
+            found = find_checkout(d)
+        except _Ambiguous:
+            found = None
         if found:
-            return found
-    return None
+            return head_branch(found[1])
+        b = ctx.git(["branch", "--show-current"], d)
+        return None if b in (None, "HEAD") else b
+    return st.once(("branch", d), read)
 
 
-def _env_words(words: List[str], st: _State, depth: int) -> Optional[str]:
-    for w in words:
-        m = _ENV_ASSIGN.match(w)
-        if m and not (m.group(1) in _SAFE_GIT_ENV or m.group(2) in _SAFE_EXEC_ENV.get(m.group(1), ())):
-            return f"{m.group(1)}={_short(m.group(2), 30)}"
-    core = _core(words)
-    name, args = (_prog(core[0]), core[1:]) if core else ("", [])
-    found = _allexport(name, args)
-    if found:
-        return found
-    if name in ("declare", "typeset", "local") and any(
-            a.startswith("-") and not a.startswith("--") and "n" in a[1:] for a in args):
-        return f"{name} -n (a reference can set any variable)"
-    if name == "eval":
-        body = " ".join(args)
-        try:
-            parsed = lex(body)
-        except Unparsed:
-            return "eval with text the guard cannot read"
-        for c in parsed.commands:
-            for w in c.words:
-                left = w.split("=", 1)[0]
-                if "=" in w and ("$" in left or "`" in left):
-                    return "eval with a computed name"
-        return _env_setting(parsed.commands, parsed.code, st, depth + 1)
-    if name in ("source", "."):
-        path = next((a for a in args if a != "--"), None)
-        if path is None:
-            return f"{name} of standard input"
-        if st.moved and not _path.isabs(path):
-            return f"{name} {path} in a command that changes directory"
-        if _unquoted_backslash(path):
-            return f"{name} {_short(getattr(path, 'raw', path), 60)}, whose unquoted backslashes bash drops"
-        text = _read_script(_norm(path, st.dir), st)
-        if text is None:
-            return f"{name} {path}, which cannot be read"
-        try:
-            parsed = lex(text)
-        except Unparsed:
-            return f"{name} {path}, which cannot be read with confidence"
-        return _env_setting(parsed.commands, parsed.code, st, depth + 1)
-    setters = [_prog(w) for w in words if _prog(w) in _ENV_SETTERS]
-    if not setters:
-        return None
-    for w in words:
-        if _ENV_WORD.fullmatch(w):
-            return f"{setters[0]} {w}"
-    if "printf" in setters and any(w.startswith("-v") for w in words):
-        return "printf -v"
-    if set(setters) - {"printf", "for", "select", "env"} and any(
-            ("$" in w.split("=", 1)[0] or "`" in w.split("=", 1)[0]) for w in words if not w.startswith("-")):
-        return f"{setters[0]} with a computed name"
-    return None
-
-
-_EXPORT_OPTS = {"allexport", "keyword"}  # set -o names that export every assignment (or take them from arguments)
-
-
-def _allexport(name: str, args: List[str]) -> Optional[str]:
-    """`set -a`, `set -k`, `set -o allexport`, `setopt allexport`: later assignments reach git and gh."""
-    if name == "set":
-        for k, a in enumerate(args):
-            if not a.startswith("-") or a.startswith("--"):
-                continue
-            if set(a[1:]) & {"a", "k"}:
-                return f"set {a}"
-            nxt = args[k + 1].lower() if k + 1 < len(args) else ""
-            if "o" in a[1:] and nxt in _EXPORT_OPTS:
-                return f"set -o {nxt}"
-    if name in ("setopt", "unsetopt"):  # zsh: setopt all_export, unsetopt no_all_export
-        prefix = "" if name == "setopt" else "no"
-        for a in args:
-            if a.lower().replace("_", "") in {prefix + o for o in _EXPORT_OPTS}:
-                return f"{name} {a}"
-    return None
-
-
-def _git_exec_option(sub: str, args: List[str]) -> Optional[str]:
-    """The first option that lets this git call run a program or escape the read allow-list, or None."""
-    if sub in _GIT_READ_ONLY:
-        for a in args:
-            if a == "--":
-                break
-            if sub == "ls-remote" and not a.startswith("--") and "u" in a:
-                return a  # ls-remote -u is --upload-pack
-            if not a.startswith("-") or a == "-" or a in _GIT_READ_OPTS:
-                continue
-            if a.startswith("--"):
-                if "=" in a and a.split("=", 1)[0] in _GIT_READ_VALUE_OPTS:
-                    continue
-                return a
-            if _git_short_ok(sub, a):
-                continue
-            return a
-        return None
-    exact = _GIT_WRITE_LONG.get(sub)
-    for a in args:
-        if a == "--":
-            break
-        name = a.split("=", 1)[0]
-        if exact is not None and a.startswith("--") and name not in exact:
-            return a  # git accepts any unambiguous prefix of a long option: only exact known names pass
-        abbrev = a.startswith("--") and len(name) > 2
-        for opt in _GIT_EXEC_OPTS.get(sub, ()):
-            long_hit = opt.startswith("--") and abbrev and opt.startswith(name)
-            short_hit = not opt.startswith("--") and a.startswith("-") and not a.startswith("--") and opt[1] in a
-            if long_hit or short_hit:
-                return a
-        strategy = None
-        if abbrev and "--strategy".startswith(name) and "=" in a:
-            strategy = a.split("=", 1)[1]
-        elif (abbrev and "--strategy".startswith(name)) or (a == "-s" and sub in ("merge", "pull", "rebase")):
-            nxt = args[args.index(a) + 1:args.index(a) + 2]
-            strategy = nxt[0] if nxt else ""
-        elif a.startswith("-s") and len(a) > 2 and not a.startswith("--") and sub in ("merge", "pull", "rebase"):
-            strategy = a[2:]
-        if strategy is not None and strategy not in _MERGE_STRATEGIES:
-            return a
-    return None
-
-
-_PICKAXE_SUBS = {"log", "diff", "show", "whatchanged", "diff-tree", "diff-files", "diff-index", "blame", "annotate"}
-
-
-def _git_short_ok(sub: str, a: str) -> bool:
-    """A short option on a read: a count (-5, -n5, -U3), a pickaxe or range value where it takes one (-Sfoo,
-    -L1,9:f), or a cluster of letters that are each safe (so -nO'cmd' fails on the O)."""
-    body = a[1:]
-    if re.fullmatch(r"\d+|[nUABCMm]\d+%?", body):
-        return True
-    if sub in _PICKAXE_SUBS and re.fullmatch(r"[SGL].+", body, re.S):
-        return True
-    return set(body) <= _GIT_SAFE_SHORT
-
-
-def _git_writes(sub: str, args: List[str]) -> bool:
-    """True unless this git subcommand only reads (a listing form such as `git branch -a` counts as a read)."""
-    if sub in _GIT_READ_ONLY:
-        return False
-    if sub == "remote":
-        return not _remote_lists(args)
-    if sub == "config":
-        return not _config_reads(args)
-    if sub not in _GIT_LISTING:
-        return True
-    words, every = _GIT_LISTING[sub]
-    if every:
-        return not all(a in words for a in args)
-    return (args[0] if args else "") not in words
-
-
-def _remote_lists(args: List[str]) -> bool:
-    """git remote [-v], git remote get-url [--push|--all] <name>, git remote show [-n] <name>."""
-    rest = [a for a in args if a not in ("-v", "--verbose")]
-    if not rest:
-        return True
-    verb, more = rest[0], rest[1:]
-    opts = {"get-url": {"--push", "--all"}, "show": {"-n"}}.get(verb)
-    if opts is None:
-        return False
-    names = [a for a in more if not a.startswith("-")]
-    return all(a in opts for a in more if a.startswith("-")) and (len(names) == 1 or verb == "show")
-
-
-_CONFIG_READ_OPTS = {"--get", "--get-all", "--get-regexp", "--list", "-l", "--show-origin", "--show-scope", "--global",
-                     "--local", "--system", "--worktree", "-z", "--null", "--name-only", "--includes",
-                     "--no-includes", "--bool", "--int", "--path"}
-
-
-def _config_reads(args: List[str]) -> bool:
-    """git config --get k, --get-all k, --get-regexp re, --list, `get k`, `list`, or a bare key."""
-    opts = [a for a in args if a.startswith("-")]
-    pos = [a for a in args if not a.startswith("-")]
-    if not all(a in _CONFIG_READ_OPTS or a.startswith(("--type=", "--default=")) for a in opts):
-        return False
-    if {"--list", "-l"} & set(opts) or pos[:1] == ["list"]:
-        return len(pos) <= (1 if pos[:1] == ["list"] else 0)
-    if pos[:1] == ["get"]:
-        pos = pos[1:]
-    limit = 2 if "--get-regexp" in opts else 1
-    return 1 <= len(pos) <= limit
+def _git_config(ctx: GuardContext, st: _State, d: str, key: str) -> Optional[str]:
+    return st.once(("config", d, key), lambda: ctx.git(["config", "--get", key], d))
 
 
 def _git_switch(c: _GitCall) -> Iterator[Block]:
@@ -3030,40 +2071,78 @@ def _git_remote(c: _GitCall) -> Iterator[Block]:
         yield c.blk("other_repo", f"git remote {c.args[0]} can redirect pushes", "ask the operator to change remotes")
 
 
+_CONFIG_READ_OPTS = {"--get", "--get-all", "--get-regexp", "--list", "-l", "--show-origin", "--show-scope", "--global",
+                     "--local", "--system", "--worktree", "-z", "--null", "--name-only", "--includes",
+                     "--no-includes", "--bool", "--int", "--path"}
+
+
+def _config_reads(args: List[str]) -> bool:
+    """git config --get k, --get-all k, --get-regexp re, --list, `get k`, `list`, or a bare key."""
+    opts = [a for a in args if a.startswith("-")]
+    pos = [a for a in args if not a.startswith("-")]
+    if not all(a in _CONFIG_READ_OPTS or a.startswith(("--type=", "--default=")) for a in opts):
+        return False
+    if {"--list", "-l"} & set(opts) or pos[:1] == ["list"]:
+        return len(pos) <= (1 if pos[:1] == ["list"] else 0)
+    if pos[:1] == ["get"]:
+        pos = pos[1:]
+    limit = 2 if "--get-regexp" in opts else 1
+    return 1 <= len(pos) <= limit
+
+
 def _git_config_cmd(c: _GitCall) -> Iterator[Block]:
-    """Reads pass; a write may only set or unset a key from the safe list, in the repo or global file."""
+    """Reads pass; a write may not set a key that changes where or what git pushes, or open the whole file."""
     if _config_reads(c.args):
         return
     opts = [a for a in c.args if a.startswith("-")]
     pos = [a for a in c.args if not a.startswith("-")]
-    if pos[:1] in (["set"], ["unset"]):
+    if pos[:1] in (["set"], ["unset"], ["rename-section"], ["remove-section"], ["edit"]):
+        opts.append("--" + pos[0])
         pos = pos[1:]
-    ok_opts = all(a in ("--global", "--local", "--add", "--unset", "--unset-all", "--replace-all", "--bool",
-                        "--int", "--path") or a.startswith("--type=") for a in opts)
-    if not (ok_opts and pos and _safe_git_key(pos[0])):
-        what = pos[0] if pos else " ".join(c.args)
-        yield c.blk("other_repo", f"git config {_short(what, 40)} can run programs or redirect pushes",
+    whole = {"-e", "--edit", "--rename-section", "--remove-section", "-f", "--file", "--blob"} & set(opts)
+    if whole or (pos and _PUSH_KEY.match(pos[0].lower())):
+        what = sorted(whole)[0] if whole else pos[0]
+        yield c.blk("other_repo", f"git config {_short(what, 40)} can change where or what git pushes",
                     "ask the operator to change git config")
 
 
+_SEQUENCER = ("--abort", "--quit", "--continue", "--skip")
+
+
 def _git_move(c: _GitCall) -> Iterator[Block]:
-    """merge, rebase and reset while on a protected branch."""
-    if any(a in ("--abort", "--quit") for a in c.args):
+    """merge, rebase, cherry-pick and am while on a protected branch; the commands rebase --exec runs."""
+    if c.sub == "rebase":
+        for k, a in enumerate(c.args):
+            name, eq, val = a.partition("=")
+            if a == "-x" or (not eq and _long(name, "--exec")):
+                body = c.args[k + 1] if k + 1 < len(c.args) else ""
+            elif a.startswith("-x") or (eq and _long(name, "--exec")):
+                body = val if eq else a[2:]
+            else:
+                continue
+            yield from _body(body, c.st, c.ctx, c.blk, "git rebase --exec")
+    if any(a in _SEQUENCER for a in c.args):
         return
     b = _branch(c.ctx, c.st, c.d)
-    if b not in c.ctx.protected_branches:
-        return
-    if c.sub != "reset":
+    if b in c.ctx.protected_branches:
         yield c.blk("protected_branches", f"git {c.sub} on the protected branch {b}",
                     "switch to a feature branch first; merging into it is a human action")
+
+
+def _git_submodule(c: _GitCall) -> Iterator[Block]:
+    """git submodule foreach runs a shell command in every submodule."""
+    if "foreach" in c.args:
+        rest = c.args[c.args.index("foreach") + 1:]
+        yield from _body(" ".join(a for a in rest if a != "--recursive"), c.st, c.ctx, c.blk, "git submodule foreach")
+
+
+def _git_reset(c: _GitCall) -> Iterator[Block]:
+    if not any(_long(a, "--hard") or a == "--hard" for a in c.args):
         return
-    if "--hard" in c.args:
-        yield c.blk("destructive_git", f"git reset --hard on the protected branch {b} discards work",
-                    "ask the operator to reset protected branches by hand")
-    modes = {"--hard", "--soft", "--mixed", "--keep", "--merge"} & set(c.args)
-    pos = [a for a in c.args if not a.startswith("-")]
-    if modes or (pos and "--" not in c.args):
-        yield c.blk("protected_branches", f"git reset on the protected branch {b}", "switch to a feature branch first")
+    b = _branch(c.ctx, c.st, c.d)
+    if b in c.ctx.protected_branches:
+        yield c.blk("protected_branches", f"git reset --hard on the protected branch {b} discards work",
+                    "switch to a feature branch first; ask the operator to reset protected branches")
 
 
 def _git_branch(c: _GitCall) -> Iterator[Block]:
@@ -3081,23 +2160,6 @@ def _git_clean(c: _GitCall) -> Iterator[Block]:
     if "f" in flags and ("x" in flags or "X" in flags):
         yield c.blk("destructive_git", "git clean -x deletes ignored files such as local config and caches",
                     "use git clean -fd, or delete specific files")
-
-
-def _git_rewrite(c: _GitCall) -> Iterator[Block]:
-    yield c.blk("destructive_git", f"git {c.sub} rewrites history", "ask the operator to rewrite history by hand")
-
-
-def _git_update_ref(c: _GitCall) -> Iterator[Block]:
-    if "-d" in c.args or "--delete" in c.args:
-        yield c.blk("destructive_git", "git update-ref -d deletes a ref", "ask the operator to delete refs by hand")
-
-
-_PUSH_LONG = {"--set-upstream", "--force", "--force-with-lease", "--no-force-with-lease", "--force-if-includes",
-              "--no-force-if-includes", "--delete", "--mirror", "--all", "--branches", "--tags", "--follow-tags",
-              "--no-follow-tags", "--verify", "--no-verify", "--dry-run", "--porcelain", "--quiet", "--verbose",
-              "--progress", "--no-progress", "--atomic", "--no-atomic", "--signed", "--no-signed", "--prune",
-              "--thin", "--no-thin", "--ipv4", "--ipv6", "--repo", "--push-option", "--receive-pack", "--exec",
-              "--recurse-submodules", "--no-recurse-submodules"}
 
 
 def _push_default_target(c: _GitCall, current: Optional[str], remote: Optional[str]) -> Iterator[Block]:
@@ -3137,42 +2199,51 @@ def _push_default_target(c: _GitCall, current: Optional[str], remote: Optional[s
                   "name the branch: git push origin <branch>")
 
 
+def _long(name: str, *options: str) -> bool:
+    """name is one of options or an abbreviation git would accept for one (git takes any unambiguous prefix)."""
+    return len(name) > 3 and any(o.startswith(name) for o in options)
+
+
 def _git_push(c: _GitCall) -> Iterator[Block]:
     ctx, st, blk, d = c.ctx, c.st, c.blk, c.d
-    force = delete = mirror = all_ = False
+    force = delete = mirror = all_ = recurse = False
     positional: List[str] = []
     repo_opt: Optional[str] = None
-    for a in c.args:
-        name = a.split("=", 1)[0]
-        if a.startswith("--") and name not in _PUSH_LONG:  # also git's abbreviations, such as --rec or --for
-            yield blk("other_repo", f"git push {name}: option not known to the guard", "spell out a plain option")
-            return
-        if a.startswith("--repo="):
-            repo_opt = a[len("--repo="):]
-        elif a in ("-o", "--push-option", "--receive-pack", "--exec", "--repo") or \
-                a.startswith(("--receive-pack=", "--exec=", "--push-option=")):
-            yield blk("other_repo", f"git push {a.split('=')[0]}: option not supported by the guard",
-                      "push without that option")
-            return
-        elif name == "--recurse-submodules" and a.split("=", 1)[-1] not in ("no", "check"):
-            yield blk("other_repo", "git push --recurse-submodules also pushes submodule repos",
-                      "push without it")
-            return
-        elif a.startswith("--force"):
-            force = True
-        elif a == "--delete":
-            delete = True
-        elif a == "--mirror":
-            mirror = True
-        elif a in ("--all", "--branches"):
-            all_ = True
-        elif a.startswith("--"):
+    args = list(c.args)
+    k = 0
+    while k < len(args):
+        a = args[k]
+        k += 1
+        name, eq, val = a.partition("=")
+        if a == "--":
+            positional += args[k:]
+            break
+        if a.startswith("--no-"):
             continue
-        elif a.startswith("-") and len(a) > 1:
+        if a.startswith("--"):
+            if _long(name, "--force", "--force-with-lease", "--force-if-includes"):
+                force = True
+            elif _long(name, "--delete"):
+                delete = True
+            elif _long(name, "--mirror"):
+                mirror = True
+            elif _long(name, "--all", "--branches"):
+                all_ = True
+            elif _long(name, "--recurse-submodules") and (val if eq else "on-demand") not in ("no", "check"):
+                recurse = True
+            elif _long(name, "--repo"):
+                repo_opt = val if eq else (args[k] if k < len(args) else "")
+                k += 0 if eq else 1
+            elif not eq and _long(name, "--push-option", "--receive-pack", "--exec"):
+                k += 1  # the value
+            continue
+        if a.startswith("-") and len(a) > 1:
             force = force or "f" in a[1:]
             delete = delete or "d" in a[1:]
-        else:
-            positional.append(a)
+            if a == "-o":
+                k += 1
+            continue
+        positional.append(a)
     remote = repo_opt if repo_opt is not None else (positional[0] if positional else None)
     refspecs = positional if repo_opt is not None else positional[1:]
 
@@ -3182,15 +2253,19 @@ def _git_push(c: _GitCall) -> Iterator[Block]:
     if delete or any(r.startswith(":") for r in refspecs):
         yield blk("force_push", "this push deletes a remote branch", "leave remote branches for a person to delete")
     if mirror:
-        yield blk("destructive_git", "git push --mirror overwrites every remote ref", "push one feature branch")
+        yield blk("protected_branches", "git push --mirror overwrites every remote ref, protected branches too",
+                  "push one feature branch")
     if all_ and ctx.protected_branches:
         yield blk("protected_branches", "git push --all would push protected branches", "push one feature branch")
-    recurse = (_git_config(ctx, st, d, "push.recurseSubmodules") or "").strip().lower()
-    if recurse not in ("", "no", "check", "false"):
-        yield blk("other_repo", f"push.recurseSubmodules={recurse} also pushes submodule repos",
-                  "ask the operator to unset push.recurseSubmodules")
+    if recurse or (_git_config(ctx, st, d, "push.recurseSubmodules") or "").strip().lower() not in (
+            "", "no", "check", "false"):
+        yield blk("other_repo", "this push also pushes submodule repos", "push without recursing into submodules")
     current = _branch(ctx, st, d)
     for r in refspecs or [""]:
+        if _unresolved(r):
+            yield blk("protected_branches", f"the shell fills in the refspec {_short(r, 40)}, so the branch it "
+                                            "pushes to cannot be checked", "name the branch: git push origin <branch>")
+            break
         s = r.lstrip("+")
         dst = s.split(":", 1)[1] if ":" in s else s
         dst = (current or "") if dst in ("", "HEAD", "@") else dst
@@ -3202,9 +2277,6 @@ def _git_push(c: _GitCall) -> Iterator[Block]:
     if not refspecs and not (mirror or all_):
         yield from _push_default_target(c, current, remote)
 
-    if c.has_c:
-        yield blk("other_repo", "git -c with push can rewrite the push URL", "push without -c")
-        return
     if remote is not None:
         url_repo = parse_origin(remote)
         if url_repo:
@@ -3236,73 +2308,48 @@ def _git_push(c: _GitCall) -> Iterator[Block]:
 _GIT_RULES: Dict[str, Callable[[_GitCall], Iterator[Block]]] = {
     "checkout": _git_switch, "switch": _git_switch, "send-pack": _git_send_pack, "subtree": _git_subtree,
     "push": _git_push, "commit": _git_commit, "remote": _git_remote, "config": _git_config_cmd,
-    "merge": _git_move, "rebase": _git_move, "reset": _git_move, "branch": _git_branch, "clean": _git_clean,
-    "filter-branch": _git_rewrite, "filter-repo": _git_rewrite, "update-ref": _git_update_ref,
+    "merge": _git_move, "rebase": _git_move, "cherry-pick": _git_move, "am": _git_move, "reset": _git_reset,
+    "branch": _git_branch, "clean": _git_clean, "submodule": _git_submodule,
 }
 
 # --- gh --------------------------------------------------------------------
 
 
-def _cmd_gh(t, seg, st, ctx, blk, gitenv):
+def _cmd_gh(t, c, st, ctx, blk):
+    t = list(t)
+    lead: List[str] = []  # -R/--repo before the subcommand applies to it
+    while len(t) > 1 and (t[1] in ("-R", "--repo") or t[1].startswith("--repo=") or
+                          (t[1].startswith("-R") and len(t[1]) > 2)):
+        n = 2 if t[1] in ("-R", "--repo") else 1
+        lead += t[1:1 + n]
+        t = [t[0]] + t[1 + n:]
+    if lead:
+        t = t[:3] + lead + t[3:]
     group = t[1] if len(t) > 1 else ""
-    env = _exec_env(st)
-    if env:
-        yield blk(OPAQUE, f"{env} makes gh run another program", "run gh without it")
+    if any(_unresolved(w) or getattr(w, "brace", False) or getattr(w, "glob", False) for w in t[1:3]) or \
+            any(getattr(w, "brace", False) for w in t):
+        yield from _opaque(c.raw, blk, "the shell fills in part of this gh command")
         return
-    if group in ("--version", "--help", "-h", "") or group in _GH_READ_GROUPS:
+    if group in ("", "--version", "--help", "-h") or group.startswith("-") or group in _GH_READ_GROUPS:
         return
-    if group.startswith("-"):
-        yield blk("other_repo", f"gh {group}: flags before the subcommand cannot be checked",
-                  "put flags after the subcommand, e.g. gh pr create --repo owner/name")
-        return
-    handler = _GH_RULES.get(group)
-    if handler is not None:
-        yield from handler(t, seg, st, ctx, blk)
+    if group == "api":
+        yield from _gh_api(t, c.raw, st, ctx, blk)
     elif group in _GH_GROUPS:
-        yield from _gh_write(t, seg, st, ctx, blk)
-    else:
-        yield blk("other_repo", f"gh {group}: unknown command (a gh alias or extension cannot be checked)",
-                  "use a built-in gh command")
+        yield from _gh_write(t, ctx, blk)
 
 
-def _gh_auth(t, seg, st, ctx, blk):
-    verb = t[2] if len(t) > 2 else ""
-    if verb != "status":
-        yield blk("other_repo", f"gh auth {verb} changes or exposes credentials", "ask the operator to manage gh auth")
-
-
-def _gh_alias(t, seg, st, ctx, blk):
-    verb = t[2] if len(t) > 2 else ""
-    if verb not in ("list", "ls", ""):
-        yield blk("other_repo", f"gh {t[1]} {verb} can hide commands from the guard",
-                  "ask the operator to manage gh aliases and extensions")
-
-
-def _gh_gist(t, seg, st, ctx, blk):
-    verb = t[2] if len(t) > 2 else ""
-    if verb not in ("view", "list", "clone", ""):
-        yield blk("other_repo", f"gh gist {verb} publishes outside the repo",
-                  "put the content in an issue or PR comment on an allowed repo")
-
-
-def _gh_write(t: List[str], seg: str, st: _State, ctx: GuardContext, blk: Blk) -> Iterator[Block]:
+def _gh_write(t: List[str], ctx: GuardContext, blk: Blk) -> Iterator[Block]:
     group, verb = t[1], (t[2] if len(t) > 2 else "")
     what = f"gh {group} {verb}".strip()
     if group in _GH_DESTRUCTIVE and (_GH_DESTRUCTIVE[group] is None or verb in _GH_DESTRUCTIVE[group]):
         yield blk("destructive_git", f"{what} changes settings, secrets or deletes data; that is a human action",
                   "ask the operator to do this by hand")
-    if group == "pr" and verb == "merge":
-        if "--admin" in t:
-            yield blk("force_push", "gh pr merge --admin bypasses branch protection", "leave merging to a person")
-        merge = blk("protected_branches", "merging a pull request is a human action",
-                    f"leave the PR ready for review; a person merges it, or grants this one merge by sending "
-                    f"{merge_grant.COMMAND} owner/name#N")
-        merge.grantable = True
-        yield merge
+    if group == "pr" and verb in ("merge", "close") and any(
+            a == "--delete-branch" or (a.startswith("--delete-branch=") and a.split("=", 1)[1].lower() != "false")
+            or (a.startswith("-") and not a.startswith("--") and "d" in a[1:]) for a in t[3:]):
+        yield blk("force_push", f"{what} --delete-branch deletes the remote branch, a protected one too",
+                  f"run {what} without --delete-branch; a person deletes branches by hand")
     if verb in _GH_READ_VERBS:
-        return
-    if st.moved:
-        yield _moved_write(st, blk, what)
         return
     n_repo = 0
     targets: List[str] = []
@@ -3342,7 +2389,7 @@ def _gh_write(t: List[str], seg: str, st: _State, ctx: GuardContext, blk: Blk) -
                               f"pass --repo {ctx.origin_repo or 'owner/name'}")
 
 
-def _gh_api(t, seg, st, ctx, blk):
+def _gh_api(t: List[str], seg: str, st: _State, ctx: GuardContext, blk: Blk) -> Iterator[Block]:
     values: Dict[str, List[str]] = {"method": [], "field": [], "input": []}
     endpoint: Optional[str] = None
     i = 2
@@ -3375,14 +2422,12 @@ def _gh_api(t, seg, st, ctx, blk):
     ep = (endpoint or "").lstrip("/")
     if ep == "graphql":
         queries = [f.split("=", 1)[1] for f in fields if f.split("=", 1)[0] == "query" and "=" in f]
-        if inputs or len(queries) != 1 or any(c in queries[0] for c in "$`") or queries[0].startswith("@"):
+        if inputs or len(queries) != 1 or _unresolved(queries[0]) or queries[0].startswith("@"):
             yield blk("other_repo", "gh api graphql without one literal query cannot be checked",
                       "pass the query inline with -f query='...'")
             return
         atfile = any("@" in f for f in fields)
-        if (mutation or atfile or inputs) and st.moved:
-            yield _moved_write(st, blk, "gh api graphql")
-        elif (mutation or atfile or inputs) and BOARD_MARKER not in seg:
+        if (mutation or atfile or inputs) and BOARD_MARKER not in seg:
             why = "a mutation" if mutation else ("an @file field" if atfile else "--input")
             yield blk("other_repo", f"gh api graphql with {why} cannot be checked",
                       "use gh pr/issue commands with --repo, or the REST API under repos/owner/name")
@@ -3390,21 +2435,16 @@ def _gh_api(t, seg, st, ctx, blk):
     method = (values["method"][-1] if values["method"] else ("POST" if fields or inputs else "GET")).upper()
     if method in ("GET", "HEAD"):
         return
-    if st.moved:
-        yield _moved_write(st, blk, f"gh api {method}")
-        return
     if ".." in ep or "//" in ep or "\\" in ep or re.search(r"%(?:2e|2f|5c)", ep, re.I):
         yield blk("other_repo", f"gh api {method} {_short(ep, 60)}: dot segments or encoded separators can reach "
                                 "another repo", "spell out repos/owner/name/... plainly")
         return
     m = _REPO_PATH.match(ep)
     repo_root = bool(m) and not ep[m.end():].strip("/")
-    if method == "DELETE" or (repo_root and method == "PATCH") or _PROTECTION.search(ep) or _SECRETS.search(ep):
+    if method == "DELETE" or (repo_root and method == "PATCH") or _PROTECTION.search(ep) or _SECRETS.search(ep) \
+            or _RULESETS.search(ep):
         yield blk("destructive_git", f"gh api {method} {ep}: settings, secrets and deletion are human actions",
                   "ask the operator to do this by hand")
-    if m and _PULL_MERGE.search(ep):
-        yield blk("protected_branches", "merging a pull request is a human action",
-                  "leave the PR ready for review; a person merges it")
     if not m:
         yield _unknown_target(blk, f"gh api {method} {ep or '(no endpoint)'}",
                               "use an endpoint under repos/owner/name for an allowed repo")
@@ -3417,370 +2457,13 @@ def _gh_api(t, seg, st, ctx, blk):
     yield from _check_target(ctx, repo, blk)
 
 
-# --- programs that run commands from their program text ----------------------
-#
-# awk, sed, vim, tar and less can run a shell command named in their arguments. Each extractor returns what
-# their program text says: the texts it read, the plain literal commands it runs, and a reason when it runs
-# something that is not a plain literal (a computed string, the pattern space, a file the guard cannot read).
-
-@dataclass
-class _Exec:
-    texts: List[str] = field(default_factory=list)  # program text, for the mention check
-    runs: List[str] = field(default_factory=list)  # plain literal shell commands it runs
-    opaque: Optional[str] = None  # why what it runs cannot be checked
-    can_exec: bool = False  # the text can run a program at all
-
-
-_AWK_STR = re.compile(r'"(?:[^"\\\n]|\\.)*"')
-_AWK_REGEX = re.compile(r"((?:^|[(,{;~!&|\n])\s*)/(?:[^/\\\n]|\\.)+/")  # a /regex/ where an operand starts
-_AWK_SYSTEM = re.compile(r"\bsystem\s*\(")
-_AWK_SYSTEM_LIT = re.compile(r"\bsystem\s*\(\s*\x00(\d+)\x00\s*\)")
-_AWK_PIPE = re.compile(r"(?<!\|)\|&?(?!\|)")
-_AWK_OTHER_EXEC = re.compile(r"\bclose\s*\(|@load\b")
-_AWK_VALUE = {"-v", "--assign", "-F", "--field-separator", "-W"}
-
-
-def _awk_exec(args: List[str], st: _State) -> _Exec:
-    out = _Exec()
-    programs: List[str] = []
-    files: List[str] = []
-    explicit = False
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a == "--":
-            i += 1
-            break
-        if not a.startswith("-") or a == "-":
-            break
-        name, eq, val = a.partition("=")
-        nxt = args[i + 1] if i + 1 < len(args) else ""
-        if name in ("-l", "--load") or (a.startswith("-l") and not a.startswith("--")):
-            out.opaque, out.can_exec = "loads an extension", True
-            return out
-        if name in ("-f", "--file", "-E", "--exec", "-i", "--include") or (
-                a[:2] in ("-f", "-E", "-i") and not a.startswith("--") and len(a) > 2):
-            files.append(val if eq else (a[2:] if not a.startswith("--") and len(a) > 2 else nxt))
-            explicit = explicit or name not in ("-i", "--include")
-            i += 1 if (eq or (not a.startswith("--") and len(a) > 2)) else 2
-            continue
-        if name in ("-e", "--source"):
-            programs.append(val if eq else nxt)
-            explicit = True
-            i += 1 if eq else 2
-            continue
-        if a == "-W" and nxt.lower().startswith("e"):  # mawk -W exec file
-            out.opaque, out.can_exec = "reads its program from a file", True
-            return out
-        i += 2 if a in _AWK_VALUE else 1
-    if not explicit and i < len(args):
-        programs.append(args[i])
-    for f in files:
-        if st.moved and not _path.isabs(f):
-            out.opaque, out.can_exec = f"reads its program from {f} in a command that changes directory", True
-            return out
-        text = _read_script(_norm(f, st.dir), st)
-        if text is None:
-            out.opaque, out.can_exec = f"reads its program from {f}, which cannot be read", True
-            return out
-        programs.append(text)
-    out.texts = programs
-    for prog in programs:
-        strings: List[str] = []
-
-        def keep(m: "re.Match[str]") -> str:
-            strings.append(m.group(0)[1:-1])
-            return f"\x00{len(strings) - 1}\x00"
-        masked = _AWK_REGEX.sub(r"\1R", _AWK_STR.sub(keep, prog))
-        if _AWK_OTHER_EXEC.search(masked):
-            out.can_exec = True
-        literal = {m.start() for m in _AWK_SYSTEM_LIT.finditer(masked)}
-        for m in _AWK_SYSTEM.finditer(masked):
-            out.can_exec = True
-            lit = _AWK_SYSTEM_LIT.match(masked, m.start())
-            if m.start() not in literal or lit is None:
-                out.opaque = out.opaque or "system() with a computed command"
-            else:
-                out.runs.append(strings[int(lit.group(1))])
-        for m in _AWK_PIPE.finditer(masked):
-            out.can_exec = True
-            after, before = masked[m.end():], masked[:m.start()]
-            if re.match(r"\s*getline\b", after):
-                lit = re.search(r"\x00(\d+)\x00\s*$", before)
-            else:
-                lit = re.match(r"\s*\x00(\d+)\x00\s*(?:[;}\n)]|$)", after)
-            if lit is None:
-                out.opaque = out.opaque or "a | pipe to a computed command"
-            else:
-                out.runs.append(strings[int(lit.group(1))])
-    if any("\\" in r for r in out.runs):
-        out.opaque = out.opaque or "a command string with escape sequences"
-    return out
-
-
-def _skip_delimited(s: str, i: int, delim: str) -> int:
-    """Index just past the next unescaped delim at or after i."""
-    while i < len(s) and s[i] != delim:
-        i += 2 if s[i] == "\\" else 1
-    return i + 1
-
-
-def _line_end(s: str, i: int) -> int:
-    """End of the line at i, past backslash-newline continuations."""
-    while i < len(s) and s[i] != "\n":
-        i += 2 if s[i] == "\\" else 1
-    return min(i, len(s))
-
-
-def _sed_script_exec(script: str, out: _Exec) -> None:
-    """Find sed's e command (runs the rest of its line, or the pattern space) and the s///e flag."""
-    i, n = 0, len(script)
-    while i < n:
-        c = script[i]
-        if c == "\\" and i + 1 < n:  # \cREGEXc address
-            i = _skip_delimited(script, i + 2, script[i + 1])
-        elif c == "/":
-            i = _skip_delimited(script, i + 1, "/")
-        elif c in "sy" and i + 1 < n and script[i + 1] not in "\n\\":
-            d = script[i + 1]
-            i = _skip_delimited(script, _skip_delimited(script, i + 2, d), d)
-            flags = re.match(r"[A-Za-z0-9]*", script[i:]).group(0) if c == "s" else ""
-            i += len(flags)
-            if "e" in flags:
-                out.can_exec = True
-                out.opaque = out.opaque or "s///e runs the pattern space as a command"
-        elif c in "aicrRwWbtTv:#":  # text, a file name or a label to the end of the line
-            i = _line_end(script, i + 1)
-        elif c == "e":
-            end = _line_end(script, i + 1)
-            body = script[i + 1:end].strip()
-            out.can_exec = True
-            if body:
-                out.runs.append(body)
-            else:
-                out.opaque = out.opaque or "e runs the pattern space as a command"
-            i = end
-        else:
-            i += 1
-
-
-def _sed_exec(args: List[str], st: _State) -> _Exec:
-    out = _Exec()
-    scripts: List[str] = []
-    files: List[str] = []
-    explicit = False
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a == "--":
-            i += 1
-            break
-        if not a.startswith("-") or a == "-":
-            break
-        nxt = args[i + 1] if i + 1 < len(args) else ""
-        name, eq, val = a.partition("=")
-        if a == "--sandbox":  # GNU sed refuses e, w and r
-            return _Exec()
-        if name in ("--expression", "--file"):
-            (scripts if name == "--expression" else files).append(val if eq else nxt)
-            explicit = True
-            i += 1 if eq else 2
-            continue
-        if a.startswith("--"):
-            i += 2 if name == "--line-length" and not eq else 1
-            continue
-        step = 1
-        for k, ch in enumerate(a[1:], 1):
-            if ch in "efl":
-                value = a[k + 1:] or nxt
-                step = 1 if a[k + 1:] else 2
-                if ch == "e":
-                    scripts.append(value)
-                elif ch == "f":
-                    files.append(value)
-                explicit = explicit or ch in "ef"
-                break
-            if ch == "i":  # -i[SUFFIX]
-                break
-        i += step
-    if not explicit:  # every operand: -i takes an optional suffix (sed -i '' 's/x/y/' f), so which is the script varies
-        scripts += args[i:]
-    for f in files:
-        text = None if (st.moved and not _path.isabs(f)) else _read_script(_norm(f, st.dir), st)
-        if text is None:
-            out.opaque, out.can_exec = f"reads its script from {f}, which cannot be read", True
-            return out
-        scripts.append(text)
-    out.texts = scripts
-    for s in scripts:
-        _sed_script_exec(s, out)
-    return out
-
-
-_VIM_EXEC = re.compile(r"\bsystem(?:list)?\s*\(|\bjob_?start|\btermopen|\bterm_start|\bter(?:minal)?\b|\blibcall"
-                       r"|(?:^|[\s:|])(?:py(?:thon)?3?|pyx|lua|perl|ruby|tcl|mz(?:scheme)?|so(?:urce)?|exe(?:cute)?"
-                       r"|call|norm(?:al)?|redir)\b")
-_VIM_BANG = re.compile(r"^\s*:*\s*[%.,$0-9'<>]*\s*(?:r(?:ead)?\s*|w(?:rite)?\s*)?!(.*)$", re.S)
-
-
-def _vim_exec(args: List[str], seg: str, st: _State) -> _Exec:
-    out = _Exec()
-    cmds: List[str] = []
-    ex_mode = False
-    i = 0
-    while i < len(args):
-        a = args[i]
-        nxt = args[i + 1] if i + 1 < len(args) else None
-        if a in ("-c", "--cmd") and nxt is not None:
-            cmds.append(nxt)
-            i += 2
-            continue
-        if a.startswith("+"):
-            cmds.append(a[1:])
-        elif a in ("-S", "-u", "-U", "-s", "-i") or a.startswith("--startuptime"):
-            if nxt is None or nxt in ("NONE", "NORC"):
-                i += 1
-                continue
-            text = None if (st.moved and not _path.isabs(nxt)) else _read_script(_norm(nxt, st.dir), st)
-            if text is None and a != "-i":
-                out.opaque, out.can_exec = f"runs commands from {nxt}, which cannot be read", True
-                return out
-            if a != "-i":
-                cmds.append(text or "")
-            i += 2
-            continue
-        elif a.startswith("-") and not a.startswith("--") and set(a[1:]) & set("eE"):
-            ex_mode = True
-        i += 1
-    if ex_mode and ("<" in seg or _mentions_any(st.text)):
-        out.opaque, out.can_exec = "reads ex commands from its input", True
-    out.texts = cmds
-    for text in cmds:
-        for line in text.splitlines() or [""]:
-            for piece in line.split("|"):
-                bang = _VIM_BANG.match(piece)
-                if bang:
-                    out.can_exec = True
-                    out.runs.append(bang.group(1))
-                elif _VIM_EXEC.search(piece):
-                    out.can_exec = True
-                    out.opaque = out.opaque or f"'{_short(piece.strip(), 40)}' can run a program"
-    return out
-
-
-_TAR_EXEC = ("--to-command", "--use-compress-program", "--info-script", "--new-volume-script", "--rsh-command",
-             "--rmt-command", "--checkpoint-action")
-_TAR_SHORT_VALUE = set("bCfgHKLNTVX")
-
-
-def _tar_exec(args: List[str], st: _State) -> _Exec:
-    out = _Exec(texts=list(args))
-    if "TAR_OPTIONS" in st.text:
-        out.opaque, out.can_exec = "TAR_OPTIONS can add options that run a program", True
-        return out
-    if args and not args[0].startswith("-") and set(args[0]) & set("IF"):
-        out.opaque, out.can_exec = f"old-style options {args[0]} can run a program", True
-        return out
-    for k, a in enumerate(args):
-        nxt = args[k + 1] if k + 1 < len(args) else ""
-        if a == "--":
-            break
-        if a.startswith("--"):
-            name, eq, val = a.partition("=")
-            opt = next((o for o in _TAR_EXEC if len(name) > 2 and o.startswith(name)), None)
-            if opt is None:
-                continue
-            value = val if eq else nxt
-            out.can_exec = True
-            if opt == "--checkpoint-action":
-                if value.startswith("exec="):
-                    out.runs.append(value[len("exec="):])
-            else:
-                out.runs.append(value)
-        elif a.startswith("-") and len(a) > 1:
-            for j, ch in enumerate(a[1:], 1):
-                if ch in "IF":
-                    out.can_exec = True
-                    out.runs.append(a[j + 1:] or nxt)
-                    break
-                if ch in _TAR_SHORT_VALUE:
-                    break
-    return out
-
-
-_LESS_ENV = re.compile(r"(?<![A-Za-z0-9_])(?:LESS[A-Z_]*|VISUAL|EDITOR)(?![A-Za-z0-9_])")
-
-
-def _less_exec(args: List[str], st: _State) -> _Exec:
-    out = _Exec()
-    m = _LESS_ENV.search(st.text)
-    if m:
-        out.opaque, out.can_exec = f"{m.group(0)} can make less run a program", True
-        return out
-    for a in args:
-        if not a.startswith("+"):
-            continue
-        cmd = a.lstrip("+")
-        out.texts.append(cmd)
-        if "|" in cmd:
-            out.can_exec = True
-            out.opaque = out.opaque or "a | command pipes to a program"
-        elif "!" in cmd:
-            out.can_exec = True
-            out.runs.append(cmd.split("!", 1)[1])
-    return out
-
-
-_RUNNERS: Dict[str, Callable[[List[str], str, _State], _Exec]] = {
-    **{p: (lambda a, s, st: _awk_exec(a, st)) for p in ("awk", "gawk", "mawk", "nawk")},
-    **{p: (lambda a, s, st: _sed_exec(a, st)) for p in ("sed", "gsed")},
-    **{p: _vim_exec for p in ("vim", "vi", "nvim", "ex", "view", "vimdiff", "gvim", "rvim", "evim")},
-    **{p: (lambda a, s, st: _tar_exec(a, st)) for p in ("tar", "gtar", "bsdtar")},
-    "less": lambda a, s, st: _less_exec(a, st),
-}
-
-
-def _cmd_runner(t, seg, st, ctx, blk, gitenv):
-    """awk, sed, vim, tar and less: block when their program text can run a program and mentions gh/git/github, or
-    runs something that is not a plain literal; judge each plain literal command as a shell command."""
-    prog = _prog(t[0])
-    ex = _RUNNERS[prog](t[1:], seg, st)
-    hint = "run the command directly, with every word spelled out"
-    if ex.opaque:
-        yield blk(OPAQUE, f"{prog} {ex.opaque}, so what it runs cannot be checked", hint)
-        return
-    if ex.can_exec and any(_mentions_any(x) for x in ex.texts + ex.runs):
-        yield blk(OPAQUE, f"{prog} program text that can run a program mentions gh/git or GitHub, which cannot be "
-                          "checked", "run gh/git directly")
-        return
-    for body in ex.runs:
-        yield from _judge_body(body, st, ctx, blk, prog)
-
-
-def _cmd_rg(t, seg, st, ctx, blk, gitenv):
-    """rg only runs a program through --pre (with --pre-glob) or options from RIPGREP_CONFIG_PATH."""
-    if "RIPGREP_CONFIG_PATH" in st.text:
-        yield blk(OPAQUE, "RIPGREP_CONFIG_PATH can add rg --pre, which runs a program", "run rg without it")
-        return
-    for a in t[1:]:
-        if a == "--":
-            break
-        if a.split("=", 1)[0] in ("--pre", "--pre-glob"):
-            yield blk(OPAQUE, f"rg {a.split('=', 1)[0]} runs a program on every file", "run rg without --pre")
-            return
-
-
-_GH_RULES = {"api": _gh_api, "auth": _gh_auth, "alias": _gh_alias, "extension": _gh_alias, "ext": _gh_alias,
-             "extensions": _gh_alias, "gist": _gh_gist}
-
 _COMMANDS: Dict[str, Callable[..., Iterator[Block]]] = {
-    "export": _cmd_export, "declare": _cmd_export, "typeset": _cmd_export, "set": _cmd_export,
-    "rm": _cmd_rm, "git": _cmd_git, "gh": _cmd_gh, "find": _cmd_find, "eval": _cmd_eval,
+    "rm": _cmd_rm, "git": _cmd_git, "gh": _cmd_gh, "find": _cmd_find, "eval": _cmd_eval, "script": _cmd_script,
     "xargs": _wrapped(_XARGS_VALUE), "parallel": _wrapped(_PARALLEL_VALUE, (":::", "::::")),
-    "sudo": _wrapped(_SUDO_VALUE), "doas": _wrapped(_SUDO_VALUE),
+    "sudo": _wrapped(_SUDO_VALUE, adds_input=False), "doas": _wrapped(_SUDO_VALUE, adds_input=False),
     **{s: _cmd_shell for s in (*_SHELLS, "source", ".")},
-    **{p: _cmd_runner for p in _RUNNERS}, "rg": _cmd_rg,
 }
+
 
 # --- log and self-test -----------------------------------------------------
 
