@@ -88,11 +88,12 @@ class LabelQueue(BaseQueue):
                 and self._has(names, "todo")
                 and (not opt_in or opt_in.lower() in {n.lower() for n in names})
                 and not any(self._has(names, x) for x in _EXCLUDED)
-                and not [a for a in _assignees(issue) if not self._is_me(a)]  # mine, or nobody's
-                and self.trusted(_author(issue)))
+                and self.trusted(_author(issue))
+                and self._assignees_allow(_assignees(issue)))  # last, so only otherwise eligible ones are counted
 
     def candidates(self) -> List[Candidate]:
         """Eligible issues: epic children first (epic order, then task-list order), then the rest oldest first."""
+        self.unassigned_skipped = 0
         opt_in = self.queue_cfg.get("opt_in_label")
         eligible = {i["number"]: i for i in self._list("todo", extra=[opt_in] if opt_in else []) if self._eligible(i)}
         placed: Dict[int, Candidate] = {}
@@ -146,26 +147,27 @@ class LabelQueue(BaseQueue):
             raise claims.ClaimLost(f"{self.tracker}#{n} is not open")
         if self._has(names, "in_progress"):
             raise claims.ClaimLost(f"{self.tracker}#{n} is already in progress")
-        others = [a for a in _assignees(issue) if not self._is_me(a)]
+        assignees = _assignees(issue)
+        others = [a for a in assignees if not self._is_me(a)]
         if others:
             raise claims.ClaimLost(f"{self.tracker}#{n} is assigned to {others[0]}")
         new_labels = states.transition(names, "todo", "in_progress", self.labels)  # IllegalTransition if not to do
 
-        self.assign(n)
+        added = self.assign(n, assignees)
         self.gh.labels_set(self.tracker, n, new_labels)
-        marker_id = self.upsert_marker(n)
+        marker_id = self.upsert_marker(n, assigned="claim" if added else None)
         if not self.gh.dry_run:
-            self._check_timeline(n)
+            self._check_timeline(n, added)
         return Claim(number=n, previous="todo", now="in_progress", marker_comment_id=marker_id, run_id=self.run_id)
 
-    def _check_timeline(self, n: int) -> None:
+    def _check_timeline(self, n: int, added: bool) -> None:
         events = self._timeline(n)
         if not self._has_own_assignment(events):  # cannot prove we are first, so do not keep the claim
-            self._back_out(n)
+            self._back_out(n, added)
             raise claims.ClaimLost(f"{self.tracker}#{n}: our assignment is not in the timeline; claim released")
         winner = self._older_assignee(events) or self._older_marker(n)
         if winner:
-            self._back_out(n)
+            self._back_out(n, added)
             raise claims.ClaimLost(f"{self.tracker}#{n} was claimed first by {winner}")
 
     def _timeline(self, n: int) -> List[Dict[str, Any]]:
@@ -217,9 +219,10 @@ class LabelQueue(BaseQueue):
                 return marker["login"]
         return None
 
-    def _back_out(self, n: int) -> None:
-        """Undo our claim after losing. Labels go back to todo only when nobody else is assigned."""
-        self.unassign(n)
+    def _back_out(self, n: int, added: bool) -> None:
+        """Undo our claim after losing: unassign us only if this claim assigned us. Labels go back to todo only
+        when nobody else is assigned."""
+        self.unassign_if_claimed(n, added)
         self.mark_released(n)
         remaining = [a for a in _assignees(self.gh.issue(self.tracker, n)) if not self._is_me(a)]
         if not remaining:
@@ -231,9 +234,10 @@ class LabelQueue(BaseQueue):
             self.gh.labels_set(self.tracker, n, states.transition(names, "in_progress", to, self.labels))
 
     def release(self, n: int, to: str = "todo") -> None:
-        """Give the issue back: unassign us, move in_progress to `to`, mark our comment released, drop the lock."""
+        """Give the issue back: unassign us (only if the claim assigned us, per its marker), move in_progress to
+        `to`, mark our comment released, drop the lock."""
         n = _num(n)
-        self.unassign(n)
+        self.unassign_if_claimed(n)
         self._relabel(n, to)
         self.mark_released(n)
         self.unlock(n)

@@ -29,8 +29,8 @@ deploy target, `/not-me` routes between them, and `setup`, `config`, `doctor`,
 `status`, `ticket`, `retro` and `allow-repo` support them. It replaces three
 bespoke skill families Dave uses daily (YaleSites `not_dave*`, palliative-care-rag
 `pcr-*`, YDS-Web-Component `wc_dave*`). Mechanics live in a stdlib-only Python
-CLI (`notme`), judgment stays in the model, and a PreToolUse guard hook fails
-closed. Project specifics live in markdown config docs with three layers
+CLI (`notme`), judgment stays in the model, and a small PreToolUse guard hook blocks
+the risky actions. Project specifics live in markdown config docs with three layers
 (plugin defaults, `~/.claude/not-me/`, repo `.claude/not-me/`).
 
 ## State at handoff
@@ -52,6 +52,10 @@ closed. Project specifics live in markdown config docs with three layers
     were fixed in PR 37 (bare `Closes #N`, no marker comment on the issue). N1
     has not been rerun since PR 37.
   - Nothing else has run live yet.
+- Queue default changed (issue 69): label and board queues now pick only issues
+  assigned to the operator. `queue.include_unassigned: true` also picks
+  unassigned ones; issues assigned to someone else are never picked. Before
+  this, the board queue skipped every assigned item.
 
 ## Decisions made on day one that are not obvious from the code
 
@@ -95,13 +99,12 @@ them without asking him.
 7. **The happy path of `new` leaves one upserted `new` marker comment on the
    issue naming the PR**, so a person reading the issue sees the run happened.
 8. Everything in `CLAUDE.md` "Decisions that must survive edits" (layers that
-   only tighten, one gated write path, fail-closed guard, trust anchor, untrusted
+   only tighten, one gated write path, a small guard, trust anchor, untrusted
    text never reaches the model, compare-and-set claims, dry-run default, no
    project names in the plugin, abstract labels, CLI for every GitHub action,
-   merging is a human action). A person can hand one named merge to an
-   interactive session with `/not-me:allow-merge owner/repo#N` (a
-   UserPromptSubmit hook writes the grant; the guard spends it once); runs
-   never merge. Design in `docs/guards.md` "Merge grants".
+   merging is a person's call). No skill merges and runs never merge; a person
+   merges by hand or by asking Claude directly. The guard does not block
+   merges. Design in `docs/guards.md` "Merging pull requests".
 
 ## How to work here (the orchestration loop that built this)
 
@@ -153,7 +156,7 @@ Everything below the live runs is runnable from inside a Claude Code session.
 ```bash
 cd ~/code/not-me
 python3 scripts/run-tests.py                      # unit + harness + docs tests
-python3 plugins/not-me/tests/run_guard_cases.py   # 774 hook table cases
+python3 plugins/not-me/tests/run_guard_cases.py   # hook table cases
 python3 scripts/check-skills.py                   # skill lint R1-R14
 python3 scripts/lint-evals.py                     # case lint E1-E6
 python3 scripts/gen-cli-docs.py --check           # docs/cli.md in sync

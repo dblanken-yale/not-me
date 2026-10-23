@@ -13,9 +13,15 @@ the issue is chosen, how its text is read and screened, and how epics chain.
    log. A summary that says "committed but NOT PUSHED" names a branch: check it out,
    confirm its commits are still there, and continue at step 8 with that issue.
    Anything else in the last log is history, not work.
-3. **Queue.** `notme pick-issue`. It already skips issues that are assigned to someone else, carry
-   `paused`, `blocked` or `epic`, lack the pick label, or were written by an author
-   the roster does not trust. `{"none": true}` is NONE.
+3. **Queue.** `notme pick-issue`. It already skips issues that carry `paused`,
+   `blocked` or `epic`, lack the `labels.todo` label (or the board's To Do column),
+   or were written by an author the roster
+   does not trust. Of the rest it returns only issues assigned to the operator, plus
+   unassigned ones when `queue.include_unassigned` is true; an issue assigned to
+   someone else is never returned. `{"none": true}` is NONE. With `reason`
+   `unassigned_only`, also log one line saying `unassigned` issues are ready but
+   unassigned, and that assigning them or setting `queue.include_unassigned: true`
+   in the global layer lets the queue pick them.
 
 ## Reading the issue
 

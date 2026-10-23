@@ -14,7 +14,9 @@ A not-me run never does any of these:
 1. Delete or rename a branch, tag, release, label, or repository.
 2. Force-push, or rewrite published history (rebase, amend, or squash of pushed
    commits).
-3. Merge a pull request. A human merges.
+3. Merge a pull request. Merging is no skill's step: a person merges, by hand or by
+   asking Claude directly outside a run. The guard does not stop a merge, so this
+   rule is yours to keep.
 4. Change repository settings, secrets, variables, branch protection, or the
    permissions of workflows.
 5. Touch production, databases, or live sites beyond what `verify.md` explicitly

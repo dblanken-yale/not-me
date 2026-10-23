@@ -114,7 +114,7 @@ notme pick-issue [--exclude N]
 |----------|----------|---------|
 | `--exclude N` | optional | skip this issue (repeatable) |
 
-Output: number, title, url, author, labels, parent, candidates (count); or none (with reason when paused)
+Output: number, title, url, author, labels, parent, candidates (count); or none, with reason when paused or disabled, and with reason unassigned_only, unassigned (count) and setting when the queue found no issue and the only eligible issues have no assignee (only issues assigned to the operator are picked unless queue.include_unassigned is true)
 
 ### `notme claim-issue`
 

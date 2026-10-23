@@ -2,7 +2,8 @@
 """not-me PreToolUse hook: exit 2 (reason on stderr) blocks the tool call, exit 0 allows it.
 
 Runs on Python 3.9+ with the standard library only. An internal error fails
-closed (exit 2) when the call looks git- or GitHub-related, and open otherwise.
+closed (exit 2) when the raw input holds a word the guard's opaque-text rule
+blocks on, and open otherwise.
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import sys
 import threading
 from pathlib import Path
 
+# used only when the guard module itself cannot be loaded
 SENTINELS = ("gh ", "git ", "github", ".git/", ".git\\\\", "allowed-repos.json")
 # Below the 10 s timeout in hooks.json: a hook that times out does not block, so a slow check blocks instead.
 WATCHDOG_SECONDS = 8.0
@@ -53,7 +55,7 @@ def main(raw: "str | None" = None) -> int:
         print(block.message, file=sys.stderr)
         return 2
     except Exception as exc:  # noqa: BLE001 - any failure must still produce a decision
-        if any(s in (raw or "").lower() for s in SENTINELS):
+        if _risky(raw or ""):
             print(f"not-me guard failed closed: {exc.__class__.__name__}: {exc}; run /not-me:doctor",
                   file=sys.stderr)
             return 2
@@ -61,6 +63,16 @@ def main(raw: "str | None" = None) -> int:
     finally:
         if watchdog is not None:
             watchdog.cancel()
+
+
+def _risky(raw: str) -> bool:
+    """The raw hook input, read as opaque text, would block; the sentinels when the guard cannot be loaded."""
+    try:
+        from notme import guard
+
+        return guard.risky_text(raw)
+    except Exception:  # noqa: BLE001
+        return any(s in raw.lower() for s in SENTINELS)
 
 
 if __name__ == "__main__":

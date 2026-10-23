@@ -6,7 +6,7 @@ from unittest import mock
 from notme import claims
 from notme.queue.board import BoardQueue, UnmappedState, priority_value
 from tests.fakes.fakegh import FakeRunner
-from tests.test_queue_labels import REPO, QueueTestCase, add_issue
+from tests.test_queue_labels import REPO, QueueTestCase, add_issue, make_cfg
 
 BOARD = {"owner": "acme", "number": 6, "status_field": "Status", "priority_fields": ["Priority", "Size"]}
 
@@ -38,6 +38,9 @@ class BoardTestCase(QueueTestCase):
 
 
 class CandidateTests(BoardTestCase):
+    # These cover the other eligibility rules, so unassigned items are let in; AssignmentTests covers the default.
+    cfg_overrides = {**BoardTestCase.cfg_overrides, "include_unassigned": True}
+
     def test_only_to_do_open_unassigned_items(self):
         self.put(5)
         self.put(6, status="In progress")
@@ -110,10 +113,59 @@ class CandidateTests(BoardTestCase):
             self.queue("run-1")
 
 
+class AssignmentTests(BoardTestCase):
+    """Who a To Do item is assigned to: mine always, nobody's only with queue.include_unassigned, others' never."""
+
+    def use(self, include_unassigned):
+        self.cfg = make_cfg(**{**BoardTestCase.cfg_overrides, "include_unassigned": include_unassigned})
+        self.q = self.queue("run-1")
+
+    def seed(self):
+        self.put(5, assignees=["octocat"])
+        self.put(6)
+        self.put(7, assignees=["hubot"])
+        self.put(8, assignees=["octocat", "hubot"])
+
+    def test_default_picks_only_items_assigned_to_me(self):
+        self.seed()
+        self.assertEqual(self.numbers(), [5])
+        self.assertEqual(self.q.unassigned_skipped, 1)
+
+    def test_include_unassigned_also_picks_unassigned_items(self):
+        self.use(True)
+        self.seed()
+        self.assertEqual(self.numbers(), [5, 6])
+        self.assertEqual(self.q.unassigned_skipped, 0)
+
+    def test_items_assigned_to_others_are_never_picked(self):
+        self.put(7, assignees=["hubot"])
+        self.put(8, assignees=["octocat", "hubot"])
+        for setting in (False, True):
+            self.use(setting)
+            self.assertEqual(self.numbers(), [], setting)
+            self.assertEqual(self.q.unassigned_skipped, 0, setting)
+
+    def test_unassigned_count_covers_only_otherwise_eligible_items(self):
+        self.put(6)
+        self.put(9, author="mallory")
+        self.put(10, labels=["paused"])
+        self.put(11, status="In progress")
+        self.assertEqual(self.numbers(), [])
+        self.assertEqual(self.q.unassigned_skipped, 1)
+
+
 class ClaimTests(BoardTestCase):
     def setUp(self):
         super().setUp()
         self.put(5)
+
+    def test_claiming_an_item_already_assigned_to_me(self):
+        self.put(9, assignees=["octocat"])
+        got = self.q.claim(9)
+        self.assertEqual((got.previous, got.now), ("todo", "in_progress"))
+        self.assertEqual(self.thing(9)["assignees"], ["octocat"])
+        self.assertEqual(self.status(9), "In progress")
+        self.assertFalse([c for c in self.fake.calls if "--add-assignee" in c])  # no second assignment
 
     def test_claim_sets_status_assigns_and_leaves_one_marker(self):
         got = self.q.claim(5)
@@ -155,6 +207,15 @@ class ClaimTests(BoardTestCase):
         self.assertTrue(claims.is_released(claims.parse_marker(self.marker_comments(5)[0]["body"])))
         self.assertFalse((self.claims_dir / "issue-5.lock").exists())
 
+    def test_lost_claim_keeps_an_assignment_made_before_the_claim(self):
+        self.put(9, assignees=["octocat"])
+        with mock.patch.object(self.gh, "board_set_status", return_value={}):
+            with self.assertRaises(claims.ClaimLost):
+                self.q.claim(9)
+        self.assertEqual(self.thing(9)["assignees"], ["octocat"])
+        self.assertFalse([c for c in self.fake.calls if "--remove-assignee" in c])
+        self.assertTrue(claims.is_released(claims.parse_marker(self.marker_comments(9)[0]["body"])))
+
     def test_item_not_on_the_board(self):
         add_issue(self.fake, 9, labels=[])
         with self.assertRaises(LookupError):
@@ -179,6 +240,25 @@ class ReleaseAndMoveTests(BoardTestCase):
         self.assertEqual(self.status(5), "To Do")
         self.assertEqual(self.thing(5)["assignees"], [])
         self.assertTrue(claims.is_released(claims.parse_marker(self.marker_comments(5)[0]["body"])))
+
+    def test_release_keeps_an_assignment_made_before_the_claim(self):
+        self.put(9, assignees=["octocat"])  # a person assigned it
+        self.q.claim(9)
+        self.queue("run-2").release(9)  # a later process: it knows only what the marker recorded
+        self.assertEqual(self.status(9), "To Do")
+        self.assertEqual(self.thing(9)["assignees"], ["octocat"])
+        self.assertFalse([c for c in self.fake.calls if "--remove-assignee" in c])
+        self.assertTrue(claims.is_released(claims.parse_marker(self.marker_comments(9)[0]["body"])))
+
+    def test_release_removes_an_assignment_the_claim_made(self):
+        self.cfg = make_cfg(**{**BoardTestCase.cfg_overrides, "include_unassigned": True})
+        self.q = self.queue("run-1")
+        self.q.claim(5)
+        self.assertEqual(claims.parse_marker(self.marker_comments(5)[0]["body"])["assigned"], "claim")
+        self.queue("run-2").release(5)
+        self.assertEqual(self.thing(5)["assignees"], [])
+        released = claims.parse_marker(self.marker_comments(5)[0]["body"])
+        self.assertEqual((released["state"], released["assigned"]), ("released", "claim"))
 
     def test_release_to_needs_review_uses_the_in_review_column(self):
         self.q.claim(5)

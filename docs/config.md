@@ -158,6 +158,7 @@ Anyone with push access can edit the repo layer, and it is committed, so not-me 
 | `guard.<rule>` | set `on` | set `off`. The value is ignored |
 | `mode` | set `dry-run` | set `live`. The value is ignored |
 | `enabled` | set `false` | set `true` over a lower `false` |
+| `queue.include_unassigned` | set `false` | set `true` over a lower `false` |
 | `protected_branches` | add names | remove names. Its `!name` entries are dropped |
 | `allow_repos` | nothing | add repos. Every entry is dropped |
 | `review.block_on` | add levels | drop a level the global or default list has. The whole value is ignored |
@@ -205,6 +206,24 @@ Two things to know:
 2. Only the name changes. The meaning stays: `needs_human` is added whenever a run parks, holds, or gives up.
 
 Every value in `labels` must be a string, and the config check rejects anything else. Labels are always written as the whole set in one call, followed by a read-back, so two people editing labels at once is caught instead of silently overwritten.
+
+### Which issues the queue picks
+
+`/not-me:new` picks an open issue only when all of these hold:
+
+- It carries the `labels.todo` label (`to do` by default), or sits in the `queue.board_states.todo` column when `queue.source` is `board`.
+- It carries `queue.opt_in_label`, when one is set.
+- It does not carry `paused`, `blocked` or `epic`.
+- Its author is a lead or authority on the roster (with no roster, only you).
+- It is assigned to you. With `queue.include_unassigned: true`, an issue with no assignee counts too.
+
+An issue assigned to anyone else is never picked, whatever the setting. A fresh install picks only issues assigned to you. To also pick unassigned ones, set this in your global `~/.claude/not-me/project.md`:
+
+```yaml
+queue: {include_unassigned: true}
+```
+
+A repo file cannot turn this on, because it would widen what not-me picks. When nothing is assigned to you but unassigned issues are ready, `notme pick-issue` returns `{"none": true, "reason": "unassigned_only", "unassigned": <count>, "setting": "queue.include_unassigned"}`.
 
 ### Board queues
 
@@ -311,6 +330,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `queue.source` | `labels` | `labels` or `board`. Where work is picked from |
 | `queue.pick_label` | `to do` | Label that marks an issue as ready to pick up |
 | `queue.opt_in_label` | `null` | An extra label an issue must also carry. `null` means none required |
+| `queue.include_unassigned` | `false` | `false` picks only issues assigned to you. `true` also picks issues with no assignee. Issues assigned to someone else are never picked. The repo layer may set `false`, never `true` over a lower `false` (see [Which issues the queue picks](#which-issues-the-queue-picks)) |
 | `queue.board.owner` | `null` | Board owner, used when `queue.source` is `board` |
 | `queue.board.number` | `null` | Board number, used when `queue.source` is `board` |
 | `queue.board.status_field` | `Status` | Name of the board column field |

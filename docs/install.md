@@ -150,6 +150,8 @@ Run these in the repo you want to automate, in a Claude Code session started in 
 2. `/not-me:setup` asks a few questions and writes `.claude/not-me/*.md` in the repo. Commit those files. They are the only thing not-me asks you to commit. Setup also records the allowed repos on your allow list.
 3. `/not-me --dry-run` runs the whole loop as if live. Reads are real. Every write goes into a ledger instead of GitHub.
 
+A fresh install picks only issues assigned to you. Issues with no assignee are left alone until you set `queue: {include_unassigned: true}` in `~/.claude/not-me/project.md`. Issues assigned to someone else are never picked. See [config.md](config.md#which-issues-the-queue-picks).
+
 Read the ledger before you trust it. It is `<git-common-dir>/not-me/logs/intended-writes.jsonl`, which is `.git/not-me/logs/intended-writes.jsonl` in a normal clone. Each line says which repo, which command, and what text it would have posted.
 
 ### Going live
@@ -194,5 +196,5 @@ Nothing else is written. Uninstalling does not touch your branches, pull request
 | The hook blocked a command that is fine | A guard rule matched it. Often a write to another repo, or a script or `bash -c` that the hook cannot read | Read the message. It names the rule and what to do. For another repo, see "Allow a repo" in [guards.md](guards.md). Otherwise run the `git` or `gh` command directly instead of through a wrapper |
 | Run stops with `STOP - paused` or `STOP - disabled` | A `PAUSED` file exists, or `enabled: false` is set in some layer | Remove the file, or fix the key. Only a person should do this |
 | `config invalid` with a layer, file, and line | A config file has a typo or a bad value | Fix that line. `/not-me:config` shows what is in force |
-| Nothing is picked up | The queue is empty, or the label name does not match | Check `labels.todo` and `queue.pick_label` match a real label in your tracker. See [config.md](config.md) |
+| Nothing is picked up | The queue is empty, the label name does not match, or no ready issue is assigned to you | Check `labels.todo` matches a real label in your tracker. Assign the issue to yourself, or set `queue.include_unassigned: true` in your global layer. See [config.md](config.md#which-issues-the-queue-picks) |
 | `gh` calls fail with a scope error | The token lacks `project` for a board queue | `gh auth refresh -s project` |

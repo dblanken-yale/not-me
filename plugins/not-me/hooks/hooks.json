@@ -11,17 +11,6 @@
           }
         ]
       }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/notme-python\" \"${CLAUDE_PLUGIN_ROOT}/hooks/merge_grant.py\"",
-            "timeout": 10
-          }
-        ]
-      }
     ]
   }
 }
