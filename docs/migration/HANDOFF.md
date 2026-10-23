@@ -98,7 +98,10 @@ them without asking him.
    only tighten, one gated write path, fail-closed guard, trust anchor, untrusted
    text never reaches the model, compare-and-set claims, dry-run default, no
    project names in the plugin, abstract labels, CLI for every GitHub action,
-   merging is a human action).
+   merging is a human action). A person can hand one named merge to an
+   interactive session with `/not-me:allow-merge owner/repo#N` (a
+   UserPromptSubmit hook writes the grant; the guard spends it once); runs
+   never merge. Design in `docs/guards.md` "Merge grants".
 
 ## How to work here (the orchestration loop that built this)
 

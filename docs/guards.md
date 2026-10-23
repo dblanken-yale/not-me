@@ -111,7 +111,29 @@ git push --all origin
 gh pr merge 1 --repo acme/app --squash
 ```
 
-`gh pr merge` and the merge endpoint (`gh api -X PUT repos/acme/app/pulls/1/merge`) are blocked whatever the branch, because a person merges.
+`gh pr merge` and the merge endpoint (`gh api -X PUT repos/acme/app/pulls/1/merge`) are blocked whatever the branch, because a person merges. You can hand Claude one merge with a merge grant, below.
+
+#### Merge grants
+
+To let Claude merge one PR for you, type this as your whole message:
+
+```
+/not-me:allow-merge acme/app#12
+/not-me:allow-merge acme/app#12 --rebase     # or --merge; the default is --squash
+```
+
+Claude then runs `gh pr merge 12 -R acme/app --squash` once, and the guard lets exactly that through. How it works:
+
+- Only you can create a grant. A `UserPromptSubmit` hook reads what you submit and nothing Claude does. When your message is exactly `/not-me:allow-merge owner/name#N` (optionally `--squash`, `--merge` or `--rebase`, nothing else, one line), it writes a grant for this session to `~/.claude/not-me/merge-grants/<session>.json`. The command is marked `disable-model-invocation`, so Claude cannot run it through the Skill tool. A malformed argument, or the command anywhere but the start of the message, grants nothing.
+- A grant is signed with your [operator token](install.md#the-operator-token), the same secret `/not-me:mode live` signs with, and the guard checks the signature. A grant file written any other way does not count, and without a token no grant is made (the hook says so; create one with `notme doctor --init-token` in your own terminal).
+- A grant lasts until your next message. Any other message in the session deletes it, and it expires after 30 minutes regardless.
+- It covers one merge. The guard deletes the grant when it allows the merge, and logs the use in the guard log, `<git-common-dir>/not-me/logs/guard.jsonl` (`rule: merge_grant`, the PR and the session).
+- It covers one exact command: `gh pr merge <N> -R <owner/name>` (or `--repo`), the method flag, and optionally `--subject` and `--body-file` once each. The method is part of the grant: a grant that names `--merge` or `--rebase` allows only that flag, and one that names none allows only `--squash`. The number and repo must match the grant (the repo ignoring case), and the repo must be on the allowed list. `--admin`, `--auto`, `--delete-branch`, the merge endpoint, a merge without an explicit number or `-R`, a PR URL, a variable, a substitution, a redirection, a comment and any command joined with `;`, `&&`, `|` or a newline stay blocked.
+- It belongs to one session. A grant written in another Claude Code session does not apply.
+- Runs never merge. While a not-me run is active in the checkout, a grant does not apply.
+- Nothing but the hook may touch a grant: the Read, Grep, Glob, LS, Write and Edit tools and any Bash command that names the `merge-grants` folder or reaches it through a glob, a link or a redirection are blocked, in every directory. See [Self-protection](#self-protection).
+
+Outside a not-me project (no `.claude/not-me/` folder and no run) the four rules are off, so `gh pr merge` is not blocked there and a grant is neither needed nor spent. The grant folder is still protected there.
 
 Allowed, for example:
 
@@ -240,7 +262,7 @@ Why you usually should not:
 
 - It applies to every repo on your machine, not just one.
 - `other_repo: off` lets not-me write to any repo your token can reach.
-- `protected_branches: off` also stops blocking `gh pr merge`, so a run could merge.
+- `protected_branches: off` also stops blocking `gh pr merge`, so a run could merge. To merge one PR, use a [merge grant](#merge-grants) instead.
 - `force_push: off` allows history rewrites and remote branch deletion.
 - `destructive_git: off` allows changing repo settings and secrets, and deleting data.
 - When a command is too opaque to check (`bash -c ...`, `$(...)`), the guard reports it under the first rule that is still on. With all four off, those commands are allowed.
@@ -258,6 +280,7 @@ Self-protection is always on, in every directory, whether or not the guard is ac
 - Reading or changing the operator token or the live-mode epoch (`mode-live.epoch`). This covers the Read, Grep, Glob and LS tools, Write and Edit, and Bash commands that name either file or reach it through a glob (`~/.claude/n*me/mode-live.e*`), a directory, a redirection, or a part the guard cannot work out, such as `$VAR`, `$(...)`, backticks or `{a,b}`, when the rest of the path could lead there.
 - Going live: `notme mode` with anything but `show` or `dry-run`, however it is started (`notme`, `bin/notme`, `python3 cli/notme.py`, `python3 -m notme.cli`, also after python options such as `-W ignore` or `-X utf8`). Also any Write or Edit of `mode-live.sig`, any Bash command that mentions it, and any Bash copy, move or redirection that reaches it through a glob or a part the guard cannot work out. That file is the signature `/not-me:mode live` writes with your operator token and epoch; without it a `mode: live` setting runs as dry-run, so no file edit can turn live mode on. Going back to dry-run with `/not-me:mode dry-run --global` replaces the epoch, so a saved copy of an old signature stops working.
 - A Write or Edit that would leave `mode: live` (or anything but `dry-run`) in your global `project.md`. This one is a courtesy: it stops the attempt early with a pointer to `/not-me:mode live`. The signature above is what actually keeps live mode off.
+- Creating, changing or reading a merge grant: anything under `~/.claude/not-me/merge-grants/`. This covers the Read, Grep, Glob and LS tools, Write and Edit (also through a symlink, a `..` step after a symlink, or a hard link to a grant), and any Bash command that names the folder or reaches it through a glob, a directory or a redirection. Only your own `/not-me:allow-merge` message creates one (see [Merge grants](#merge-grants)).
 
 The block message in each case says to ask the operator, which is you.
 
@@ -277,7 +300,7 @@ The guard splits a command into words the way the shell does: quotes, backslashe
 
 What it does not cover:
 
-- Programs and scripts it cannot read. A shell script is scanned for `git`, `gh`, and `github.com`, but a file run as `python3 tool.py` is not opened, and a script that builds its command from pieces will not match.
+- Programs and scripts it cannot read. A shell script is scanned for `git`, `gh`, and `github.com`, but a file run as `python3 tool.py` is not opened, and a script that builds its command from pieces will not match. A file such a program writes into the merge-grant folder is not signed with your operator token, so it does not count as a grant.
 - Tools outside its matcher. Only Bash, the file-editing tools, and MCP tools with `github` in the name are checked. Other MCP servers and your own terminal are not.
 - Reads. Any repo your token can read can be read.
 - Time of check. It looks at your git config when it checks. Something that changes the config between the check and the command is out of reach.

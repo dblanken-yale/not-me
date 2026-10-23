@@ -39,6 +39,8 @@ SCRIPTS = {
     "nested.sh": ". ./scripts/goother.sh\n",
     "plainenv.sh": "export LC_ALL=C\n",
     "setenv.sh": "export GIT_DIR=../other/.git\n",
+    "grantdir.sh": "#!/bin/sh\ncp /tmp/g.json merge-grants/s.json\n",
+    "granthome.sh": "#!/bin/sh\nD=\"$HOME/.claude/not-me\"\ncp /tmp/g.json \"$D\"/m*/s.json\n",
 }
 
 # --- fixtures --------------------------------------------------------------
@@ -104,6 +106,21 @@ HOMES: Dict[str, Optional[str]] = {
     # confirms the "tracker" fixture's repo-layer tracker and companion
     "htracker": json.dumps({"version": 1, "projects": {"acme/app": {"allow": [{"repo": "acme/issues"},
                                                                              {"repo": "acme/web"}]}}}),
+    # merge grants (written by build_fixtures): a fresh one for SESSION, and a stale one
+    "hgrant": None,
+    "hstale": None,
+    "hrebase": None,
+    "hforged": None,
+}
+
+SESSION = "fixture-session"  # the session_id of every case's event
+# home -> [(session, repo, number, age in seconds, method)]: grants as /not-me:allow-merge would write them,
+# signed with that home's operator token
+GRANTS: Dict[str, List[Tuple[str, str, int, int, Optional[str]]]] = {
+    "hgrant": [(SESSION, "acme/app", 5, 0, None), ("other-session", "acme/app", 7, 0, None)],
+    "hstale": [(SESSION, "acme/app", 5, 31 * 60, None)],
+    "hrebase": [(SESSION, "acme/app", 8, 0, "rebase")],
+    "hforged": [(SESSION, "acme/app", 5, 0, None)],  # then re-signed with a different token: must not count
 }
 
 
@@ -140,6 +157,16 @@ def build_fixtures(root: Path) -> Dict[str, str]:
     for home in (root / "homes").iterdir():  # a real token, so globs that expand to it are caught for real
         (home / "operator-token").write_text("fixture-token\n", encoding="utf-8")
         (home / "mode-live.epoch").write_text("0" * 64 + "\n", encoding="utf-8")  # and a real epoch
+    from notme import merge_grant
+    for name, grants in GRANTS.items():
+        home = root / "homes" / name
+        os.chmod(str(home / "operator-token"), 0o600)  # a usable token: grants are signed with it
+        for sid, repo, number, age, method in grants:
+            path = merge_grant.write(home, sid, {"repo": repo, "number": number, "method": method},
+                                     now=time.time() - age)
+            os.utime(str(path), (time.time() - age, time.time() - age))
+    # hforged: a grant signed with another token (as a write that slipped past the guard could make) is ignored
+    (root / "homes" / "hforged" / "operator-token").write_text("another-token\n", encoding="utf-8")
     for name, (origin, branch, front, extra) in REPOS.items():
         repo = root / name
         repo.mkdir(parents=True, exist_ok=True)
@@ -222,7 +249,7 @@ def event_for(case: Case, root: Path) -> Dict[str, Any]:
     _, _, _, tool, tin, variant = case
     cwd, home = variant_paths(root, variant)
     return {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": expand(tin, root, home),
-            "cwd": str(cwd)}
+            "cwd": str(cwd), "session_id": SESSION}
 
 
 # --- the table -------------------------------------------------------------
@@ -1295,6 +1322,61 @@ for cmd in ('rg "git push" docs', 'rg -n "gh pr" docs', 'grep -rn "gh pr" docs',
             "sed -e 's/h/H/' -e 's/i/I/' README.md", "awk -v x=1 '{print x}' README.md"):
     bash(A, None, cmd)
 
+# --- merge grants (/not-me:allow-merge) ---------------------------------------
+# hgrant holds a fresh grant for acme/app#5 in SESSION (and one for #7 in another session). Order matters: the
+# allowed merge spends the grant, so every case that must not spend it comes first, and the repeat comes last.
+MERGE_START = len(CASES)
+_G = "app@hgrant"
+for cmd, rule in (("gh pr merge 6 -R acme/app --squash", PB),  # wrong number
+                  ("gh pr merge 5 -R acme/other --squash", PB),  # wrong repo
+                  ("gh pr merge 5 -R ACME/App --squash --admin", FP),
+                  ("gh pr merge 5 -R acme/app --squash --auto", PB),
+                  ("gh pr merge 5 -R acme/app --squash --delete-branch", PB),
+                  ("gh pr merge 5 --squash", PB),  # no -R
+                  ("gh pr merge -R acme/app --squash", PB),  # no number
+                  ("gh pr merge https://github.com/acme/app/pull/5 -R acme/app --squash", PB),
+                  ("gh api -X PUT repos/acme/app/pulls/5/merge", PB),
+                  ("gh pr merge 5 -R acme/app --squash; git push", PB),
+                  ("gh pr merge 5 -R acme/app --squash && echo done", PB),
+                  ("gh pr merge 5 -R acme/app --squash --merge", PB),
+                  ("gh pr merge 5 -R acme/app --squash > out.txt", PB),
+                  ("gh pr merge 5 -R acme/app --squash # x", PB),
+                  ("gh pr merge 5 -R acme/app --body-file {H}/operator-token --squash", SP),
+                  ("gh pr merge 7 -R acme/app --squash", PB)):  # another session's grant
+    bash(B, rule, cmd, _G)
+bash(B, PB, "gh pr merge 5 -R acme/app --squash", "running@hgrant")  # an active run: grants never apply
+bash(B, PB, "gh pr merge 5 -R acme/app --squash", "app@hstale")  # older than 30 minutes
+_NO_GRANT_ID = f"G{len(CASES) + 1:03d}"
+bash(B, PB, "gh pr merge 5 -R acme/app --squash", "app")  # no grant at all
+MERGE_ALLOW_ID = f"G{len(CASES) + 1:03d}"
+bash(A, None, "gh pr merge 5 -R ACME/app --squash --subject 'fix: x (#5)'", _G)
+bash(B, PB, "gh pr merge 5 -R acme/app --squash", _G)  # single use: the grant is spent
+# nothing but the person's prompt may create, change or read a grant, in any directory
+for variant in ("app", "bare", "nogit"):
+    for tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+        write(B, SP, tool, "{H}/merge-grants/" + SESSION + ".json", variant)
+    write(B, SP, "Write", "{H}/MERGE-GRANTS/x.json", variant)
+    mcp(B, SP, "Read", {"file_path": "{H}/merge-grants/" + SESSION + ".json"}, variant)
+    mcp(B, SP, "Grep", {"pattern": "repo", "path": "{H}/merge-grants"}, variant)
+    mcp(B, SP, "Glob", {"pattern": "{H}/m*/*.json"}, variant)
+    mcp(B, SP, "LS", {"path": "{H}/merge-grants"}, variant)
+    for cmd in ("cat {H}/merge-grants/" + SESSION + ".json", "cat {H}/merge-g*/*", "mkdir -p {H}/merge-grants",
+                "echo '{{}}' > {H}/merge-grants/" + SESSION + ".json", "cp x.json {H}/merge-gr''ants/s.json",
+                "ln -s {H}/merge-grants /tmp/g", "python3 -c 'open(\"{H}/merge-grants/s.json\", \"w\")'",
+                "ls -la {H}/merge-grants", "grep -r repo {H}"):
+        bash(B, SP, cmd, variant)
+write(B, SP, "Write", "{H}/../" + "h0/merge-grants/x.json", "app")
+for cmd in ("sh scripts/grantdir.sh", "bash scripts/granthome.sh", "./scripts/granthome.sh",
+            "script -q /dev/null cat merge-grants/s.json"):
+    bash(B, SP, cmd)  # scripts and pty wrappers that name the grant folder or the not-me home
+# the method is bound: a grant that names one allows only that flag, one that names none allows only --squash
+for cmd in ("gh pr merge 8 -R acme/app --squash", "gh pr merge 8 -R acme/app", "gh pr merge 8 -R acme/app --merge"):
+    bash(B, PB, cmd, "app@hrebase")
+bash(A, None, "gh pr merge 8 -R acme/app --rebase", "app@hrebase")
+for cmd in ("gh pr merge 5 -R acme/app --squash", "gh pr merge 5 -R acme/app"):
+    bash(B, PB, cmd, "app@hforged")  # signed with another token
+MERGE_END = len(CASES)
+
 # Substrings a block message must contain, by case id.
 MESSAGE_CHECKS: Dict[str, List[str]] = {
     CASES[17][0]: ["not-me guard [other_repo]", "/not-me:allow-repo acme/other", "acme/other --everywhere",
@@ -1306,4 +1388,5 @@ MESSAGE_CHECKS: Dict[str, List[str]] = {
     _marker_id: ["live-mode marker", "/not-me:mode live"],
     _epoch_id: ["live-mode epoch", "/not-me:mode live"],
     _MOVED_ID: ["changes directory", "git -C <path>", "gh -R owner/name", "separate Bash call"],
+    _NO_GRANT_ID: ["merging a pull request is a human action", "/not-me:allow-merge owner/name#N"],
 }

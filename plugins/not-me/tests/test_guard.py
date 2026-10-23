@@ -450,6 +450,15 @@ class HooksJsonTests(unittest.TestCase):
         self.assertEqual((hook["type"], hook["timeout"]), ("command", 10))
         self.assertIn('bin/notme-python" "${CLAUDE_PLUGIN_ROOT}/hooks/repo_guard.py"', hook["command"])
 
+    def test_declares_the_merge_grant_prompt_hook(self):
+        data = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+        entries = data["hooks"]["UserPromptSubmit"]
+        self.assertEqual(len(entries), 1)
+        self.assertNotIn("matcher", entries[0])  # every prompt: any other prompt must end the grant
+        hook = entries[0]["hooks"][0]
+        self.assertEqual((hook["type"], hook["timeout"]), ("command", 10))
+        self.assertIn('bin/notme-python" "${CLAUDE_PLUGIN_ROOT}/hooks/merge_grant.py"', hook["command"])
+
 
 class LiveMarkerTests(unittest.TestCase):
     """The guard protects the live-mode marker by name, the same cheap way as the allow list and the token."""

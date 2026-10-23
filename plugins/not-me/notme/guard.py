@@ -23,7 +23,9 @@ guard is active. Live mode is signed: `mode: live` counts only next to a marker
 that `notme mode live` writes with the operator token, so no file edit can
 turn it on. The guard still blocks Edit/Write of `mode: live` into the global
 project.md as an early, friendly refusal; that check is not the security
-boundary.
+boundary. Merge grants (notme/merge_grant.py) are self-protected the same way:
+no tool may touch the merge-grants folder, and `decide` lifts the `gh pr merge`
+block only for the exact PR a person granted from their own prompt, once.
 
 Residual risk: a token file readable by the same OS user cannot be fully hidden
 from an agent running as that user; this guard is the enforcement, and the
@@ -59,7 +61,7 @@ from functools import cached_property, lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, Iterator, List, Mapping, Optional, Set, Tuple
 
-from . import paths, runlog, writes
+from . import merge_grant, paths, runlog, writes
 from .frontmatter import parse as parse_frontmatter  # stdlib only: no config stack
 from .writes import parse_origin, valid_slug
 
@@ -122,13 +124,18 @@ LIVE_HINT = "the operator runs /not-me:mode live in their own terminal"
 LIVE_EPOCH_NAME = "mode-live.epoch"
 LIVE_EPOCH_WHY = "the live-mode epoch is the operator's own secret"
 TOKEN_WHY, TOKEN_HINT = "the operator token is the operator's own confirmation", "ask the operator to confirm by hand"
+GRANT_NAME = merge_grant.GRANT_DIR  # the merge-grant directory under the global not-me home
+GRANT_WHY = "merge grants come only from the person typing " + merge_grant.COMMAND
+GRANT_HINT = f"ask the operator; to allow one merge they send {merge_grant.COMMAND} owner/name#N"
 # words that make a forged terminal dangerous: driving the not-me CLI or its human checks through a pty
+_NOTME_HOME_PATH = r"\.claude[/\\]+not-me(?![A-Za-z0-9_.-])"  # the global not-me home (and the repo layer)
 _PTY_TRIGGER = re.compile(r"notme|allow-repo|(?<![A-Za-z0-9_-])pause(?![A-Za-z0-9_-])|operator-token"
-                          r"|mode-live\.(?:sig|epoch)|NOT_ME_")
+                          r"|mode-live\.(?:sig|epoch)|NOT_ME_|merge-grants|" + _NOTME_HOME_PATH)
 # `mode` followed by anything but show or dry-run: the live switch, when the command word is a $VAR
 _MODE_LIVE = re.compile(r"(?<![A-Za-z0-9_-])mode\s+(?!(?:show|dry-run)(?![A-Za-z0-9_-]))\S")
 # words a script file run through a shell may not contain (they drive the not-me CLI where the guard cannot see)
-_SCRIPT_SELF = re.compile(r"notme|allow-repo|operator-token|mode-live\.(?:sig|epoch)|NOT_ME_")
+_SCRIPT_SELF = re.compile(r"notme|allow-repo|operator-token|mode-live\.(?:sig|epoch)|NOT_ME_|merge-grants|"
+                          + _NOTME_HOME_PATH)
 _PTY_CODE = re.compile(r"(?<![A-Za-z])pty(?![A-Za-z])|openpty|forkpty|spawn\s*\(")
 # code that forges a terminal or leaves the session's process tree: blocked in inline code and scripts outright
 _PRIMITIVES = re.compile(r"(?<![A-Za-z_])pty(?![A-Za-z_])|openpty|forkpty|os\.fork\b|(?<![A-Za-z_.])fork\s*\(|setsid"
@@ -169,6 +176,7 @@ _PREFILTER = re.compile(
     r"php|deno|bun|bash|sh|zsh|dash|ksh|fish|source|exec|eval)(?![A-Za-z0-9_-])"
     r"|(?:^|[\s;|&(])\.(?:\s|$)|\./|\.(?:sh|bash|zsh)\b|\$|`|allow-repo|allowed-repos|GIT_|\.git|notme|not-me|NOT_ME_|operator-token"
     r"|mode-live"  # LIVE_MARKER_NAME
+    r"|merge-grants"  # GRANT_NAME
     r"|(?<![A-Za-z0-9_-])(?:script|expect|unbuffer|socat|ssh|tmux|screen|pause)(?![A-Za-z0-9_-])"
     # any file reader, copier or < redirection, or a > redirection to a glob, brace or ~ path: its arguments may
     # expand into the not-me home (a plain > target that does not spell a guarded name cannot reach it)
@@ -408,6 +416,7 @@ class Block:
     suggest_allow: bool = False  # target is a real owner/name the operator could allow
     tool: str = ""
     message: str = ""
+    grantable: bool = False  # the plain `gh pr merge` block a person's merge grant may lift
 
 
 Decision = Optional[Block]  # None = allow
@@ -1193,7 +1202,12 @@ def decide(event: Mapping[str, Any], ctx: GuardContext) -> Decision:
     # outside a project an unreadable command still blocks when it could drive the not-me CLI or its trust inputs
     plain = _unshell(str(tin.get("command") or "")) if ctx.only_self and tool == "Bash" else ""
     drives = bool(plain) and bool(_PTY_TRIGGER.search(plain) or _MODE_LIVE.search(plain))
+    grant = _merge_grant(event, ctx) if tool == "Bash" else None
+    lifted = False
     for block in cands:
+        if grant is not None and block.grantable:
+            lifted = True  # the person granted exactly this merge; every other check still applies
+            continue
         if ctx.only_self and block.rule == OPAQUE and drives:
             block.rule = SELF
         if ctx.only_self and block.rule != SELF:
@@ -1208,6 +1222,122 @@ def decide(event: Mapping[str, Any], ctx: GuardContext) -> Decision:
         block.tool = tool
         block.message = render(block, ctx)
         return block
+    if lifted and grant is not None:
+        return _use_grant(ctx, grant, str(tin.get("command") or ""))
+    return None
+
+
+# --- merge grants -------------------------------------------------------------
+#
+# A person grants one named merge with /not-me:allow-merge owner/name#N (see notme/merge_grant.py). The guard lifts
+# its `gh pr merge` block for exactly that PR, once, in that session, outside a not-me run, when the command is the
+# plainest possible form and the repo is allowed.
+
+_MERGE_UNQUOTED = re.compile(r"[A-Za-z0-9 \t_./=:@+,%-]*")  # what may stand outside quotes in a granted merge
+_MERGE_METHODS = {"--squash", "--merge", "--rebase"}
+_MERGE_VALUE_OPTS = {"--subject", "--body-file"}
+
+
+def _merge_command(cmd: str, cwd: str, ctx: GuardContext) -> Optional[Tuple[str, int, Optional[str]]]:
+    """(owner/name, number, method flag or None) when cmd is exactly one simple `gh pr merge <N> -R|--repo
+    <owner/name>` with at most one of --squash, --merge or --rebase and optionally --subject and --body-file once
+    each; else None. No substitution, variable, backslash, redirection, pipe, list, comment, glob or other option
+    anywhere."""
+    if any(c in cmd for c in "$`\\\n\r"):
+        return None
+    outside, quote = [], ""
+    for c in cmd:
+        if quote:
+            quote = "" if c == quote else quote
+        elif c in "'\"":
+            quote = c
+        else:
+            outside.append(c)
+    if quote or not _MERGE_UNQUOTED.fullmatch("".join(outside)):
+        return None
+    try:
+        parsed = lex(cmd)
+    except Unparsed:
+        return None
+    if len(parsed.commands) != 1 or parsed.subs or parsed.funcdef:
+        return None
+    c = parsed.commands[0]
+    if c.nested or c.bodies or c.redirs:
+        return None
+    w = [str(x) for x in c.words]
+    if w[:3] != ["gh", "pr", "merge"]:
+        return None
+    number: Optional[int] = None
+    repo: Optional[str] = None
+    seen: Set[str] = set()
+    i = 3
+    while i < len(w):
+        a = w[i]
+        if a in ("-R", "--repo") or a in _MERGE_VALUE_OPTS:
+            key = "--repo" if a == "-R" else a
+            if key in seen or i + 1 >= len(w) or w[i + 1].startswith("-") or not w[i + 1]:
+                return None
+            seen.add(key)
+            value = w[i + 1]
+            if key == "--repo":
+                if not valid_slug(value):
+                    return None
+                repo = value
+            elif key == "--body-file" and _under(_norm(value, cwd), _norm(str(ctx.home), cwd)):
+                return None  # never post a file from the not-me home
+            i += 2
+            continue
+        if a in _MERGE_METHODS and not (seen & _MERGE_METHODS):
+            seen.add(a)
+        elif number is None and a.isdigit() and a.isascii() and not a.startswith("0"):
+            number = int(a)
+        else:
+            return None
+        i += 1
+    if number is None or repo is None:
+        return None
+    method = next(iter(seen & _MERGE_METHODS), None)
+    return repo, number, method
+
+
+def _merge_grant(event: Mapping[str, Any], ctx: GuardContext) -> Optional[Tuple[str, str, int]]:
+    """(session key, owner/name, number) when a fresh, signed grant for this call's session names exactly the PR
+    this command merges and the method it uses (the grant's method, else --squash), the command is the plain
+    form, the repo is allowed, and no not-me run is active; else None. Outside a not-me project the merge rule is
+    off anyway, so a grant is neither needed nor used there."""
+    tin = event.get("tool_input") or {}
+    cmd = str(tin.get("command") or "")
+    if ctx.only_self or ctx.active_run or "merge" not in cmd:
+        return None
+    cwd = str(event.get("cwd") or ctx.cwd)
+    target = _merge_command(cmd, cwd, ctx)
+    sid = merge_grant.session_key(event.get("session_id"))
+    if target is None or sid is None:
+        return None
+    grant = merge_grant.read(ctx.home, sid)
+    if grant is None:
+        return None
+    repo, number, method = target
+    if grant["repo"].lower() != repo.lower() or grant["number"] != number or repo.lower() not in ctx.allowed_repos:
+        return None
+    if method != merge_grant.required_flag(grant):
+        return None
+    return sid, repo.lower(), number
+
+
+def _use_grant(ctx: GuardContext, grant: Tuple[str, str, int], cmd: str) -> Decision:
+    """Spend the grant (single use) and log it; block when another call spent it first."""
+    sid, repo, number = grant
+    if not merge_grant.consume(ctx.home, sid):
+        block = _blk(_short(cmd))("protected_branches", "this merge grant was already used",
+                                   f"ask the operator to send {merge_grant.COMMAND} {repo}#{number} again")
+        block.tool, block.message = "Bash", render(block, ctx)
+        return block
+    root = log_root(ctx.common_dir)
+    if root is not None:
+        runlog.guard_log_append(runlog.guard_log_path(root), {
+            "tool": "Bash", "rule": "merge_grant", "reason": "a person's merge grant allowed this merge",
+            "target": f"{repo}#{number}", "session": sid})
     return None
 
 
@@ -1231,7 +1361,8 @@ _READ_TOOLS = ("Read", "NotebookRead", "LS", "Grep", "Glob")
 # The not-me home's private files, as (name, why, hint). The agent may neither read nor write the secrets (the
 # operator token and the live-mode epoch); the shell checks also cover the live marker, which the agent may not
 # write (the Read tool may still read it).
-_HOME_SECRETS = ((OPERATOR_TOKEN, TOKEN_WHY, TOKEN_HINT), (LIVE_EPOCH_NAME, LIVE_EPOCH_WHY, LIVE_HINT))
+_HOME_SECRETS = ((OPERATOR_TOKEN, TOKEN_WHY, TOKEN_HINT), (LIVE_EPOCH_NAME, LIVE_EPOCH_WHY, LIVE_HINT),
+                 (GRANT_NAME, GRANT_WHY, GRANT_HINT))  # a directory: everything under it is guarded too
 _HOME_GUARDED = _HOME_SECRETS + ((LIVE_MARKER_NAME, LIVE_MARKER_WHY, LIVE_HINT),)
 # (_norm path, plain normcased path, why, hint) of one guarded file
 _Guarded = Tuple[str, str, str, str]
@@ -1254,7 +1385,9 @@ def _pattern_hit(pattern: str, base: str, guarded: List[_Guarded], recursive: bo
     p = _path.normcase(_path.normpath(p))
     pats = [p] + ([p.rstrip(_path.sep) + _path.sep + "*"] if recursive else [])
     for g in guarded:
-        if any(fnmatch.fnmatchcase(c, q) for c in g[:2] for q in pats):
+        # a file inside the grant directory, which may not exist yet
+        inside = [_path.join(c, "s.json") for c in g[:2]] if _base(g[0]) == GRANT_NAME else []
+        if any(fnmatch.fnmatchcase(c, q) for c in list(g[:2]) + inside for q in pats):
             return g
     return None
 
@@ -1273,7 +1406,7 @@ def _read_tool(tool: str, tin: Mapping[str, Any], cwd: str, ctx: GuardContext) -
     blk = _blk(_short(f"{tool} {raw} {pattern}".strip()))
     for g, (name, why, hint) in zip(_guarded(ctx, cwd, _HOME_SECRETS), _HOME_SECRETS):
         secret = g[0]
-        hit = base in (home, secret) or name in raw.lower() or name in pattern.lower()
+        hit = base in (home, secret) or _under(base, secret) or name in raw.lower() or name in pattern.lower()
         if not hit and tool != "LS" and _under(secret, base):
             rel = secret[len(base):].lstrip(_path.sep).replace(_path.sep, "/")
             # a missing or matching filter reaches the secret (fnmatch's * also crosses "/": an over-approximation)
@@ -1293,9 +1426,34 @@ def _token_file(tool: str, fpath: str, cwd: str, ctx: GuardContext) -> Iterator[
         return
     full = _norm(fpath, cwd)
     for g, (name, why, hint) in zip(_guarded(ctx, cwd, _HOME_SECRETS), _HOME_SECRETS):
-        if _base(fpath).lower() == name or full == g[0]:
+        if _base(fpath).lower() == name or _under(full, g[0]):
             yield _blk(_short(f"{tool} {fpath}"))(SELF, why, hint)
             return
+    if _reaches_grant(fpath, full, cwd, ctx):
+        yield _blk(_short(f"{tool} {fpath}"))(SELF, GRANT_WHY, GRANT_HINT)
+
+
+def _reaches_grant(fpath: str, full: str, cwd: str, ctx: GuardContext) -> bool:
+    """A file tool's path names or reaches the merge-grant directory: by name anywhere in the path, under it
+    after resolving symlinks physically (so `link/..` cannot step around it), or as a hard link to a grant."""
+    if GRANT_NAME in fpath.lower() or GRANT_NAME in full.lower():
+        return True
+    gdir = _norm(_path.join(str(ctx.home), GRANT_NAME), cwd)
+    p = _path.expanduser(fpath)
+    try:
+        physical = _path.normcase(_path.realpath(p if _path.isabs(p) else _path.join(cwd, p)))
+    except (OSError, ValueError):
+        return True
+    if _under(physical, gdir):
+        return True
+    key = _stat_key(physical)
+    if key is None or not _path.isdir(gdir):
+        return False
+    try:
+        names = os.listdir(gdir)
+    except OSError:
+        return True
+    return any(_stat_key(_path.join(gdir, n)) == key for n in names)
 
 
 @dataclass(frozen=True)
@@ -1584,6 +1742,8 @@ def _bash(cmd: str, cwd: str, ctx: GuardContext) -> Iterator[Block]:
         yield blk(SELF, LIVE_EPOCH_WHY, LIVE_HINT)
     if LIVE_MARKER_NAME in plain.lower():
         yield blk(SELF, LIVE_MARKER_WHY, LIVE_HINT)
+    if GRANT_NAME in plain.lower() or any(GRANT_NAME in v for v in _spellings(plain)):
+        yield blk(SELF, GRANT_WHY, GRANT_HINT)
     if ALLOWLIST_NAME in cmd.lower() or str(ctx.allowlist_path).lower() in cmd.lower():
         yield blk(SELF, "the not-me allow list is off limits to the agent",
                   "ask the operator to run /not-me:allow-repo, or read it with /not-me:config")
@@ -1871,7 +2031,7 @@ def _reaches(arg: str, base: str, guarded: List[_Guarded], recursive: bool,
 
     def hit(path: str) -> Optional[_Guarded]:
         n = _norm(path, base)
-        return next((g for g in guarded if n == g[0] or (recursive and _under(g[0], n))), None)
+        return next((g for g in guarded if _under(n, g[0]) or (recursive and _under(g[0], n))), None)
     if not _GLOB.search(arg):
         return hit(full)
     try:
@@ -2803,8 +2963,11 @@ def _gh_write(t: List[str], seg: str, st: _State, ctx: GuardContext, blk: Blk) -
     if group == "pr" and verb == "merge":
         if "--admin" in t:
             yield blk("force_push", "gh pr merge --admin bypasses branch protection", "leave merging to a person")
-        yield blk("protected_branches", "merging a pull request is a human action",
-                  "leave the PR ready for review; a person merges it")
+        merge = blk("protected_branches", "merging a pull request is a human action",
+                    f"leave the PR ready for review; a person merges it, or grants this one merge by sending "
+                    f"{merge_grant.COMMAND} owner/name#N")
+        merge.grantable = True
+        yield merge
     if verb in _GH_READ_VERBS:
         return
     if st.moved:

@@ -126,8 +126,14 @@ the owner's say-so, not a cleanup.
     shell arguments. The `--bg` result is exactly one line in the grammar in
     `references/bg-mode.md`; `NONE` means only "nothing to do".
 
-11. **Merging is a human action.** Nothing here merges PRs, deletes branches,
-    or changes repository settings, even when a lead asks.
+11. **Merging is a human action: a person merges, or grants one named merge
+    from their own prompt (`/not-me:allow-merge owner/repo#N`); runs never
+    merge.** The grant is written only by the UserPromptSubmit hook, signed
+    with the operator token, binds the PR and the merge method, ends with
+    the person's next message (30 minutes at most), covers one plain
+    `gh pr merge N -R owner/repo` in that session, and never applies while a
+    run is active. Nothing here deletes branches or changes repository
+    settings, even when a lead asks.
 
 ## How to work here
 
