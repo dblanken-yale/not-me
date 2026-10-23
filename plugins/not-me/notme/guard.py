@@ -130,22 +130,43 @@ _MCP_WRITE_WORDS = re.compile(
     r"reopen|fork|edit|lock|unlock|cancel|enable|disable|trigger|mark|star|approve|comment|upload|transfer)(_|$)")
 
 # Opaque text: what decoded text the guard does not parse may not hold, with the rules a match is reported under
-# (the first one that is on). Matched against every spelling _spellings makes.
+# (the first one that is on). Matched against every spelling _spellings makes. Every matcher is linear in the text:
+# a two-part one finds its first part once per shell segment and looks for the second part after it.
 _PB, _FP, _OR, _DG = "protected_branches", "force_push", "other_repo", "destructive_git"
-_DANGER: Tuple[Tuple["re.Pattern[str]", Tuple[str, ...]], ...] = (
-    (re.compile(r"(?<![^\s'\"(\[,;|&{=`])push(?=[\s'\")\],;|&}`]|$)"), (_PB, _FP, _OR)),  # push as a word
-    (re.compile(r"reset\s+(?:\S+\s+)?--hard"), (_PB,)),
+_SEGMENT = re.compile(r"[^;&|\n]+")
+Matcher = Callable[[str], Optional[str]]
+
+
+def _found(pattern: "re.Pattern[str]") -> Matcher:
+    return lambda v: (lambda m: m.group(0) if m else None)(pattern.search(v))
+
+
+def _then(first: "re.Pattern[str]", second: "re.Pattern[str]") -> Matcher:
+    """first, then second later in the same shell segment (between ;, &, | and newlines)."""
+    def match(v: str) -> Optional[str]:
+        for seg in _SEGMENT.finditer(v):
+            m = first.search(v, seg.start(), seg.end())
+            n = second.search(v, m.end(), seg.end()) if m else None
+            if n:
+                return v[m.start():n.end()]
+        return None
+    return match
+
+
+_DANGER: Tuple[Tuple[Matcher, Tuple[str, ...]], ...] = (
+    (_found(re.compile(r"(?<![^\s'\"(\[,;|&{=`])push(?=[\s'\")\],;|&}`]|$)")), (_PB, _FP, _OR)),  # push as a word
+    (_found(re.compile(r"reset\s+(?:\S+\s+)?--hard")), (_PB,)),
     # gh pr merge|close --delete-branch (or -d) deletes the remote branch
-    (re.compile(r"(?<![A-Za-z0-9_-])pr\s+(?:merge|close)(?![A-Za-z0-9_-])[^;&|\n]{0,200}?"
-                r"(?:--delete-branch|(?<![A-Za-z0-9_-])-[A-Za-z]*d(?![A-Za-z0-9_-]))"), (_FP,)),
-    (re.compile(r"-X\s*=?\s*DELETE|--method[\s=]+DELETE", re.IGNORECASE), (_DG,)),
+    (_then(re.compile(r"(?<![A-Za-z0-9_-])pr\s+(?:merge|close)(?![A-Za-z0-9_-])"),
+           re.compile(r"--delete-branch|(?<![A-Za-z0-9_-])-[A-Za-z]*d(?![A-Za-z0-9_-])")), (_FP,)),
+    (_found(re.compile(r"-X\s*=?\s*DELETE|--method[\s=]+DELETE", re.IGNORECASE)), (_DG,)),
     # GitHub secrets: gh secret set|delete|remove and the secrets API paths
-    (re.compile(r"(?<![A-Za-z0-9_-])secret\s+(?:set|delete|remove)(?![A-Za-z0-9_-])"
+    (_found(re.compile(r"(?<![A-Za-z0-9_-])secret\s+(?:set|delete|remove)(?![A-Za-z0-9_-])"
                 r"|/(?:actions|dependabot|codespaces)/secrets(?![A-Za-z0-9_-])|/environments/[^/\s]+/secrets"
-                r"(?![A-Za-z0-9_-])", re.IGNORECASE), (_DG,)),
-    (re.compile(r"branch\s+(?:\S+\s+)?-[A-Za-z]*D"), (_DG,)),
-    (re.compile(r"clean\s+(?:\S+\s+)?-[A-Za-z]*[xX]"), (_DG,)),
-    (re.compile(r"rm\s+-[A-Za-z]*[rR][^;&|\n]{0,200}?\.git(?![A-Za-z0-9_-])"), (_DG,)),
+                r"(?![A-Za-z0-9_-])", re.IGNORECASE)), (_DG,)),
+    (_found(re.compile(r"branch\s+(?:\S+\s+)?-[A-Za-z]*D")), (_DG,)),
+    (_found(re.compile(r"clean\s+(?:\S+\s+)?-[A-Za-z]*[xX]")), (_DG,)),
+    (_then(re.compile(r"rm\s+-[A-Za-z]*[rR]"), re.compile(r"\.git(?![A-Za-z0-9_-])")), (_DG,)),
 )
 # protected path names: self-protection in any opaque text
 _SELF_TEXT = re.compile(r"operator-token|mode-live\.(?:sig|epoch)|allowed-repos\.json", re.IGNORECASE)
@@ -428,7 +449,7 @@ def _spellings(text: str) -> List[str]:
 
 def risky_text(text: str) -> bool:
     """text, read as opaque, holds a word that would block: used by the hook when it cannot decide a call at all."""
-    return any(_SELF_TEXT.search(v) or _NOTME_TEXT.search(v) or any(p.search(v) for p, _ in _DANGER)
+    return any(_SELF_TEXT.search(v) or _NOTME_TEXT.search(v) or any(match(v) for match, _ in _DANGER)
                for v in _spellings(text))
 
 
@@ -856,7 +877,9 @@ def needs_check(event: Mapping[str, Any]) -> bool:
     if parsed.subs:  # a here-document body can hold a substitution the code text no longer shows
         return True
     text = parsed.code + "\n" + parsed.code.replace("\\\n", "")
-    return bool(_PREFILTER.search(text.replace("'", "").replace('"', "").replace("\\", "")))
+    # a backslash is a path separator on Windows (C:\Users\x): it alone needs the full check, even though the
+    # pattern is matched with backslashes removed so that g\it still reads as git
+    return "\\" in text or bool(_PREFILTER.search(text.replace("'", "").replace('"', "").replace("\\", "")))
 
 
 # --- finding the checkout without git ------------------------------------------
@@ -1411,10 +1434,10 @@ def _opaque(text: str, blk: Blk, what: str, inline: bool = True) -> Iterator[Blo
                       "ask the operator")
             return
     for v in spellings:
-        for pattern, rules in _DANGER:
-            m = pattern.search(v)
-            if m:
-                yield blk(OPAQUE, f"{what}, and it holds `{_short(m.group(0), 40)}`", _OPAQUE_HINT, rules=rules)
+        for match, rules in _DANGER:
+            hit = match(v)
+            if hit:
+                yield blk(OPAQUE, f"{what}, and it holds `{_short(hit, 40)}`", _OPAQUE_HINT, rules=rules)
                 return
 
 

@@ -332,7 +332,8 @@ class TokenizerTests(unittest.TestCase):
         for cmd in ("git status", "g''h pr list", "g\\it log", "${X} y", "./run", "make.sh", "python3 -c 1",
                     "find . -name x", "cat ~/.claude/not-me/allowed-repos.json", "sh <<EOF\ngh pr merge 1\nEOF",
                     "cp -r /some/home x", "wc < /some/home/op*", "echo 0 > /some/home/m*.sig", "echo 0 >~/x",
-                    "cat operator-token", "nohup make &", "script -q /dev/null make"):
+                    "cat operator-token", "nohup make &", "script -q /dev/null make",
+                    "cp -r C:\\Users\\op\\homes\\h0 backup"):  # only backslashes: a Windows path
             self.assertTrue(bash(cmd), cmd)
         self.assertTrue(guard.needs_check({"tool_name": "Write", "tool_input": {"file_path": "x"}}))
         self.assertTrue(guard.needs_check({"tool_name": "mcp__github__create_issue", "tool_input": {}}))
