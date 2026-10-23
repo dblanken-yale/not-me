@@ -29,7 +29,7 @@ companion-prs
 testing-steps
 review-post
 resolve-threads
-issue-edit-body
+issue-body
 followup
 check-text
 log start

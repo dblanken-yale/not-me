@@ -104,6 +104,10 @@ class ThreadTests(Base):
         self.assertFalse(fbmod.trusted(self.roster, "ci[bot]"))
         self.assertTrue(fbmod.trusted(self.roster, "ci[bot]") is False)
 
+    def test_missing_author_never_trusted_even_with_empty_operator(self):
+        self.assertFalse(fbmod.author_trusted(effective([], "x"), "", ""))
+        self.assertTrue(fbmod.author_trusted(effective([], "x"), "Op", "op"))
+
     def test_deleted_author_untrusted(self):
         self.thread("T1", [tcomment(1, None, SENTINEL)])
         self.pr["threads"][0]["comments"][0]["author"] = None

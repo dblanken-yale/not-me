@@ -1174,16 +1174,48 @@ def cmd_resolve_threads(ctx: Context, args: argparse.Namespace, repo: str, n: in
     return {"repo": repo, "number": n, "resolved": writeback.resolve_fixed_threads(ctx.gh, repo, n, ids)}
 
 
-@command("issue-edit-body", "replace an issue's body", writes=True, ref="tracker", args=[
+_MARKER_RE = re.compile(r"<!--\s*not-me:.*?-->", re.S)
+
+
+def _same_body(a: str, b: str) -> bool:
+    """Equal apart from line endings and trailing whitespace."""
+    def norm(text: str) -> str:
+        lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        return "\n".join(line.rstrip() for line in lines).rstrip()
+    return norm(a) == norm(b)
+
+
+@command("issue-body", "replace a trusted author's issue body", writes=True, ref="tracker", args=[
     arg("number", metavar="N|REF", help="a number (in the tracker), #N, owner/name#N or a URL"), body_file_arg])
-def cmd_issue_edit_body(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
-    """Replace an issue's body with a file's text (no attribution is added). The file must pass the input-path
-    checks; the target repository goes through the write gate.
+def cmd_issue_body(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
+    """Replace an issue's body with a file's text. The text must pass `check-text` (exit 1, kind text_lint, and no
+    write otherwise), and the issue's author must be trusted by the rule `issue` uses (otherwise exit 1, kind
+    untrusted_author, and no write). Every not-me marker in the current body that the new text lacks is appended
+    back, and the configured attribution is added when missing. The issue is read back after the write (exit 5
+    when the body differs; skipped in a dry run).
 
     Output: repo, number, updated
     """
-    with gh_mod.tmp_text_file(ctx.read_input(args.body_file), prefix="not-me-cli-") as path:
+    text = ctx.read_input(args.body_file)
+    problems = writeback.check_text(text, ctx.tracker, repo, writeback.attribution(ctx.cfg), False)
+    if problems:
+        raise CliExit(ExitCode.ERROR, {"error": f"{len(problems)} problem(s) in the text", "kind": "text_lint",
+                                       "ok": False, "problems": problems})
+    issue = ctx.gh.issue(repo, n)
+    author = gh_mod.login_of(issue.get("author"))
+    if not feedback_mod.author_trusted(ctx.roster, author, ctx.operator):
+        raise fail(ExitCode.ERROR, "untrusted_author",
+                   f"{repo}#{n} is by {author or 'an unknown author'}, who is not trusted; its body is not replaced")
+    body = with_attribution(ctx, text)
+    missing = [m for m in _MARKER_RE.findall(issue.get("body") or "") if m not in body]
+    if missing:
+        body = body.rstrip("\n") + "\n\n" + "\n".join(missing) + "\n"
+    with gh_mod.tmp_text_file(body, prefix="not-me-cli-") as path:
         ctx.gh.issue_edit_body(repo, n, path)
+    if not ctx.mode_is_dry:
+        found = ctx.gh.issue(repo, n).get("body") or ""
+        if not _same_body(found, body):
+            raise writeback.WritebackMismatch(f"{repo}#{n} body differs from what was written")
     return {"repo": repo, "number": n, "updated": True}
 
 

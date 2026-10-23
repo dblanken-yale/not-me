@@ -544,12 +544,12 @@ Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
 Output: repo, number, resolved
 
-### `notme issue-edit-body`
+### `notme issue-body`
 
-Replace an issue's body with a file's text (no attribution is added). The file must pass the input-path checks; the target repository goes through the write gate.
+Replace an issue's body with a file's text. The text must pass `check-text` (exit 1, kind text_lint, and no write otherwise), and the issue's author must be trusted by the rule `issue` uses (otherwise exit 1, kind untrusted_author, and no write). Every not-me marker in the current body that the new text lacks is appended back, and the configured attribution is added when missing. The issue is read back after the write (exit 5 when the body differs; skipped in a dry run).
 
 ```
-notme issue-edit-body N|REF --body-file F
+notme issue-body N|REF --body-file F
 ```
 
 | Argument | Required | Meaning |
