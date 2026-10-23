@@ -80,7 +80,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/authority.md`.
    the operator's login under `## Per-reviewer focus` in the effective review doc.
 3. No profile, or a profile written for another login: run the full review. A
    profile only adds emphasis; an unmatched reviewer never narrows the review.
-   Blocker and major findings in every dimension are always raised.
+   Findings at every level in `review.block_on` (default blocker and major), in every dimension, are always raised.
 
 ## Step 2: Build the queue
 
@@ -144,9 +144,10 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/delegation.md`.
 The orchestrator decides; a subagent never does. Follow
 `${CLAUDE_PLUGIN_ROOT}/skills/review/references/verdict.md`.
 
-1. **Approve**: no blocker or major finding, every earlier thread fixed or
-   soundly answered, every check green.
-2. **Request changes**: any blocker or major finding, an open or unsoundly
+1. **Approve**: no finding whose level is in `review.block_on` (default
+   blocker and major), every earlier thread fixed or soundly answered, every
+   check green.
+2. **Request changes**: any finding whose level is in `review.block_on`, an open or unsoundly
    answered earlier thread, or a red check caused by the change.
 3. **Unsure**: a product or UX call, two leads who disagree, or a check that
    cannot run for a reason outside the PR. Post nothing.

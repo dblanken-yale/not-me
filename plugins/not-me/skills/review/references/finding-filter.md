@@ -79,7 +79,9 @@ verdict. Name the follow-up issue in the review body.
 
 ## Severity
 
-| Level | Means | Blocks approval |
+The last column is the default of `review.block_on`. The effective list decides; the repo layer can only add levels to it, and `blocker` is always in it.
+
+| Level | Means | Blocks approval by default |
 |-------|-------|-----------------|
 | blocker | Wrong result, data loss, security hole, or a failing check caused by the change | yes |
 | major | A missed acceptance criterion, a missing test for new behaviour, a likely bug | yes |
