@@ -4,8 +4,9 @@
 A prompt that is exactly `/not-me:allow-merge owner/name#N` (optionally --squash, --merge or --rebase) writes
 this session's merge grant; any other prompt in the session deletes it, so a grant lasts until the person's next
 message. A malformed argument writes nothing. Reads only the hook input on stdin, NOT_ME_HOME for where the
-not-me home is, and the operator token there to sign the grant (no token, no grant). Never blocks a prompt:
-always exits 0.
+not-me home is, and the operator token there to sign the grant (no token, no grant). Before writing, it reads the
+process table: a session started by another Claude Code session (or in print mode) gets no grant, and neither does
+one whose ancestry cannot be read. Never blocks a prompt: always exits 0.
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ def main(raw: "str | None" = None) -> int:
         if raw is None:
             raw = sys.stdin.buffer.read().decode("utf-8", "replace")
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from notme import merge_grant, paths
+        from notme import humans, merge_grant, paths
 
         event = json.loads(raw)
         if not isinstance(event, dict) or event.get("hook_event_name", "UserPromptSubmit") != "UserPromptSubmit":
@@ -30,7 +31,12 @@ def main(raw: "str | None" = None) -> int:
         home = paths.home_dir()
         named, grant = merge_grant.parse_prompt(event.get("prompt"))
         merge_grant.clear(home, sid)  # first: a failed write below must not leave an older grant behind
-        if grant is not None:
+        if grant is not None and (merge_grant.started_non_interactively()
+                                  or merge_grant.nested_session(humans.read_process_table())):
+            print("not-me: no merge was granted: this session was started by another Claude Code session or in "
+                  "print mode, or its process ancestry could not be read. Send the command from a session you "
+                  "opened yourself.")
+        elif grant is not None:
             try:
                 merge_grant.write(home, sid, grant)
             except merge_grant.NoOperatorToken:

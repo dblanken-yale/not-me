@@ -25,9 +25,10 @@ import json
 import os
 import re
 import stat
+import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from . import humans
 
@@ -43,6 +44,111 @@ _SIGNED = ("session", "repo", "number", "method", "created")
 
 class NoOperatorToken(Exception):
     """There is no usable operator token to sign a grant with."""
+
+
+# Provenance: the only process shapes a grant may come from, identified by each process's real executable path
+# (macOS: ps reports it as the command name; Linux: /proc/<pid>/exe), never by argv0, arguments or a basename.
+_MAC_HOST = re.compile(r"^(?:/Users/[^/]+)?/Applications/Claude\.app/Contents/(?:MacOS/Claude"
+                       r"|Frameworks/Claude Helper(?: \([A-Za-z]+\))?\.app/Contents/MacOS/Claude Helper(?: \([A-Za-z]+\))?)$")
+_ANCHOR_PATHS = re.compile(
+    r"^(?:/System/Applications/Utilities/Terminal\.app/Contents/MacOS/Terminal"
+    r"|(?:/Users/[^/]+)?/Applications/(?:iTerm|Ghostty|Alacritty|kitty|WezTerm|Warp|Hyper)\.app/Contents/MacOS/[^/]+"
+    r"|/usr/bin/login|/bin/login|/usr/sbin/sshd|/usr/bin/screen|/usr/bin/tmux|/usr/local/bin/tmux"
+    r"|/opt/homebrew/bin/tmux|/opt/homebrew/Cellar/tmux/[^/]+/bin/tmux|/usr/libexec/gnome-terminal-server"
+    r"|/usr/bin/(?:konsole|xterm|alacritty|kitty|foot|tilix|terminator|wezterm-gui|ghostty))$")
+_SHELL_PATHS = re.compile(r"^(?:(?:/usr)?/bin/(?:zsh|bash|sh|dash|fish)|(?:/opt/homebrew|/usr/local)/bin/(?:zsh|bash|fish)"
+                          r"|/opt/homebrew/Cellar/(?:zsh|bash|fish)/[^/]+/bin/(?:zsh|bash|fish))$")
+_MAX_DEPTH = 64
+Exe = Callable[[int, str], Optional[str]]
+
+
+def real_exe(platform: Optional[str] = None) -> Exe:
+    """A resolver from (pid, command name) to the real executable path, or None when it cannot be known."""
+    platform = sys.platform if platform is None else platform
+
+    def resolve(pid: int, comm: str) -> Optional[str]:
+        comm = comm.strip()
+        if platform == "darwin":
+            return comm if comm.startswith("/") else None
+        if platform.startswith("linux"):
+            try:
+                return os.readlink(f"/proc/{pid}/exe")
+            except OSError:
+                return None
+        return None  # Windows: no executable path in the table, so no grant (fails closed)
+    return resolve
+
+
+def _claude_env(pid: int) -> bool:
+    """A process whose environment (where readable: Linux /proc) shows it runs under Claude Code."""
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as fh:
+            env = fh.read(1 << 20)
+    except OSError:
+        return False
+    return any(v.startswith((b"CLAUDECODE=", b"CLAUDE_CODE_")) for v in env.split(b"\0"))
+
+
+def nested_session(table: Optional["humans.ProcessTable"], pid: Optional[int] = None,
+                   platform: Optional[str] = None, exe: Optional[Exe] = None) -> bool:
+    """False only for these exact shapes, walking up from pid (default: this hook process):
+      hook launch chain (processes whose command line runs merge_grant.py) ->
+      one Claude Code process ->
+      either the desktop app binary, or an interactive shell whose parent is a terminal, login, sshd, tmux or
+      screen binary (every one matched by its real executable path in a known location) ->
+      the rest of the chain up to pid 1, in which no process is Claude Code.
+    Anything else is True and gets no grant: another Claude Code process anywhere above (`claude -p` or
+    `claude --resume` from inside a session), an orphan, an unknown process in between, an unreadable table, a
+    gap, or an executable path that cannot be resolved."""
+    if not table:
+        return True
+    exe = exe or real_exe(platform)
+    here = os.getpid() if pid is None else pid
+    chain: List[Tuple[int, int, str, str]] = []
+    for _ in range(_MAX_DEPTH):
+        row = table.get(here)
+        if row is None:
+            return True
+        chain.append((here,) + row)
+        if here in (0, 1) or row[0] == here:
+            break
+        here = row[0]
+    else:
+        return True
+    i = 0
+    while i < len(chain) and "merge_grant.py" in chain[i][3]:
+        i += 1  # the hook itself and the shell Claude Code ran it through
+    if i == 0 or i >= len(chain) or not humans.is_claude(chain[i][2], chain[i][3]):
+        return True
+    i += 1
+    if i >= len(chain):
+        return True
+    p, _, comm, _ = chain[i]
+    path = exe(p, comm) or ""
+    if _MAC_HOST.match(path):
+        i += 1
+        while i < len(chain) and _MAC_HOST.match(exe(chain[i][0], chain[i][2]) or ""):
+            i += 1  # the app's own helper chain up to its main binary
+    elif _SHELL_PATHS.match(path) and i + 1 < len(chain):
+        p2, _, comm2, _ = chain[i + 1]
+        if not _ANCHOR_PATHS.match(exe(p2, comm2) or ""):
+            return True
+        i += 2
+    else:
+        return True
+    for p, _, comm, args in chain[i:]:
+        if p in (0, 1):
+            break
+        if humans.is_claude(comm, args) or _claude_env(p):
+            return True
+    return chain[-1][0] not in (0, 1)  # the walk must end at the root
+
+
+def started_non_interactively(env: Optional[Dict[str, str]] = None) -> bool:
+    """Best effort: Claude Code marks print mode (`claude -p`) with CLAUDE_CODE_ENTRYPOINT=sdk-cli. The process
+    ancestry check (nested_session) is the real control; this only refuses the plain case early."""
+    env = os.environ if env is None else env
+    return env.get("CLAUDE_CODE_ENTRYPOINT", "").lower() == "sdk-cli"
 
 
 def required_flag(grant: Dict[str, Any]) -> str:

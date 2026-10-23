@@ -1,6 +1,8 @@
 """Merge grants: the UserPromptSubmit hook that writes and ends them, and the guard that spends them."""
 from __future__ import annotations
 
+import importlib.util
+import io
 import json
 import os
 import shutil
@@ -9,7 +11,9 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from notme import guard, humans, merge_grant, runlog
@@ -18,6 +22,45 @@ from tests import PLUGIN_ROOT
 from tests import guard_cases as gc
 
 PROMPT_HOOK = PLUGIN_ROOT / "hooks" / "merge_grant.py"
+_SPEC = importlib.util.spec_from_file_location("notme_prompt_hook", str(PROMPT_HOOK))
+prompt_hook = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(prompt_hook)
+
+MAC_CLI = "/Users/x/Library/Application Support/Claude/claude-code/2.1.0/claude"
+MAC_APP = "/Applications/Claude.app/Contents/MacOS/Claude"
+MAC_HELPER = "/Applications/Claude.app/Contents/Frameworks/Claude Helper.app/Contents/MacOS/Claude Helper"
+TERMINAL = "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"
+ITERM = "/Applications/iTerm.app/Contents/MacOS/iTerm2"
+NODE_CLI = "node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+# the hook as Claude Code runs it: its python, the launcher, the shell
+HOOK = (("/usr/bin/python3", "python3 /p/hooks/merge_grant.py"),
+        ("/bin/bash", "bash /p/bin/notme-python /p/hooks/merge_grant.py"),
+        ("/bin/sh", "/bin/sh -c bash \"/p/bin/notme-python\" \"/p/hooks/merge_grant.py\""))
+
+
+def by_path(pid, comm):
+    """The test resolver: the command name is the real executable path when it is absolute (as macOS ps gives)."""
+    return comm if comm.startswith("/") else None
+
+
+def table(*chain):
+    """A process table for this process and the ancestors given (comm, args), outermost last, then launchd."""
+    rows, pid = {}, os.getpid()
+    for k, (comm, args) in enumerate(chain):
+        parent = 1 if k == len(chain) - 1 else 1000 + k
+        rows[pid] = (parent, comm, args)
+        pid = parent
+    rows[1] = (1, "/sbin/launchd", "/sbin/launchd")
+    return rows
+
+
+def desktop():
+    return table(*HOOK, (MAC_CLI, MAC_CLI), (MAC_APP, MAC_APP))
+
+
+def terminal():
+    return table(*HOOK, ("/usr/local/bin/claude", "claude"), ("/bin/zsh", "-zsh"), ("/usr/bin/login", "login -pf x"),
+                 (TERMINAL, TERMINAL))
 
 
 class _Home(unittest.TestCase):
@@ -26,18 +69,99 @@ class _Home(unittest.TestCase):
         self.addCleanup(shutil.rmtree, str(self.home), True)
         humans.create_token(self.home)  # grants are signed with the operator token
 
-    def prompt(self, text, sid="s1", event="UserPromptSubmit"):
-        """Run the real hook as Claude Code does: JSON on stdin, NOT_ME_HOME in the environment."""
+    def prompt(self, text, sid="s1", event="UserPromptSubmit", procs="terminal", env=None):
+        """Run the real hook's main() as Claude Code does (JSON in, NOT_ME_HOME set), with a given process table
+        (default: a session started in a terminal); procs=None means the table cannot be read."""
         payload = {"hook_event_name": event, "session_id": sid, "prompt": text, "cwd": str(self.home),
                    "transcript_path": "/dev/null"}
-        env = {k: v for k, v in os.environ.items() if not k.startswith("NOT_ME_")}
-        proc = subprocess.run([sys.executable, str(PROMPT_HOOK)], input=json.dumps(payload).encode("utf-8"),
-                              capture_output=True, env=dict(env, NOT_ME_HOME=str(self.home)), timeout=60)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        return proc
+        base = {k: v for k, v in os.environ.items() if not k.startswith(("NOT_ME_", "CLAUDE_CODE_ENTRYPOINT"))}
+        rows = terminal() if procs == "terminal" else procs
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, dict(base, NOT_ME_HOME=str(self.home), **(env or {})), clear=True), \
+                mock.patch.object(humans, "read_process_table", lambda: rows), \
+                mock.patch.object(merge_grant, "real_exe", lambda platform=None: by_path), redirect_stdout(out):
+            rc = prompt_hook.main(json.dumps(payload))
+        self.assertEqual(rc, 0)
+        return SimpleNamespace(returncode=rc, stdout=out.getvalue().encode("utf-8"))
 
     def grant(self, sid="s1"):
         return merge_grant.read(self.home, sid)
+
+
+class ProvenanceTests(_Home):
+    """A grant is written only from the exact shapes a person starts: the hook's launch chain, one Claude Code
+    process, then the desktop app binary or an interactive shell under a terminal, login, sshd, tmux or screen
+    binary (real executable paths), and no Claude Code process anywhere above. Everything else gets no grant."""
+
+    def nested(self, rows):
+        return merge_grant.nested_session(rows, exe=by_path)
+
+    def test_shapes_a_person_starts(self):
+        cases = {
+            "desktop app (Code tab, Remote Control)": desktop(),
+            "desktop app helper": table(*HOOK, (MAC_CLI, MAC_CLI), (MAC_HELPER, MAC_HELPER), (MAC_APP, MAC_APP)),
+            "Terminal": terminal(),
+            "iTerm without login": table(*HOOK, ("/usr/local/bin/claude", "claude"), ("/bin/zsh", "-zsh"),
+                                         (ITERM, ITERM)),
+            "npm CLI over ssh": table(*HOOK, ("/usr/local/bin/node", NODE_CLI), ("/bin/bash", "-bash"),
+                                      ("/usr/sbin/sshd", "sshd: x@ttys001"), ("/usr/sbin/sshd", "sshd")),
+            "tmux": table(*HOOK, ("/opt/homebrew/bin/claude", "claude"), ("/bin/zsh", "-zsh"),
+                          ("/opt/homebrew/bin/tmux", "tmux")),
+        }
+        for name, rows in cases.items():
+            with self.subTest(name):
+                self.assertFalse(self.nested(rows))
+        self.prompt("/not-me:allow-merge acme/app#5")  # the hook itself, from a Terminal session
+        self.assertIsNotNone(self.grant())
+
+    def test_every_other_shape_gets_no_grant(self):
+        cases = {
+            "claude -p from a desktop session": table(*HOOK, ("/usr/local/bin/claude", "claude -p hi"),
+                                                      ("/bin/bash", "bash -c x"), (MAC_CLI, MAC_CLI),
+                                                      (MAC_APP, MAC_APP)),
+            "claude --resume from a terminal session": table(*HOOK, ("/usr/local/bin/claude", "claude --resume s1 -p"),
+                                                             ("/bin/zsh", "zsh -c x"), ("/usr/local/bin/claude", "claude"),
+                                                             ("/bin/zsh", "-zsh"), (TERMINAL, TERMINAL)),
+            "a resumed session started by a shell under a session's shell": table(
+                *HOOK, ("/usr/local/bin/claude", "claude -r s1"), ("/bin/zsh", "-zsh"), (TERMINAL, TERMINAL),
+                (MAC_CLI, MAC_CLI), (MAC_APP, MAC_APP)),
+            "npx claude-code inside a session": table(*HOOK, ("/usr/local/bin/node", NODE_CLI + " -p x"),
+                                                      ("/usr/local/bin/npm", "npm exec"), (MAC_CLI, MAC_CLI),
+                                                      (MAC_APP, MAC_APP)),
+            "host named only in the arguments": table(*HOOK, (MAC_CLI, MAC_CLI), ("/tmp/x/claude", MAC_APP)),
+            "host argv0 forged, real binary elsewhere": table(*HOOK, (MAC_CLI, MAC_CLI), ("/tmp/x/Claude", MAC_APP)),
+            "a terminal named only by basename": table(*HOOK, (MAC_CLI, MAC_CLI), ("/bin/zsh", "-zsh"),
+                                                       ("/tmp/x/Terminal", "Terminal")),
+            "host not the direct parent": table(*HOOK, (MAC_CLI, MAC_CLI), ("/bin/bash", "bash"), (MAC_APP, MAC_APP)),
+            "a shell whose parent is not an anchor": table(*HOOK, (MAC_CLI, MAC_CLI), ("/bin/zsh", "-zsh"),
+                                                           ("/usr/bin/nohup", "nohup")),
+            "an orphan re-parented to launchd": table(*HOOK, ("/usr/local/bin/claude", "claude -p x")),
+            "a process the resolver cannot place": table(*HOOK, ("claude", "claude"), ("zsh", "-zsh"),
+                                                         ("login", "login")),
+            "no hook launch chain": table(("/usr/bin/python3", "python3 x.py"), (MAC_CLI, MAC_CLI), (MAC_APP, MAC_APP)),
+            "no Claude Code at all": table(*HOOK, ("/bin/zsh", "-zsh"), (TERMINAL, TERMINAL)),
+            "unreadable": None,
+            "a gap in the chain": {os.getpid(): (4242, "/usr/bin/python3", "python3 merge_grant.py")},
+        }
+        for name, rows in cases.items():
+            with self.subTest(name):
+                self.assertTrue(self.nested(rows))
+                out = self.prompt("/not-me:allow-merge acme/app#5", procs=rows).stdout.decode()
+                self.assertIsNone(self.grant())
+                self.assertIn("no merge was granted", out)
+
+    def test_the_default_resolver_never_reads_arguments(self):
+        darwin, windows = merge_grant.real_exe("darwin"), merge_grant.real_exe("win32")
+        self.assertEqual(darwin(1, MAC_APP), MAC_APP)
+        self.assertIsNone(darwin(1, "Claude"))  # a bare name is not a path
+        self.assertIsNone(windows(1, "Claude.exe"))  # no executable path on Windows: no grant
+
+    def test_print_mode_is_refused(self):
+        self.assertTrue(merge_grant.started_non_interactively({"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}))
+        for value in ("claude-desktop", "cli", ""):
+            self.assertFalse(merge_grant.started_non_interactively({"CLAUDE_CODE_ENTRYPOINT": value}))
+        self.prompt("/not-me:allow-merge acme/app#5", env={"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"})
+        self.assertIsNone(self.grant())
 
 
 class PromptHookTests(_Home):

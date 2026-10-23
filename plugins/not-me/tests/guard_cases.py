@@ -1504,6 +1504,59 @@ for tool, tin in (("mcp__ccd_session_mgmt__send_message", {"session_id": "x", "m
                   ("mcp__other__anything", {"nested": {"text": "npx @anthropic-ai/claude-code -p x"}})):
     for variant in ("app", "bare"):
         mcp(B, SP, tool, tin, variant)
+# each MCP string on its own, through the same unquoting and escape decoding as Bash, against every marker
+for tool, tin in (("mcp__ccd_session_mgmt__send_message", {"message": "/not-me:allow-mer\\x67e acme/app#5"}),
+                  ("mcp__ccd_session_mgmt__send_message", {"message": "/not-me:allow-mer''ge acme/app#5"}),
+                  ("mcp__x__y", {"a": ["ok", {"b": "notme allow-repo add acme/other"}]}),
+                  ("mcp__x__y", {"text": "cat ~/.claude/not-me/project.md"}),
+                  ("mcp__x__y", {"text": "NOT_ME_OPERATOR_CONFIRM=1"}),
+                  ("mcp__x__y", {"allow-merge": "x"}),
+                  ("mcp__terminal__run_in_terminal", {"command": "notme pause off"})):
+    for variant in ("app", "bare"):
+        mcp(B, SP, tool, tin, variant)
+# a name built at run time is opaque: blocked inside a project; outside one only the prompt hook's process-ancestry
+# check stops a session started this way from granting a merge
+mcp(B, OR, "mcp__terminal__run_in_terminal", {"command": "C=$(printf 'cl%sude' a); $C -p hi"})
+mcp(A, None, "mcp__terminal__run_in_terminal", {"command": "C=$(printf 'cl%sude' a); $C -p hi"}, "bare")
+# a terminal command is judged as a Bash command: the four rules apply inside a project
+mcp(B, OR, "mcp__terminal__run_in_terminal", {"command": "git push https://github.com/acme/other HEAD"})
+mcp(A, None, "mcp__terminal__run_in_terminal", {"command": "git push https://github.com/acme/other HEAD"}, "bare")
+# a file that holds the grant command could be sent as a prompt later
+for tool, tin in (("Write", {"file_path": "notes.md", "content": "send /not-me:allow-merge acme/app#5"}),
+                  ("Edit", {"file_path": "README.md", "old_string": "# fixture", "new_string": "/NOT-ME:ALLOW-MERGE a/b#1"}),
+                  ("MultiEdit", {"file_path": "README.md", "edits": [{"old_string": "x", "new_string": "/not-me:allow-merge"}]}),
+                  ("NotebookEdit", {"notebook_path": "x.ipynb", "new_source": "/not-me:allow-merge a/b#1"})):
+    for variant in ("app", "bare"):
+        mcp(B, SP, tool, tin, variant)
+mcp(A, None, "Write", {"file_path": "notes.md", "content": "the person merges"})
+# the text the file would hold after the edit, in every spelling
+SCRIPTS["split.md"] = "/not-me:allow-mer\nX\n"
+mcp(B, SP, "Edit", {"file_path": "scripts/split.md", "old_string": "\nX", "new_string": "ge"})
+mcp(B, SP, "Write", {"file_path": "notes.md", "content": "/not-me:allow-mer\\x67e acme/app#5"})
+mcp(B, SP, "Write", {"file_path": "notes.md", "content": "/not-me:allow-mer''ge acme/app#5"})
+mcp(A, None, "Edit", {"file_path": "README.md", "old_string": "# fixture", "new_string": "# fixture two"})
+# an edit whose result cannot be worked out is refused rather than judged by its fragments
+mcp(B, SP, "Edit", {"file_path": "README.md", "old_string": "not in the file", "new_string": "x"})
+mcp(B, SP, "MultiEdit", {"file_path": "README.md", "edits": [{"old_string": "absent", "new_string": "x"}]})
+# text the lexer cannot read blocks every MCP tool except those known only to display it
+for variant in ("app", "bare"):
+    mcp(B, SP, "mcp__x__y", {"text": "it's not closed"}, variant)
+    mcp(A, None, "mcp__ccd_turn__wrap_up", {"recap": "it's not closed"}, variant)
+# MCP input: too deep or too large is refused unread; every string of an unknown tool is judged as a command
+_deep: Dict[str, Any] = {"v": "x"}
+for _ in range(40):
+    _deep = {"n": _deep}
+for variant in ("app", "bare"):
+    mcp(B, SP, "mcp__x__y", _deep, variant)
+    mcp(B, SP, "mcp__x__y", {"text": "a" * (300 * 1024)}, variant)
+    mcp(B, SP, "mcp__x__y", {"text": "notme pause off"}, variant)
+    # opaque and driving not-me: the first rule inside a project, self-protection outside it
+    mcp(B, OR if variant == "app" else SP, "mcp__terminal__run_in_terminal", {"command": "$N pause off"}, variant)
+mcp(B, OR, "mcp__ccd_session_mgmt__send_message", {"message": "git push https://github.com/acme/other HEAD"})
+mcp(A, None, "mcp__x__get_thing", {"q": "git push https://github.com/acme/other HEAD"})  # a read-only tool
+# text that only looks like a command is judged as one: blocked inside a not-me project (fail closed), allowed outside
+mcp(B, OR, "mcp__x__y", {"code": "(() => { return [1, 2].map(x => x * 2) })()"})
+mcp(A, None, "mcp__x__y", {"code": "(() => { return [1, 2].map(x => x * 2) })()"}, "bare")
 for tool, tin in (("mcp__terminal__run_in_terminal", {"command": "npm test"}),
                   ("mcp__ccd_session_mgmt__send_message", {"session_id": "x", "message": "status please"}),
                   ("mcp__Claude_Browser__preview_eval", {"expression": "location.href = 'https://claude.ai'"}),

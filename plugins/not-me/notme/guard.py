@@ -1210,11 +1210,18 @@ def decide(event: Mapping[str, Any], ctx: GuardContext) -> Decision:
     elif tool in _READ_TOOLS:
         cands = _read_tool(tool, tin, cwd, ctx)
     elif tool.startswith("mcp__"):
-        cands = _mcp_any(tool, tin, ctx)
+        cands = _mcp_any(tool, tin, ctx, cwd)
     else:
         return None
     # outside a project an unreadable command still blocks when it could drive the not-me CLI or its trust inputs
-    plain = _unshell(str(tin.get("command") or "")) if ctx.only_self and tool == "Bash" else ""
+    plain = ""
+    if ctx.only_self and tool == "Bash":
+        plain = _unshell(str(tin.get("command") or ""))
+    elif ctx.only_self and tool.startswith("mcp__"):  # MCP strings are judged as commands too (_mcp_any)
+        try:
+            plain = _unshell("\n".join(v for _, v in _strings(tin)))
+        except ValueError:
+            plain = ""
     drives = bool(plain) and bool(_PTY_TRIGGER.search(plain) or _MODE_LIVE.search(plain))
     grant = _merge_grant(event, ctx) if tool == "Bash" else None
     lifted = False
@@ -1577,6 +1584,20 @@ def _file(tool: str, fpath: str, cwd: str, ctx: GuardContext, tin: Mapping[str, 
         return
     yield from _token_file(tool, fpath, cwd, ctx)
     blk = _blk(_short(f"{tool} {fpath}"))
+    # the text the file would hold: an Edit applied to the current file (else its new strings), checked in every
+    # spelling the shell or a program might decode
+    full_text = _after_edit(tool, tin, _read_text(_norm(fpath, cwd))) if tool in ("Edit", "MultiEdit") else None
+    written = [full_text] + [tin.get(k) for k in ("content", "new_string", "new_source")]
+    edits = tin.get("edits")
+    if isinstance(edits, list):
+        written += [e.get("new_string") for e in edits if isinstance(e, dict)]
+    if tool in ("Edit", "MultiEdit") and full_text is None and ("old_string" in tin or "edits" in tin):
+        # an edit Claude Code would apply but the guard cannot (an unreadable file, an old_string it cannot find)
+        yield blk(SELF, "the text this edit would leave cannot be worked out, so it cannot be checked",
+                  "read the file and make the edit with an exact old_string, or use Write")
+    elif any(isinstance(w, str) and any(merge_grant.COMMAND in v.lower() for v in _spellings(w)) for w in written):
+        yield blk(SELF, f"a file that holds {merge_grant.COMMAND} could later be sent as a prompt",
+                  "describe the command in words, or ask the operator to make this edit")
     full = _norm(fpath, cwd)
     if _names_live_marker(fpath, full, ctx, cwd):
         yield blk(SELF, LIVE_MARKER_WHY, LIVE_HINT)
@@ -1600,21 +1621,70 @@ def _file(tool: str, fpath: str, cwd: str, ctx: GuardContext, tin: Mapping[str, 
                   "change git settings by hand, outside the agent")
 
 
-def _mcp_any(tool: str, tin: Mapping[str, Any], ctx: GuardContext) -> Iterator[Block]:
-    """Every MCP tool: one whose input carries a grant prompt, the not-me secrets or a Claude Code CLI invocation is
-    refused (session, terminal and prompt tools can deliver text outside Bash). GitHub tools get the write rules."""
+# self-protection markers any MCP string may not carry (beside _TOOL_MARKERS)
+_SELF_MARKERS = re.compile(r"allow-repo|NOT_ME_|allowed-repos\.json|" + _NOTME_HOME_PATH, re.IGNORECASE)
+
+
+MCP_MAX_DEPTH = 32  # deeper tool input is refused unread
+MCP_MAX_BYTES = 256 * 1024  # larger tool input is refused unread
+
+
+def _strings(value: Any, key: str = "", depth: int = 0) -> Iterator[Tuple[str, str]]:
+    """Every string in a tool input (keys included), with the key it sits under, so each field is scanned on its
+    own. Raises ValueError past MCP_MAX_DEPTH: the caller fails closed rather than scan a prefix."""
+    if depth > MCP_MAX_DEPTH:
+        raise ValueError("tool input nested too deep")
+    if isinstance(value, str):
+        yield key, value
+    elif isinstance(value, Mapping):
+        for k, v in value.items():
+            yield str(k), str(k)
+            yield from _strings(v, str(k), depth + 1)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _strings(v, key, depth + 1)
+
+
+_UNREAD = "the guard cannot read this command with confidence"
+# MCP tools known not to run or deliver the text they are given (plans, recaps, widgets, page inspection): text the
+# lexer cannot read does not block them. Every other MCP tool keeps that block.
+_TEXT_ONLY_MCP = re.compile(r"^mcp__(?:ccd_turn__(?:update_plan|wrap_up)|ccd_session__mark_chapter|visualize__\w+"
+                            r"|Claude_Browser__preview_(?:screenshot|snapshot|inspect|list|logs|console_logs|network))$")
+
+
+def _mcp_any(tool: str, tin: Mapping[str, Any], ctx: GuardContext, cwd: str) -> Iterator[Block]:
+    """Every MCP tool. Each string in the input is scanned on its own, through the same unquoting and escape
+    decoding as Bash, for the self-protection markers (a grant prompt, the not-me secrets and home, a Claude Code
+    invocation). Then: GitHub tools get the write rules; read-only tools nothing more; every other tool has each
+    string judged as a Bash command, since session, terminal and prompt tools can run or deliver it (text the
+    lexer cannot read counts against a shell tool's command only). Input too deep or too large is refused."""
+    blk = _blk(_short(tool))
     try:
-        text = json.dumps(tin, ensure_ascii=False)
-    except (TypeError, ValueError):
-        text = str(tin)
-    for variant in (text, text.replace("\\n", "\n").replace('\\"', '"')):
-        m = _TOOL_MARKERS.search(variant)
-        if m:
-            yield _blk(_short(tool))(SELF, f"{tool} input names {m.group(0).strip()}, which only the operator may "
-                                           "send or run", "ask the operator")
-            return
+        size = len(json.dumps(tin, default=str))
+        strings = list(_strings(tin))
+    except (ValueError, TypeError, RecursionError):
+        size, strings = -1, []
+    if size < 0 or size > MCP_MAX_BYTES:
+        yield blk(SELF, f"{tool} input is too deep or too large to check", "send smaller, flatter input")
+        return
+    for _, value in strings:
+        for variant in _spellings(value) + [_unshell(value)]:
+            m = _TOOL_MARKERS.search(variant) or _SELF_MARKERS.search(variant)
+            if m:
+                yield blk(SELF, f"{tool} input names {m.group(0).strip()}, which only the operator may send or run",
+                          "ask the operator")
+                return
     if _MCP_TOOL.match(tool):
         yield from _mcp(tool, tin, ctx)
+        return
+    name = tool.split("__")[-1]
+    if name in _READ_MCP or (_READ_MCP_PREFIX.match(name) and not _MCP_WRITE_WORDS.search(name)):
+        return
+    text_only = bool(_TEXT_ONLY_MCP.match(tool))
+    for _, value in strings:
+        for block in _bash(value, cwd, ctx):
+            if not (text_only and block.reason.startswith(_UNREAD)):
+                yield block
 
 
 def _mcp(tool: str, tin: Mapping[str, Any], ctx: GuardContext) -> Iterator[Block]:
