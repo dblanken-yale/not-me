@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/dblanken-yale/not-me/compare/not-me-v0.3.0...not-me-v0.4.0) (2026-10-23)
+
+
+### Features
+
+* **cli:** issue-body replaces a trusted author's issue body ([#68](https://github.com/dblanken-yale/not-me/issues/68)) ([c453ea8](https://github.com/dblanken-yale/not-me/commit/c453ea8d557b81268a1a7e0cb9dcb2dfcb9b57b4))
+* pick only assigned issues; slim the guard and allow merges ([#81](https://github.com/dblanken-yale/not-me/issues/81)) ([a6a9eee](https://github.com/dblanken-yale/not-me/commit/a6a9eee890936c8bb2f3abaa2160e5b11c0790c2))
+
 ## [0.3.0](https://github.com/dblanken-yale/not-me/compare/not-me-v0.2.0...not-me-v0.3.0) (2026-10-23)
 
 
