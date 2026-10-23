@@ -301,7 +301,7 @@ bash(A, None, "gh api -X POST repos/acme/app/issues/1/comments -f body=x")
 bash(A, None, "git push origin HEAD")
 bash(A, None, "git push -u origin feature")
 bash(A, None, "git push https://github.com/acme/app.git HEAD")
-bash(A, None, "git -C {F}/live push")  # another checkout of acme/app
+bash(A, None, "git -C '{F}'/live push")  # another checkout of acme/app (quoted: a Windows path keeps its \)
 bash(A, None, "cd {F}/other; git status")  # a directory change with no write
 bash(A, None, 'git commit -m "fix: x"')
 # Writes elsewhere are blocked.
@@ -671,7 +671,7 @@ bash(A, None, "LC_ALL=C git status")
 bash(A, None, "LC_ALL=C NO_COLOR=1 gh pr comment 1 --repo acme/app -b x")
 bash(B, SP, "cd scripts && notme status")  # notme in a command that changes directory
 bash(A, None, "notme pause on")
-bash(A, None, "notme git worktree-add {F}/app/.git/not-me/worktrees/feat-x")
+bash(A, None, "notme git worktree-add '{F}'/app/.git/not-me/worktrees/feat-x")
 bash(B, SP, "notme --project-dir {F}/other status")
 bash(B, SP, "notme --proj={F}/other status", "alloff")
 bash(B, SP, "python3 {P}/cli/notme.py --project-dir {F}/other config")
@@ -1326,7 +1326,7 @@ for cmd in ('rg "git push" docs', 'rg -n "gh pr" docs', 'grep -rn "gh pr" docs',
             "less -N README.md", "bash -c 'for f in *.md; do echo \"$f\"; done'", "bash -c 'git log --oneline -5'",
             "git fetch --prune origin", "git pull --rebase origin feature/x", "git rebase --continue",
             "git merge --no-ff feature/y", "git clone --depth 1 https://github.com/acme/app", "set -e; git log",
-            "source {F}/app/scripts/plainenv.sh; git log", _nest("ls", 2), "vim -c 'wq!' README.md",
+            "source '{F}'/app/scripts/plainenv.sh; git log", _nest("ls", 2), "vim -c 'wq!' README.md",
             "sed -e 's/h/H/' -e 's/i/I/' README.md", "awk -v x=1 '{print x}' README.md"):
     bash(A, None, cmd)
 

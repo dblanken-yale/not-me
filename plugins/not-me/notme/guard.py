@@ -509,16 +509,19 @@ def _norm(p: str, base: str) -> str:
     return _path.normcase(_path.normpath(_resolve(p)))
 
 
-def _path_word(word: str, base: str) -> str:
-    """The spelling of a path word to resolve for a decision that allows only a resolved path (git -C, a script
-    to read, a worktree to create). Normally the word as the shell reads it. Where paths use backslashes, a word
-    the shell read as C:Usersx (unquoted backslashes dropped) that is not an existing path is taken as typed,
-    C:\\Users\\x, when that form is absolute. Blocking checks see both forms anyway (_judge_commands)."""
-    raw = getattr(word, "raw", "")
-    if (raw and raw != word and "\\" in (_path.sep, _path.altsep or "") and _path.isabs(raw)
-            and not _path.exists(_norm(word, base))):
-        return raw
-    return word
+_BACKSLASH_HINT = "put the path in quotes ('C:\\Users\\x') or write it with forward slashes (C:/Users/x)"
+
+
+def _unquoted_backslash(word: str) -> bool:
+    """word held an unquoted backslash, which bash drops (C:\\Users\\x reads as C:Usersx). A decision that allows
+    only a resolved path (git -C, a script to read, a worktree to create) refuses such a word rather than guess
+    which spelling is meant; blocking checks see both spellings (_judge_commands)."""
+    return getattr(word, "raw", word) != word
+
+
+def _backslash_why(word: str) -> str:
+    return (f"{_short(getattr(word, 'raw', word), 60)} has unquoted backslashes, which bash drops, so the guard "
+            "cannot tell which path is meant")
 
 
 def _under(path: str, base: str) -> bool:
@@ -2510,7 +2513,10 @@ def _cmd_notme(args: List[str], st: _State, ctx: GuardContext, blk: Blk) -> Iter
             yield blk(SELF, "only a person turns live mode on",
                       LIVE_HINT)
     if pos[:2] == ["git", "worktree-add"]:
-        target = _norm(_path_word(raw_pos[2], st.dir), st.dir) if len(raw_pos) > 2 else None
+        if len(raw_pos) > 2 and _unquoted_backslash(raw_pos[2]):
+            yield blk(SELF, _backslash_why(raw_pos[2]), _BACKSLASH_HINT)
+            return
+        target = _norm(raw_pos[2], st.dir) if len(raw_pos) > 2 else None
         base = _norm(_path.join(str(ctx.common_dir), "not-me", "worktrees"), "/") if ctx.common_dir else None
         if target is None or base is None or target == base or not _under(target, base):
             yield blk(SELF, "notme git worktree-add may only create worktrees under <git common dir>/not-me/worktrees/",
@@ -2518,10 +2524,12 @@ def _cmd_notme(args: List[str], st: _State, ctx: GuardContext, blk: Blk) -> Iter
 
 
 def _script(path: str, st: _State, blk: Blk) -> Iterator[Block]:
-    path = _path_word(path, st.dir)
     if st.moved and not _path.isabs(path):
         yield blk(OPAQUE, f"{path} is a relative path in a command that changes directory ({st.moved}), so the "
                           "guard cannot tell which file runs", _CD_HINT)
+        return
+    if _unquoted_backslash(path):
+        yield blk(OPAQUE, _backslash_why(path), _BACKSLASH_HINT)
         return
     text = _read_script(_norm(path, st.dir), st)
     if text is None:
@@ -2697,7 +2705,10 @@ def _cmd_git(t, seg, st, ctx, blk, gitenv):
     while i < len(t) and t[i].startswith("-"):
         a = t[i]
         if a == "-C":
-            d = _norm(_path_word(t[i + 1], d) if i + 1 < len(t) else ".", d)
+            if i + 1 < len(t) and _unquoted_backslash(t[i + 1]):
+                yield blk(OPAQUE, f"git -C: {_backslash_why(t[i + 1])}", _BACKSLASH_HINT)
+                return
+            d = _norm(t[i + 1] if i + 1 < len(t) else ".", d)
             i += 2
         elif a == "-c":
             c_values.append(t[i + 1] if i + 1 < len(t) else "")
@@ -2796,9 +2807,10 @@ def _env_words(words: List[str], st: _State, depth: int) -> Optional[str]:
         path = next((a for a in args if a != "--"), None)
         if path is None:
             return f"{name} of standard input"
-        path = _path_word(path, st.dir)
         if st.moved and not _path.isabs(path):
             return f"{name} {path} in a command that changes directory"
+        if _unquoted_backslash(path):
+            return f"{name} {_short(getattr(path, 'raw', path), 60)}, whose unquoted backslashes bash drops"
         text = _read_script(_norm(path, st.dir), st)
         if text is None:
             return f"{name} {path}, which cannot be read"

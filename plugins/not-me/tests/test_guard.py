@@ -89,43 +89,70 @@ def _backslash_path_module():
 
 
 class WindowsTypedPathTableTests(_Fixtures):
-    """Every table case that names a fixture path, with the path typed the Windows way: C:\\Users\\x\\home, unquoted.
-    Bash drops unquoted backslashes, so before the guard judged words in both forms these self-protection blocks
-    came back allowed on Windows (fail open) and git -C / worktree-add / source of a real path came back blocked.
-    Runs on every platform: a path module that splits on backslashes too stands in for ntpath on the real disk."""
+    """Table cases that name a fixture path, with the path typed the Windows way (C:\\Users\\x\\home). Bash drops
+    unquoted backslashes, so before the guard judged words in both spellings these self-protection blocks came back
+    allowed on Windows (fail open). Each case must decide as the table says both as written and, where it holds no
+    quotes, with every path quoted (the shell keeps the backslashes). Runs on every platform: a path module that
+    splits on backslashes too stands in for ntpath on the real disk."""
+
+    def setUp(self):
+        self.ctxs = {}
+        module, globber = _backslash_path_module()
+        for patch in (mock.patch.object(guard, "_path", module), mock.patch.object(guard, "glob", globber)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def typed(self, value, home, quote=False):
+        if isinstance(value, str):
+            for key, path in (("{F}", self.root), ("{H}", home), ("{P}", gc.PLUGIN)):
+                win = str(path).replace("/", "\\")
+                value = value.replace(key, f"'{win}'" if quote else win)
+            return value
+        if isinstance(value, dict):
+            return {k: self.typed(v, home, quote and k == "command") for k, v in value.items()}
+        return [self.typed(v, home) for v in value] if isinstance(value, list) else value
+
+    def decide(self, variant, tool, tin):
+        if variant not in self.ctxs:
+            self.ctxs[variant] = self.ctx(variant)
+            if not guard.is_active(self.ctxs[variant]):
+                self.ctxs[variant].self_only()  # as the hook does
+        cwd, _ = gc.variant_paths(self.root, variant)
+        return guard.decide({"tool_name": tool, "tool_input": tin, "cwd": str(cwd), "session_id": gc.SESSION},
+                            self.ctxs[variant])
 
     def test_cases_with_backslash_paths(self):
-        module, globber = _backslash_path_module()
-        ctxs = {}
-
-        def typed(value, home):
-            if isinstance(value, str):
-                for key, path in (("{F}", self.root), ("{H}", home), ("{P}", gc.PLUGIN)):
-                    value = value.replace(key, str(path).replace("/", "\\"))
-                return value
-            if isinstance(value, dict):
-                return {k: typed(v, home) for k, v in value.items()}
-            return [typed(v, home) for v in value] if isinstance(value, list) else value
         checked = 0
-        with mock.patch.object(guard, "_path", module), mock.patch.object(guard, "glob", globber):
-            for cid, want, rule, tool, tin, variant in gc.CASES:
-                if not any(k in json.dumps(tin) for k in ("{F}", "{H}", "{P}")):
-                    continue
-                checked += 1
-                with self.subTest(cid=cid, tool=tool, input=tin, variant=variant):
-                    if variant not in ctxs:
-                        ctxs[variant] = self.ctx(variant)
-                        if not guard.is_active(ctxs[variant]):
-                            ctxs[variant].self_only()
-                    cwd, home = gc.variant_paths(self.root, variant)
-                    event = {"tool_name": tool, "tool_input": typed(tin, home), "cwd": str(cwd),
-                             "session_id": gc.SESSION}
-                    result = guard.decide(event, ctxs[variant])
+        for cid, want, rule, tool, tin, variant in gc.CASES:
+            if not any(k in json.dumps(tin) for k in ("{F}", "{H}", "{P}")):
+                continue
+            checked += 1
+            _, home = gc.variant_paths(self.root, variant)
+            forms = [("as in the table", self.typed(tin, home))]  # as the Windows CI runner sees the table
+            if tool == "Bash" and not any(q in tin["command"] for q in "'\""):  # quotable: no quotes of its own
+                forms.append(("quoted", self.typed(tin, home, quote=True)))
+            for form, typed in forms:
+                with self.subTest(cid=cid, form=form, input=typed, variant=variant):
+                    result = self.decide(variant, tool, typed)
                     self.assertEqual("block" if isinstance(result, Block) else "allow", want,
                                      getattr(result, "message", ""))
                     if isinstance(result, Block):
                         self.assertEqual(result.rule, rule)
         self.assertGreater(checked, 100)
+
+    def test_unquoted_backslash_path_positions_block(self):
+        """Where only a resolved path allows the command, an unquoted backslash path blocks; quoted, it is allowed."""
+        _, home = gc.variant_paths(self.root, "app")
+        for cmd in ("git -C {F}/live push", "notme git worktree-add {F}/app/.git/not-me/worktrees/feat-x",
+                    "sh {F}/app/scripts/clean.sh", "source {F}/app/scripts/plainenv.sh; git log",
+                    ". {F}/app/scripts/plainenv.sh; git status"):
+            with self.subTest(cmd=cmd):
+                result = self.decide("app", "Bash", {"command": self.typed(cmd, home)})
+                self.assertIsInstance(result, Block)
+                # source changes directory, so its relative-path check (on the shell's spelling) comes first
+                self.assertIn("relative path" if cmd.startswith(("source", ".")) else "unquoted backslashes",
+                              result.message)
+                self.assertIsNone(self.decide("app", "Bash", {"command": self.typed(cmd, home, quote=True)}))
 
 
 class CrlfEditTests(unittest.TestCase):
@@ -408,8 +435,10 @@ class WindowsPathTests(unittest.TestCase):
         self.assertEqual([str(w) for w in words], ["cat", "C:Usersopx", "C:\\q", "C:\\d", "e f"])
         self.assertEqual([w.raw for w in words], ["cat", "C:\\Users\\op\\x", "C:\\q", "C:\\d", "e\\ f"])
         wt = "C:\\Work\\App\\.git\\not-me\\worktrees"
-        self.assertIsNone(self.decide("Bash", {"command": f"notme git worktree-add {wt}\\feat-x"}))
-        for cmd in (f"notme git worktree-add {wt}\\..\\..\\hooks", "cat C:\\Users\\op\\.claude\\not-me\\op*",
+        self.assertIsNone(self.decide("Bash", {"command": f"notme git worktree-add '{wt}\\feat-x'"}))
+        self.assertIn("unquoted backslashes", self.decide("Bash", {"command": "git -C C:\\Work\\App status"}).message)
+        for cmd in (f"notme git worktree-add {wt}\\feat-x", f"notme git worktree-add {wt}\\..\\..\\hooks",
+                    "cat C:\\Users\\op\\.claude\\not-me\\op*",
                     "cp -r C:\\Users\\op\\.claude\\not-me D:\\x", "cat C:\\Users\\op\\.claude\\not-me\\merge-g*\\*"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.decide("Bash", {"command": cmd}).rule, "self_protect")
