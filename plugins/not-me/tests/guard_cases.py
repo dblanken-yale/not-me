@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -37,6 +38,7 @@ SCRIPTS = {
     "goother.sh": "cd ../other\n",
     "nested.sh": ". ./scripts/goother.sh\n",
     "plainenv.sh": "export LC_ALL=C\n",
+    "setenv.sh": "export GIT_DIR=../other/.git\n",
 }
 
 # --- fixtures --------------------------------------------------------------
@@ -74,6 +76,7 @@ REPOS: Dict[str, Tuple[str, str, Optional[str], str]] = {
     "matching": (GH + "acme/app.git", "feature/x", "", "matching"),
     "upmain": (GH + "acme/app.git", "feature/x", "", "upmain"),
     "pushspec": (GH + "acme/app.git", "feature/x", "", "pushspec"),
+    "mirror": (GH + "acme/app.git", "feature/x", "", "mirror"),
 }
 
 # The repo layer may only tighten guard.*, mode, enabled and protected_branches, and its
@@ -163,6 +166,8 @@ def build_fixtures(root: Path) -> Dict[str, str]:
             _git(["config", "push.default", "upstream"], repo, env)
         elif extra == "pushspec":
             _git(["config", "remote.origin.push", "refs/heads/*:refs/heads/*"], repo, env)
+        elif extra == "mirror":
+            _git(["config", "remote.origin.mirror", "true"], repo, env)
         elif extra == "pushdefault":
             _git(["remote", "add", "up", GH + "acme/lib.git"], repo, env)
             _git(["config", "remote.pushDefault", "up"], repo, env)
@@ -1107,6 +1112,76 @@ for cmd in ("git log --oneline -5", "git diff main...HEAD --stat", "git log --fo
             "git fetch origin", "gh pr view 5 --json state", "git commit -F f", "git push -u origin feature/x",
             "git push", "git log -S foo -p", "git blame -L 10,20 README.md", "git grep -n -C3 foo", "LC_ALL=C git log",
             "awk '{print $1}' README.md", "sed -n 1p README.md"):
+    bash(A, None, cmd)
+
+# Fix round 3: obfuscated spellings. Variables defaulted inside a word, shell -c bodies and program text that
+# build gh/git from pieces, xargs feeding a shell, short abbreviations, namerefs, eval and source, and mirror remotes.
+_OGH = "https://github.com/acme/other"
+
+
+def _nest(cmd: str, depth: int) -> str:
+    for _ in range(depth):
+        cmd = "sh -c " + shlex.quote(cmd)
+    return cmd
+
+
+ROUND3_START = len(CASES)
+for cmd in (
+        # 1. ${NAME:=value} and ${NAME=value} in any word, set -a / allexport next to git or gh
+        "set -a; : ${GIT_DIR:=../other/.git}; git push", "set -o allexport; : ${GIT_DIR:=../other/.git}; git push",
+        ": ${GIT_DIR=../other/.git}; git push", "echo x${GIT_DIR:=../other/.git}y; git commit -m x",
+        "set -a; : ${GH_HOST=evil.example}; gh pr create --repo acme/app --title x --body y",
+        "set -a; : ${PAGER:='sh -c y'}; git log", "set -a; git commit -m x",
+        "set -o allexport; gh pr create --repo acme/app --title x --body y", "set -ea; git log",
+        "setopt allexport; git log", "set -k; git log", ": ${!n:=x}; git log", "(( PATH=1 )); git status",
+        # 2. shell -c bodies that spell git in pieces
+        f"bash -c '\"g\"\"it\" push {OTHER}'", f"bash -c \"g''it push {OTHER}\"", f"bash -c $'\\x67it push {OTHER}'",
+        f"zsh -c 'g\\it push {OTHER}'", f"sh -c \"\\$(printf '\\\\147')it push {OTHER}\"",
+        f"find . -exec sh -c 'g\"i\"t push {OTHER}' \\;", f"bash -xc 'G\"\"it push {OTHER}'",
+        f"fish -c 'g\"\"it push {OTHER}'", f"env bash -c 'g\"\"it push {OTHER}'",
+        f"bash -c 'bash -c \"g\\\\it push {OTHER}\"'", "bash -c 'cd ../other && git push'",
+        f"bash -c 'x=$1; g\"\"it push $x HEAD' _ {_OGH}", f"bash -c 'g\"\"it push \"$U\" HEAD'",
+        f"bash -c 'eval \"g\"\"it push {OTHER}\"'", _nest("git status", 6),
+        # 3. awk, sed, vim, tar and less building a command from pieces
+        f"awk 'BEGIN{{system(\"g\" \"it push {OTHER}\")}}'",
+        f"awk 'BEGIN{{system(sprintf(\"%cit push {OTHER}\",103))}}'",
+        f"sed -n '1e g\\it push {OTHER}' README.md", "awk 'BEGIN{x=\"sh\"; system(x)}'",
+        f"awk 'BEGIN{{print \"x\" | \"g\\x69t push {OTHER}\"}}'",
+        f"awk 'BEGIN{{c=\"g\" \"it\"; c \" push {OTHER}\" | getline}}'",
+        "sed 's/.*/g\\x69t push/e' README.md", "sed -n '1e' README.md", f"sed -i '' '1e git push {OTHER}' f",
+        _nest("ls", 6),
+        f"vim -c '!g\"\"it push {OTHER}' -c q", "vim -c 'call system(\"g\" . \"it push\")' -c q",
+        f"tar -cf - README.md --to-command='g\"\"it push {OTHER}'",
+        f"tar -cf x.tar -I 'g\"\"it push {_OGH}' README.md",
+        f"tar --use-comp='g\"\"it push {_OGH}' -cf x.tar README.md",
+        f"less '+!g\"\"it push {OTHER}' README.md", "LESSOPEN='|g\"\"it push %s' less README.md",
+        # 4. xargs and parallel that run a shell or interpreter
+        "xargs -I{} sh -c '{}' < cmd.txt", "ls | xargs -n1 bash -c 'echo $0'", "xargs -0 env perl -e 1 < f",
+        "parallel python3 -c 'print(1)' ::: a", "parallel < cmds.txt",
+        # a shell reading commands from a pipe or a file
+        "cat cmds.txt | bash", "bash < scripts/ship.sh", "printf 'g%sit push x' '' | sh",
+        # 5. short long-option abbreviations and unknown options on write subcommands
+        "git rebase --ex=true main", "git clone --te=/tmp/t https://github.com/acme/app", "git init --tem=/tmp/t x",
+        "git merge --st=evil feature/y", "git pull --str=evil origin feature/x", "git cherry-pick --strategy=evil HEAD~1",
+        "git fetch --unknown-opt origin",
+        # 6. namerefs, eval and source as setters
+        "declare -n r=GIT_DIR; r=../other/.git; git log", "typeset -n r=PAGER; r='sh -c y'; git log",
+        "local -n r=GH_CONFIG_DIR; gh pr view 1", "eval 'GIT_DIR=../other/.git'; git log",
+        'eval "$n=../other/.git"; git log', "eval 'a=1; export PAGER=x'; git log", ". {F}/app/scripts/setenv.sh; git log",
+        "source {F}/app/scripts/missing.sh; git log",
+        # 8. rg runs a program only through --pre
+        "rg --pre=sh foo", "rg --pre-glob '*.pdf' --pre ./x foo", "RIPGREP_CONFIG_PATH=x rg foo"):
+    bash(B, OR, cmd)
+bash(B, PB, "git push", "mirror")  # 7. remote.origin.mirror decides a bare push
+ROUND3_END = len(CASES)
+for cmd in ('rg "git push" docs', 'rg -n "gh pr" docs', 'grep -rn "gh pr" docs', "git diff main...HEAD --stat",
+            "cd sub && make test", "awk '/a|b/ {print}' README.md", "sed 's/a/b/' README.md",
+            "awk 'BEGIN{system(\"ls\")}'", "tar -czf x.tar.gz README.md", "tar -I zstd -cf x.tar README.md",
+            "less -N README.md", "bash -c 'for f in *.md; do echo \"$f\"; done'", "bash -c 'git log --oneline -5'",
+            "git fetch --prune origin", "git pull --rebase origin feature/x", "git rebase --continue",
+            "git merge --no-ff feature/y", "git clone --depth 1 https://github.com/acme/app", "set -e; git log",
+            "source {F}/app/scripts/plainenv.sh; git log", _nest("ls", 2), "vim -c 'wq!' README.md",
+            "sed -e 's/h/H/' -e 's/i/I/' README.md", "awk -v x=1 '{print x}' README.md"):
     bash(A, None, cmd)
 
 # Substrings a block message must contain, by case id.

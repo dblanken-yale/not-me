@@ -32,9 +32,12 @@ The guard does not follow cd: a command that changes directory anywhere (see
 _dir_change) may not also write with git or gh, run notme, or use relative
 paths a rule would have to resolve. Writes are judged in the hook's real
 working directory, or the `git -C` / `gh -R` they name. Anything else it
-cannot see through ($(...) around gh/git, bash -c, GIT_DIR=..., a command name
-in a variable, inline interpreter code, scripts that mention gh/git) is
-blocked, so it fails closed.
+cannot see through ($(...) around gh/git, GIT_DIR=..., a command name in a
+variable, inline interpreter code, scripts that mention gh/git) is blocked, so
+it fails closed. A string another program runs as a command (bash -c, eval,
+awk system(), sed e, vim !, tar --to-command) is lexed and judged as a command
+itself (_judge_body); one still obfuscated after lexing is blocked when it
+mentions gh/git/github or the command could reach the network.
 """
 from __future__ import annotations
 
@@ -72,6 +75,7 @@ SCRIPT_SUFFIXES = (".sh", ".bash", ".zsh")
 GLOBAL_DOC = "project.md"
 MAX_COMMAND = 32 * 1024  # longer Bash commands are blocked unread: checking them could outrun the hook timeout
 MAX_NESTING = 64  # deeper $( ), backtick or ${ } nesting is blocked unread
+MAX_BODY_DEPTH = 4  # shell bodies (bash -c, eval, awk system()) nested deeper than this are blocked
 PREFILTER_MAX = 2048  # longer commands skip the regex prefilter and always get the full check
 
 GitFn = Callable[[List[str], str], Optional[str]]
@@ -86,6 +90,12 @@ _PATH_SEP = re.compile(r"[/\\]")
 _SCP_REMOTE = re.compile(r"^[^/]*@[^/]*:")
 _ALLOW_EDIT = re.compile(r"(?:^|[^A-Za-z0-9_-])(?:(add|remove)|(--e[a-z]*))(?:[^A-Za-z0-9_-]|$)")
 _PARAM_DEFAULT = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=+?]([^{}]*)\}")
+_ESC_SEQ = re.compile(r"\\(?:x([0-9A-Fa-f]{1,2})|([0-7]{1,3})|u([0-9A-Fa-f]{4}))")  # \x67, \147, g
+_SHELL_PIECES = re.compile(r"\$\{[^{}]*\}|\$\([^()]*\)|`[^`]*`|\$(?=['\"])")
+_OBFUSCATED = re.compile(r"[$`\\'\"]")  # left in a word after lexing: the shell still expands or unquotes it
+# a command that could reach the network: a URL, a network client, or GitHub
+_NETWORK = re.compile(r"://|github\.com|(?<![A-Za-z0-9_.-])(?:curl|wget|nc|ncat|netcat|ssh|scp|sftp|rsync|telnet|"
+                      r"socat|ftp|http|https|xh|gh|git)(?![A-Za-z0-9_-])", re.IGNORECASE)
 _NOTME_PROGS = {"notme", "notme.py"}
 # variables that re-point the not-me CLI's trust anchor (its project, home, operator or GitHub identity)
 _TRUST_ENV = re.compile(r"(?<![A-Za-z0-9_])(NOT_ME_[A-Za-z0-9_]*|CLAUDE_PROJECT_DIR|CLAUDECODE|HOME|GH_HOST|GH_TOKEN|"
@@ -197,13 +207,14 @@ _CD_HINT = ("use git -C <path> or gh -R owner/name instead of cd; if a cd is nee
             "call first")
 _HTTP_CLIENTS = {"curl", "wget", "http", "https", "xh"}
 # programs that never run their arguments: a gh or git word there is data (anything else naming gh/git blocks)
-# (not man, less, more, sort, rg or yq: a pager, --compress-program or --pre can run a command)
+# (not man, more, sort or yq: a pager or --compress-program can run a command; rg, awk, sed, vim, tar and less
+# have their own handlers, which look at the options and program text that run one)
 _INERT = {"echo", "printf", "grep", "egrep", "fgrep", "cat", "ls", "head", "tail", "wc", "test", "[", "[[",
           "true", "false", ":", "which", "type", "whereis", "file", "stat", "uniq",
           "cut", "tr", "diff", "cmp", "basename", "dirname", "realpath", "readlink", "touch", "mkdir", "cp", "mv",
           "ln", "chmod", "jq", "tee", "comm", "column", "nl", "od", "xxd", "hexdump", "strings", "base64",
           "shasum", "sha256sum", "md5", "md5sum", "date", "pwd", "whoami", "id", "uname", "sleep", "rmdir",
-          "cd", "pushd", "popd", "export", "unset", "local", "read", "set"}
+          "cd", "pushd", "popd", "export", "unset", "local", "read", "set", "rg"}
 # git subcommands that change nothing, provided every option is on _GIT_READ_OPTS. A git call is a read
 # only when proven to be one; an unknown subcommand, option or -c key blocks.
 _GIT_READ_ONLY = {"", "status", "log", "diff", "show", "rev-parse", "ls-files", "ls-tree", "ls-remote", "cat-file",
@@ -261,6 +272,55 @@ _GIT_EXEC_OPTS: Dict[str, Tuple[str, ...]] = {
     "fetch": ("--upload-pack",), "pull": ("--upload-pack",), "rebase": ("-x", "--exec"), "ls-remote": ("-u",),
 }
 _MERGE_STRATEGIES = {"ort", "recursive", "resolve", "octopus", "ours", "subtree"}
+# write subcommands with an option that runs a program: only these exact long options pass (git also accepts any
+# unambiguous prefix, so --ex would be --exec); --upload-pack, --template, --config and --exec are left out
+_MERGE_LONG = set("""
+--commit --no-commit --edit --no-edit --cleanup --ff --no-ff --ff-only --gpg-sign --no-gpg-sign --log --no-log
+--signoff --no-signoff --stat --no-stat --squash --no-squash --verify --no-verify --strategy --strategy-option
+--verify-signatures --no-verify-signatures --summary --no-summary --quiet --verbose --progress --no-progress
+--autostash --no-autostash --allow-unrelated-histories --rerere-autoupdate --no-rerere-autoupdate
+""".split())
+_FETCH_LONG = set("""
+--all --no-all --append --atomic --depth --deepen --shallow-since --shallow-exclude --unshallow --update-shallow
+--negotiation-tip --negotiate-only --dry-run --porcelain --write-fetch-head --no-write-fetch-head --force --keep
+--multiple --auto-maintenance --no-auto-maintenance --auto-gc --no-auto-gc --write-commit-graph
+--no-write-commit-graph --prefetch --prune --no-prune --prune-tags --no-tags --tags --refetch --refmap
+--no-recurse-submodules --jobs --set-upstream --update-head-ok --progress --no-progress --server-option
+--show-forced-updates --no-show-forced-updates --ipv4 --ipv6 --quiet --verbose --filter
+""".split())
+_GIT_WRITE_LONG: Dict[str, Set[str]] = {
+    "fetch": _FETCH_LONG,
+    "pull": _FETCH_LONG | _MERGE_LONG | {"--rebase", "--no-rebase"},
+    "merge": _MERGE_LONG | {"--abort", "--quit", "--continue", "--message", "--file", "--into-name",
+                            "--overwrite-ignore", "--no-overwrite-ignore"},
+    "rebase": set("""
+--onto --keep-base --no-keep-base --continue --skip --abort --quit --edit-todo --show-current-patch --apply --merge
+--empty --keep-empty --no-keep-empty --reapply-cherry-picks --no-reapply-cherry-picks --allow-empty-message
+--strategy --strategy-option --gpg-sign --no-gpg-sign --quiet --verbose --stat --no-stat --verify --no-verify
+--force-rebase --no-ff --fork-point --no-fork-point --ignore-whitespace --whitespace --committer-date-is-author-date
+--ignore-date --reset-author-date --signoff --interactive --rebase-merges --no-rebase-merges --update-refs
+--no-update-refs --autosquash --no-autosquash --autostash --no-autostash --root --rerere-autoupdate
+--no-rerere-autoupdate --reschedule-failed-exec --no-reschedule-failed-exec
+""".split()),
+    "cherry-pick": set("""
+--edit --no-edit --cleanup --mainline --no-commit --signoff --gpg-sign --no-gpg-sign --ff --allow-empty
+--allow-empty-message --keep-redundant-commits --empty --strategy --strategy-option --rerere-autoupdate
+--no-rerere-autoupdate --continue --skip --quit --abort
+""".split()),
+    "revert": set("""
+--edit --no-edit --cleanup --mainline --no-commit --signoff --gpg-sign --no-gpg-sign --strategy --strategy-option
+--rerere-autoupdate --no-rerere-autoupdate --reference --continue --skip --quit --abort
+""".split()),
+    "clone": set("""
+--local --no-local --no-hardlinks --shared --reference --reference-if-able --dissociate --quiet --verbose
+--progress --server-option --no-checkout --bare --sparse --filter --also-filter-submodules --mirror --origin
+--branch --revision --depth --shallow-since --shallow-exclude --single-branch --no-single-branch --no-tags --tags
+--recurse-submodules --shallow-submodules --no-shallow-submodules --remote-submodules --no-remote-submodules
+--separate-git-dir --jobs --bundle-uri --ref-format
+""".split()),
+    "init": {"--quiet", "--bare", "--object-format", "--ref-format", "--separate-git-dir", "--initial-branch",
+             "--shared"},
+}
 # subcommands that only list with these arguments: (words, True = every argument, False = the first one)
 _GIT_LISTING: Dict[str, Tuple[Set[str], bool]] = {
     "branch": ({"-a", "-r", "-v", "-vv", "-l", "--list", "--all", "--remotes", "--verbose", "--show-current"}, True),
@@ -276,6 +336,11 @@ _ENV_NAMES = (r"GIT_[A-Z0-9_]*|EDITOR|VISUAL|PAGER|MANPAGER|GH_[A-Z0-9_]*|XDG_CO
               r"|SSH_ASKPASS")
 _ENV_ASSIGN = re.compile(r"(" + _ENV_NAMES + r")(?:\[[^\[\]]*\])?\+?=(.*)", re.S)
 _ENV_WORD = re.compile(r"(?:-[A-Za-z]*)?(?:" + _ENV_NAMES + r")")
+# ${NAME:=value} or ${NAME=value} assigns NAME from inside any word; ${!ref:=value} assigns a computed name
+_ENV_DEFAULT = re.compile(r"\$\{(?:(?:" + _ENV_NAMES + r")(?:\[[^\[\]]*\])?|![^{}:=]*):?=")
+# an assignment inside (( )) or $(( ))
+_ENV_ARITH = re.compile(r"\(\([^()]*?(?<![A-Za-z0-9_$])(?:" + _ENV_NAMES + r")(?:\[[^\[\]]*\])?\s*"
+                        r"(?:[-+*/%&|^]|<<|>>)?=(?!=)")
 _ENV_SETTERS = {"export", "declare", "typeset", "local", "readonly", "integer", "float", "private", "unset", "read",
                 "mapfile", "readarray", "getopts", "let", "for", "select", "printf", "env"}
 _SAFE_EXEC_ENV = {"PAGER": {"", "cat", "less", "more"}, "GH_PAGER": {"", "cat", "less", "more"},
@@ -1300,16 +1365,23 @@ def _mcp(tool: str, tin: Mapping[str, Any], ctx: GuardContext) -> Iterator[Block
 
 class _State:
     """Per-call state: the hook's real working directory, whether the command changes it, the branch a
-    checkout moved to, and memoised lookups. Text scans see both the source and its line continuations joined."""
+    checkout moved to, and memoised lookups. Text scans see both the source and its line continuations joined.
 
-    def __init__(self, cwd: str, parsed: Parsed, raw: str):
+    A shell body judged as a command (bash -c, eval, awk system()) gets a child state: its text, commands,
+    directory change and background are its own plus every parent's, since what the parent set reaches it."""
+
+    def __init__(self, cwd: str, parsed: Parsed, raw: str, parent: Optional["_State"] = None):
         self.dir = cwd
         self.parsed = parsed
-        self.text = parsed.code + "\n" + parsed.code.replace("\\\n", "")
-        self.raw = raw + "\n" + raw.replace("\\\n", "")  # with here-document bodies, for the pty checks
-        self.background = bool(_BACKGROUND.search(self.text))
-        self.moved = _moves(parsed, raw, cwd)  # what changes the directory, or None
-        self.switched: Dict[str, str] = {}
+        self.depth = parent.depth + 1 if parent else 0
+        text = parsed.code + "\n" + parsed.code.replace("\\\n", "")
+        own_raw = raw + "\n" + raw.replace("\\\n", "")  # with here-document bodies, for the pty checks
+        self.text = parent.text + "\n" + text if parent else text
+        self.raw = parent.raw + "\n" + own_raw if parent else own_raw
+        self.commands: List[SimpleCommand] = (parent.commands if parent else []) + parsed.commands
+        self.background = bool(_BACKGROUND.search(text)) or bool(parent and parent.background)
+        self.moved = _moves(parsed, raw, cwd) or (parent.moved if parent else None)  # what changes the directory
+        self.switched: Dict[str, str] = parent.switched if parent else {}  # a checkout outlives the child shell
         self.memo: Dict[Tuple[str, ...], Any] = {}
 
     def once(self, key: Tuple[str, ...], fn: Callable[[], Any]) -> Any:
@@ -1439,6 +1511,14 @@ def _bash(cmd: str, cwd: str, ctx: GuardContext) -> Iterator[Block]:
         yield blk(SELF, f"the guard cannot read this command with confidence: {exc}",
                   "split it into shorter, simpler commands with plain quoting")
         return
+    yield from _parsed_checks(parsed, blk)
+    st = _State(cwd, parsed, cmd)
+    for c in parsed.commands:
+        yield from _command(list(c.words), c.raw, st, ctx)
+
+
+def _parsed_checks(parsed: Parsed, blk: Blk) -> Iterator[Block]:
+    """Checks on a lexed command (or shell body) as a whole: here-documents and substitutions."""
     # a here-document anywhere may reach a shell anywhere in the command (cat <<EOF | bash): checked together
     feeds = any(_prog(w) in _FED_PROGS or _INTERP.match(_prog(w)) for c in parsed.commands for w in c.words)
     if feeds and any(_mentions_github(b) for c in parsed.commands for b in c.bodies):
@@ -1447,9 +1527,72 @@ def _bash(cmd: str, cwd: str, ctx: GuardContext) -> Iterator[Block]:
     if any(has_gh_git(_unshell(s)) for s in parsed.subs):
         yield blk(OPAQUE, "gh/git inside $(...), backticks or <(...) cannot be checked",
                   "run gh/git directly, not inside $(...)")
-    st = _State(cwd, parsed, cmd)
+
+
+def _spellings(text: str) -> List[str]:
+    """text as the shell or a program may end up reading it: as written, with \\x67 / \\147 / \\u0067 escapes
+    decoded, with quotes and backslashes removed, with ${...}, $(...), backticks and $'/$" markers dropped, and
+    lowercased (git runs as GIT on a case-insensitive file system)."""
+    def esc(m: "re.Match[str]") -> str:
+        hexa, octal, uni = m.groups()
+        code = int(hexa, 16) if hexa else (int(octal, 8) if octal else int(uni, 16))
+        return chr(code)
+    decoded = _ESC_SEQ.sub(esc, text)
+    out = [text, decoded]
+    for v in (text, decoded):
+        out.append(_unshell(v))
+        out.append(_SHELL_PIECES.sub("", v).replace('"', "").replace("'", "").replace("\\", ""))
+    return out + [v.lower() for v in out]
+
+
+def _mentions_any(text: str) -> bool:
+    """text names gh, git or github.com in any spelling _spellings knows."""
+    return any(_mentions_github(v) for v in _spellings(text))
+
+
+def _judge_body(body: str, st: _State, ctx: GuardContext, blk: Blk, what: str) -> Iterator[Block]:
+    """Judge a string a program runs as a shell command (bash -c, eval, awk system(), sed e, vim !, tar
+    --to-command) as a command in its own right: lexed with the guard's lexer and checked command by command in a
+    child state. A body nested too deep, one that cannot be lexed, or one whose words still hold $, quotes,
+    backslashes or substitutions after lexing is blocked when it mentions gh/git/github in any spelling or the
+    whole command could reach the network."""
+    hint = "run gh/git directly, with every word spelled out plainly"
+    if st.depth >= MAX_BODY_DEPTH:
+        yield blk(OPAQUE, f"{what} nests commands more than {MAX_BODY_DEPTH} deep, which cannot be checked", hint)
+        return
+    risky = _mentions_any(body) or bool(st.find(_NETWORK, st.text))
+    try:
+        parsed = lex(body)
+    except Unparsed as exc:
+        if risky:
+            yield blk(OPAQUE, f"{what} runs text the guard cannot read with confidence ({exc})", hint)
+        return
+    residual = bool(parsed.subs) or any(_OBFUSCATED.search(w) for c in parsed.commands for w in c.words)
+    if residual and risky:
+        yield blk(OPAQUE, f"{what} runs words that still hold $, quotes, backslashes or substitutions after "
+                          "unquoting, so what it runs cannot be checked", hint)
+        return
+    yield from _parsed_checks(parsed, blk)
+    inner = _State(st.dir, parsed, body, parent=st)
     for c in parsed.commands:
-        yield from _command(list(c.words), c.raw, st, ctx)
+        yield from _command(list(c.words), c.raw, inner, ctx)
+
+
+_RUNS_TEXT = {"eval", "source", ".", "sudo", "doas", "xargs", "parallel"}  # run words they are given as a command
+
+
+def _core(words: List[str]) -> List[str]:
+    """The command past leading assignments, keywords and prefix words such as env, nice or timeout."""
+    rest = list(words)
+    while rest:
+        p = _prog(rest[0])
+        if _ASSIGN.match(rest[0]) or p in _KEYWORDS:
+            rest = rest[1:]
+        elif p in _PREFIX_WORDS:
+            rest = _drop_prefix(p, rest[1:])
+        else:
+            break
+    return rest
 
 
 def _drop_prefix(word: str, rest: List[str]) -> List[str]:
@@ -1543,7 +1686,7 @@ def _command(t: List[str], seg: str, st: _State, ctx: GuardContext) -> Iterator[
         yield blk(OPAQUE, f"{head} to GitHub bypasses gh's repo checks", "use gh with --repo owner/name")
     elif prefixed and has_gh_git(seg):
         yield blk(OPAQUE, f"cannot tell what '{word}' runs", "run gh/git directly, without the wrapper")
-    elif _prog(word) not in _INERT and any(has_gh_git(a) for a in t):  # awk system(), sed e, vim -c '!git'
+    elif _prog(word) not in _INERT and any(has_gh_git(a) or has_gh_git(_unshell(a)) for a in t):  # man -P, watch
         yield blk(OPAQUE, f"{_prog(word)} may run gh/git with words the guard cannot check",
                   "run gh/git directly, without the wrapper")
 
@@ -1864,23 +2007,65 @@ def _script(path: str, st: _State, blk: Blk) -> Iterator[Block]:
                   "run its gh/git commands directly")
 
 
+_SHELL_VALUE_OPTS = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
+_FISH_BODY_OPTS = ("--command", "--init-command", "-C")  # fish: options whose value is a command
+
+
+def _shell_bodies(head: str, args: List[str]) -> Tuple[Optional[List[str]], Optional[str]]:
+    """(command strings the shell runs from its arguments, or None when it runs none; the script it runs, or
+    None). -c makes the first word after the options the command; fish also takes --command and -C values."""
+    bodies: List[str] = []
+    c_mode = False
+    i = 0
+    while i < len(args) and args[i].startswith(("-", "+")) and args[i] not in ("-", "--"):
+        a = args[i]
+        name, eq, val = a.partition("=")
+        if head == "fish" and (name in _FISH_BODY_OPTS or (a.startswith("-C") and not a.startswith("--"))):
+            if eq:
+                bodies.append(val)
+            elif a.startswith("-C") and len(a) > 2:
+                bodies.append(a[2:])
+            elif i + 1 < len(args):
+                bodies.append(args[i + 1])
+                i += 1
+        elif not a.startswith("--") and "c" in a[1:]:
+            c_mode = True
+        i += 2 if a in _SHELL_VALUE_OPTS else 1
+    if i < len(args) and args[i] == "--":
+        i += 1
+    if c_mode:
+        bodies += args[i:i + 1]
+    if c_mode or bodies:
+        return bodies, None
+    return None, (args[i] if i < len(args) else None)
+
+
 def _cmd_shell(t, seg, st, ctx, blk, gitenv):
     head = _head(t[0])
     args = t[1:]
-    if head in _SHELLS and any(a.startswith("-") and not a.startswith("--") and "c" in a[1:] for a in args):
-        if has_gh_git(seg):
-            yield blk(OPAQUE, f"{head} -c wrapping gh/git cannot be checked", "run gh/git directly")
-        return
-    i = 0
-    while i < len(args) and args[i].startswith(("-", "+")):
-        i += 2 if args[i] in ("-o", "+o", "-O", "+O") else 1
-    if i < len(args):
-        yield from _script(args[i], st, blk)
+    if head in _SHELLS:
+        bodies, script = _shell_bodies(head, args)
+        for body in bodies or []:
+            yield from _judge_body(body, st, ctx, blk, f"{head} -c")
+        if bodies is not None:
+            return
+    else:  # source and .
+        script = next((a for a in args if a != "--"), None)
+    if script is None:  # commands come from its input: a here-document (checked with the command), a file or a pipe
+        redirect = [m.group(1) for m in _IN_REDIRECT.finditer(seg)]
+        if redirect:
+            script = redirect[-1]
+        elif "<<" not in seg:
+            yield blk(OPAQUE, f"{head} reads commands from its input, which cannot be checked",
+                      "run the commands directly, or put them in a script file")
+            return
+    if script is not None:
+        yield from _script(script, st, blk)
 
 
 def _cmd_eval(t, seg, st, ctx, blk, gitenv):
-    if has_gh_git(seg):
-        yield blk(OPAQUE, "eval wrapping gh/git cannot be checked", "run gh/git directly")
+    # eval joins its words with spaces and runs the result as a command
+    yield from _judge_body(" ".join(t[1:]), st, ctx, blk, "eval")
 
 
 def _wrapped(takes_value: Set[str], stop: Tuple[str, ...] = ()):
@@ -1898,6 +2083,17 @@ def _wrapped(takes_value: Set[str], stop: Tuple[str, ...] = ()):
             if a in stop:
                 rest = rest[:k]
                 break
+        if _prog(t[0]) in ("xargs", "parallel"):
+            core = _core(rest)
+            p = _prog(core[0]) if core else ""
+            if not core and _prog(t[0]) == "parallel":
+                yield blk(OPAQUE, "parallel with no command runs its input lines as commands, which cannot be checked",
+                          "run the commands directly")
+                return
+            if p in _SHELLS or p in _RUNS_TEXT or _INTERP.match(p):
+                yield blk(OPAQUE, f"{_prog(t[0])} runs {p} with words from its input, which cannot be checked",
+                          "run the command directly with every word spelled out")
+                return
         if rest:
             yield from _command(rest, " ".join(rest), st, ctx)
     return handler
@@ -2021,26 +2217,96 @@ def _safe_git_key(key: str) -> bool:
 def _exec_env(st: _State) -> Optional[str]:
     """How the command sets a variable that can make git or gh run another program or read other config
     (assignment, export, read, printf -v, mapfile, declare, local, unset, a computed name), or None."""
-    def find() -> Optional[str]:
-        for c in st.parsed.commands:
-            words = c.words
-            for w in words:
-                m = _ENV_ASSIGN.match(w)
-                if m and not (m.group(1) in _SAFE_GIT_ENV or m.group(2) in _SAFE_EXEC_ENV.get(m.group(1), ())):
-                    return f"{m.group(1)}={_short(m.group(2), 30)}"
-            setters = [_prog(w) for w in words if _prog(w) in _ENV_SETTERS]
-            if not setters:
-                continue
-            for w in words:
-                if _ENV_WORD.fullmatch(w):
-                    return f"{setters[0]} {w}"
-            if "printf" in setters and any(w.startswith("-v") for w in words):
-                return "printf -v"
-            if set(setters) - {"printf", "for", "select", "env"} and any(
-                    ("$" in w.split("=", 1)[0] or "`" in w.split("=", 1)[0]) for w in words if not w.startswith("-")):
-                return f"{setters[0]} with a computed name"
+    return st.once(("exec-env",), lambda: _env_setting(st.commands, st.text, st, 0))
+
+
+def _env_setting(commands: List[SimpleCommand], text: str, st: _State, depth: int) -> Optional[str]:
+    """_exec_env over these commands and their source text; eval bodies and sourced files are read the same way."""
+    if depth > MAX_BODY_DEPTH:
+        return f"eval or source nested more than {MAX_BODY_DEPTH} deep"
+    m = _ENV_DEFAULT.search(text) or _ENV_ARITH.search(text)
+    if m:
+        return _short(m.group(0), 40)
+    for c in commands:
+        found = _env_words(c.words, st, depth)
+        if found:
+            return found
+    return None
+
+
+def _env_words(words: List[str], st: _State, depth: int) -> Optional[str]:
+    for w in words:
+        m = _ENV_ASSIGN.match(w)
+        if m and not (m.group(1) in _SAFE_GIT_ENV or m.group(2) in _SAFE_EXEC_ENV.get(m.group(1), ())):
+            return f"{m.group(1)}={_short(m.group(2), 30)}"
+    core = _core(words)
+    name, args = (_prog(core[0]), core[1:]) if core else ("", [])
+    found = _allexport(name, args)
+    if found:
+        return found
+    if name in ("declare", "typeset", "local") and any(
+            a.startswith("-") and not a.startswith("--") and "n" in a[1:] for a in args):
+        return f"{name} -n (a reference can set any variable)"
+    if name == "eval":
+        body = " ".join(args)
+        try:
+            parsed = lex(body)
+        except Unparsed:
+            return "eval with text the guard cannot read"
+        for c in parsed.commands:
+            for w in c.words:
+                left = w.split("=", 1)[0]
+                if "=" in w and ("$" in left or "`" in left):
+                    return "eval with a computed name"
+        return _env_setting(parsed.commands, parsed.code, st, depth + 1)
+    if name in ("source", "."):
+        path = next((a for a in args if a != "--"), None)
+        if path is None:
+            return f"{name} of standard input"
+        if st.moved and not _path.isabs(path):
+            return f"{name} {path} in a command that changes directory"
+        text = _read_script(_norm(path, st.dir), st)
+        if text is None:
+            return f"{name} {path}, which cannot be read"
+        try:
+            parsed = lex(text)
+        except Unparsed:
+            return f"{name} {path}, which cannot be read with confidence"
+        return _env_setting(parsed.commands, parsed.code, st, depth + 1)
+    setters = [_prog(w) for w in words if _prog(w) in _ENV_SETTERS]
+    if not setters:
         return None
-    return st.once(("exec-env",), find)
+    for w in words:
+        if _ENV_WORD.fullmatch(w):
+            return f"{setters[0]} {w}"
+    if "printf" in setters and any(w.startswith("-v") for w in words):
+        return "printf -v"
+    if set(setters) - {"printf", "for", "select", "env"} and any(
+            ("$" in w.split("=", 1)[0] or "`" in w.split("=", 1)[0]) for w in words if not w.startswith("-")):
+        return f"{setters[0]} with a computed name"
+    return None
+
+
+_EXPORT_OPTS = {"allexport", "keyword"}  # set -o names that export every assignment (or take them from arguments)
+
+
+def _allexport(name: str, args: List[str]) -> Optional[str]:
+    """`set -a`, `set -k`, `set -o allexport`, `setopt allexport`: later assignments reach git and gh."""
+    if name == "set":
+        for k, a in enumerate(args):
+            if not a.startswith("-") or a.startswith("--"):
+                continue
+            if set(a[1:]) & {"a", "k"}:
+                return f"set {a}"
+            nxt = args[k + 1].lower() if k + 1 < len(args) else ""
+            if "o" in a[1:] and nxt in _EXPORT_OPTS:
+                return f"set -o {nxt}"
+    if name in ("setopt", "unsetopt"):  # zsh: setopt all_export, unsetopt no_all_export
+        prefix = "" if name == "setopt" else "no"
+        for a in args:
+            if a.lower().replace("_", "") in {prefix + o for o in _EXPORT_OPTS}:
+                return f"{name} {a}"
+    return None
 
 
 def _git_exec_option(sub: str, args: List[str]) -> Optional[str]:
@@ -2061,11 +2327,14 @@ def _git_exec_option(sub: str, args: List[str]) -> Optional[str]:
                 continue
             return a
         return None
+    exact = _GIT_WRITE_LONG.get(sub)
     for a in args:
         if a == "--":
             break
         name = a.split("=", 1)[0]
-        abbrev = a.startswith("--") and len(name) >= 5  # git accepts any unambiguous prefix of a long option
+        if exact is not None and a.startswith("--") and name not in exact:
+            return a  # git accepts any unambiguous prefix of a long option: only exact known names pass
+        abbrev = a.startswith("--") and len(name) > 2
         for opt in _GIT_EXEC_OPTS.get(sub, ()):
             long_hit = opt.startswith("--") and abbrev and opt.startswith(name)
             short_hit = not opt.startswith("--") and a.startswith("-") and not a.startswith("--") and opt[1] in a
@@ -2274,6 +2543,14 @@ def _push_default_target(c: _GitCall, current: Optional[str], remote: Optional[s
         yield blk("protected_branches", f"remote.{name}.push decides what a bare git push sends",
                   "name the branch: git push origin <branch>")
         return
+    keys = st.once(("remote-keys", d, name), lambda: ctx.git(
+        ["config", "--get-regexp", "^remote\\." + re.escape(name) + "\\.(push|mirror)$"], d)) or ""
+    for line in keys.splitlines():
+        key, _, value = line.strip().partition(" ")
+        if key.lower().endswith(".push") or value.strip().lower() not in ("false", "no", "off", "0"):
+            yield blk("protected_branches", f"{key} decides what a bare git push sends",
+                      "name the branch: git push origin <branch>")
+            return
     mode = (_git_config(ctx, st, d, "push.default") or "simple").strip().lower()
     if mode not in ("simple", "current", "upstream", "tracking", "nothing"):
         yield blk("protected_branches", f"push.default={mode} can push other branches",
@@ -2564,6 +2841,359 @@ def _gh_api(t, seg, st, ctx, blk):
     yield from _check_target(ctx, repo, blk)
 
 
+# --- programs that run commands from their program text ----------------------
+#
+# awk, sed, vim, tar and less can run a shell command named in their arguments. Each extractor returns what
+# their program text says: the texts it read, the plain literal commands it runs, and a reason when it runs
+# something that is not a plain literal (a computed string, the pattern space, a file the guard cannot read).
+
+@dataclass
+class _Exec:
+    texts: List[str] = field(default_factory=list)  # program text, for the mention check
+    runs: List[str] = field(default_factory=list)  # plain literal shell commands it runs
+    opaque: Optional[str] = None  # why what it runs cannot be checked
+    can_exec: bool = False  # the text can run a program at all
+
+
+_AWK_STR = re.compile(r'"(?:[^"\\\n]|\\.)*"')
+_AWK_REGEX = re.compile(r"((?:^|[(,{;~!&|\n])\s*)/(?:[^/\\\n]|\\.)+/")  # a /regex/ where an operand starts
+_AWK_SYSTEM = re.compile(r"\bsystem\s*\(")
+_AWK_SYSTEM_LIT = re.compile(r"\bsystem\s*\(\s*\x00(\d+)\x00\s*\)")
+_AWK_PIPE = re.compile(r"(?<!\|)\|&?(?!\|)")
+_AWK_OTHER_EXEC = re.compile(r"\bclose\s*\(|@load\b")
+_AWK_VALUE = {"-v", "--assign", "-F", "--field-separator", "-W"}
+
+
+def _awk_exec(args: List[str], st: _State) -> _Exec:
+    out = _Exec()
+    programs: List[str] = []
+    files: List[str] = []
+    explicit = False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            i += 1
+            break
+        if not a.startswith("-") or a == "-":
+            break
+        name, eq, val = a.partition("=")
+        nxt = args[i + 1] if i + 1 < len(args) else ""
+        if name in ("-l", "--load") or (a.startswith("-l") and not a.startswith("--")):
+            out.opaque, out.can_exec = "loads an extension", True
+            return out
+        if name in ("-f", "--file", "-E", "--exec", "-i", "--include") or (
+                a[:2] in ("-f", "-E", "-i") and not a.startswith("--") and len(a) > 2):
+            files.append(val if eq else (a[2:] if not a.startswith("--") and len(a) > 2 else nxt))
+            explicit = explicit or name not in ("-i", "--include")
+            i += 1 if (eq or (not a.startswith("--") and len(a) > 2)) else 2
+            continue
+        if name in ("-e", "--source"):
+            programs.append(val if eq else nxt)
+            explicit = True
+            i += 1 if eq else 2
+            continue
+        if a == "-W" and nxt.lower().startswith("e"):  # mawk -W exec file
+            out.opaque, out.can_exec = "reads its program from a file", True
+            return out
+        i += 2 if a in _AWK_VALUE else 1
+    if not explicit and i < len(args):
+        programs.append(args[i])
+    for f in files:
+        if st.moved and not _path.isabs(f):
+            out.opaque, out.can_exec = f"reads its program from {f} in a command that changes directory", True
+            return out
+        text = _read_script(_norm(f, st.dir), st)
+        if text is None:
+            out.opaque, out.can_exec = f"reads its program from {f}, which cannot be read", True
+            return out
+        programs.append(text)
+    out.texts = programs
+    for prog in programs:
+        strings: List[str] = []
+
+        def keep(m: "re.Match[str]") -> str:
+            strings.append(m.group(0)[1:-1])
+            return f"\x00{len(strings) - 1}\x00"
+        masked = _AWK_REGEX.sub(r"\1R", _AWK_STR.sub(keep, prog))
+        if _AWK_OTHER_EXEC.search(masked):
+            out.can_exec = True
+        literal = {m.start() for m in _AWK_SYSTEM_LIT.finditer(masked)}
+        for m in _AWK_SYSTEM.finditer(masked):
+            out.can_exec = True
+            lit = _AWK_SYSTEM_LIT.match(masked, m.start())
+            if m.start() not in literal or lit is None:
+                out.opaque = out.opaque or "system() with a computed command"
+            else:
+                out.runs.append(strings[int(lit.group(1))])
+        for m in _AWK_PIPE.finditer(masked):
+            out.can_exec = True
+            after, before = masked[m.end():], masked[:m.start()]
+            if re.match(r"\s*getline\b", after):
+                lit = re.search(r"\x00(\d+)\x00\s*$", before)
+            else:
+                lit = re.match(r"\s*\x00(\d+)\x00\s*(?:[;}\n)]|$)", after)
+            if lit is None:
+                out.opaque = out.opaque or "a | pipe to a computed command"
+            else:
+                out.runs.append(strings[int(lit.group(1))])
+    if any("\\" in r for r in out.runs):
+        out.opaque = out.opaque or "a command string with escape sequences"
+    return out
+
+
+def _skip_delimited(s: str, i: int, delim: str) -> int:
+    """Index just past the next unescaped delim at or after i."""
+    while i < len(s) and s[i] != delim:
+        i += 2 if s[i] == "\\" else 1
+    return i + 1
+
+
+def _line_end(s: str, i: int) -> int:
+    """End of the line at i, past backslash-newline continuations."""
+    while i < len(s) and s[i] != "\n":
+        i += 2 if s[i] == "\\" else 1
+    return min(i, len(s))
+
+
+def _sed_script_exec(script: str, out: _Exec) -> None:
+    """Find sed's e command (runs the rest of its line, or the pattern space) and the s///e flag."""
+    i, n = 0, len(script)
+    while i < n:
+        c = script[i]
+        if c == "\\" and i + 1 < n:  # \cREGEXc address
+            i = _skip_delimited(script, i + 2, script[i + 1])
+        elif c == "/":
+            i = _skip_delimited(script, i + 1, "/")
+        elif c in "sy" and i + 1 < n and script[i + 1] not in "\n\\":
+            d = script[i + 1]
+            i = _skip_delimited(script, _skip_delimited(script, i + 2, d), d)
+            flags = re.match(r"[A-Za-z0-9]*", script[i:]).group(0) if c == "s" else ""
+            i += len(flags)
+            if "e" in flags:
+                out.can_exec = True
+                out.opaque = out.opaque or "s///e runs the pattern space as a command"
+        elif c in "aicrRwWbtTv:#":  # text, a file name or a label to the end of the line
+            i = _line_end(script, i + 1)
+        elif c == "e":
+            end = _line_end(script, i + 1)
+            body = script[i + 1:end].strip()
+            out.can_exec = True
+            if body:
+                out.runs.append(body)
+            else:
+                out.opaque = out.opaque or "e runs the pattern space as a command"
+            i = end
+        else:
+            i += 1
+
+
+def _sed_exec(args: List[str], st: _State) -> _Exec:
+    out = _Exec()
+    scripts: List[str] = []
+    files: List[str] = []
+    explicit = False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            i += 1
+            break
+        if not a.startswith("-") or a == "-":
+            break
+        nxt = args[i + 1] if i + 1 < len(args) else ""
+        name, eq, val = a.partition("=")
+        if a == "--sandbox":  # GNU sed refuses e, w and r
+            return _Exec()
+        if name in ("--expression", "--file"):
+            (scripts if name == "--expression" else files).append(val if eq else nxt)
+            explicit = True
+            i += 1 if eq else 2
+            continue
+        if a.startswith("--"):
+            i += 2 if name == "--line-length" and not eq else 1
+            continue
+        step = 1
+        for k, ch in enumerate(a[1:], 1):
+            if ch in "efl":
+                value = a[k + 1:] or nxt
+                step = 1 if a[k + 1:] else 2
+                if ch == "e":
+                    scripts.append(value)
+                elif ch == "f":
+                    files.append(value)
+                explicit = explicit or ch in "ef"
+                break
+            if ch == "i":  # -i[SUFFIX]
+                break
+        i += step
+    if not explicit:  # every operand: -i takes an optional suffix (sed -i '' 's/x/y/' f), so which is the script varies
+        scripts += args[i:]
+    for f in files:
+        text = None if (st.moved and not _path.isabs(f)) else _read_script(_norm(f, st.dir), st)
+        if text is None:
+            out.opaque, out.can_exec = f"reads its script from {f}, which cannot be read", True
+            return out
+        scripts.append(text)
+    out.texts = scripts
+    for s in scripts:
+        _sed_script_exec(s, out)
+    return out
+
+
+_VIM_EXEC = re.compile(r"\bsystem(?:list)?\s*\(|\bjob_?start|\btermopen|\bterm_start|\bter(?:minal)?\b|\blibcall"
+                       r"|(?:^|[\s:|])(?:py(?:thon)?3?|pyx|lua|perl|ruby|tcl|mz(?:scheme)?|so(?:urce)?|exe(?:cute)?"
+                       r"|call|norm(?:al)?|redir)\b")
+_VIM_BANG = re.compile(r"^\s*:*\s*[%.,$0-9'<>]*\s*(?:r(?:ead)?\s*|w(?:rite)?\s*)?!(.*)$", re.S)
+
+
+def _vim_exec(args: List[str], seg: str, st: _State) -> _Exec:
+    out = _Exec()
+    cmds: List[str] = []
+    ex_mode = False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        nxt = args[i + 1] if i + 1 < len(args) else None
+        if a in ("-c", "--cmd") and nxt is not None:
+            cmds.append(nxt)
+            i += 2
+            continue
+        if a.startswith("+"):
+            cmds.append(a[1:])
+        elif a in ("-S", "-u", "-U", "-s", "-i") or a.startswith("--startuptime"):
+            if nxt is None or nxt in ("NONE", "NORC"):
+                i += 1
+                continue
+            text = None if (st.moved and not _path.isabs(nxt)) else _read_script(_norm(nxt, st.dir), st)
+            if text is None and a != "-i":
+                out.opaque, out.can_exec = f"runs commands from {nxt}, which cannot be read", True
+                return out
+            if a != "-i":
+                cmds.append(text or "")
+            i += 2
+            continue
+        elif a.startswith("-") and not a.startswith("--") and set(a[1:]) & set("eE"):
+            ex_mode = True
+        i += 1
+    if ex_mode and ("<" in seg or _mentions_any(st.text)):
+        out.opaque, out.can_exec = "reads ex commands from its input", True
+    out.texts = cmds
+    for text in cmds:
+        for line in text.splitlines() or [""]:
+            for piece in line.split("|"):
+                bang = _VIM_BANG.match(piece)
+                if bang:
+                    out.can_exec = True
+                    out.runs.append(bang.group(1))
+                elif _VIM_EXEC.search(piece):
+                    out.can_exec = True
+                    out.opaque = out.opaque or f"'{_short(piece.strip(), 40)}' can run a program"
+    return out
+
+
+_TAR_EXEC = ("--to-command", "--use-compress-program", "--info-script", "--new-volume-script", "--rsh-command",
+             "--rmt-command", "--checkpoint-action")
+_TAR_SHORT_VALUE = set("bCfgHKLNTVX")
+
+
+def _tar_exec(args: List[str], st: _State) -> _Exec:
+    out = _Exec(texts=list(args))
+    if "TAR_OPTIONS" in st.text:
+        out.opaque, out.can_exec = "TAR_OPTIONS can add options that run a program", True
+        return out
+    if args and not args[0].startswith("-") and set(args[0]) & set("IF"):
+        out.opaque, out.can_exec = f"old-style options {args[0]} can run a program", True
+        return out
+    for k, a in enumerate(args):
+        nxt = args[k + 1] if k + 1 < len(args) else ""
+        if a == "--":
+            break
+        if a.startswith("--"):
+            name, eq, val = a.partition("=")
+            opt = next((o for o in _TAR_EXEC if len(name) > 2 and o.startswith(name)), None)
+            if opt is None:
+                continue
+            value = val if eq else nxt
+            out.can_exec = True
+            if opt == "--checkpoint-action":
+                if value.startswith("exec="):
+                    out.runs.append(value[len("exec="):])
+            else:
+                out.runs.append(value)
+        elif a.startswith("-") and len(a) > 1:
+            for j, ch in enumerate(a[1:], 1):
+                if ch in "IF":
+                    out.can_exec = True
+                    out.runs.append(a[j + 1:] or nxt)
+                    break
+                if ch in _TAR_SHORT_VALUE:
+                    break
+    return out
+
+
+_LESS_ENV = re.compile(r"(?<![A-Za-z0-9_])(?:LESS[A-Z_]*|VISUAL|EDITOR)(?![A-Za-z0-9_])")
+
+
+def _less_exec(args: List[str], st: _State) -> _Exec:
+    out = _Exec()
+    m = _LESS_ENV.search(st.text)
+    if m:
+        out.opaque, out.can_exec = f"{m.group(0)} can make less run a program", True
+        return out
+    for a in args:
+        if not a.startswith("+"):
+            continue
+        cmd = a.lstrip("+")
+        out.texts.append(cmd)
+        if "|" in cmd:
+            out.can_exec = True
+            out.opaque = out.opaque or "a | command pipes to a program"
+        elif "!" in cmd:
+            out.can_exec = True
+            out.runs.append(cmd.split("!", 1)[1])
+    return out
+
+
+_RUNNERS: Dict[str, Callable[[List[str], str, _State], _Exec]] = {
+    **{p: (lambda a, s, st: _awk_exec(a, st)) for p in ("awk", "gawk", "mawk", "nawk")},
+    **{p: (lambda a, s, st: _sed_exec(a, st)) for p in ("sed", "gsed")},
+    **{p: _vim_exec for p in ("vim", "vi", "nvim", "ex", "view", "vimdiff", "gvim", "rvim", "evim")},
+    **{p: (lambda a, s, st: _tar_exec(a, st)) for p in ("tar", "gtar", "bsdtar")},
+    "less": lambda a, s, st: _less_exec(a, st),
+}
+
+
+def _cmd_runner(t, seg, st, ctx, blk, gitenv):
+    """awk, sed, vim, tar and less: block when their program text can run a program and mentions gh/git/github, or
+    runs something that is not a plain literal; judge each plain literal command as a shell command."""
+    prog = _prog(t[0])
+    ex = _RUNNERS[prog](t[1:], seg, st)
+    hint = "run the command directly, with every word spelled out"
+    if ex.opaque:
+        yield blk(OPAQUE, f"{prog} {ex.opaque}, so what it runs cannot be checked", hint)
+        return
+    if ex.can_exec and any(_mentions_any(x) for x in ex.texts + ex.runs):
+        yield blk(OPAQUE, f"{prog} program text that can run a program mentions gh/git or GitHub, which cannot be "
+                          "checked", "run gh/git directly")
+        return
+    for body in ex.runs:
+        yield from _judge_body(body, st, ctx, blk, prog)
+
+
+def _cmd_rg(t, seg, st, ctx, blk, gitenv):
+    """rg only runs a program through --pre (with --pre-glob) or options from RIPGREP_CONFIG_PATH."""
+    if "RIPGREP_CONFIG_PATH" in st.text:
+        yield blk(OPAQUE, "RIPGREP_CONFIG_PATH can add rg --pre, which runs a program", "run rg without it")
+        return
+    for a in t[1:]:
+        if a == "--":
+            break
+        if a.split("=", 1)[0] in ("--pre", "--pre-glob"):
+            yield blk(OPAQUE, f"rg {a.split('=', 1)[0]} runs a program on every file", "run rg without --pre")
+            return
+
+
 _GH_RULES = {"api": _gh_api, "auth": _gh_auth, "alias": _gh_alias, "extension": _gh_alias, "ext": _gh_alias,
              "extensions": _gh_alias, "gist": _gh_gist}
 
@@ -2573,6 +3203,7 @@ _COMMANDS: Dict[str, Callable[..., Iterator[Block]]] = {
     "xargs": _wrapped(_XARGS_VALUE), "parallel": _wrapped(_PARALLEL_VALUE, (":::", "::::")),
     "sudo": _wrapped(_SUDO_VALUE), "doas": _wrapped(_SUDO_VALUE),
     **{s: _cmd_shell for s in (*_SHELLS, "source", ".")},
+    **{p: _cmd_runner for p in _RUNNERS}, "rg": _cmd_rg,
 }
 
 # --- log and self-test -----------------------------------------------------
