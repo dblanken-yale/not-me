@@ -1,6 +1,6 @@
 {
   "name": "not-me",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Project-agnostic autonomous dev loop for Claude Code: pick up issues, rework reviewed PRs, review PRs, and prove PRs.",
   "author": {
     "name": "David Blankenship",

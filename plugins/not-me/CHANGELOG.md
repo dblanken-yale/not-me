@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/dblanken-yale/not-me/compare/not-me-v0.2.0...not-me-v0.3.0) (2026-10-23)
+
+
+### Features
+
+* **review:** review.block_on chooses which severities request changes ([#65](https://github.com/dblanken-yale/not-me/issues/65)) ([6f2b37e](https://github.com/dblanken-yale/not-me/commit/6f2b37e20ade6fbf81e98e4d1c4b70291805aeec))
+
+
+### Bug Fixes
+
+* **guard:** no directory change with writes, proven reads, and a user-granted merge ([#64](https://github.com/dblanken-yale/not-me/issues/64)) ([a8b195c](https://github.com/dblanken-yale/not-me/commit/a8b195c5b68203ca5e5302fb2533aa093ac824fd))
+
 ## [0.2.0](https://github.com/dblanken-yale/not-me/compare/not-me-v0.1.0...not-me-v0.2.0) (2026-10-22)
 
 
