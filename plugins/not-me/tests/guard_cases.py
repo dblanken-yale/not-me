@@ -165,6 +165,14 @@ def build_fixtures(root: Path) -> Dict[str, str]:
             cfg.mkdir(parents=True, exist_ok=True)
             body = "schema: 1\n" + (front + "\n" if front else "")
             (cfg / "project.md").write_text(f"---\n{body}---\n# Project\n", encoding="utf-8")
+    # outside a not-me project: a plain directory, and a git repo nested in a not-me checkout without its own config
+    (root / "nogit").mkdir(exist_ok=True)
+    (root / "nogit" / "README.md").write_text("# plain\n", encoding="utf-8")
+    nested = root / "app" / "vendor" / "nested"
+    nested.mkdir(parents=True, exist_ok=True)
+    _git(["init", "-q"], nested, env)
+    _git(["remote", "add", "origin", GH + "acme/nested.git"], nested, env)
+    (nested / "README.md").write_text("# nested\n", encoding="utf-8")
     return env
 
 
@@ -699,6 +707,70 @@ bash(B, SP, "python3 - <<'EOF'\nimport os\nos.openpty()\nEOF")
 bash(A, None, "python3 scripts/tool.py")
 bash(A, None, "python3 -c \"import threading; threading.Thread(target=print, daemon=True).start()\"")
 bash(A, None, "node -e \"require('child_process').spawn('ls')\"")
+# Outside a not-me project (a plain directory, or a git repo nested in a not-me checkout) the four rules are off,
+# but self-protection of the global not-me home and the plugin still applies.
+for _where in ("nogit", "app/vendor/nested"):
+    write(B, SP, "Read", "{H}/operator-token", _where)
+    mcp(B, SP, "NotebookRead", {"notebook_path": "{H}/operator-token"}, _where)
+    mcp(B, SP, "Grep", {"pattern": "x", "path": "{H}"}, _where)
+    mcp(B, SP, "Glob", {"pattern": "{H}/*"}, _where)
+    mcp(B, SP, "LS", {"path": "{H}"}, _where)
+    bash(B, SP, "cat {H}/operator-token", _where)
+    bash(B, SP, "cat {H}/oper*", _where)
+    bash(B, SP, "base64 < {H}/operator-t?ken", _where)
+    bash(B, SP, "cp -r {H} backup", _where)
+    write(B, SP, "Write", "{H}/operator-token", _where)
+    write(B, SP, "Write", "{H}/allowed-repos.json", _where)
+    write(B, SP, "Edit", "{H}/allowed-repos.json", _where)
+    write(B, SP, "Write", "{P}/hooks/repo_guard.py", _where)
+    bash(B, SP, "echo {} > {H}/allowed-repos.json", _where)
+    bash(B, SP, "notme allow-repo add acme/other", _where)
+    bash(B, SP, "notme allow-repo acme/other --everywhere", _where)
+    bash(B, SP, "notme pause off", _where)
+    bash(B, SP, 'script -q -c "notme pause off" /dev/null', _where)
+    bash(B, SP, "nohup notme pause off &", _where)
+    bash(B, SP, "NOT_ME_OPERATOR_CONFIRM=x notme pause off", _where)
+    bash(B, SP, "cd {F}/app && notme status", _where)  # re-points the CLI at a not-me project
+    bash(B, SP, "notme git worktree-add {F}/wt", _where)  # no not-me common dir to put it under
+    # a command name taken from a variable cannot be checked: it blocks when it could drive notme
+    bash(B, SP, "N=notme; $N pause off", _where)
+    bash(B, SP, '"$CLAUDE_PLUGIN_ROOT/bin/notme" pause off', _where)
+    bash(B, SP, "$CLAUDE_PLUGIN_ROOT/bin/notme --project-dir /x status", _where)
+    bash(B, SP, "NOT_ME_HOME=/x $P/bin/notme pause off", _where)
+    bash(A, None, "echo $HOME", _where)
+    bash(A, None, "ls $TMPDIR", _where)
+    bash(A, None, "git push origin $BRANCH", _where)
+    bash(A, None, "$EDITOR notes.txt", _where)
+    bash(A, None, "ls", _where)
+    bash(A, None, "cat README.md", _where)
+    bash(A, None, "git status", _where)
+    bash(A, None, "git push origin feature/x", _where)
+    bash(A, None, "git push --force origin main", _where)
+    bash(A, None, "gh pr create --title x --body y", _where)
+    bash(A, None, "gh pr comment 1 --repo acme/other -b x", _where)
+    bash(A, None, "rm -rf .git", _where)
+    bash(A, None, "notme allow-repo list", _where)
+    bash(A, None, "notme pause status", _where)
+    bash(A, None, "notme status", _where)
+    write(A, None, "Read", "README.md", _where)
+    write(A, None, "Write", "notes.txt", _where)
+    write(A, None, "Edit", ".git/config", _where)
+    mcp(A, None, "Grep", {"pattern": "x"}, _where)
+    mcp(A, None, "mcp__github__create_issue", {"owner": "acme", "repo": "other"}, _where)
+    # the live-mode epoch and marker, and going live, are self-protection too
+    write(B, SP, "Read", "{H}/mode-live.epoch", _where)
+    bash(B, SP, "cat {H}/mode-live.e*", _where)
+    write(B, SP, "Write", "{H}/mode-live.sig", _where)
+    bash(B, SP, "cp /tmp/saved {H}/mode-live.sig", _where)
+    bash(B, SP, "notme mode live", _where)
+    bash(B, SP, '"$CLAUDE_PLUGIN_ROOT/bin/notme" mode live', _where)
+    mcp(B, SP, "Write", {"file_path": "{H}/project.md", "content": "---\nschema: 1\nmode: live\n---\n"}, _where)
+    bash(B, SP, "$P mode live", _where)
+    bash(B, SP, "X=$(printf %s no tme); $X mode live", _where)
+    bash(A, None, "notme mode show", _where)
+    bash(A, None, "$P mode show", _where)
+    bash(A, None, "$EDITOR mode.txt", _where)
+
 # Live mode is signed: `mode: live` counts only next to the marker `notme mode live` writes with the operator
 # token, so no file write by the agent can turn it on. The guard keeps a friendly early refusal for Edit/Write of a
 # live global project.md, protects the marker itself, and blocks `notme mode live` in every spelling.
