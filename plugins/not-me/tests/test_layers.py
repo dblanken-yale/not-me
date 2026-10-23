@@ -213,6 +213,17 @@ class LayerCaseTests(unittest.TestCase):
         cfg = self.global_and_repo(None, "---\nenabled: true\n---\n")  # no global false: harmless
         self.assertIs(cfg.meta["project"]["enabled"], True)
 
+    def test_repo_may_not_turn_include_unassigned_on(self):
+        cfg = self.global_and_repo(None, "---\nqueue: {include_unassigned: true}\n---\n")
+        self.assertIs(cfg.meta["project"]["queue"]["include_unassigned"], False)
+        self.assertEqual(len([w for w in cfg.warnings if "only tighten" in w]), 1)
+        cfg = self.global_and_repo("---\nqueue: {include_unassigned: true}\n---\n",
+                                   "---\nqueue: {include_unassigned: false}\n---\n")
+        self.assertIs(cfg.meta["project"]["queue"]["include_unassigned"], False)  # turning it off tightens
+        self.assertEqual([w for w in cfg.warnings if "only tighten" in w], [])
+        cfg = self.global_and_repo("---\nqueue: {include_unassigned: true}\n---\n", "---\nschema: 1\n---\n")
+        self.assertIs(cfg.meta["project"]["queue"]["include_unassigned"], True)
+
     def test_L22_explain_shows_ignored_with_reason(self):
         cfg = self.global_and_repo("---\nmode: dry-run\n---\n", "---\nmode: live\nallow_repos: [acme/evil]\n---\n")
         keys = cfg.explain()["keys"]

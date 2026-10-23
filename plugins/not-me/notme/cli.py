@@ -773,11 +773,18 @@ def push_check(ctx: Context) -> Dict[str, Any]:
 def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """The next issue to work, by the queue's order. Nothing is claimed.
 
-    Output: number, title, url, author, labels, parent, candidates (count); or none (with reason when paused)
+    Output: number, title, url, author, labels, parent, candidates (count); or none, with reason when paused or
+    disabled, and with reason unassigned_only, unassigned (count) and setting when the queue found no issue and
+    the only eligible issues have no assignee (only issues assigned to the operator are picked unless queue.include_unassigned is true)
     """
     skip = set(args.exclude or [])
-    found = [c for c in ctx.queue().candidates() if c.number not in skip]
+    queue = ctx.queue()
+    every = queue.candidates()
+    found = [c for c in every if c.number not in skip]
     if not found:
+        if not every and queue.unassigned_skipped:
+            return {"none": True, "reason": "unassigned_only", "unassigned": queue.unassigned_skipped,
+                    "setting": "queue.include_unassigned"}
         return {"none": True}
     top = found[0]
     return {"number": top.number, "title": top.title, "url": top.url, "author": top.author,

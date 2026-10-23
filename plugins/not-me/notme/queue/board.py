@@ -118,6 +118,7 @@ class BoardQueue(BaseQueue):
     # --- queue ---
 
     def candidates(self) -> List[Candidate]:
+        self.unassigned_skipped = 0
         opt_in = self.queue_cfg.get("opt_in_label")
         todo = self.board_states.get("todo")
         skip = set()
@@ -130,9 +131,10 @@ class BoardQueue(BaseQueue):
         for item in self._fetch()["items"]:
             names = {n.lower() for n in item["labels"]}
             if ((item["repo"] or "").lower() != self.tracker.lower() or item["status"] != todo
-                    or str(item["state"]).upper() != "OPEN" or item["assignees"]
+                    or str(item["state"]).upper() != "OPEN"
                     or (opt_in and opt_in.lower() not in names) or names & skip
-                    or not self.trusted(item["author"])):
+                    or not self.trusted(item["author"])
+                    or not self._assignees_allow(item["assignees"])):  # last, so only eligible ones are counted
                 continue
             found.append(self._candidate(item))
         return sorted(found, key=Candidate.sort_key)
@@ -165,12 +167,12 @@ class BoardQueue(BaseQueue):
         if others or str(item["state"]).upper() != "OPEN":
             raise claims.ClaimLost(f"{self.tracker}#{n} is closed or assigned to {others[0] if others else 'someone'}")
         self._set_status(board, item, "in_progress")
-        self.assign(n)
-        marker_id = self.upsert_marker(n)
+        added = self.assign(n, item["assignees"])
+        marker_id = self.upsert_marker(n, assigned="claim" if added else None)
         if not self.gh.dry_run:
             now = self._item(self._fetch(), n)
             if now["status"] != self.column("in_progress"):
-                self.unassign(n)
+                self.unassign_if_claimed(n, added)
                 self.mark_released(n)
                 raise claims.ClaimLost(f"{self.tracker}#{n} moved to {now['status']!r} while claiming")
         return Claim(number=n, previous="todo", now="in_progress", marker_comment_id=marker_id, run_id=self.run_id)
@@ -179,7 +181,7 @@ class BoardQueue(BaseQueue):
         n = _num(n)
         board = self._fetch()
         self._set_status(board, self._item(board, n), to)
-        self.unassign(n)
+        self.unassign_if_claimed(n)  # only when the claim assigned us, per its marker
         self.mark_released(n)
         self.unlock(n)
 

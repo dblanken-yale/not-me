@@ -77,6 +77,8 @@ class BaseQueue:
         self.operator = _login(operator)
         self.claims_dir = Path(claims_dir) if claims_dir else None
         self._clock = clock or claims.utcnow
+        self.include_unassigned = self.queue_cfg.get("include_unassigned") is True
+        self.unassigned_skipped = 0  # eligible issues the last candidates() left out only because nobody is assigned
 
     def now(self) -> datetime:
         return self._clock()
@@ -94,11 +96,26 @@ class BaseQueue:
         self.gh.write(self._target(), ["issue", "edit", str(int(n)), "-R", self.tracker, flag, _login(login)],
                       description=f"{what} {login} on {self.tracker}#{int(n)}")
 
-    def assign(self, n: int) -> None:
+    def assign(self, n: int, assignees: Sequence[str] = ()) -> bool:
+        """Assign the operator, unless `assignees` (as just read) already has them. True when it assigned."""
+        if any(self._is_me(a) for a in assignees):
+            return False
         self._edit_assignee(n, "--add-assignee", self.operator, "assign")
+        return True
 
     def unassign(self, n: int) -> None:
         self._edit_assignee(n, "--remove-assignee", self.operator, "unassign")
+
+    def claim_assigned(self, n: int) -> bool:
+        """Whether our claim marker on n says the claim itself assigned the operator. No marker, or no record:
+        False, so a release never removes an assignment a person made."""
+        mine = self._mine(n)
+        return bool(mine) and (claims.parse_marker(mine.get("body")) or {}).get("assigned") == "claim"
+
+    def unassign_if_claimed(self, n: int, added: Optional[bool] = None) -> None:
+        """Unassign the operator only when the claim added the assignment (added, else the marker's record)."""
+        if added if added is not None else self.claim_assigned(n):
+            self.unassign(n)
 
     def trusted(self, author: Optional[str]) -> bool:
         """Whether the roster trusts this author to direct work. Both queues filter candidates through this."""
@@ -106,6 +123,16 @@ class BaseQueue:
 
     def _is_me(self, login: Optional[str]) -> bool:
         return (login or "").lower() == self.operator.lower()
+
+    def _assignees_allow(self, assignees: Sequence[str]) -> bool:
+        """Check this last, after every other eligibility rule. Assigned to the operator alone: yes. Assigned to
+        anyone else: never. Nobody: only with queue.include_unassigned; otherwise counted in unassigned_skipped."""
+        if any(not self._is_me(a) for a in assignees):
+            return False
+        if assignees or self.include_unassigned:
+            return True
+        self.unassigned_skipped += 1
+        return False
 
     # --- the marker comment ---
 
@@ -131,10 +158,16 @@ class BaseQueue:
         mine = [c for c, m in self.marker_comments(n) if self._is_me(m.get("login"))]
         return max(mine, key=lambda c: c["id"]) if mine else None
 
-    def upsert_marker(self, n: int, released: bool = False) -> Optional[int]:
-        """Create our marker comment, or edit the one we already have. Never a second one."""
-        body = claims.marker_body(self.operator, self.run_id, claims.iso(self.now()), released=released)
+    def upsert_marker(self, n: int, released: bool = False, assigned: Optional[str] = None) -> Optional[int]:
+        """Create our marker comment, or edit the one we already have. Never a second one.
+
+        A claim passes assigned="claim" when it added the operator as assignee. Releasing keeps whatever the
+        existing marker recorded, so a later release still knows."""
         existing = self._mine(n)
+        if released and existing is not None:
+            assigned = (claims.parse_marker(existing.get("body")) or {}).get("assigned")
+        body = claims.marker_body(self.operator, self.run_id, claims.iso(self.now()), released=released,
+                                  assigned=assigned)
         with self._body_file(body) as path:
             if existing is not None:
                 self.gh.comment_update(self.tracker, existing["id"], path)

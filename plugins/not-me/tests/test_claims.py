@@ -23,6 +23,14 @@ class MarkerTests(unittest.TestCase):
         self.assertIn("released", body.splitlines()[0])
         self.assertTrue(claims.is_released(claims.parse_marker(body)))
 
+    def test_marker_records_that_the_claim_assigned(self):
+        body = claims.marker_body("octocat", "run-1", "2026-03-01T12:00:00Z", released=True, assigned="claim")
+        self.assertEqual(claims.parse_marker(body), {"login": "octocat", "run": "run-1", "ts": "2026-03-01T12:00:00Z",
+                                                     "state": "released", "assigned": "claim"})
+        self.assertNotIn("assigned", claims.parse_marker(claims.marker_body("octocat", "r", "t")))
+        with self.assertRaises(ValueError):
+            claims.marker_body("octocat", "r", "t", assigned="a --> b")
+
     def test_parse_finds_the_marker_inside_other_text(self):
         body = "hello\n<!-- not-me:claim login=hubot run=r2 ts=2026-03-01T11:00:00Z -->\nbye"
         self.assertEqual(claims.parse_marker(body)["login"], "hubot")

@@ -66,6 +66,32 @@ class ConfigTests(base.CliCase):
 
 
 class IssueTests(base.CliCase):
+    def setUp(self):
+        super().setUp()
+        self.fake.add_assignee(REPO, 1, "octocat")  # the default queue picks only issues assigned to me
+
+    def test_pick_says_when_only_unassigned_issues_are_ready(self):
+        things(self.fake)["1"]["assignees"] = []
+        things(self.fake)["2"]["labels"] = ["to do"]
+        self.assertEqual(self.ok("pick-issue"), {"none": True, "reason": "unassigned_only", "unassigned": 2,
+                                                 "setting": "queue.include_unassigned"})
+        things(self.fake)["2"]["assignees"] = ["hubot"]  # someone else's: never counted
+        self.assertEqual(self.ok("pick-issue")["unassigned"], 1)
+
+    def test_excluding_every_candidate_is_not_reported_as_unassigned_only(self):
+        things(self.fake)["2"]["labels"] = ["to do"]  # unassigned and eligible
+        self.assertEqual(self.ok("pick-issue", "--exclude", "1"), {"none": True})
+
+    def test_include_unassigned_picks_an_unassigned_issue(self):
+        things(self.fake)["1"]["assignees"] = []
+        self.tc.write("global", "project", base.GLOBAL_PROJECT.replace(
+            "operator: octocat", "operator: octocat\nqueue: {include_unassigned: true}"))
+        self.assertEqual(self.ok("pick-issue")["number"], 1)
+
+    def test_pick_with_nothing_ready_has_no_reason(self):
+        things(self.fake)["1"]["labels"] = []
+        self.assertEqual(self.ok("pick-issue"), {"none": True})
+
     def test_pick_then_claim_then_release(self):
         picked = self.ok("pick-issue")
         self.assertEqual(picked["number"], 1)
@@ -77,6 +103,13 @@ class IssueTests(base.CliCase):
         self.assertEqual(issue["assignees"], ["octocat"])
         self.assertEqual(self.ok("release-issue", "1", "--to", "blocked")["to"], "blocked")
         self.assertEqual(things(self.fake)["1"]["labels"], ["blocked"])
+        self.assertEqual(things(self.fake)["1"]["assignees"], ["octocat"])  # assigned before the claim: kept
+
+    def test_release_removes_an_assignment_the_claim_made(self):
+        things(self.fake)["1"]["assignees"] = []
+        self.ok("claim-issue", "1")
+        self.assertEqual(things(self.fake)["1"]["assignees"], ["octocat"])
+        self.ok("release-issue", "1")
         self.assertEqual(things(self.fake)["1"]["assignees"], [])
 
     def test_move_issue_checks_the_required_state(self):
@@ -315,6 +348,7 @@ class StatusAndPauseTests(base.CliCase):
         self.assertTrue(any("not read" in w for w in payload["warnings"]))
 
     def test_pause_on_and_off(self):
+        self.fake.add_assignee(REPO, 1, "octocat")  # the default queue picks only issues assigned to me
         self.assertEqual(self.ok("pause", "on"), {"paused": True, "scope": "project"})
         self.assertEqual(self.ok("status")["paused"]["project"], True)
         self.assertEqual(self.ok("pick-issue"), {"none": True, "reason": "paused"})

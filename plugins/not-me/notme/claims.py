@@ -59,11 +59,17 @@ def _field(name: str, value: str) -> str:
     return f"{name}={value}"
 
 
-def marker_body(login: str, run_id: str, ts: str, released: bool = False) -> str:
-    """The comment text: one human line, then the machine marker."""
+def marker_body(login: str, run_id: str, ts: str, released: bool = False, assigned: Optional[str] = None) -> str:
+    """The comment text: one human line, then the machine marker.
+
+    assigned="claim" records that the claim itself assigned the operator, so a release may unassign them. Without
+    it the operator was assigned before the claim (usually by a person), and a release leaves the assignment alone.
+    """
     fields = [_field("login", login), _field("run", run_id), _field("ts", ts)]
     if released:
         fields.append("state=released")
+    if assigned:
+        fields.append(_field("assigned", assigned))
     line = f"not-me released its claim for {login}" if released else f"not-me claimed this for {login}"
     return f"{line}\n\n<!-- not-me:claim {' '.join(fields)} -->\n"
 

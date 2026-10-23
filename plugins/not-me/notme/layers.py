@@ -66,6 +66,7 @@ SCHEMA: Dict[str, Dict[str, KeySpec]] = {
         "protected_branches": KeySpec(merge="union", tighten_only="no-bang"),
         "allow_repos": KeySpec(merge="union", tighten_only="ignore"),
         "enabled": KeySpec(tighten_only="false"),
+        "queue.include_unassigned": KeySpec(tighten_only="false"),  # true widens what gets picked
         "markers.legacy": KeySpec(merge="union"),
         "mode": KeySpec(enum=("dry-run", "live"), tighten_only="dry-run"),
         "models.strategy": KeySpec(enum=("orchestrate", "single")),

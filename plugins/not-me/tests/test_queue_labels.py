@@ -24,7 +24,7 @@ REPO = "acme/app"
 PROJECT_META = {
     "tracker": "auto",
     "operator": "octocat",
-    "queue": {"source": "labels", "pick_label": "to do", "opt_in_label": None,
+    "queue": {"source": "labels", "pick_label": "to do", "opt_in_label": None, "include_unassigned": False,
               "board": {"owner": None, "number": None, "status_field": "Status", "priority_fields": []},
               "board_states": {"todo": "To Do", "in_progress": "In progress", "in_review": "In review",
                                "blocked": "Blocked"}},
@@ -85,6 +85,9 @@ class QueueTestCase(unittest.TestCase):
 
 
 class CandidateTests(QueueTestCase):
+    # These cover the other eligibility rules, so unassigned issues are let in; AssignmentTests covers the default.
+    cfg_overrides = {"include_unassigned": True}
+
     def setUp(self):
         super().setUp()
         self.fake.state["repos"][REPO]["things"].pop("1")
@@ -130,7 +133,7 @@ class CandidateTests(QueueTestCase):
         self.assertEqual(self.numbers(), [5])
 
     def test_opt_in_label_is_required_when_configured(self):
-        self.cfg = make_cfg(opt_in_label="claude")
+        self.cfg = make_cfg(opt_in_label="claude", **self.cfg_overrides)
         self.q = self.queue("run-1")
         add_issue(self.fake, 5, labels=["to do", "claude"])
         add_issue(self.fake, 6, labels=["to do"])
@@ -178,7 +181,108 @@ class CandidateTests(QueueTestCase):
         self.assertTrue(c.url.endswith("/issues/5"))
 
 
+class AssignmentTests(QueueTestCase):
+    """Who an eligible issue is assigned to: mine always, nobody's only with queue.include_unassigned, others' never."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake.state["repos"][REPO]["things"].pop("1")
+        self.fake.state["repos"][REPO]["things"].pop("2")
+
+    def use(self, include_unassigned):
+        self.cfg = make_cfg(include_unassigned=include_unassigned)
+        self.q = self.queue("run-1")
+
+    def numbers(self):
+        return [c.number for c in self.q.candidates()]
+
+    def seed(self):
+        add_issue(self.fake, 5, assignees=["octocat"])
+        add_issue(self.fake, 6)
+        add_issue(self.fake, 7, assignees=["hubot"])
+        add_issue(self.fake, 8, assignees=["octocat", "hubot"])
+
+    def test_default_picks_only_issues_assigned_to_me(self):
+        self.seed()
+        self.assertEqual(self.numbers(), [5])
+        self.assertEqual(self.q.unassigned_skipped, 1)
+
+    def test_include_unassigned_also_picks_unassigned_issues(self):
+        self.use(True)
+        self.seed()
+        self.assertEqual(self.numbers(), [5, 6])
+        self.assertEqual(self.q.unassigned_skipped, 0)
+
+    def test_issues_assigned_to_others_are_never_picked(self):
+        add_issue(self.fake, 7, assignees=["hubot"])
+        add_issue(self.fake, 8, assignees=["octocat", "hubot"])
+        for setting in (False, True):
+            self.use(setting)
+            self.assertEqual(self.numbers(), [], setting)
+            self.assertEqual(self.q.unassigned_skipped, 0, setting)
+
+    def test_unassigned_count_covers_only_otherwise_eligible_issues(self):
+        add_issue(self.fake, 6)
+        add_issue(self.fake, 9, author="mallory")
+        add_issue(self.fake, 10, labels=["to do", "paused"])
+        add_issue(self.fake, 11, labels=["in progress"])
+        self.assertEqual(self.numbers(), [])
+        self.assertEqual(self.q.unassigned_skipped, 1)
+
+    def test_an_unassigned_epic_child_waits_for_the_setting(self):
+        add_issue(self.fake, 10, labels=["epic"], body="- [ ] #11\n- [ ] #12\n")
+        add_issue(self.fake, 11)
+        add_issue(self.fake, 12, assignees=["octocat"])
+        self.assertEqual([(c.number, c.parent) for c in self.q.candidates()], [(12, 10)])
+
+
 class ClaimTests(QueueTestCase):
+    def test_claiming_an_issue_already_assigned_to_me(self):
+        self.fake.add_assignee(REPO, 1, "octocat", created_at="2026-02-28T09:00:00Z")  # a lead assigned it earlier
+        got = self.q.claim(1)
+        self.assertEqual((got.previous, got.now), ("todo", "in_progress"))
+        self.assertEqual(self.thing(1)["assignees"], ["octocat"])
+        self.assertEqual(self.thing(1)["labels"], ["in progress"])
+        self.assertFalse([c for c in self.fake.calls if "--add-assignee" in c])  # no second assignment
+
+    def test_release_keeps_an_assignment_made_before_the_claim(self):
+        self.fake.add_assignee(REPO, 1, "octocat", created_at="2026-02-28T09:00:00Z")  # a person assigned it
+        self.q.claim(1)
+        self.assertNotIn("assigned", claims.parse_marker(self.marker_comments(1)[0]["body"]))
+        self.queue("run-2").release(1)  # a later process: it knows only what the marker recorded
+        self.assertEqual(self.thing(1)["assignees"], ["octocat"])
+        self.assertEqual(self.thing(1)["labels"], ["to do"])
+        self.assertFalse([c for c in self.fake.calls if "--remove-assignee" in c])
+        self.assertTrue(claims.is_released(claims.parse_marker(self.marker_comments(1)[0]["body"])))
+
+    def test_release_removes_an_assignment_the_claim_made(self):
+        self.cfg = make_cfg(include_unassigned=True)
+        self.q = self.queue("run-1")
+        self.q.claim(1)
+        self.assertEqual(claims.parse_marker(self.marker_comments(1)[0]["body"])["assigned"], "claim")
+        self.queue("run-2").release(1)
+        self.assertEqual(self.thing(1)["assignees"], [])
+        self.assertEqual(self.thing(1)["labels"], ["to do"])
+        released = claims.parse_marker(self.marker_comments(1)[0]["body"])
+        self.assertEqual((released["state"], released["assigned"]), ("released", "claim"))
+
+    def test_release_without_a_marker_leaves_the_assignment(self):
+        self.fake.add_assignee(REPO, 1, "octocat")
+        self.thing(1)["labels"] = ["in progress"]  # claimed by something that left no marker
+        self.q.release(1)
+        self.assertEqual(self.thing(1)["assignees"], ["octocat"])
+        self.assertEqual(self.thing(1)["labels"], ["to do"])
+
+    def test_lost_claim_keeps_an_assignment_made_before_the_claim(self):
+        self.fake.add_assignee(REPO, 1, "octocat", created_at="2026-02-28T09:00:00Z")
+        foreign = claims.marker_body("hubot", "run-9", claims.iso(NOW - timedelta(minutes=1)))
+        self.fake.post_comment(REPO, 1, "hubot", foreign)
+        with self.assertRaises(claims.ClaimLost):
+            self.q.claim(1)
+        self.assertEqual(self.thing(1)["assignees"], ["octocat"])
+        self.assertEqual(self.thing(1)["labels"], ["to do"])
+        self.assertFalse([c for c in self.fake.calls if "--remove-assignee" in c])
+
     def test_happy_path(self):
         got = self.q.claim(1)
         self.assertEqual(got, Claim(number=1, previous="todo", now="in_progress",
@@ -188,7 +292,7 @@ class ClaimTests(QueueTestCase):
         markers = self.marker_comments(1)
         self.assertEqual(len(markers), 1)
         self.assertEqual(claims.parse_marker(markers[0]["body"]),
-                         {"login": "octocat", "run": "run-1", "ts": "2026-03-01T12:00:00Z"})
+                         {"login": "octocat", "run": "run-1", "ts": "2026-03-01T12:00:00Z", "assigned": "claim"})
         self.assertIn("not-me claimed this for octocat", markers[0]["body"])
 
     def test_labels_are_replaced_in_one_put_with_unrelated_labels_kept(self):
