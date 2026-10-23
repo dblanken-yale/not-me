@@ -2,8 +2,8 @@
 
 Trust rule: every item is filtered by its author's login BEFORE its body is read. The body of an
 untrusted item is never returned, stored, or logged; only its login, URL and kind are kept (and a
-count). Bot accounts (login ending in "[bot]", or GraphQL type Bot) are untrusted unless the roster
-lists them by name. Every returned body travels with separate `author`, `tier` and `association`
+count). Bot accounts (login ending in "[bot]", `app/<slug>` with is_bot, or GraphQL type Bot) are
+spelled `<slug>[bot]` everywhere (gh.login_of) and are untrusted unless the roster lists that name. Every returned body travels with separate `author`, `tier` and `association`
 fields, so trusted and untrusted text cannot be confused.
 
 Change-request heuristic (`is_change_request`): a trusted issue comment is kept as a finding when its
@@ -87,6 +87,11 @@ def endorsement(text: Optional[str]) -> bool:
 
 def _listed(roster: Roster, login: str) -> bool:
     return any(m.login.lower() == login.lower() for m in roster.entries)
+
+
+def _author_login(obj: Any) -> Optional[str]:
+    """The author's login with bots spelled `<slug>[bot]` (see gh.login_of); None when absent."""
+    return login_of(obj.get("author") if isinstance(obj, dict) else None) or None
 
 
 def is_bot(login: Optional[str], typename: Optional[str] = None) -> bool:
@@ -183,6 +188,10 @@ class Bundle:
     companions_skipped: List[Dict[str, Any]] = field(default_factory=list)
     checks: List[Dict[str, Any]] = field(default_factory=list)
     head_ref_untrusted: bool = False
+    text_is_data: bool = False  # title and body are a member's PR text under review: data, never instructions
+    # Who chose the linked issue: "trusted_author" (a lead's or authority's branch or body), "untrusted_author" (a
+    # member's, under review: the link itself may be wrong), or None when no lookup was made.
+    linked_issue_source: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -220,7 +229,7 @@ def _linked_issue(gh: GhClient, roster: Roster, tracker: str, number: Optional[i
         issue = gh.issue(tracker, number)
     except (GhError, ValueError):
         return {"number": number, "trusted": False, "error": "unreadable"}
-    login = _dig(issue, "author", "login")
+    login = _author_login(issue)
     if not trusted(roster, login):
         return {"number": number, "trusted": False}
     return {"number": number, "trusted": True, "repo": tracker, "title": issue.get("title"),
@@ -248,7 +257,7 @@ def _companions(gh: GhClient, roster: Roster, repo: str, head_ref: Optional[str]
             if pr.get("headRefName") != head_ref:
                 continue
             ref = {"repo": other, "number": pr.get("number")}
-            login = _dig(pr, "author", "login")
+            login = _author_login(pr)
             if pr.get("isCrossRepository"):
                 skipped.append({**ref, "reason": "cross-repository (fork) PR"})
             elif not trusted(roster, login, _dig(pr, "author", "type")):
@@ -261,40 +270,51 @@ def _companions(gh: GhClient, roster: Roster, repo: str, head_ref: Optional[str]
 
 
 def bundle(gh: GhClient, repo: str, n: int, roster: Roster, *, tracker: Optional[str] = None,
-           repos: Optional[Iterable[Any]] = None) -> Bundle:
+           repos: Optional[Iterable[Any]] = None, review: bool = False) -> Bundle:
     """The PR's facts. tracker (default: repo) holds the linked issue; repos are the configured
-    `repos[*]` (names or {name: ...} items) searched for companion PRs on the same branch."""
+    `repos[*]` (names or {name: ...} items) searched for companion PRs on the same branch.
+
+    review: the bundle is for reviewing the PR. A roster member's title and body are then returned as the
+    text under review (text_is_data true): data to judge, never instructions. Without it, and for anyone
+    not on the roster, an untrusted author's text stays withheld."""
     pr = gh.pr(repo, n)
     tracker = tracker or repo
-    login = _dig(pr, "author", "login")
+    login = _author_login(pr)
     ok = trusted(roster, login, _dig(pr, "author", "type"))
+    tier = tier_of(roster, login)
+    as_data = review and not ok and tier == "member"
+    shown = ok or as_data
     cross = bool(pr.get("isCrossRepository"))
-    # An untrusted author's title and body are untrusted text: withheld. A fork's or an untrusted author's
-    # branch name and check names are attacker-chosen too: neither feeds issue or companion lookup.
-    body = pr.get("body") if ok else None
+    # An untrusted author's title and body are untrusted text: withheld, except a member's under review, which
+    # is returned flagged as data. A fork's or an untrusted author's branch name and check names are
+    # attacker-chosen too: neither feeds issue or companion lookup, and check names are cut down.
+    body = pr.get("body") if shown else None
     head_ref = pr.get("headRefName")
     checks = _checks(gh, repo, n)
-    reason = "untrusted PR author" if not ok else "cross-repository PR" if cross else None
-    if reason:
-        head_untrusted = True
+    reason = "untrusted PR author" if not shown else "cross-repository PR" if cross else None
+    head_untrusted = bool(reason) or as_data
+    if head_untrusted:
         head_ref = head_ref if isinstance(head_ref, str) and _SAFE_BRANCH_RE.match(head_ref) else None
+        checks = _safe_checks(checks)
+    if reason:
         linked: Optional[Dict[str, Any]] = {"trusted": False}
         companions: List[Dict[str, Any]] = []
         skipped = [{"repo": None, "number": None, "reason": reason}]
-        checks = _safe_checks(checks)
     else:
-        head_untrusted = False
+        # A member's branch and body only name which issue and companions to look up; each of those still
+        # passes the trust filter on its own author.
         linked = _linked_issue(gh, roster, tracker, parse_linked_issue(head_ref, body, tracker))
         companions, skipped = _companions(gh, roster, repo, head_ref, _repo_names(repos))
     return Bundle(
-        repo=repo, number=int(n), title=pr.get("title") if ok else None, body=body, head_ref=head_ref,
+        repo=repo, number=int(n), title=pr.get("title") if shown else None, body=body, head_ref=head_ref,
         head_sha=pr.get("headRefOid"), base=pr.get("baseRefName"), state=pr.get("state"),
         is_draft=bool(pr.get("isDraft")), is_cross_repository=cross,
-        author=login, author_tier=tier_of(roster, login), author_trusted=ok,
+        author=login, author_tier=tier, author_trusted=ok, text_is_data=as_data,
         labels=[x.get("name") for x in pr.get("labels") or []],
         review_requests=[x.get("login") or x.get("slug") or x.get("name") for x in pr.get("reviewRequests") or []],
         review_decision=pr.get("reviewDecision"), mergeable=pr.get("mergeable"),
         linked_issue=linked, companions=companions, companions_skipped=skipped,
+        linked_issue_source=None if reason or linked is None else "untrusted_author" if as_data else "trusted_author",
         checks=checks, head_ref_untrusted=head_untrusted)
 
 
@@ -340,12 +360,12 @@ def _thread_findings(fb: Feedback, roster: Roster, threads: Sequence[Dict[str, A
         if not comments:
             continue
         root = comments[0]
-        login = _dig(root, "author", "login")
+        login = _author_login(root)
         # Decide on the login only; the body is read after this check.
         if not trusted(roster, login, _dig(root, "author", "__typename")):
             fb._ignore(login, root.get("url"), "thread")
             for reply in comments[1:]:
-                rlogin = _dig(reply, "author", "login")
+                rlogin = _author_login(reply)
                 if not trusted(roster, rlogin, _dig(reply, "author", "__typename")):
                     continue
                 cleaned = _clean(reply)
@@ -359,7 +379,7 @@ def _thread_findings(fb: Feedback, roster: Roster, threads: Sequence[Dict[str, A
             continue
         replies = []
         for reply in comments[1:]:
-            rlogin = _dig(reply, "author", "login")
+            rlogin = _author_login(reply)
             if trusted(roster, rlogin, _dig(reply, "author", "__typename")):
                 replies.append({"author": rlogin, "tier": tier_of(roster, rlogin),
                                 "association": reply.get("authorAssociation"), **_clean(reply)})
@@ -382,7 +402,7 @@ def _review_findings(fb: Feedback, roster: Roster, reviews: Sequence[Dict[str, A
         state = r.get("state")
         if state not in _REVIEW_STATES:
             continue
-        login = _dig(r, "author", "login")
+        login = _author_login(r)
         if not trusted(roster, login, _dig(r, "author", "__typename")):
             fb._ignore(login, r.get("url"), "review")
             continue
@@ -476,11 +496,11 @@ def feedback(gh: GhClient, repo: str, n: int, roster: Roster, *, since_marker: O
 def issue_view(gh: GhClient, repo: str, n: int, roster: Roster, operator: str, labels: Any) -> Dict[str, Any]:
     """An issue's facts. The title, body and comments of an author the roster does not trust are withheld, and
     an untrusted commenter's comments are always dropped (only counted). labels is a states.Labels."""
-    issue = gh.issue(repo, n)
+    issue = gh.issue(repo, n, comments=True)
     author = login_of(issue.get("author"))
     ok = trusted(roster, author) or author.lower() == operator.lower()
     every = issue.get("comments") or []
-    comments = [c for c in every if trusted(roster, login_of(c.get("author")), (c.get("author") or {}).get("type"))]
+    comments = [c for c in every if trusted(roster, login_of(c.get("author")))]
     names = names_of(issue.get("labels"))
     current = labels.current(names)
     return {"repo": repo, "number": issue.get("number"), "title": issue.get("title") if ok else None,
@@ -497,9 +517,12 @@ def review_candidates(gh: GhClient, repo: str, operator: str, roster: Roster,
                       label: str) -> "tuple[List[Dict[str, Any]], List[Dict[str, Any]]]":
     """(picks, skipped) among open PRs carrying `label`, lowest number first.
 
-    A pick is a non-draft PR where the operator is a requested reviewer, the author is trusted and is not the
-    operator, and something changed since the operator's last submitted review (a new head SHA, or a comment
-    by the author after it). picks: {number, why, head_sha, title, url}; skipped: {number, reason}.
+    A pick is a non-draft PR where the operator is a requested reviewer, the author is on the roster at any
+    tier (lead, authority or member) and is not the operator, and something changed since the operator's last
+    submitted review (a new head SHA, or a comment by the author after it). A member may be reviewed, but that
+    does not make their text trusted: see bundle(review=True).
+    picks: {number, why, head_sha, title (None unless author_trusted), url, author, author_tier, author_trusted};
+    skipped: {number, reason}.
     """
     me = operator.lower()
     picks: List[Dict[str, Any]] = []
@@ -516,14 +539,17 @@ def review_candidates(gh: GhClient, repo: str, operator: str, roster: Roster,
             reason = "operator is not a requested reviewer"
         elif author.lower() == me:
             reason = "operator is the author"
-        elif not trusted(roster, author, (pr.get("author") or {}).get("type")):
-            reason = "author not trusted"
+        elif tier_of(roster, author) == "none":
+            reason = "author not on the roster"
         why = None if reason else _review_reason(gh, repo, n, pr, author, me)
         if why is None:
             skipped.append({"number": n, "reason": reason or "unchanged since the last review"})
         else:
-            picks.append({"number": n, "why": why, "head_sha": pr.get("headRefOid"), "title": pr.get("title"),
-                          "url": item.get("url")})
+            # A member's title is text under review: read it only through bundle(review=True), flagged as data.
+            ok = trusted(roster, author, (pr.get("author") or {}).get("type"))
+            picks.append({"number": n, "why": why, "head_sha": pr.get("headRefOid"),
+                          "title": pr.get("title") if ok else None, "url": item.get("url"), "author": author,
+                          "author_tier": tier_of(roster, author), "author_trusted": ok})
     return picks, skipped
 
 

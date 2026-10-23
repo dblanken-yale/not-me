@@ -218,6 +218,7 @@ def load(project_dir: Optional[os.PathLike] = None, home: Optional[os.PathLike] 
         cfg.meta[name] = merged
         cfg.sources.update({f"{name}.{key}": src for key, src in sources.items()})
         cfg.bodies[name], cfg.body_sources[name], cfg.body_layers[name] = resolve_body(name, docs, cfg.warnings)
+    cfg.warnings.extend(roster.bot_row_warnings(roster.parse_roster(cfg.bodies.get("project", ""))))
     _confirm_live(cfg)
     return cfg
 

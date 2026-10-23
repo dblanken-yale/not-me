@@ -223,9 +223,12 @@ def stale_claims(gh: GhClient, tracker: str, labels: Labels, hours: float, branc
 
     name = labels.name("in_progress")
     issues = gh.read(["issue", "list", "-R", tracker, "--state", "open", "--label", name,
-                      "--json", "number,title,url,labels,comments", "--limit", "100"]) or []
+                      "--json", "number,title,url,labels", "--limit", "100"]) or []
+    # Comments come from REST (gh.comments): `gh issue --json comments` drops the author type, so a bot's
+    # marker would not read as `<slug>[bot]`.
     return [{"number": i["number"], "title": i.get("title"), "url": i.get("url")} for i in issues
-            if is_stale(i, hours, branches, name, is_trusted=is_trusted)]
+            if is_stale({**i, "comments": gh.comments(tracker, i["number"])}, hours, branches, name,
+                        is_trusted=is_trusted)]
 
 
 def make_queue(cfg: Any, gh: GhClient, roster: Any, operator: str, run_id: str, *, kind: str = "issue",

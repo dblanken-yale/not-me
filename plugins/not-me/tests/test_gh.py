@@ -766,5 +766,29 @@ class SubprocessTests(Base):
         self.assertTrue(os.access(FAKE_BIN / "gh", os.X_OK))
 
 
+class LoginOfTests(unittest.TestCase):
+    """Every author source spells a bot `<slug>[bot]`; a person's login is never changed into a bot's."""
+
+    def test_bot_spellings_agree(self):
+        for value in ({"is_bot": True, "login": "app/github-actions"},       # gh pr/issue --json author
+                      {"login": "app/github-actions"},                       # app/ prefix alone
+                      {"login": "github-actions", "__typename": "Bot"},      # GraphQL
+                      {"login": "github-actions[bot]", "type": "Bot"},       # REST user
+                      "github-actions[bot]", "app/github-actions"):
+            with self.subTest(value=value):
+                self.assertEqual(ghmod.login_of(value), "github-actions[bot]")
+
+    def test_person_unchanged(self):
+        for value in ({"is_bot": False, "login": "octocat"}, {"login": "octocat", "__typename": "User"},
+                      {"login": "octocat", "type": "User"}, "octocat", {"login": "octocat", "is_bot": "yes"}):
+            with self.subTest(value=value):
+                self.assertEqual(ghmod.login_of(value), "octocat")
+
+    def test_absent_or_malformed(self):
+        for value in (None, {}, {"login": None}, "", {"login": "app/"}, {"login": "app/a/b"}, 5):
+            with self.subTest(value=value):
+                self.assertEqual(ghmod.login_of(value), "")
+
+
 if __name__ == "__main__":
     unittest.main()

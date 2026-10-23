@@ -150,7 +150,7 @@ class PickReviewsTests(base.CliCase):
         cases = [
             ("never reviewed", {}, None, ("pick", "never reviewed")),
             ("not requested", {"reviewRequests": []}, None, ("skip", "operator is not a requested reviewer")),
-            ("untrusted author", {"author": "mallory"}, None, ("skip", "author not trusted")),
+            ("not on the roster", {"author": "mallory"}, None, ("skip", "author not on the roster")),
             ("own PR", {"author": "octocat"}, None, ("skip", "operator is the author")),
             ("draft", {"isDraft": True}, None, ("skip", "draft")),
             ("unchanged", {}, lambda f, p: self.review(p), ("skip", "unchanged since the last review")),

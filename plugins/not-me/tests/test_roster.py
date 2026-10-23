@@ -98,5 +98,32 @@ class ConfigRosterTests(unittest.TestCase):
         self.assertEqual(tc.load().effective_roster(operator="octocat").leads, ["octocat"])
 
 
+class BotRowTests(unittest.TestCase):
+    ROWS = ("| login | tier |\n|-|-|\n| app/renovate | member |\n| github-actions | lead |\n"
+            "| deploy-bot | member |\n| dependabot[bot] | member |\n| hubot | member |\n")
+
+    def test_app_row_becomes_bot_login_and_bare_slug_stays(self):
+        logins = [m.login for m in roster.parse_roster(self.ROWS)]
+        self.assertEqual(logins, ["renovate[bot]", "github-actions", "deploy-bot", "dependabot[bot]", "hubot"])
+
+    def test_bare_slug_never_matches_the_bot(self):
+        r = roster.effective(roster.parse_roster(self.ROWS), "octocat")
+        self.assertTrue(r.is_trusted("github-actions"))  # a person with that login, as written
+        self.assertFalse(r.is_trusted("github-actions[bot]"))
+
+    def test_warns_about_bot_looking_rows_without_suffix(self):
+        warnings = roster.bot_row_warnings(roster.parse_roster(self.ROWS))
+        self.assertEqual(len(warnings), 2)
+        self.assertIn("'github-actions'", warnings[0])
+        self.assertIn("'deploy-bot'", warnings[1])
+
+    def test_config_load_reports_the_warning(self):
+        tc = TempCase()
+        self.addCleanup(tc.cleanup)
+        tc.write("global", "project", "---\n---\n## Roster\n\n" + self.ROWS)
+        cfg = tc.load()
+        self.assertTrue(any("github-actions" in w and "[bot]" in w for w in cfg.warnings))
+
+
 if __name__ == "__main__":
     unittest.main()

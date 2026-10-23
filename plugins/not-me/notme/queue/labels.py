@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from .. import claims, states
-from ..gh import _num
+from ..gh import _num, login_of
 from . import BaseQueue, Candidate, Claim
 
 _LIST_FIELDS = "number,title,body,state,labels,assignees,author,createdAt,url"
@@ -25,8 +25,7 @@ def _assignees(issue: Dict[str, Any]) -> List[str]:
 
 
 def _author(issue: Dict[str, Any]) -> str:
-    a = issue.get("author")
-    return (a.get("login") if isinstance(a, dict) else a) or ""
+    return login_of(issue.get("author"))
 
 
 def task_list_numbers(body: Optional[str], tracker: str) -> List[int]:
@@ -41,8 +40,7 @@ def task_list_numbers(body: Optional[str], tracker: str) -> List[int]:
 
 
 def _comment_author(comment: Dict[str, Any]) -> Optional[str]:
-    a = comment.get("author")
-    return a.get("login") if isinstance(a, dict) else a
+    return login_of(comment.get("author")) or None
 
 
 def is_stale(issue: Dict[str, Any], claim_stale_hours: float, branches: Sequence[str] = (),
@@ -122,7 +120,7 @@ class LabelQueue(BaseQueue):
 
     def stale(self, n: int, branches: Sequence[str] = ()) -> bool:
         """Whether issue n holds a stale claim. `branches` are the branch names on origin (caller supplies them)."""
-        return is_stale(self.gh.issue(self.tracker, _num(n)), self.stale_hours, branches,
+        return is_stale(self.gh.issue(self.tracker, _num(n), comments=True), self.stale_hours, branches,
                         self.labels.name("in_progress"), self.now(), is_trusted=self.marker_trusted)
 
     # --- claiming ---

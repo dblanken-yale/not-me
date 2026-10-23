@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 from . import writes
 from .dryrun import Ledger
 from .redact import redact
+from .roster import bot_login
 from .writes import Decision, GuardContext, WriteTarget
 
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
@@ -114,8 +115,13 @@ def names_of(items: Any) -> List[str]:
 
 
 def login_of(value: Any) -> str:
-    """The login from a {login} object or a plain string; "" when absent."""
-    return (value.get("login") if isinstance(value, dict) else value) or ""
+    """The login from an author/user object or a plain string, bots spelled `<slug>[bot]`; "" when absent.
+
+    An object counts as a bot when is_bot is true or its GraphQL __typename or REST type is Bot."""
+    if isinstance(value, dict):
+        kind = str(value.get("__typename") or value.get("type") or "").lower()
+        return bot_login(value.get("login"), value.get("is_bot") is True or kind == "bot")
+    return bot_login(value)
 
 
 def csv(value: Optional[str]) -> List[str]:
@@ -327,7 +333,7 @@ _PR_FIELDS = ("number,title,body,headRefName,headRefOid,baseRefName,state,isDraf
 _THREADS_QUERY = (  # {n} is an int, formatted in after validation; owner and name are -f variables
     "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){"
     "pullRequest(number:{n}){reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{"
-    "id databaseId author{login} authorAssociation body path line url}}}}}}}"
+    "id databaseId author{login __typename} authorAssociation body path line url}}}}}}}"
 )
 _THREAD_REPO_QUERY = ("query($id:ID!){node(id:$id){... on PullRequestReviewThread{repository{nameWithOwner}}}}")
 _RESOLVE_MUTATION = ("mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}")
@@ -469,10 +475,15 @@ class GhClient:
         self._repo(repo)
         return _dig(self.read(["repo", "view", repo, "--json", "defaultBranchRef"]), "defaultBranchRef", "name")
 
-    def issue(self, repo: str, n: int) -> Dict[str, Any]:
+    def issue(self, repo: str, n: int, comments: bool = False) -> Dict[str, Any]:
+        """The issue's facts; with comments, its comments as comments() returns them (REST, so a bot's
+        author carries its type and reads `<slug>[bot]`; `gh issue --json comments` drops the type)."""
         self._repo(repo)
-        return self.read(["issue", "view", str(_num(n)), "-R", repo, "--json",
-                          "number,title,body,state,labels,assignees,author,comments,url"])
+        data = self.read(["issue", "view", str(_num(n)), "-R", repo, "--json",
+                          "number,title,body,state,labels,assignees,author,url"])
+        if comments and isinstance(data, dict):
+            data["comments"] = self.comments(repo, n)
+        return data
 
     def labels(self, repo: str, n: int) -> List[str]:
         self._repo(repo)
@@ -482,7 +493,7 @@ class GhClient:
     def comments(self, repo: str, n: int) -> List[Dict[str, Any]]:
         self._repo(repo)
         data = self.read(["api", f"repos/{repo}/issues/{_num(n)}/comments?per_page=100"]) or []
-        return [{"id": c["id"], "author": _dig(c, "user", "login"),
+        return [{"id": c["id"], "author": login_of(c.get("user")),
                  "association": c.get("author_association"), "body": c.get("body", ""),
                  "created_at": c.get("created_at"), "updated_at": c.get("updated_at"), "url": c.get("html_url")}
                 for c in data]
@@ -513,7 +524,7 @@ class GhClient:
         data = self.read(self._graphql(query, owner=owner, name=name))
         nodes = _dig(data, "data", "repository", "pullRequest", "reviewThreads", "nodes") or []
         return [{"id": t.get("id"), "isResolved": bool(t.get("isResolved")),
-                 "comments": [{**c, "author": _dig(c, "author", "login")}
+                 "comments": [{**c, "author": login_of(c.get("author")) or None}
                               for c in _dig(t, "comments", "nodes") or []]} for t in nodes]
 
     def _board_project(self, owner: str, number: int, query: str) -> Dict[str, Any]:
