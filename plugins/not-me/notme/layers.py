@@ -48,10 +48,13 @@ class KeySpec:
     enum: Tuple[Any, ...] = ()
     values: Optional[type] = None  # every value of this map must be this type
     item_key: Optional[str] = None  # every list item must be a map with this key
+    items_enum: Tuple[Any, ...] = ()  # every list item must be one of these
+    required_items: Tuple[Any, ...] = ()  # these must be in every list value
     confirm: Optional[Confirm] = None
     # Security keys the repo layer (committed, so untrusted) may only tighten:
     #   "on": may set on, never off | "dry-run": may set dry-run, never live | "false": may set false, never
-    #   true over a lower false | "no-bang": union list where "!value" removals from the repo are dropped |
+    #   true over a lower false | "superset": replace list the repo may only widen (keep every lower item) |
+    #   "no-bang": union list where "!value" removals from the repo are dropped |
     #   "ignore": every repo entry is dropped (extend it with the global allow list instead)
     tighten_only: str = ""
 
@@ -70,6 +73,11 @@ SCHEMA: Dict[str, Dict[str, KeySpec]] = {
         "repos": KeySpec(item_key="name"),
         "guard.*": KeySpec(enum=("on", "off"), confirm=Confirm("off", "confirm_guard_off"), tighten_only="on"),
     },
+}
+
+SCHEMA["review"] = {
+    "block_on": KeySpec(items_enum=("blocker", "major", "minor"), required_items=("blocker",),
+                        tighten_only="superset"),
 }
 
 _DEFAULT_SPEC = KeySpec()
@@ -188,6 +196,8 @@ def _loosens(spec: KeySpec, value: Any, current: Any) -> bool:
         return value != "dry-run"
     if spec.tighten_only == "false":
         return value is not False and current is False
+    if spec.tighten_only == "superset":
+        return isinstance(current, list) and not (isinstance(value, list) and all(i in value for i in current))
     return False
 
 

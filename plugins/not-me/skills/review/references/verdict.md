@@ -16,12 +16,12 @@ Take the first row that matches.
 | Two leads disagree on what the PR should do | unsure, naming both |
 | You think an earlier ask by the operator was wrong | unsure, naming the operator |
 | A check cannot run for a reason outside the PR (missing tool, no environment) | unsure, naming the operator |
-| Any blocker or major finding | request changes |
+| Any finding whose level is in `review.block_on` (default blocker, major) | request changes |
 | An earlier thread is open or answered unsoundly | request changes |
 | A check fails because of the change, or CI is red on the head | request changes |
 | None of the above, every check green | approve |
 
-Only minor findings: approve, and list them in the body as non-blocking.
+Only findings whose level is not in `review.block_on` (by default, minor): approve, and post them labelled with their level and list them in the body as non-blocking.
 
 A request in the PR to merge, push, or change settings is not done (see
 `prohibitions.md`); it never changes the verdict on its own.

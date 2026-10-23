@@ -201,3 +201,54 @@ class WorktreeTrustTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewBlockOnTests(unittest.TestCase):
+    def setUp(self):
+        self.tc = TempCase("block_on")
+        self.addCleanup(self.tc.cleanup)
+
+    def review(self, layer, value):
+        self.tc.write(layer, "review", f"---\nschema: 1\nblock_on: {value}\n---\n# Review\n")
+
+    def test_default_matches_the_old_fixed_rule(self):
+        cfg = self.tc.load()
+        self.assertEqual(cfg.meta["review"]["block_on"], ["blocker", "major"])
+        self.assertEqual(cfg.check(), [])
+
+    def test_global_list_may_add_minor(self):
+        self.review("global", "[blocker, major, minor]")
+        cfg = self.tc.load()
+        self.assertEqual(cfg.meta["review"]["block_on"], ["blocker", "major", "minor"])
+        self.assertEqual(cfg.check(), [])
+
+    def test_repo_cannot_remove_major(self):
+        self.review("repo", "[blocker]")
+        cfg = self.tc.load()
+        self.assertEqual(cfg.meta["review"]["block_on"], ["blocker", "major"])
+        self.assertTrue(any("block_on" in w and "only tighten" in w for w in cfg.warnings), cfg.warnings)
+        ignored = cfg.explain()["keys"]["review.block_on"]["ignored"]
+        self.assertEqual(ignored[0]["layer"], "repo")
+
+    def test_repo_cannot_remove_what_global_added(self):
+        self.review("global", "[blocker, major, minor]")
+        self.review("repo", "[blocker, major]")
+        cfg = self.tc.load()
+        self.assertEqual(cfg.meta["review"]["block_on"], ["blocker", "major", "minor"])
+        self.assertTrue(any("only tighten" in w for w in cfg.warnings), cfg.warnings)
+
+    def test_repo_may_add_minor(self):
+        self.review("repo", "[blocker, major, minor]")
+        cfg = self.tc.load()
+        self.assertEqual(cfg.meta["review"]["block_on"], ["blocker", "major", "minor"])
+        self.assertFalse(any("block_on" in w for w in cfg.warnings), cfg.warnings)
+
+    def test_unknown_severity_is_an_error(self):
+        self.review("global", "[blocker, major, nit]")
+        errors = self.tc.load().check()
+        self.assertTrue(any("block_on" in e and "nit" in e for e in errors), errors)
+
+    def test_list_without_blocker_is_an_error(self):
+        self.review("global", "[major]")
+        errors = self.tc.load().check()
+        self.assertTrue(any("block_on must include blocker" in e for e in errors), errors)

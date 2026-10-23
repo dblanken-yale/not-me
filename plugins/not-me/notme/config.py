@@ -145,6 +145,14 @@ def _check_map(doc: Doc, meta: Mapping[str, Any], ref: Mapping[str, Any], prefix
         elif not confirmed(spec, value, key, doc.meta):
             out.append(_fmt(doc, key_path, f"{name} is {value} but '{key}' is not listed in "
                                            f"{spec.confirm.list_key} in this file, so it is ignored"))
+        if isinstance(value, list) and (spec.items_enum or spec.required_items):
+            bad = [i for i in value if i not in spec.items_enum] if spec.items_enum else []
+            if bad:
+                out.append(_fmt(doc, key_path, f"{name} has unknown {', '.join(map(repr, bad))}; "
+                                               f"use only {', '.join(spec.items_enum)}"))
+            missing = [i for i in spec.required_items if i not in value]
+            if missing:
+                out.append(_fmt(doc, key_path, f"{name} must include {', '.join(missing)}"))
         if spec.item_key and isinstance(value, list):
             for i, item in enumerate(value):
                 if not isinstance(item, dict) or not isinstance(item.get(spec.item_key), str) or not item[spec.item_key]:

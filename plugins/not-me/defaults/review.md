@@ -2,6 +2,7 @@
 schema: 1                        # config format version
 dimensions: [correctness, tests, acceptance-criteria, security, data-loss, docs, maintainability]  # what a review looks at
 severity: [blocker, major, minor]  # finding levels, most severe first
+block_on: [blocker, major]       # severities that make the verdict "request changes"; must include blocker
 checks: verify                   # run the verify gate as part of review
 approve_label: ready_to_merge    # labels key applied on approval
 changes_label: needs_work        # labels key applied when changes are requested

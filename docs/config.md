@@ -160,6 +160,7 @@ Anyone with push access can edit the repo layer, and it is committed, so not-me 
 | `enabled` | set `false` | set `true` over a lower `false` |
 | `protected_branches` | add names | remove names. Its `!name` entries are dropped |
 | `allow_repos` | nothing | add repos. Every entry is dropped |
+| `review.block_on` | add levels | drop a level the global or default list has. The whole value is ignored |
 
 Each dropped value shows up under `ignored` in `/not-me:config` and as a warning. Where the loosening belongs (your global layer), see below.
 
@@ -383,6 +384,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `schema` | `1` | Config format version |
 | `dimensions` | `[correctness, tests, acceptance-criteria, security, data-loss, docs, maintainability]` | What a review looks at |
 | `severity` | `[blocker, major, minor]` | Finding levels, most severe first |
+| `block_on` | `[blocker, major]` | Finding levels that make the verdict "request changes". Findings at other levels are still posted, labelled with their level, but do not block. Values must come from `severity` and the list must include `blocker`. The global layer may set any valid list; the repo layer may only add levels, and a repo list that drops one is ignored with a warning |
 | `checks` | `verify` | Run the verify gate as part of review |
 | `approve_label` | `ready_to_merge` | The `labels` key applied on approval |
 | `changes_label` | `needs_work` | The `labels` key applied when changes are requested |
