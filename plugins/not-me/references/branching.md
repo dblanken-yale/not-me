@@ -73,8 +73,11 @@ When you must set aside local changes:
 
 ## Leave the checkout clean
 
-1. At the end of every run, success or not, return the checkout to the repo's
-   default branch with a clean tree.
+1. At the end of every run, success or not, return the checkout to the branch
+   it started on (`branch` in the preflight output) with a clean tree. In the
+   main checkout that is usually the default branch. A linked git worktree
+   cannot check out a branch another worktree holds, so it goes back to its
+   own starting branch, never to the default branch.
 2. Restore any stash you made at the start.
 3. A checkout you cannot clean is a `WARN` with the `git status` output.
 
@@ -102,4 +105,4 @@ When you must set aside local changes:
 - [ ] Merged the base in at Checkpoint A and Checkpoint B; rebased nothing.
 - [ ] Never force-pushed or amended a pushed commit.
 - [ ] Stashed with a unique message and restored by SHA.
-- [ ] Left the checkout on a clean default branch.
+- [ ] Left the checkout clean on the branch it started on.
