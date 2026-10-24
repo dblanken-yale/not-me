@@ -10,9 +10,11 @@ from typing import Any, Dict, List, Mapping, Optional
 from . import humans, migrations, paths, roster
 from .frontmatter import FrontmatterError, parse_with_lines
 from .layers import (DOC_NAMES, LAYER_ORDER, SCHEMA, Doc, KeyPath, Layers, Schema, confirmed, discover, dotted,
-                     merge_meta, resolve_body, spec_for)
+                     item_ok, merge_meta, resolve_body, spec_for, split_sections)
 
 NO_LAYERS_HINT = "no global or repo not-me config found; using the shipped defaults (run setup to create one)"
+PICKING_HEADING = "Picking work"  # the project.md H2 that holds the picking rules in plain words
+OLD_PRIORITY_FIELDS = ("queue", "board", "priority_fields")  # replaced by picking.fields
 
 
 @dataclass
@@ -31,6 +33,11 @@ class Config:
     # the warning when the layers say `mode: live` but the token-signed marker does not confirm it (then the
     # effective mode is dry-run); None otherwise
     live_unconfirmed: Optional[str] = None
+    # warnings about how issues are picked (a deprecated key that was moved), also in warnings
+    picking_warnings: List[str] = field(default_factory=list)
+    # the board fields the deprecated queue.board.priority_fields named, in its order: a board queue still ranks
+    # by them (higher first) so an old config keeps its order; plain picking.fields never rank
+    ranked_fields: List[str] = field(default_factory=list)
     _errors: List[str] = field(default_factory=list)
 
     def display(self, path: Optional[Path]) -> Optional[str]:
@@ -48,7 +55,7 @@ class Config:
                 "source": {"layer": src["layer"], "path": src["path"], "line": src["line"]},
                 "shadowed": src["shadowed"],
             }
-            for extra in ("contributors", "removed", "ignored", "downgraded"):
+            for extra in ("contributors", "removed", "ignored", "downgraded", "migrated"):
                 if extra in src:
                     entry[extra] = src[extra]
             keys[name] = copy.deepcopy(entry)
@@ -61,8 +68,25 @@ class Config:
             "layers": {layer: self.display(self.layers.dirs[layer]) for layer in LAYER_ORDER},
             "keys": keys,
             "bodies": bodies,
+            "picking": self.picking(),
             "warnings": list(self.warnings),
         }
+
+    def picking(self) -> Dict[str, Any]:
+        """The picking rules in effect: the text of the `## Picking work` section of the effective project.md body
+        and the layer it came from (the default layer's text when no higher body has the section), plus
+        picking.fields and picking.target_epics. The rules only order eligible issues; they grant nothing."""
+        rules, layer = _picking_section(self.bodies.get("project", ""))
+        if rules:
+            layer = self.body_sources.get("project", {}).get(layer or "")
+        else:
+            default = self.docs.get("project", {}).get("default")
+            rules, _ = _picking_section(default.body if default else "")
+            layer = "default" if rules else None
+        meta = self.meta.get("project", {}).get("picking")
+        meta = meta if isinstance(meta, dict) else {}  # an invalid value is a check() error
+        return {"rules": rules or None, "layer": layer,
+                "fields": _as_list(meta.get("fields")), "target_epics": _as_list(meta.get("target_epics"))}
 
     def check(self) -> List[str]:
         """Errors as "<layer> <path>:<line>: <message>"; empty when valid."""
@@ -82,6 +106,29 @@ class Config:
             if isinstance(configured, str) and configured != "auto":
                 operator = configured
         return roster.effective(roster.parse_roster(self.bodies.get("project", "")), operator)
+
+
+def _picking_section(body: str) -> tuple:
+    """(section text without its heading, heading as written) of the Picking work H2; ("", None) when absent."""
+    for heading, text in split_sections(body)[1]:
+        if heading.casefold() == PICKING_HEADING.casefold():
+            return text.split("\n", 1)[1].strip() if "\n" in text else "", heading
+    return "", None
+
+
+def _as_list(value: Any) -> List[Any]:
+    return list(value) if isinstance(value, list) else []
+
+
+def picking_summary(picking: Mapping[str, Any]) -> str:
+    """One line for status: where the rules come from, then the named fields and target epics when set."""
+    layer = picking.get("layer")
+    parts = ["impact default" if layer in ("default", None) else f"rules from {layer} layer"]
+    if picking.get("fields"):
+        parts.append("fields: " + ", ".join(map(str, picking["fields"])))
+    if picking.get("target_epics"):
+        parts.append("target epics: " + ", ".join(f"#{n}" for n in picking["target_epics"]))
+    return "; ".join(parts)
 
 
 def _get(meta: Mapping[str, Any], name: str) -> Any:
@@ -153,6 +200,8 @@ def _check_map(doc: Doc, meta: Mapping[str, Any], ref: Mapping[str, Any], prefix
             missing = [i for i in spec.required_items if i not in value]
             if missing:
                 out.append(_fmt(doc, key_path, f"{name} must include {', '.join(missing)}"))
+        if spec.items_type and isinstance(value, list) and not all(item_ok(spec, i) for i in value):
+            out.append(_fmt(doc, key_path, f"{name} must be a list of {spec.items_type}s, got {value!r}"))
         if spec.item_key and isinstance(value, list):
             for i, item in enumerate(value):
                 if not isinstance(item, dict) or not isinstance(item.get(spec.item_key), str) or not item[spec.item_key]:
@@ -227,8 +276,46 @@ def load(project_dir: Optional[os.PathLike] = None, home: Optional[os.PathLike] 
         cfg.sources.update({f"{name}.{key}": src for key, src in sources.items()})
         cfg.bodies[name], cfg.body_sources[name], cfg.body_layers[name] = resolve_body(name, docs, cfg.warnings)
     cfg.warnings.extend(roster.bot_row_warnings(roster.parse_roster(cfg.bodies.get("project", ""))))
+    _move_priority_fields(cfg)
     _confirm_live(cfg)
     return cfg
+
+
+def _move_priority_fields(cfg: Config) -> None:
+    """queue.board.priority_fields is deprecated: picking.fields names the fields pick-issue gathers, and the
+    Picking work section says how to weigh them. When a layer still sets it, its names are appended to
+    picking.fields (so board facts and the board's suggested order keep them) and a warning names the file, the
+    line and the replacement. Its names, in their own order, are kept in cfg.ranked_fields so a board queue still
+    ranks by them as it did before. The key is dropped from the effective config either way."""
+    board = (cfg.meta.get("project", {}).get("queue") or {}).get("board")
+    if not isinstance(board, dict) or "priority_fields" not in board:
+        return
+    old = board.pop("priority_fields")
+    name = "project." + dotted(OLD_PRIORITY_FIELDS)
+    src = cfg.sources.pop(name, None) or {}
+    for key in [k for k in cfg.sources if k.startswith(name + ".")]:
+        del cfg.sources[key]
+    picking = cfg.meta["project"].setdefault("picking", {})
+    if not isinstance(picking, dict):
+        return  # an invalid picking value is a check() error; nothing to move into
+    fields = _as_list(picking.get("fields"))
+    old = old if isinstance(old, list) else []
+    cfg.ranked_fields = list(old)
+    added = [f for f in old if f not in fields]
+    if added:
+        picking["fields"] = fields + added
+        moved = cfg.sources.setdefault("project.picking.fields", {"layer": None, "path": None, "line": None,
+                                                                  "shadowed": []})
+        moved["migrated"] = {"from": dotted(OLD_PRIORITY_FIELDS), "added": copy.deepcopy(added)}
+    doc = cfg.docs.get("project", {}).get(src.get("layer") or "")
+    where = _fmt(doc, OLD_PRIORITY_FIELDS, "") if doc else "config: "
+    note = (f"{where}{dotted(OLD_PRIORITY_FIELDS)} is deprecated; "
+            + (f"{', '.join(map(str, added))} {'was' if len(added) == 1 else 'were'} added to picking.fields. "
+               if added else "its fields are already in picking.fields. ")
+            + "Move them to `picking: {fields: [...]}` and say how to weigh them in a `## Picking work` section "
+              "of project.md")
+    cfg.picking_warnings.append(note)
+    cfg.warnings.append(note)
 
 
 def _confirm_live(cfg: Config) -> None:

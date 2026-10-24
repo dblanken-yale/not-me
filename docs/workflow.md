@@ -74,9 +74,10 @@ When `/not-me:new` is given no issue number, it asks `notme pick-issue` for the 
 
 1. **Eligibility.** Only issues the queue may pick are listed (see [Which issues the queue picks](config.md#which-issues-the-queue-picks)). Issues by authors the roster does not trust never appear, and no issue body is listed.
 2. **Epic order.** For each epic written by a lead or authority, an issue in its task list is left out while an earlier unchecked issue in that list is still open, not blocked and not started. The CLI removes these itself and lists them under `held_back`, so a run cannot skip ahead in an epic. A blocked, claimed or closed earlier issue lets the next one through.
-3. **Impact.** From the rest (up to `queue.list_limit`), the run picks the issue that helps you most, weighing the listed facts: labels, epic and place in it, age, what the issue blocks or is blocked by, board fields, and reactions from you and trusted roster members. It logs one line naming the issue, why, and the rule that decided (`rule: impact`).
+3. **Target epics.** Issues in a `picking.target_epics` epic come first, in its task-list order. They are only reordered: a target epic never adds an issue.
+4. **Picking rules, else impact.** From the rest (every eligible issue when your own rules are set; up to `queue.list_limit` with the default), the run applies your `## Picking work` rules to the listed facts, with impact breaking ties. With no rules it picks the issue that helps you most, weighing the facts: labels, epic and place in it, age, what the issue blocks or is blocked by, board fields and `picking.fields` values, and reactions from you and trusted roster members. It logs one line naming the issue, why, and the rule that decided (`rule: impact` or `rule: picking work (<layer> layer)`). See [Picking work](config.md#picking-work).
 
-The output also names a suggested top issue (epic children first, then oldest; by priority fields on a board), which is what older callers read.
+The output also names a suggested top issue (target epic issues first, then epic children, then oldest; on a board, by the fields a deprecated `queue.board.priority_fields` named, never by `picking.fields` alone), which is what older callers read.
 
 ## The result line
 

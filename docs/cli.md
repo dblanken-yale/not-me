@@ -86,7 +86,7 @@ notme config [--explain] [--check] [--layer LAYER]
 | `--check` | optional | list configuration errors (exit 4 when any) |
 | `--layer LAYER {default|global|repo}` | optional | limit to one layer |
 
-Output: config (per document) and roster; with --explain layers, keys, bodies, warnings; with --check ok, errors
+Output: config (per document) and roster; with --explain layers, keys, bodies, picking (rules: the effective Picking work section of project.md, layer: where it came from, fields, target_epics), warnings; with --check ok, errors
 
 ### `notme preflight`
 
@@ -114,7 +114,7 @@ notme pick-issue [--exclude N]
 |----------|----------|---------|
 | `--exclude N` | optional | skip this issue (repeatable) |
 
-Output: number, title, url, author, labels, parent, candidates (count): the suggested top issue by the queue's order; issues: up to queue.list_limit issues in that order, each with number, title, url, author, labels, created, age_days, parent (epic number), position (1-based in the epic's open task list), blocked_by and blocking ([{repo, number, state}] from GitHub issue dependencies), reactions (counts by kind, from the operator and trusted logins only), board ({status, fields} on a board queue, else null); a fact that cannot be read is null; never a body. truncated (more eligible issues than listed); held_back: [{number, behind, epic}]. Or none (with held_back when not empty), with reason when paused or disabled, and with reason unassigned_only, unassigned (count) and setting when the queue found no issue and the only eligible issues have no assignee (only issues assigned to the operator are picked unless queue.include_unassigned is true)
+Output: number, title, url, author, labels, parent, candidates (count): the suggested top issue by the queue's order; issues: the eligible issues in that order, all of them when the Picking work rules come from the global or repo layer (the rules must see the whole queue), else up to queue.list_limit; each with number, title, url, author, labels, created, age_days, parent (epic number), position (1-based in the epic's open task list), blocked_by and blocking ([{repo, number, state}] from GitHub issue dependencies), reactions (counts by kind, from the operator and trusted logins only), target_epic and target_position (the picking.target_epics epic whose task list holds it, and its 1-based place there; issues in a target epic come first), fields ({name: value} for each picking.fields name, text cut to picking.value_max_chars; on a label queue only from projects the tracker's owner owns; {} when none is named), board ({status, fields} on a board queue, else null); a fact that cannot be read is null; never a body. truncated (more eligible issues than listed: the rules saw only part of the queue); held_back: [{number, behind, epic}]; picking: {rules (the effective Picking work section of project.md), layer (where the rules came from), fields, target_epics (the ones honoured: open and written by a trusted roster member), ignored_epics ([{number, reason}])}. Or none (with held_back when not empty), with reason when paused or disabled, and with reason unassigned_only, unassigned (count) and setting when the queue found no issue and the only eligible issues have no assignee (only issues assigned to the operator are picked unless queue.include_unassigned is true)
 
 ### `notme claim-issue`
 
@@ -925,13 +925,13 @@ Output: branch, clean, default_branch, origin
 
 ### `notme status`
 
-A read-only summary: enabled and paused state, the active run, items needing a person, stale claims, and the last run of each skill. When GitHub cannot be read the items are left out with a warning. Creates nothing.
+A read-only summary: enabled and paused state, the active run, items needing a person, stale claims, and the last run of each skill, and one line on how issues are picked. When GitHub cannot be read the items are left out with a warning. Creates nothing.
 
 ```
 notme status
 ```
 
-Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, items, stale_claims, last_runs, warnings
+Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, items, stale_claims, last_runs, picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and "; target epics: #N, ..." when set), warnings
 
 ### `notme pause`
 

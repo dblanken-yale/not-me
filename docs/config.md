@@ -160,6 +160,8 @@ Anyone with push access can edit the repo layer, and it is committed, so not-me 
 | `enabled` | set `false` | set `true` over a lower `false` |
 | `queue.include_unassigned` | set `false` | set `true` over a lower `false` |
 | `queue.list_limit` | lower it | raise it above the lower layer's value, or set `null` |
+| `picking.value_max_chars` | lower it | raise it above the lower layer's value, or set `null` |
+| `picking.fields`, `picking.target_epics` and the `## Picking work` section | set anything | nothing: they only order eligible issues |
 | `protected_branches` | add names | remove names. Its `!name` entries are dropped |
 | `allow_repos` | nothing | add repos. Every entry is dropped |
 | `review.block_on` | add levels | drop a level the global or default list has. The whole value is ignored |
@@ -228,7 +230,56 @@ A repo file cannot turn this on, because it would widen what not-me picks. When 
 
 An issue listed in a trusted epic's task list also waits its turn: it is left out while an earlier unchecked issue in that list is still open, not blocked and not started (no state but `to do`, and nobody but you assigned). `notme pick-issue` reports these under `held_back`.
 
-`notme pick-issue` lists up to `queue.list_limit` eligible issues (10 by default), each with the facts the run weighs: labels, epic and place in its task list, age, GitHub issue dependencies, board fields, and reaction counts from you and trusted roster members. Each listed issue costs about three GitHub reads, so a higher limit means a slower pick. See [workflow.md](workflow.md#how-the-next-issue-is-chosen).
+With the default picking rules, `notme pick-issue` lists up to `queue.list_limit` eligible issues (10 by default); with your own `## Picking work` rules it lists every eligible issue, so the rules can reach an issue the queue's own order puts last (see [Picking work](#picking-work)). Each listed issue comes with the facts the run weighs: labels, epic and place in its task list, age, GitHub issue dependencies, board fields, and reaction counts from you and trusted roster members. Each listed issue costs about three GitHub reads, so a higher limit means a slower pick. See [workflow.md](workflow.md#how-the-next-issue-is-chosen).
+
+### Picking work
+
+Which eligible issue `/not-me:new` takes is up to you. Write your rules in plain words in a `## Picking work` section of `project.md`, in your global layer (`~/.claude/not-me/project.md`) or the repo layer (`.claude/not-me/project.md`). With no such section the shipped default applies: pick by impact (what unblocks other work, what people asked for, what is next in an epic already under way, what has waited longest).
+
+Two frontmatter keys feed the rules:
+
+- `picking.fields` names the board fields the rules use. `notme pick-issue` then lists each issue's value for them under `fields` (on a board queue from the board item; on a label queue from the issue's project items in projects owned by the tracker repository's owner, the first one with a value). Items in anyone else's project are ignored, because any GitHub user can add a public issue to a project of their own and fill in its fields. Text values are cut to `picking.value_max_chars` characters (80 by default). Only named fields are read, so a rule cannot trigger reads by itself. The fields are only reported: how they weigh is up to your rules, so "prefer the smallest `Size`" works as written.
+- `picking.target_epics` names epics to finish first. Their open task-list issues come first, epic by epic in the order you list them, then in task-list order. Without it, epics get no priority beyond the epic order rule above.
+
+Rules only order the issues the queue may pick. They never add one: a paused, blocked, held-back or unassigned issue, or one assigned to someone else, stays out whatever the rules or a target epic say. A target epic counts only when it is open and its author is a lead or authority on the roster; any other is ignored and reported by number under `picking.ignored_epics`.
+
+When the rules come from your global or repo layer, `notme pick-issue` lists every eligible issue instead of the first `queue.list_limit`, so a rule can reach any of them; each listed issue costs about three GitHub reads. The plugin default rules keep the `queue.list_limit` cut. If `truncated` is ever true with your rules, the run log says the rules saw only part of the queue.
+
+Layers: the section resolves like any other prose (see [Prose: replace, or extend](#prose-replace-or-extend)). The highest layer with a `project.md` supplies the body; with `extends: global`, its sections replace same-named lower ones and the rest are kept. When the resulting body has no `## Picking work` section, the default rules (impact) apply. So a repo `project.md` without `extends` and without the section turns global rules off for that repo. `picking.fields` and `picking.target_epics` merge like other keys. The repo layer may set both and the section: they only order work and grant nothing. It may lower `picking.value_max_chars`, never raise it. As always, the repo layer is read from the main checkout only. `/not-me:config` shows the rules in effect and the layer they came from, and `/not-me:status` states them in one line. Each run logs which rule decided (`rule: impact` or `rule: picking work (repo layer)`).
+
+Example: a board priority field.
+
+```markdown
+---
+picking: {fields: [Priority]}
+---
+## Picking work
+
+Prefer the highest value of the board field `Priority`. Issues without one come
+after those with one. Impact breaks ties.
+```
+
+Example: priority labels.
+
+```markdown
+## Picking work
+
+Take issues labeled `priority: high` first, then `priority: medium`, then the
+rest. Among issues with the same label, pick by impact.
+```
+
+Example: a target epic. Finish epic 74 before anything else, then pick by impact:
+
+```markdown
+---
+picking: {target_epics: [74]}
+---
+## Picking work
+
+Finish the target epic first, in its task-list order. After that, pick by impact.
+```
+
+`queue.board.priority_fields` was the old way to name board fields and is deprecated. When a layer still sets it, not-me moves its names into `picking.fields` and warns with the file and line, so an old config keeps working: a board queue still ranks by those fields (higher first, in the order the old key listed them) for its suggested order, as before. Fields named only in `picking.fields` never change that order. Move the names to `picking.fields` and add a `## Picking work` section to say how to weigh them.
 
 ### Board queues
 
@@ -340,11 +391,13 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `queue.board.owner` | `null` | Board owner, used when `queue.source` is `board` |
 | `queue.board.number` | `null` | Board number, used when `queue.source` is `board` |
 | `queue.board.status_field` | `Status` | Name of the board column field |
-| `queue.board.priority_fields` | `[]` | Board fields used to rank items |
 | `queue.board_states.todo` | `To Do` | Board column name for ready work |
 | `queue.board_states.in_progress` | `In progress` | Board column name for claimed work |
 | `queue.board_states.in_review` | `In review` | Board column name for work waiting on review |
 | `queue.board_states.blocked` | `Blocked` | Board column name for blocked work |
+| `picking.fields` | `[]` | Board field names whose values `notme pick-issue` lists for each issue, for the rules in the `## Picking work` section to use. Any layer may set it (see [Picking work](#picking-work)) |
+| `picking.target_epics` | `[]` | Epic issue numbers to finish first, in this order. One counts only when a trusted roster member wrote it. Any layer may set it (see [Picking work](#picking-work)) |
+| `picking.value_max_chars` | `80` | Longest text field value `notme pick-issue` reports under `fields`; longer ones are cut. A whole number of at least 1. The repo layer may lower it, never raise it or set it to `null` (see [Picking work](#picking-work)) |
 | `labels.todo` | `to do` | Label for ready to be picked up |
 | `labels.in_progress` | `in progress` | Label for claimed and being worked |
 | `labels.needs_review` | `needs review` | Label for PR open and waiting for a reviewer |
