@@ -62,6 +62,19 @@ class SkillNewTest(unittest.TestCase):
         self.body = text(SKILL)
         self.meta, _rest = frontmatter.parse(self.body)
 
+    def test_queue_pick_is_by_impact_logged_and_never_skips_epic_order(self):
+        target = text(SKILL_DIR / "references" / "target.md")
+        self.assertIn("by impact", self.body)
+        self.assertIn("held_back", self.body)
+        log_action = "notme log action <path> --kind ACTION --message-file <file>"
+        self.assertIn(log_action, self.body)
+        for phrase in ("helps the user most (impact)", "rule: impact", "held_back", "never pick or re-add one",
+                       "notme pick-issue --exclude N", log_action, "the temp directory"):
+            self.assertIn(phrase, target, phrase)
+        for path in docs():  # `log action` always takes its text from a file
+            for m in re.finditer(r"notme log action <path>[^`]*`", text(path)):
+                self.assertIn("--message-file", m.group(0), f"{path.name}: {m.group(0)}")
+
     def test_frontmatter(self):
         self.assertEqual(self.meta.get("name"), "new")
         desc = self.meta.get("description")

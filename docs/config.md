@@ -159,6 +159,7 @@ Anyone with push access can edit the repo layer, and it is committed, so not-me 
 | `mode` | set `dry-run` | set `live`. The value is ignored |
 | `enabled` | set `false` | set `true` over a lower `false` |
 | `queue.include_unassigned` | set `false` | set `true` over a lower `false` |
+| `queue.list_limit` | lower it | raise it above the lower layer's value, or set `null` |
 | `protected_branches` | add names | remove names. Its `!name` entries are dropped |
 | `allow_repos` | nothing | add repos. Every entry is dropped |
 | `review.block_on` | add levels | drop a level the global or default list has. The whole value is ignored |
@@ -224,6 +225,10 @@ queue: {include_unassigned: true}
 ```
 
 A repo file cannot turn this on, because it would widen what not-me picks. When nothing is assigned to you but unassigned issues are ready, `notme pick-issue` returns `{"none": true, "reason": "unassigned_only", "unassigned": <count>, "setting": "queue.include_unassigned"}`.
+
+An issue listed in a trusted epic's task list also waits its turn: it is left out while an earlier unchecked issue in that list is still open, not blocked and not started (no state but `to do`, and nobody but you assigned). `notme pick-issue` reports these under `held_back`.
+
+`notme pick-issue` lists up to `queue.list_limit` eligible issues (10 by default), each with the facts the run weighs: labels, epic and place in its task list, age, GitHub issue dependencies, board fields, and reaction counts from you and trusted roster members. Each listed issue costs about three GitHub reads, so a higher limit means a slower pick. See [workflow.md](workflow.md#how-the-next-issue-is-chosen).
 
 ### Board queues
 
@@ -331,6 +336,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `queue.pick_label` | `to do` | Label that marks an issue as ready to pick up |
 | `queue.opt_in_label` | `null` | An extra label an issue must also carry. `null` means none required |
 | `queue.include_unassigned` | `false` | `false` picks only issues assigned to you. `true` also picks issues with no assignee. Issues assigned to someone else are never picked. The repo layer may set `false`, never `true` over a lower `false` (see [Which issues the queue picks](#which-issues-the-queue-picks)) |
+| `queue.list_limit` | `10` | Most eligible issues `notme pick-issue` lists with facts for the run to choose from. A whole number of at least 1. The repo layer may lower it, never raise it or set it to `null` (see [Which issues the queue picks](#which-issues-the-queue-picks)) |
 | `queue.board.owner` | `null` | Board owner, used when `queue.source` is `board` |
 | `queue.board.number` | `null` | Board number, used when `queue.source` is `board` |
 | `queue.board.status_field` | `Status` | Name of the board column field |

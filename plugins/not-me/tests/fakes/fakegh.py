@@ -312,6 +312,8 @@ class FakeGitHub:
             ("PUT", r + r"/issues/(\d+)/labels", self._r_labels_put),
             ("GET", r + r"/issues/(\d+)/comments", self._r_comments),
             ("GET", r + r"/issues/(\d+)/timeline", self._r_timeline),
+            ("GET", r + r"/issues/(\d+)/reactions", self._r_reactions),
+            ("GET", r + r"/issues/(\d+)/dependencies/(blocked_by|blocking)", self._r_dependencies),
             ("PATCH", r + r"/issues/comments/(\d+)", self._r_comment_edit),
             ("POST", r + r"/pulls/(\d+)/comments/(\d+)/replies", self._r_reply),
             ("GET", r + r"/pulls/(\d+)/reviews", self._r_reviews),
@@ -371,6 +373,25 @@ class FakeGitHub:
             size, page = int(query["per_page"]), int(query.get("page", 1))
             return events[(page - 1) * size:page * size]
         return events
+
+    def _r_reactions(self, g, flags):
+        # thing["reactions"]: [{"user": login, "content": "+1"}]
+        return [{"id": i + 1, "user": {"login": r["user"], "type": "Bot" if r["user"].endswith("[bot]") else "User"},
+                 "content": r["content"]} for i, r in enumerate(self._thing(*g).get("reactions", []))]
+
+    def _r_dependencies(self, g, flags):
+        # thing["blocked_by"] / thing["blocking"]: issue numbers in the same repo; thing["deps_fail"]: a 404
+        slug, n, kind = g
+        thing = self._thing(slug, n)
+        if thing.get("deps_fail"):
+            raise KeyError("HTTP 404: Not Found (dependencies)")
+        out = []
+        for number in thing.get(kind, []):
+            other = self._repo(slug)["things"].get(str(number)) or {}
+            out.append({"number": number, "state": str(other.get("state", "OPEN")).lower(),
+                        "title": other.get("title", ""), "body": other.get("body", ""),
+                        "repository_url": f"https://api.github.com/repos/{slug}"})
+        return out
 
     def _r_comment_edit(self, g, flags):
         thing, comment = self._find_comment(g[0], int(g[1]))
@@ -481,7 +502,8 @@ class FakeGitHub:
 
     def _rich_item(self, item: Dict[str, Any], query: str) -> Dict[str, Any]:
         """A board item with issue content and one aliased value per `pN:fieldValueByName(name:"X")`."""
-        node: Dict[str, Any] = {"id": item["id"], "fieldValueByName": {"name": item["status"]}}
+        node: Dict[str, Any] = {"id": item["id"],  # no Status value: null, as GitHub sends it
+                                "fieldValueByName": {"name": item["status"]} if item["status"] else None}
         for alias, field_name in re.findall(r'(p\d+):fieldValueByName\(name:"([^"]+)"\)', query):
             value = (item.get("fields") or {}).get(field_name)
             node[alias] = {"name": value} if value else None

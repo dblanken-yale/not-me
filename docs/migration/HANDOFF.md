@@ -56,6 +56,11 @@ the risky actions. Project specifics live in markdown config docs with three lay
   assigned to the operator. `queue.include_unassigned: true` also picks
   unassigned ones; issues assigned to someone else are never picked. Before
   this, the board queue skipped every assigned item.
+- Issue choice changed (issue 70): `notme pick-issue` lists the eligible issues
+  (up to `queue.list_limit`, default 10) with facts and a suggested top, and
+  `/not-me:new` picks the one with the most impact and logs why (`rule: impact`).
+  The CLI drops an epic's later issues while an earlier one is open and
+  unstarted (`held_back`), so the run cannot skip ahead in an epic.
 
 ## Decisions made on day one that are not obvious from the code
 

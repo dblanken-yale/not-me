@@ -113,6 +113,75 @@ class CandidateTests(BoardTestCase):
             self.queue("run-1")
 
 
+class EpicOrderAndFactsTests(BoardTestCase):
+    cfg_overrides = {**BoardTestCase.cfg_overrides, "include_unassigned": True}
+
+    def setUp(self):
+        super().setUp()
+        add_issue(self.fake, 10, labels=["epic"], body="- [ ] #11\n- [ ] #12\n")
+        self.put(12, fields={"Priority": "4 - Critical"})
+
+    def test_a_later_sibling_waits_for_an_earlier_unstarted_one_whatever_its_priority(self):
+        self.put(11, status="To Do", labels=["paused"])  # on the board, open, not started, not eligible
+        self.assertEqual(self.numbers(), [])
+        self.assertEqual(self.q.held_back, [{"number": 12, "behind": 11, "epic": 10}])
+
+    def test_an_earlier_sibling_in_the_blocked_column_releases_the_next(self):
+        self.put(11, status="Blocked")
+        self.assertEqual(self.numbers(), [12])
+
+    def test_an_earlier_sibling_in_progress_releases_the_next(self):
+        self.put(11, status="In progress")
+        self.assertEqual(self.numbers(), [12])
+
+    def test_an_earlier_sibling_off_the_board_is_read_from_the_issue(self):
+        add_issue(self.fake, 11, labels=["to do"])
+        self.assertEqual(self.numbers(), [])
+        add_issue(self.fake, 11, state="CLOSED")
+        self.assertEqual(self.numbers(), [12])
+
+    def test_an_earlier_sibling_in_an_unmapped_column_counts_as_started(self):
+        for column in ("Done", "Backlog"):
+            with self.subTest(column):
+                self.board["items"] = [i for i in self.board["items"] if i["number"] != 11]
+                self.put(11, status=column)
+                self.assertEqual(self.numbers(), [12])
+
+    def test_an_earlier_sibling_with_no_status_holds(self):
+        self.put(11, status=None)
+        self.assertEqual(self.numbers(), [])
+        self.assertEqual(self.q.held_back, [{"number": 12, "behind": 11, "epic": 10}])
+
+    def test_an_earlier_sibling_in_to_do_holds(self):
+        self.put(11, status="To Do", assignees=["hubot"])  # not eligible (someone else's) and claimed
+        self.assertEqual(self.numbers(), [12])
+        self.board["items"] = [i for i in self.board["items"] if i["number"] != 11]
+        self.put(11, status="To Do", labels=["paused"])
+        self.assertEqual(self.numbers(), [])
+
+    def test_an_untrusted_epic_is_ignored(self):
+        self.thing(10)["author"] = "mallory"
+        self.put(11, status=None)
+        self.assertEqual(self.numbers(), [12])
+        self.assertEqual(self.q.held_back, [])
+
+    def test_board_facts_name_the_status_and_every_priority_field(self):
+        self.put(11, status="In progress")
+        self.board["items"][0]["fields"] = {"Priority": "4 - Critical", "Size": "1 - Small"}
+        self.thing(12)["reactions"] = [{"user": "hubot", "content": "+1"}, {"user": "mallory", "content": "+1"}]
+        facts = self.q.facts(self.q.candidates())
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0]["board"], {"status": "To Do",
+                                             "fields": {"Priority": "4 - Critical", "Size": "1 - Small"}})
+        self.assertEqual((facts[0]["parent"], facts[0]["position"]), (10, 2))
+        self.assertEqual(facts[0]["reactions"], {"+1": 1})
+
+    def test_a_field_with_no_value_is_null(self):
+        self.board["items"][0]["fields"] = {}
+        facts = self.q.facts(self.q.candidates())
+        self.assertEqual(facts[0]["board"]["fields"], {"Priority": None, "Size": None})
+
+
 class AssignmentTests(BoardTestCase):
     """Who a To Do item is assigned to: mine always, nobody's only with queue.include_unassigned, others' never."""
 

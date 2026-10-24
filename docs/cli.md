@@ -104,7 +104,7 @@ Output: ok, blockers, enabled, paused, mode, dry_run, repo, tracker, operator, b
 
 ### `notme pick-issue`
 
-The next issue to work, by the queue's order. Nothing is claimed.
+The eligible issues with the facts to choose between them, and a suggested top issue. Nothing is claimed. An issue in a trusted epic's task list is left out while an earlier issue in that list is open and unstarted (not blocked; no state but to do; assigned to nobody but the operator), so no choice can skip ahead in an epic. --exclude drops issues from the list and the top.
 
 ```
 notme pick-issue [--exclude N]
@@ -114,7 +114,7 @@ notme pick-issue [--exclude N]
 |----------|----------|---------|
 | `--exclude N` | optional | skip this issue (repeatable) |
 
-Output: number, title, url, author, labels, parent, candidates (count); or none, with reason when paused or disabled, and with reason unassigned_only, unassigned (count) and setting when the queue found no issue and the only eligible issues have no assignee (only issues assigned to the operator are picked unless queue.include_unassigned is true)
+Output: number, title, url, author, labels, parent, candidates (count): the suggested top issue by the queue's order; issues: up to queue.list_limit issues in that order, each with number, title, url, author, labels, created, age_days, parent (epic number), position (1-based in the epic's open task list), blocked_by and blocking ([{repo, number, state}] from GitHub issue dependencies), reactions (counts by kind, from the operator and trusted logins only), board ({status, fields} on a board queue, else null); a fact that cannot be read is null; never a body. truncated (more eligible issues than listed); held_back: [{number, behind, epic}]. Or none (with held_back when not empty), with reason when paused or disabled, and with reason unassigned_only, unassigned (count) and setting when the queue found no issue and the only eligible issues have no assignee (only issues assigned to the operator are picked unless queue.include_unassigned is true)
 
 ### `notme claim-issue`
 
