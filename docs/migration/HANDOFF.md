@@ -77,9 +77,11 @@ the risky actions. Project specifics live in markdown config docs with three lay
   an old config keeps working (the board's suggested order still ranks by those
   fields, in the old key's order, via `Config.ranked_fields`; fields named only
   in `picking.fields` never rank, since the prose may want "smallest first").
-  Remove the shim in a later breaking release. With rules from the global or
-  repo layer, `pick-issue` lists every eligible issue (no `list_limit` cut) so
-  the rules see the whole queue. On a label queue, field values come only from
+  Remove the shim in a later breaking release. With rules from the global
+  layer, `pick-issue` lists every eligible issue (no `list_limit` cut) so the
+  rules see the whole queue; repo-layer rules keep the cut, since
+  `queue.list_limit` is tighten-only and a repo file must not lift it through
+  its rules (the run log notes `truncated`). On a label queue, field values come only from
   projects owned by the tracker's owner (anyone can add a public issue to their
   own project), and every text value is cut to `picking.value_max_chars`.
 

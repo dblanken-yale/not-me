@@ -30,8 +30,9 @@ the issue is chosen, how its text is read and screened, and how epics chain.
    `picking` holds the rules in effect: `rules` (the Picking work section of
    `project.md`, in plain words), `layer` (where they came from), `fields`
    (named fields; each issue's `fields` has their values), `target_epics` and
-   `ignored_epics`. With rules from the `global` or `repo` layer, `issues` holds
-   every eligible issue. When `truncated` is true, the rules saw only part of
+   `ignored_epics`. With rules from the `global` layer, `issues` holds every
+   eligible issue; with `repo` or `default` rules it stops at
+   `queue.list_limit`. When `truncated` is true, the rules saw only part of
    the queue: say so in the logged line (`rules saw N of M eligible issues`,
    with N the length of `issues` and M `candidates`).
 

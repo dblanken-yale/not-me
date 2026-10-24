@@ -781,7 +781,7 @@ def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
 
     Output: number, title, url, author, labels, parent, candidates (count): the suggested top issue by the
     queue's order; issues: the eligible issues in that order, all of them when the Picking work rules come from
-    the global or repo layer (the rules must see the whole queue), else up to queue.list_limit; each with number,
+    the global layer (the rules must see the whole queue), else up to queue.list_limit; each with number,
     title, url, author, labels, created, age_days, parent (epic number), position (1-based in the epic's open
     task list), blocked_by and blocking ([{repo, number, state}] from GitHub issue dependencies), reactions
     (counts by kind, from the operator and trusted logins only), target_epic and target_position (the
@@ -802,10 +802,11 @@ def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     for warning in ctx.cfg.picking_warnings:
         ctx.warn(warning)
     rules = ctx.cfg.picking()
-    # Rules a person wrote may prefer an issue the queue's own order puts last, so they see every eligible issue;
-    # the plugin default (impact) keeps the queue.list_limit cut. Eligibility is the same either way.
+    # Global rules may prefer an issue the queue's own order puts last, so they see every eligible issue. Repo
+    # rules and the plugin default keep the queue.list_limit cut: list_limit is tighten-only, and a repo file must
+    # not lift it through its rules (the run log notes `truncated`). Eligibility is the same either way.
     limit = queue.list_limit()
-    if rules["layer"] in ("global", "repo"):
+    if rules["layer"] == "global":
         limit = None
     every = queue.candidates()
     found = [c for c in every if c.number not in skip]

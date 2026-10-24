@@ -130,7 +130,7 @@ class IssueTests(base.CliCase):
         self.assertEqual([i["number"] for i in picked["issues"]], [1])
         self.assertEqual((picked["candidates"], picked["truncated"]), (2, True))
 
-    def test_pick_with_rules_from_a_layer_lists_every_eligible_issue_past_list_limit(self):
+    def test_pick_with_global_layer_rules_lists_every_eligible_issue_past_list_limit(self):
         # The rules may prefer an issue the queue's own order puts last, so they must see every eligible issue.
         things(self.fake)["2"]["labels"] = ["to do"]
         self.fake.add_assignee(REPO, 2, "octocat")
@@ -142,10 +142,18 @@ class IssueTests(base.CliCase):
         self.assertEqual(picked["picking"]["layer"], "global")
         self.assertEqual([i["number"] for i in picked["issues"]], [1, 2])  # eligibility unchanged: #3 is paused
         self.assertEqual((picked["candidates"], picked["truncated"]), (2, False))
-        self.tc.write("repo", "project", "---\nschema: 1\n---\n## Picking work\n\nBugs first.\n")
+
+    def test_pick_with_repo_layer_rules_keeps_the_list_limit_cut(self):
+        # queue.list_limit is tighten-only: a repo file must not lift it, not even through its Picking work rules.
+        things(self.fake)["2"]["labels"] = ["to do"]
+        self.fake.add_assignee(REPO, 2, "octocat")
+        self.tc.write("global", "project", base.GLOBAL_PROJECT.replace(
+            "operator: octocat", "operator: octocat\nqueue: {list_limit: 1}"))
+        self.tc.write("repo", "project", "---\nschema: 1\nextends: global\n---\n## Picking work\n\nBugs first.\n")
         picked = self.ok("pick-issue")
         self.assertEqual(picked["picking"]["layer"], "repo")
-        self.assertEqual(([i["number"] for i in picked["issues"]], picked["truncated"]), ([1, 2], False))
+        self.assertEqual(([i["number"] for i in picked["issues"]], picked["candidates"], picked["truncated"]),
+                         ([1], 2, True))
 
     def test_pick_with_the_default_rules_keeps_the_list_limit_cut(self):
         things(self.fake)["2"]["labels"] = ["to do"]
