@@ -95,6 +95,13 @@ class HelperSkillsTest(unittest.TestCase):
             self.assertIsNone(WRITES.search(text), f"{name}: write command")
             self.assertNotIn("allow-repo add", text)
 
+    def test_config_and_status_show_the_picking_rules(self):
+        config, _meta = load("config")
+        for phrase in ("`picking`", "`rules`", "`layer`", "Picking work"):
+            self.assertIn(phrase, config, phrase)
+        status, _meta = load("status")
+        self.assertIn("`picking`", status)
+
     def test_line_budgets(self):
         budgets = {"status": 60, "doctor": 60, "config": 70}
         for name, cap in budgets.items():

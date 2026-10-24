@@ -472,6 +472,18 @@ class FakeGitHub:
             reviews = [{**r, "author": author(r)} for r in pr.get("review_nodes", [])]
             return {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes},
                                                             "reviews": {"nodes": reviews}}}}}
+        if "projectItems" in query:  # one issue's project items with the named field values
+            number = re.search(r"issue\(number:(\d+)\)", query).group(1)
+            thing = self._thing(f"{variables['owner']}/{variables['name']}", number)
+            if thing.get("project_fields_fail"):
+                raise KeyError("GraphQL: could not read the project items")
+            # thing["project_fields"]: one {field name: value} map per project item; "__owner__" names the
+            # project's owner (the tracker's owner when absent)
+            nodes = [{**{alias: _field_value(values.get(name))
+                         for alias, name in re.findall(r'(p\d+):fieldValueByName\(name:"([^"]+)"\)', query)},
+                      "project": {"owner": {"login": values.get("__owner__", variables["owner"])}}}
+                     for values in thing.get("project_fields", [])]
+            return {"data": {"repository": {"issue": {"projectItems": {"nodes": nodes}}}}}
         board = self.state["board"]
         if "updateProjectV2ItemFieldValue" in query:
             names = {o["id"]: o["name"] for o in board["status_field"]["options"]}
@@ -505,8 +517,7 @@ class FakeGitHub:
         node: Dict[str, Any] = {"id": item["id"],  # no Status value: null, as GitHub sends it
                                 "fieldValueByName": {"name": item["status"]} if item["status"] else None}
         for alias, field_name in re.findall(r'(p\d+):fieldValueByName\(name:"([^"]+)"\)', query):
-            value = (item.get("fields") or {}).get(field_name)
-            node[alias] = {"name": value} if value else None
+            node[alias] = _field_value((item.get("fields") or {}).get(field_name))
         thing = self._repo(item["repo"])["things"].get(str(item["number"]))
         if thing is not None:
             view = self._view(thing, ["number", "title", "url", "state", "createdAt"])
@@ -517,6 +528,13 @@ class FakeGitHub:
         else:
             node["content"] = None
         return node
+
+
+def _field_value(value: Any) -> Optional[Dict[str, Any]]:
+    """A project field value as GitHub sends it: a number field as {number}, any other as {name}; none is null."""
+    if value is None or value == "":
+        return None
+    return {"number": value} if isinstance(value, (int, float)) else {"name": value}
 
 
 class FakeRunner(FakeGitHub):

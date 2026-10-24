@@ -40,6 +40,13 @@ class ConfigTests(base.CliCase):
         self.assertNotRegex(text, r'"/[A-Za-z]|[A-Za-z]:\\\\')
         self.assertEqual(payload["keys"]["project.limits.fix_loop"]["source"]["layer"], "repo")
 
+    def test_explain_shows_the_picking_rules_and_their_layer(self):
+        self.tc.write("repo", "project", "---\nschema: 1\npicking: {fields: [Priority]}\n---\n"
+                                         "## Picking work\n\nHighest Priority first.\n")
+        picking = self.ok("config", "--explain")["picking"]
+        self.assertEqual(picking, {"rules": "Highest Priority first.", "layer": "repo", "fields": ["Priority"],
+                                   "target_epics": []})
+
     def test_layer_option_limits_the_output(self):
         payload = self.ok("config", "--explain", "--layer", "global")
         self.assertTrue(payload["keys"])
@@ -123,6 +130,40 @@ class IssueTests(base.CliCase):
         self.assertEqual([i["number"] for i in picked["issues"]], [1])
         self.assertEqual((picked["candidates"], picked["truncated"]), (2, True))
 
+    def test_pick_with_global_layer_rules_lists_every_eligible_issue_past_list_limit(self):
+        # The rules may prefer an issue the queue's own order puts last, so they must see every eligible issue.
+        things(self.fake)["2"]["labels"] = ["to do"]
+        self.fake.add_assignee(REPO, 2, "octocat")
+        things(self.fake)["3"] = {"number": 3, "title": "Paused", "body": "", "state": "OPEN", "labels": ["to do", "paused"],
+                                  "assignees": ["octocat"], "author": "octocat", "comments": [], "kind": "issue"}
+        self.tc.write("global", "project", base.GLOBAL_PROJECT.replace(
+            "operator: octocat", "operator: octocat\nqueue: {list_limit: 1}") + "\n## Picking work\n\nNewest first.\n")
+        picked = self.ok("pick-issue")
+        self.assertEqual(picked["picking"]["layer"], "global")
+        self.assertEqual([i["number"] for i in picked["issues"]], [1, 2])  # eligibility unchanged: #3 is paused
+        self.assertEqual((picked["candidates"], picked["truncated"]), (2, False))
+
+    def test_pick_with_repo_layer_rules_keeps_the_list_limit_cut(self):
+        # queue.list_limit is tighten-only: a repo file must not lift it, not even through its Picking work rules.
+        things(self.fake)["2"]["labels"] = ["to do"]
+        self.fake.add_assignee(REPO, 2, "octocat")
+        self.tc.write("global", "project", base.GLOBAL_PROJECT.replace(
+            "operator: octocat", "operator: octocat\nqueue: {list_limit: 1}"))
+        self.tc.write("repo", "project", "---\nschema: 1\nextends: global\n---\n## Picking work\n\nBugs first.\n")
+        picked = self.ok("pick-issue")
+        self.assertEqual(picked["picking"]["layer"], "repo")
+        self.assertEqual(([i["number"] for i in picked["issues"]], picked["candidates"], picked["truncated"]),
+                         ([1], 2, True))
+
+    def test_pick_with_the_default_rules_keeps_the_list_limit_cut(self):
+        things(self.fake)["2"]["labels"] = ["to do"]
+        self.fake.add_assignee(REPO, 2, "octocat")
+        self.tc.write("global", "project", base.GLOBAL_PROJECT.replace(
+            "operator: octocat", "operator: octocat\nqueue: {list_limit: 1}\npicking: {target_epics: [9]}"))
+        picked = self.ok("pick-issue")
+        self.assertEqual(picked["picking"]["layer"], "default")
+        self.assertEqual(([i["number"] for i in picked["issues"]], picked["truncated"]), ([1], True))
+
     def test_pick_removes_an_issue_waiting_behind_an_earlier_epic_sibling(self):
         things(self.fake)["2"]["labels"] = ["epic"]
         things(self.fake)["2"]["body"] = "- [ ] #5\n- [ ] #1\n"
@@ -133,6 +174,45 @@ class IssueTests(base.CliCase):
         picked = self.ok("pick-issue")
         self.assertEqual((picked["number"], picked["parent"], picked["held_back"]), (1, 2, []))
         self.assertEqual(picked["issues"][0]["position"], 2)
+
+    def test_pick_reports_the_default_picking_rules(self):
+        picking = self.ok("pick-issue")["picking"]
+        self.assertEqual(picking["layer"], "default")
+        self.assertIn("impact", picking["rules"])
+        self.assertEqual((picking["fields"], picking["target_epics"], picking["ignored_epics"]), ([], [], []))
+
+    def test_pick_reports_rules_from_the_global_and_repo_layers(self):
+        self.tc.write("global", "project", base.GLOBAL_PROJECT + "\n## Picking work\n\nGlobal: oldest first.\n")
+        picking = self.ok("pick-issue")["picking"]
+        self.assertEqual((picking["layer"], picking["rules"]), ("global", "Global: oldest first."))
+        self.tc.write("repo", "project", "---\nschema: 1\n---\n## Picking work\n\nRepo: bugs first.\n")
+        picking = self.ok("pick-issue")["picking"]
+        self.assertEqual((picking["layer"], picking["rules"]), ("repo", "Repo: bugs first."))
+
+    def test_pick_puts_a_trusted_target_epic_first_and_reports_an_untrusted_one(self):
+        things(self.fake)["2"]["labels"] = ["to do"]
+        self.fake.add_assignee(REPO, 2, "octocat")
+        things(self.fake)["7"] = {"number": 7, "title": "Target", "body": "- [ ] #2\n", "state": "OPEN",
+                                  "labels": [], "assignees": [], "author": "hubot", "comments": [], "kind": "issue"}
+        things(self.fake)["8"] = {"number": 8, "title": "Other", "body": "- [ ] #1\n", "state": "OPEN",
+                                  "labels": [], "assignees": [], "author": "mallory", "comments": [], "kind": "issue"}
+        self.tc.write("repo", "project", "---\nschema: 1\nextends: global\npicking: {target_epics: [8, 7]}\n---\n")
+        picked = self.ok("pick-issue")
+        self.assertEqual(picked["number"], 2)
+        self.assertEqual([i["number"] for i in picked["issues"]], [2, 1])
+        self.assertEqual((picked["issues"][0]["target_epic"], picked["issues"][0]["target_position"]), (7, 1))
+        self.assertEqual(picked["picking"]["target_epics"], [7])
+        self.assertEqual(picked["picking"]["ignored_epics"], [{"number": 8, "reason": "untrusted author"}])
+
+    def test_pick_with_an_old_priority_fields_setting_still_works_and_warns(self):
+        self.tc.write("global", "project", base.GLOBAL_PROJECT.replace(
+            "operator: octocat", "operator: octocat\nqueue: {board: {priority_fields: [Priority]}}"))
+        things(self.fake)["1"]["project_fields"] = [{"Priority": "3 - High"}]
+        picked = self.ok("pick-issue")
+        self.assertEqual(picked["picking"]["fields"], ["Priority"])
+        self.assertEqual(picked["issues"][0]["fields"], {"Priority": "3 - High"})
+        self.assertTrue(any("priority_fields" in w and "picking.fields" in w for w in picked["warnings"]),
+                        picked.get("warnings"))
 
     def test_pick_then_claim_then_release(self):
         picked = self.ok("pick-issue")
@@ -361,13 +441,19 @@ class StatusAndPauseTests(base.CliCase):
         things(self.fake)["3"]["labels"] = ["question", "paused"]
         payload = self.ok("status")
         self.assertEqual(set(payload), {"enabled", "paused", "mode", "repo", "tracker", "operator", "active_run",
-                                        "items", "stale_claims", "last_runs", "warnings"})
+                                        "items", "stale_claims", "last_runs", "picking", "warnings"})
+        self.assertEqual(payload["picking"], "impact default")
         self.assertTrue(payload["enabled"])
         self.assertEqual(payload["paused"], {"global": False, "project": False})
         self.assertEqual(payload["operator"], "octocat")
         got = {(i["kind"], i["number"]): i["states"] for i in payload["items"]}
         self.assertEqual(got, {("issue", 2): ["needs_human"], ("pr", 3): ["question", "paused"]})
         self.assertEqual(self.fake.writes_made(), [])
+
+    def test_status_states_the_picking_rules_in_one_line(self):
+        self.tc.write("repo", "project", "---\nschema: 1\npicking: {fields: [Priority], target_epics: [74]}\n---\n"
+                                         "## Picking work\n\nHighest Priority first.\n")
+        self.assertEqual(self.ok("status")["picking"], "rules from repo layer; fields: Priority; target epics: #74")
 
     def test_status_reports_stale_claims_and_last_runs(self):
         issue = things(self.fake)["1"]

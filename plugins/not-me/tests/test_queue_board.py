@@ -8,13 +8,19 @@ from notme.queue.board import BoardQueue, UnmappedState, priority_value
 from tests.fakes.fakegh import FakeRunner
 from tests.test_queue_labels import REPO, QueueTestCase, add_issue, make_cfg
 
-BOARD = {"owner": "acme", "number": 6, "status_field": "Status", "priority_fields": ["Priority", "Size"]}
+BOARD = {"owner": "acme", "number": 6, "status_field": "Status"}
+FIELDS = ["Priority", "Size"]
 
 
 class BoardTestCase(QueueTestCase):
     cfg_overrides = {"source": "board", "board": BOARD}
+    picking = {"fields": FIELDS}
+    ranked: tuple = ()  # what the deprecated queue.board.priority_fields named (Config.ranked_fields)
 
     def queue(self, run_id, cls=None):
+        project = self.cfg.meta["project"]
+        project["picking"] = {**project.get("picking", {}), **self.picking}
+        self.cfg.ranked_fields = list(self.ranked)
         return super().queue(run_id, cls or BoardQueue)
 
     def setUp(self):
@@ -78,7 +84,9 @@ class CandidateTests(BoardTestCase):
         self.board["items"].append({"id": "PVTI_x", "repo": "acme/other", "number": 5, "status": "To Do"})
         self.assertEqual(self.numbers(), [5])
 
-    def test_priority_ordering_higher_first_nulls_last_then_oldest(self):
+    def test_migrated_priority_fields_rank_higher_first_nulls_last_then_oldest(self):
+        self.ranked = tuple(FIELDS)
+        self.q = self.queue("run-1")
         self.put(5, fields={"Priority": "2 - Medium"}, created="2026-02-01T00:00:00Z")
         self.put(6, fields={"Priority": "4 - Critical"}, created="2026-02-09T00:00:00Z")
         self.put(7, created="2026-01-01T00:00:00Z")  # no priority: after every prioritized item
@@ -86,8 +94,9 @@ class CandidateTests(BoardTestCase):
         self.put(9, fields={"Priority": "2 - Medium", "Size": "3 - Large"}, created="2026-03-01T00:00:00Z")
         self.assertEqual(self.numbers(), [6, 9, 8, 5, 7])
 
-    def test_no_priority_fields_means_oldest_first(self):
-        self.q.priority_fields = []  # as if queue.board.priority_fields were empty
+    def test_no_named_fields_means_oldest_first(self):
+        self.q.pick_fields = []  # as if picking.fields were empty
+        self.q.rank_fields = []
         self.put(5, created="2026-02-02T00:00:00Z")
         self.put(6, created="2026-02-01T00:00:00Z")
         self.assertEqual(self.numbers(), [6, 5])
@@ -106,11 +115,75 @@ class CandidateTests(BoardTestCase):
         self.assertIn('p1:fieldValueByName(name:"Size")', query)
 
     def test_unsafe_field_names_are_refused(self):
-        bad = dict(BOARD, priority_fields=['x"){evil}'])
+        self.picking = {"fields": ['x"){evil}']}
+        with self.assertRaises(ValueError):
+            self.queue("run-1")
+        self.picking = {"fields": FIELDS}
+        bad = dict(BOARD, status_field='x"){evil}')
         self.cfg = self.cfg.__class__(meta={"project": {**self.cfg.meta["project"], "queue": {
             **self.cfg.meta["project"]["queue"], "board": bad}}}, project_dir=None)
         with self.assertRaises(ValueError):
             self.queue("run-1")
+
+    def test_number_text_and_iteration_fields_are_read(self):
+        self.picking = {"fields": ["Points", "Team"]}
+        self.q = self.queue("run-1")
+        self.put(5, fields={"Points": 8, "Team": "Web"}, created="2026-02-01T00:00:00Z")
+        self.put(6, fields={"Points": 13}, created="2026-02-02T00:00:00Z")
+        facts = {f["number"]: f for f in self.q.facts(self.q.candidates())}
+        self.assertEqual(facts[5]["fields"], {"Points": 8, "Team": "Web"})
+        self.assertEqual(facts[5]["board"]["fields"], {"Points": 8, "Team": "Web"})
+        self.assertEqual(facts[6]["fields"], {"Points": 13, "Team": None})
+
+    def test_picking_fields_alone_do_not_reorder_the_board(self):
+        # "Prefer the smallest Size" is a valid rule: the order among named fields is the model's reading of the
+        # Picking work prose, so the queue keeps its own order (oldest first).
+        self.put(5, fields={"Priority": "1 - Low", "Size": "1 - Small"}, created="2026-02-01T00:00:00Z")
+        self.put(6, fields={"Priority": "4 - Critical", "Size": "5 - Huge"}, created="2026-02-02T00:00:00Z")
+        self.put(7, created="2026-01-01T00:00:00Z")
+        self.assertEqual(self.numbers(), [7, 5, 6])
+
+    def test_migrated_priority_fields_keep_their_ranking_beside_new_picking_fields(self):
+        # priority_fields: [Priority, Size] merged with picking.fields: [Size, Team] gives fields
+        # [Size, Team, Priority]; the ranking stays Priority, then Size, as before.
+        self.picking = {"fields": ["Size", "Team", "Priority"]}
+        self.ranked = ("Priority", "Size")
+        self.q = self.queue("run-1")
+        self.put(5, fields={"Priority": "2 - Medium", "Size": "5 - Huge", "Team": "9"}, created="2026-02-01T00:00:00Z")
+        self.put(6, fields={"Priority": "4 - Critical", "Size": "1 - Small"}, created="2026-02-02T00:00:00Z")
+        self.put(7, fields={"Priority": "2 - Medium", "Size": "1 - Small"}, created="2026-01-01T00:00:00Z")
+        self.put(8, fields={"Size": "9 - Giant", "Team": "99"}, created="2025-01-01T00:00:00Z")
+        self.assertEqual(self.numbers(), [6, 5, 7, 8])
+        facts = {f["number"]: f for f in self.q.facts(self.q.candidates())}
+        self.assertEqual(facts[5]["fields"], {"Size": "5 - Huge", "Team": "9", "Priority": "2 - Medium"})
+
+    def test_long_board_text_values_are_cut_to_picking_value_max_chars(self):
+        self.picking = {"fields": ["Notes", "Points"], "value_max_chars": 5}
+        self.q = self.queue("run-1")
+        self.put(5, fields={"Notes": "abcdefghij", "Points": 123456789})
+        facts = self.q.facts(self.q.candidates())
+        self.assertEqual(facts[0]["fields"], {"Notes": "abcde", "Points": 123456789})
+        self.assertEqual(facts[0]["board"]["fields"], {"Notes": "abcde", "Points": 123456789})
+
+    def test_target_epic_items_come_first_in_task_list_order(self):
+        self.picking = {"fields": FIELDS, "target_epics": [30]}
+        self.q = self.queue("run-1")
+        self.put(5)
+        self.put(6, fields={"Priority": "4 - Critical"})
+        self.put(7)
+        self.put(8, status="In progress")
+        add_issue(self.fake, 30, labels=[], body="- [ ] #8\n- [ ] #7\n- [ ] #5\n", author="hubot")
+        self.assertEqual(self.numbers(), [7, 5, 6])  # #8 is not in To Do: the target epic does not add it
+        self.assertEqual(self.q.target_epics_used, [30])
+
+    def test_untrusted_target_epic_is_ignored(self):
+        self.picking = {"fields": FIELDS, "target_epics": [30]}
+        self.q = self.queue("run-1")
+        add_issue(self.fake, 30, labels=[], body="- [ ] #7\n", author="mallory")
+        self.put(6, fields={"Priority": "4 - Critical"})
+        self.put(7)
+        self.assertEqual(self.numbers(), [6, 7])
+        self.assertEqual(self.q.target_epics_ignored, [{"number": 30, "reason": "untrusted author"}])
 
 
 class EpicOrderAndFactsTests(BoardTestCase):
@@ -165,7 +238,7 @@ class EpicOrderAndFactsTests(BoardTestCase):
         self.assertEqual(self.numbers(), [12])
         self.assertEqual(self.q.held_back, [])
 
-    def test_board_facts_name_the_status_and_every_priority_field(self):
+    def test_board_facts_name_the_status_and_every_named_field(self):
         self.put(11, status="In progress")
         self.board["items"][0]["fields"] = {"Priority": "4 - Critical", "Size": "1 - Small"}
         self.thing(12)["reactions"] = [{"user": "hubot", "content": "+1"}, {"user": "mallory", "content": "+1"}]

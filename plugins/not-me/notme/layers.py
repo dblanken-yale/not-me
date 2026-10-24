@@ -21,6 +21,8 @@ REPO_SUBDIR = (".claude", "not-me")
 PROJECT_FILE = "project.md"  # the doc that holds mode, in the global dir and in REPO_SUBDIR
 
 _H2 = re.compile(r"^##[ \t]+(.+?)[ \t]*#*[ \t]*$")
+# A board or issue field name that may be written into a GraphQL query: no quote, brace or backslash.
+FIELD_NAME = re.compile(r"^[A-Za-z0-9 _.-]+$")
 
 KeyPath = Tuple[Any, ...]
 
@@ -50,6 +52,7 @@ class KeySpec:
     item_key: Optional[str] = None  # every list item must be a map with this key
     items_enum: Tuple[Any, ...] = ()  # every list item must be one of these
     required_items: Tuple[Any, ...] = ()  # these must be in every list value
+    items_type: str = ""  # every list item must be a "field name" (see FIELD_NAME) or a "positive integer"
     confirm: Optional[Confirm] = None
     # Security keys the repo layer (committed, so untrusted) may only tighten:
     #   "on": may set on, never off | "dry-run": may set dry-run, never live | "false": may set false, never
@@ -70,6 +73,9 @@ SCHEMA: Dict[str, Dict[str, KeySpec]] = {
         "queue.include_unassigned": KeySpec(tighten_only="false"),  # true widens what gets picked
         "queue.list_limit": KeySpec(tighten_only="max"),  # higher (or null, no cap) means more reads per pick
         "markers.legacy": KeySpec(merge="union"),
+        "picking.fields": KeySpec(items_type="field name"),  # only orders eligible issues: any layer may set it
+        "picking.target_epics": KeySpec(items_type="positive integer"),
+        "picking.value_max_chars": KeySpec(tighten_only="max"),  # field text can come from other people
         "mode": KeySpec(enum=("dry-run", "live"), tighten_only="dry-run"),
         "models.strategy": KeySpec(enum=("orchestrate", "single")),
         "labels": KeySpec(values=str),
@@ -89,6 +95,25 @@ _DEFAULT_SPEC = KeySpec()
 def spec_for(schema: Schema, key_path: KeyPath) -> KeySpec:
     """The spec for a key: exact dotted match, else `<parent>.*`."""
     return schema.get(dotted(key_path)) or schema.get(dotted(key_path[:-1] + ("*",))) or _DEFAULT_SPEC
+
+
+def is_field_name(value: Any) -> bool:
+    """A string that is safe to write into a GraphQL query as a field name (see FIELD_NAME)."""
+    return isinstance(value, str) and bool(FIELD_NAME.match(value))
+
+
+def is_positive_int(value: Any) -> bool:
+    """A whole number above zero; true/false do not count."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def item_ok(spec: KeySpec, item: Any) -> bool:
+    """Whether one list item fits spec.items_type (always true when the spec sets none)."""
+    if spec.items_type == "field name":
+        return is_field_name(item)
+    if spec.items_type == "positive integer":
+        return is_positive_int(item)
+    return True
 
 
 def confirmed(spec: KeySpec, value: Any, rule: Any, layer_meta: Mapping[str, Any]) -> bool:

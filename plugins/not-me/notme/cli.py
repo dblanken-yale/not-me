@@ -687,7 +687,9 @@ def cmd_config(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     two states sharing one label name is an error), --layer limits the output to one layer (default, global or
     repo).
 
-    Output: config (per document) and roster; with --explain layers, keys, bodies, warnings; with --check ok, errors
+    Output: config (per document) and roster; with --explain layers, keys, bodies, picking (rules: the effective
+    Picking work section of project.md, layer: where it came from, fields, target_epics), warnings; with --check
+    ok, errors
     """
     cfg = ctx.cfg
     if args.check:
@@ -778,18 +780,34 @@ def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     ahead in an epic. --exclude drops issues from the list and the top.
 
     Output: number, title, url, author, labels, parent, candidates (count): the suggested top issue by the
-    queue's order; issues: up to queue.list_limit issues in that order, each with number, title, url, author,
-    labels, created, age_days, parent (epic number), position (1-based in the epic's open task list), blocked_by
-    and blocking ([{repo, number, state}] from GitHub issue dependencies), reactions (counts by kind, from the
-    operator and trusted logins only), board ({status, fields} on a board queue, else null); a fact that cannot
-    be read is null; never a body. truncated (more eligible issues than listed); held_back: [{number, behind,
-    epic}]. Or none (with held_back when not empty), with reason when paused or disabled, and with reason
-    unassigned_only, unassigned (count) and setting when the queue found no issue and the only eligible issues
-    have no assignee (only issues assigned to the operator are picked unless queue.include_unassigned is true)
+    queue's order; issues: the eligible issues in that order, all of them when the Picking work rules come from
+    the global layer (the rules must see the whole queue), else up to queue.list_limit; each with number,
+    title, url, author, labels, created, age_days, parent (epic number), position (1-based in the epic's open
+    task list), blocked_by and blocking ([{repo, number, state}] from GitHub issue dependencies), reactions
+    (counts by kind, from the operator and trusted logins only), target_epic and target_position (the
+    picking.target_epics epic whose task list holds it, and its 1-based place there; issues in a target epic
+    come first), fields ({name: value} for each picking.fields name, text cut to picking.value_max_chars; on a
+    label queue only from projects the tracker's owner owns; {} when none is named), board ({status, fields} on
+    a board queue, else null); a fact that cannot be read is null; never a body. truncated (more eligible issues
+    than listed: the rules saw only part of the queue); held_back:
+    [{number, behind, epic}]; picking: {rules (the effective Picking work section of project.md), layer (where
+    the rules came from), fields, target_epics (the ones honoured: open and written by a trusted roster member),
+    ignored_epics ([{number, reason}])}. Or none (with held_back when not empty), with reason when paused or
+    disabled, and with reason unassigned_only, unassigned (count) and setting when the queue found no issue and
+    the only eligible issues have no assignee (only issues assigned to the operator are picked unless
+    queue.include_unassigned is true)
     """
     skip = set(args.exclude or [])
     queue = ctx.queue()
+    for warning in ctx.cfg.picking_warnings:
+        ctx.warn(warning)
+    rules = ctx.cfg.picking()
+    # Global rules may prefer an issue the queue's own order puts last, so they see every eligible issue. Repo
+    # rules and the plugin default keep the queue.list_limit cut: list_limit is tighten-only, and a repo file must
+    # not lift it through its rules (the run log notes `truncated`). Eligibility is the same either way.
     limit = queue.list_limit()
+    if rules["layer"] == "global":
+        limit = None
     every = queue.candidates()
     found = [c for c in every if c.number not in skip]
     if not found:
@@ -801,9 +819,12 @@ def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
             out["held_back"] = queue.held_back
         return out
     top, listed = found[0], found[:limit]
+    picking = {**rules, "target_epics": list(queue.target_epics_used),
+               "ignored_epics": list(queue.target_epics_ignored)}
     return {"number": top.number, "title": top.title, "url": top.url, "author": top.author,
             "labels": top.labels, "parent": top.parent, "candidates": len(found),
-            "issues": queue.facts(listed), "truncated": len(listed) < len(found), "held_back": queue.held_back}
+            "issues": queue.facts(listed), "truncated": len(listed) < len(found), "held_back": queue.held_back,
+            "picking": picking}
 
 
 @command("claim-issue", "claim an issue", writes=True, running="error", ref="tracker", args=[number_arg])
@@ -1675,10 +1696,12 @@ def cmd_git_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
 @command("status", "read-only summary of state, items and runs")
 def cmd_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """A read-only summary: enabled and paused state, the active run, items needing a person, stale claims, and the
-    last run of each skill. When GitHub cannot be read the items are left out with a warning. Creates nothing.
+    last run of each skill, and one line on how issues are picked. When GitHub cannot be read the items are left
+    out with a warning. Creates nothing.
 
     Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, items, stale_claims,
-    last_runs, warnings
+    last_runs, picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and
+    "; target epics: #N, ..." when set), warnings
     """
     ctx.require_valid()
     pauses = {scope: path.exists() for scope, path in ctx.pause_files().items()}
@@ -1687,7 +1710,7 @@ def cmd_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
         "paused": {"global": pauses.get("global", False), "project": pauses.get("project", False)},
         "mode": str(ctx.meta.get("mode") or "dry-run"), "repo": None, "tracker": None, "operator": None,
         "active_run": ctx.active_run(), "items": [], "stale_claims": [], "last_runs": {},
-        "warnings": list(ctx.guard.warnings)}
+        "picking": config_mod.picking_summary(ctx.cfg.picking()), "warnings": list(ctx.guard.warnings)}
     try:
         root = ctx.log_root()
         for folder in sorted(p for p in root.iterdir() if p.is_dir()):

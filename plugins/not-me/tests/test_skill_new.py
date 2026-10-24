@@ -75,6 +75,18 @@ class SkillNewTest(unittest.TestCase):
             for m in re.finditer(r"notme log action <path>[^`]*`", text(path)):
                 self.assertIn("--message-file", m.group(0), f"{path.name}: {m.group(0)}")
 
+    def test_picking_rules_order_only_the_listed_issues_and_are_logged(self):
+        target = text(SKILL_DIR / "references" / "target.md")
+        for phrase in ("`picking`", "`layer` is `default`", "impact breaks ties", "never pick an issue that is not in `issues`",
+                       "rule: picking work (<layer> layer)", "`target_epic`", "`target_position`", "`fields`",
+                       "`ignored_epics`"):
+            self.assertIn(phrase, target, phrase)
+
+    def test_a_truncated_list_is_logged_as_rules_that_saw_part_of_the_queue(self):
+        target = text(SKILL_DIR / "references" / "target.md")
+        for phrase in ("`truncated` is true", "the rules saw only part of", "rules saw N of M eligible issues"):
+            self.assertIn(phrase, target, phrase)
+
     def test_frontmatter(self):
         self.assertEqual(self.meta.get("name"), "new")
         desc = self.meta.get("description")
