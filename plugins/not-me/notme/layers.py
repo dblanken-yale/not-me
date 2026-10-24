@@ -55,7 +55,8 @@ class KeySpec:
     #   "on": may set on, never off | "dry-run": may set dry-run, never live | "false": may set false, never
     #   true over a lower false | "superset": replace list the repo may only widen (keep every lower item) |
     #   "no-bang": union list where "!value" removals from the repo are dropped |
-    #   "ignore": every repo entry is dropped (extend it with the global allow list instead)
+    #   "ignore": every repo entry is dropped (extend it with the global allow list instead) |
+    #   "max": a whole number the repo may lower, never raise above the lower layer's value or clear
     tighten_only: str = ""
 
 
@@ -67,6 +68,7 @@ SCHEMA: Dict[str, Dict[str, KeySpec]] = {
         "allow_repos": KeySpec(merge="union", tighten_only="ignore"),
         "enabled": KeySpec(tighten_only="false"),
         "queue.include_unassigned": KeySpec(tighten_only="false"),  # true widens what gets picked
+        "queue.list_limit": KeySpec(tighten_only="max"),  # higher (or null, no cap) means more reads per pick
         "markers.legacy": KeySpec(merge="union"),
         "mode": KeySpec(enum=("dry-run", "live"), tighten_only="dry-run"),
         "models.strategy": KeySpec(enum=("orchestrate", "single")),
@@ -197,6 +199,10 @@ def _loosens(spec: KeySpec, value: Any, current: Any) -> bool:
         return value != "dry-run"
     if spec.tighten_only == "false":
         return value is not False and current is False
+    if spec.tighten_only == "max":
+        if isinstance(value, bool) or not isinstance(value, int):
+            return True  # null (no cap) or not a number: never tighter
+        return isinstance(current, int) and not isinstance(current, bool) and value > current
     if spec.tighten_only == "superset":
         kept = current if isinstance(current, list) else []
         return not (isinstance(value, list) and all(i in value for i in kept))

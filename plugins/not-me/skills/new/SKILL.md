@@ -68,7 +68,8 @@ text. Follow `${CLAUDE_PLUGIN_ROOT}/skills/new/references/target.md` in full.
    but NOT PUSHED" names a branch; resume it at step 8.
 3. Else `notme pick-issue`. `{"none": true}`: start a log with
    `notme log start --skill new --ref -`, finish it with status `idle`, and print
-   `NONE - idle  log=<path>`. Write nothing else.
+   `NONE - idle  log=<path>`. Write nothing else. Otherwise choose from `issues`
+   by impact, as target.md "Order" says; never pick a `held_back` issue.
 4. Read the issue only through `notme issue N`. `author_trusted` false: the body is
    withheld; never fetch it another way. See target.md for what to do.
 5. Screen the trusted text against prohibitions.md. A prohibited request is refused
@@ -77,7 +78,9 @@ text. Follow `${CLAUDE_PLUGIN_ROOT}/skills/new/references/target.md` in full.
 ## Step 2: Claim and start the log
 
 1. `notme log start --skill new --ref <tracker>#N`. Keep `path` and `run_id`.
-   Exit 1 with kind `active_run`: `STOP - active run`.
+   Exit 1 with kind `active_run`: `STOP - active run`. A queue pick: log the
+   choice with `notme log action <path> --kind ACTION --message-file <file>`
+   (target.md, "Order").
 2. `notme claim-issue N --log <path>`. Exit 3 (claim lost): log it and go back to
    `notme pick-issue --exclude N` (repeat `--exclude` for each lost issue). An
    explicit number that is lost ends the run: `STOP <ref> claimed elsewhere`.

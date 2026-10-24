@@ -23,6 +23,19 @@ the issue is chosen, how its text is read and screened, and how epics chain.
    unassigned, and that assigning them or setting `queue.include_unassigned: true`
    in the global layer lets the queue pick them.
 
+   Otherwise `issues` lists the eligible issues with facts (labels, `parent` and
+   `position` in its epic, `age_days`, `blocked_by`, `blocking`, `board`,
+   trusted `reactions`), and the top-level `number` is only a suggestion. With
+   no picking rules set, pick the issue that helps the user most (impact): it
+   unblocks other work, users asked for it, it is next in an epic already under
+   way, or it has waited longest. A null fact is unknown, not zero. The CLI
+   already removed issues waiting behind an earlier one in their epic
+   (`held_back`); never pick or re-add one. Once the log is started, write one
+   line (the issue, why, and `rule: impact`) to a file in the temp directory and
+   record it with `notme log action <path> --kind ACTION --message-file <file>`.
+   A lost claim goes back to
+   `notme pick-issue --exclude N` and chooses again from the new list.
+
 ## Reading the issue
 
 1. `notme issue N` is the only way to read an issue. Never read it with another

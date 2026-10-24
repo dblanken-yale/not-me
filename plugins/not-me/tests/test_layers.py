@@ -224,6 +224,26 @@ class LayerCaseTests(unittest.TestCase):
         cfg = self.global_and_repo("---\nqueue: {include_unassigned: true}\n---\n", "---\nschema: 1\n---\n")
         self.assertIs(cfg.meta["project"]["queue"]["include_unassigned"], True)
 
+    def test_repo_may_lower_list_limit_but_never_raise_or_clear_it(self):
+        cfg = self.global_and_repo(None, "---\nqueue: {list_limit: 3}\n---\n")
+        self.assertEqual(cfg.meta["project"]["queue"]["list_limit"], 3)  # lower than the default: tightens
+        self.assertEqual([w for w in cfg.warnings if "only tighten" in w], [])
+        for loosening in ("50", "null", "true", "'5'"):
+            with self.subTest(loosening):
+                cfg = self.global_and_repo("---\nqueue: {list_limit: 20}\n---\n",
+                                           f"---\nqueue: {{list_limit: {loosening}}}\n---\n")
+                self.assertEqual(cfg.meta["project"]["queue"]["list_limit"], 20)
+                self.assertEqual(len([w for w in cfg.warnings if "only tighten" in w]), 1)
+                ignored = cfg.explain()["keys"]["project.queue.list_limit"]["ignored"]
+                self.assertEqual([i["layer"] for i in ignored], ["repo"])
+        cfg = self.global_and_repo("---\nqueue: {list_limit: 20}\n---\n", "---\nqueue: {list_limit: 20}\n---\n")
+        self.assertEqual(cfg.meta["project"]["queue"]["list_limit"], 20)  # equal is not a loosening
+        self.assertEqual([w for w in cfg.warnings if "only tighten" in w], [])
+
+    def test_global_may_raise_list_limit(self):
+        cfg = self.global_and_repo("---\nqueue: {list_limit: 40}\n---\n", "---\nschema: 1\n---\n")
+        self.assertEqual(cfg.meta["project"]["queue"]["list_limit"], 40)
+
     def test_L22_explain_shows_ignored_with_reason(self):
         cfg = self.global_and_repo("---\nmode: dry-run\n---\n", "---\nmode: live\nallow_repos: [acme/evil]\n---\n")
         keys = cfg.explain()["keys"]

@@ -771,24 +771,39 @@ def push_check(ctx: Context) -> Dict[str, Any]:
 @command("pick-issue", "the next issue to work (claims nothing)", running="none", args=[
     arg("--exclude", type=int, action="append", metavar="N", help="skip this issue (repeatable)")])
 def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """The next issue to work, by the queue's order. Nothing is claimed.
+    """The eligible issues with the facts to choose between them, and a suggested top issue. Nothing is claimed.
 
-    Output: number, title, url, author, labels, parent, candidates (count); or none, with reason when paused or
-    disabled, and with reason unassigned_only, unassigned (count) and setting when the queue found no issue and
-    the only eligible issues have no assignee (only issues assigned to the operator are picked unless queue.include_unassigned is true)
+    An issue in a trusted epic's task list is left out while an earlier issue in that list is open and
+    unstarted (not blocked; no state but to do; assigned to nobody but the operator), so no choice can skip
+    ahead in an epic. --exclude drops issues from the list and the top.
+
+    Output: number, title, url, author, labels, parent, candidates (count): the suggested top issue by the
+    queue's order; issues: up to queue.list_limit issues in that order, each with number, title, url, author,
+    labels, created, age_days, parent (epic number), position (1-based in the epic's open task list), blocked_by
+    and blocking ([{repo, number, state}] from GitHub issue dependencies), reactions (counts by kind, from the
+    operator and trusted logins only), board ({status, fields} on a board queue, else null); a fact that cannot
+    be read is null; never a body. truncated (more eligible issues than listed); held_back: [{number, behind,
+    epic}]. Or none (with held_back when not empty), with reason when paused or disabled, and with reason
+    unassigned_only, unassigned (count) and setting when the queue found no issue and the only eligible issues
+    have no assignee (only issues assigned to the operator are picked unless queue.include_unassigned is true)
     """
     skip = set(args.exclude or [])
     queue = ctx.queue()
+    limit = queue.list_limit()
     every = queue.candidates()
     found = [c for c in every if c.number not in skip]
     if not found:
+        out: Dict[str, Any] = {"none": True}
         if not every and queue.unassigned_skipped:
-            return {"none": True, "reason": "unassigned_only", "unassigned": queue.unassigned_skipped,
-                    "setting": "queue.include_unassigned"}
-        return {"none": True}
-    top = found[0]
+            out.update({"reason": "unassigned_only", "unassigned": queue.unassigned_skipped,
+                        "setting": "queue.include_unassigned"})
+        if queue.held_back:
+            out["held_back"] = queue.held_back
+        return out
+    top, listed = found[0], found[:limit]
     return {"number": top.number, "title": top.title, "url": top.url, "author": top.author,
-            "labels": top.labels, "parent": top.parent, "candidates": len(found)}
+            "labels": top.labels, "parent": top.parent, "candidates": len(found),
+            "issues": queue.facts(listed), "truncated": len(listed) < len(found), "held_back": queue.held_back}
 
 
 @command("claim-issue", "claim an issue", writes=True, running="error", ref="tracker", args=[number_arg])

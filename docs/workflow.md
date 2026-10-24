@@ -68,6 +68,16 @@ Who acts where:
 - **`/not-me:allow-repo`** shows the repos and boards not-me may write to, and prints the exact terminal command a person runs to allow or remove one. It never changes the list itself.
 - **Merging** is not part of any skill: no not-me skill merges a pull request, and autonomous runs never merge. A person merges, by hand or by asking Claude directly in a session; the guard does not block that. See [guards.md](guards.md).
 
+## How the next issue is chosen
+
+When `/not-me:new` is given no issue number, it asks `notme pick-issue` for the queue:
+
+1. **Eligibility.** Only issues the queue may pick are listed (see [Which issues the queue picks](config.md#which-issues-the-queue-picks)). Issues by authors the roster does not trust never appear, and no issue body is listed.
+2. **Epic order.** For each epic written by a lead or authority, an issue in its task list is left out while an earlier unchecked issue in that list is still open, not blocked and not started. The CLI removes these itself and lists them under `held_back`, so a run cannot skip ahead in an epic. A blocked, claimed or closed earlier issue lets the next one through.
+3. **Impact.** From the rest (up to `queue.list_limit`), the run picks the issue that helps you most, weighing the listed facts: labels, epic and place in it, age, what the issue blocks or is blocked by, board fields, and reactions from you and trusted roster members. It logs one line naming the issue, why, and the rule that decided (`rule: impact`).
+
+The output also names a suggested top issue (epic children first, then oldest; by priority fields on a board), which is what older callers read.
+
 ## The result line
 
 Every run ends with one line. In `--bg` mode that line is the whole output.

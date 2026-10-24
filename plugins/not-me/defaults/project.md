@@ -11,6 +11,7 @@ queue:                           # where work is picked from
   pick_label: to do              # label that marks an issue as ready to pick up
   opt_in_label: null             # extra label an issue must also carry; null = none required
   include_unassigned: false      # false = only issues assigned to the operator; true also picks unassigned ones; the repo layer may set false, never true over a global false
+  list_limit: 10                 # most eligible issues pick-issue lists with facts (about three reads each); the run chooses among them
   board: {owner: null, number: null, status_field: Status, priority_fields: []}  # project board used when source = board
   board_states: {todo: To Do, in_progress: In progress, in_review: In review, blocked: Blocked}  # board column names
 labels:                          # label names used in the tracker, keyed by role
