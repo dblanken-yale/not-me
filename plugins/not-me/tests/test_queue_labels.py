@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import shutil
 import tempfile
 import unittest
@@ -483,9 +484,77 @@ class ReleaseAndMoveTests(QueueTestCase):
         self.q.move(1, "in_progress", require_current="todo")
         self.assertEqual(self.thing(1)["labels"], ["in progress"])
 
+    def test_move_require_current_mismatch_still_raises_live(self):
+        self.q.claim(1)
+        self.q.move(1, "needs_review")
+        with self.assertRaises(StateMismatch):
+            self.q.move(1, "needs_work", require_current="in_progress")
+        self.assertEqual(self.thing(1)["labels"], ["needs review"])
+
     def test_state_of_an_issue_with_no_state_label(self):
         self.assertEqual(self.q.state(2), None)
         self.assertEqual(self.q.state(1), "todo")
+
+
+def ledger_label_sets(ledger):
+    """The label sets of every label PUT recorded in a dry-run ledger, in order."""
+    out = []
+    for entry in ledger.read():
+        if "PUT" in entry["argv"] and entry["argv"][-3].endswith("/labels"):
+            payload = ledger.path.parent / entry["payload_path"]
+            out.append(json.loads(payload.read_text(encoding="utf-8"))["labels"])
+    return out
+
+
+class DryRunFlowTests(QueueTestCase):
+    """Dry-run writes only reach the ledger, so later steps assume the state the earlier ones would have set."""
+
+    def setUp(self):
+        super().setUp()
+        self.ledger = Ledger(self.dir / "dry.jsonl")
+        self.gh = GhClient(self.ctx, runner=self.fake, dry_run=True, ledger=self.ledger)
+        self.q = self.queue("run-1")
+        self.before = self.fake.snapshot()["repos"]
+
+    def test_claim_then_move_records_the_target_labels(self):
+        self.q.claim(1)
+        self.q.move(1, "needs_review", require_current="in_progress")
+        self.assertEqual(self.fake.snapshot()["repos"], self.before)
+        self.assertEqual(ledger_label_sets(self.ledger), [["in progress"], ["needs review"]])
+
+    def test_move_keeps_unrelated_and_additive_labels(self):
+        self.thing(1)["labels"] = ["to do", "bug", "paused"]
+        self.before = self.fake.snapshot()["repos"]
+        self.q.move(1, "needs_review", require_current="in_progress")
+        self.assertEqual(sorted(ledger_label_sets(self.ledger)[-1]), ["bug", "needs review", "paused"])
+        self.assertEqual(self.fake.snapshot()["repos"], self.before)
+
+    def test_claim_move_then_release_all_land_in_the_ledger(self):
+        self.q.claim(1)
+        self.q.move(1, "needs_review", require_current="in_progress")
+        self.assertEqual(ledger_label_sets(self.ledger), [["in progress"], ["needs review"]])
+        self.q.release(1, to="needs_human")
+        self.assertEqual(ledger_label_sets(self.ledger)[-1], ["needs human"])
+        self.assertEqual(self.fake.snapshot()["repos"], self.before)
+
+    def test_claim_then_release_records_the_todo_write(self):
+        self.q.claim(1)
+        self.q.release(1)
+        self.assertEqual(ledger_label_sets(self.ledger), [["in progress"], ["to do"]])
+
+    def test_release_of_an_issue_really_past_in_progress_records_no_label_write(self):
+        self.thing(1)["labels"] = ["needs review"]
+        self.q.release(1)
+        self.assertEqual(ledger_label_sets(self.ledger), [])
+
+    def test_an_illegal_edge_still_raises(self):
+        with self.assertRaises(IllegalTransition):
+            self.q.move(1, "ready_to_merge", require_current="in_progress")
+        self.assertEqual(ledger_label_sets(self.ledger), [])
+
+    def test_a_matching_state_behaves_as_live(self):
+        self.q.move(1, "in_progress", require_current="todo")
+        self.assertEqual(ledger_label_sets(self.ledger), [["in progress"]])
 
 
 class StaleTests(QueueTestCase):
