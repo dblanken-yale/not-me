@@ -85,9 +85,9 @@ a failing test first. Acceptance: the project test command passes and
 A resumed or background agent replies after your turn ends, and in a `--bg` run
 ending the turn ends the run.
 
-The one exception: an attended `/not-me:new` or `/not-me:update` may start
-`/not-me:prove` in the background after its result is final, because prove is its
-own run with its own log. Under `--bg` it is skipped.
+The one exception: `/not-me:new` and `/not-me:update` start `/not-me:prove` in
+the background as their last step, after the log is finished. Prove is its own run
+with its own log and result, so nothing in the leg waits on it.
 
 ## Log every dispatch
 
