@@ -6,7 +6,7 @@ from notme import frontmatter as fm
 from notme.frontmatter import FrontmatterError
 from tests import PLUGIN_ROOT
 
-DOCS = ("project", "standards", "verify", "review", "prove")
+DOCS = ("project", "standards", "verify", "review", "prove", "role")
 
 
 def doc(fm_text: str, body: str = "body\n") -> str:

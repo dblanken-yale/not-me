@@ -1,7 +1,7 @@
 ---
 name: setup
-description: Interactive setup for not-me. Detects the repo, labels, boards, roster candidates, companion checkouts and verify commands, runs one batched interview, then writes the five config docs (project, standards, verify, review, prove) to the repo layer or, with --global, the global layer, keeping the shipped comments. Also checks the current config (--check), upgrades old schemas (--upgrade) and runs non-interactively from an answers file (--answers). NOT for running work (use /not-me), NOT for diagnosing a broken install (use /not-me:doctor), NOT for changing the allow list (use /not-me:allow-repo).
-argument-hint: "[--global] [all|project|standards|verify|review|prove] [--check] [--upgrade] [--answers FILE] [--import SOURCE]"
+description: Interactive setup for not-me. Detects the repo, labels, boards, roster candidates, companion checkouts and verify commands, runs one batched interview, then writes the six config docs (project, standards, verify, review, prove, role) to the repo layer or, with --global, the global layer, keeping the shipped comments. Also checks the current config (--check), upgrades old schemas (--upgrade) and runs non-interactively from an answers file (--answers). NOT for running work (use /not-me), NOT for diagnosing a broken install (use /not-me:doctor), NOT for changing the allow list (use /not-me:allow-repo).
+argument-hint: "[--global] [all|project|standards|verify|review|prove|role] [--check] [--upgrade] [--answers FILE] [--import SOURCE]"
 disable-model-invocation: true
 allowed-tools: AskUserQuestion, Read, Write, Edit, Bash, Glob, Grep
 ---
@@ -38,7 +38,7 @@ Read before starting: `${CLAUDE_PLUGIN_ROOT}/references/config-and-layers.md`
 ## Parse arguments
 
 - Scope: `all` (default) or one doc name: `project`, `standards`, `verify`,
-  `review`, `prove`.
+  `review`, `prove`, `role`.
 - `--global`: target the global layer and ask only operator-level keys.
 - `--check`: report only, write nothing (see Check mode).
 - `--upgrade`: schema upgrade only (see Upgrade mode).
@@ -56,7 +56,7 @@ An unknown argument: print the argument hint and stop.
 2. Run `notme status`. When `active_run` is set and its marker is fresh, stop:
    "A not-me run is active; run setup when it ends." Do not override this.
 3. Run `notme config --explain`. Show a table per doc: `project.md`,
-   `standards.md`, `verify.md`, `review.md`, `prove.md`, with the layer that wins
+   `standards.md`, `verify.md`, `review.md`, `prove.md`, `role.md`, with the layer that wins
    today (default, global layer, repo layer), the file path, and warnings.
 4. Without `--global`, run `git rev-parse --show-toplevel`. Outside a git checkout,
    refuse to write the repo layer and offer `--global` instead.
@@ -77,7 +77,8 @@ first, each key explained with its comment from the shipped defaults. With
 `--answers`, read the file instead and ask nothing.
 
 Cover: tracker vs code repo; queue source (labels or a board, and which board);
-roster rows and tiers; reviewers; companion set and push order; label mapping;
+roster rows and tiers; reviewers; whether every reviewer must approve, and
+each reviewer's role and pass label; companion set and push order; label mapping;
 protected branches to add; `models.strategy` (`orchestrate` or `single`);
 confirmation of the verify commands; the prove `target` strategy; `notify.command`;
 and whether to turn on live mode at the end.
@@ -85,7 +86,7 @@ and whether to turn on live mode at the end.
 With `--global`, ask only `mode`, `attribution`, `limits`, `models`, `router`,
 `notify` and `logs.root` (write `mode` only as `dry-run`; live is Step 7's
 command). Refuse repo-only answers (tracker, repos, queue, labels,
-reviewers, roster, verify commands, ticket format) with one line saying they
+reviewers, roster, roles, verify commands, ticket format) with one line saying they
 belong in a repo layer. Never ask about `allow_repos`.
 
 ## Step 3: labels (project scope, repo layer)
@@ -93,8 +94,9 @@ belong in a repo layer. Never ask about `allow_repos`.
 Follow `${CLAUDE_PLUGIN_ROOT}/skills/setup/references/labels.md`. Show the
 recommended eleven next to the repo's existing labels. Per state the user picks
 create, map to an existing label, or skip. Refuse a mapping where two states share
-a label name; ask again for those states. Labels are created later, in Step 6,
-and only after a yes.
+a label name; ask again for those states. List the pass labels role.md names
+too, and refuse one equal to a state label or shared by two roles. Labels are
+created later, in Step 6, and only after a yes.
 
 ## Step 4: companions (project scope, repo layer)
 
@@ -117,7 +119,7 @@ detected commands. Never write a companion's `project.md`.
 ## Step 5: render
 
 For each doc in scope, start from `${CLAUDE_PLUGIN_ROOT}/defaults/<doc>.md` (one of
-`project.md`, `standards.md`, `verify.md`, `review.md`, `prove.md`). When the
+`project.md`, `standards.md`, `verify.md`, `review.md`, `prove.md`, `role.md`). When the
 target file already exists, start from it instead and change only answered keys.
 
 Frontmatter:
@@ -144,6 +146,10 @@ Body sections the interview produces:
   `## Issue readiness`.
 - `verify.md`: `## Tests`, `## Lint`, `## Build`, `## Environment start` with the
   confirmed commands and where each was found, and `## Gate additions`.
+- `role.md`: only when the user wants every reviewer to approve, a starter
+  `## Roles` table with one row per roster reviewer (Reviewer yes), Role and
+  Pass label as answered or left empty. Any row turns the rule on; no rows
+  keeps one approval enough.
 
 Keep every other section's default text. Do not invent sections.
 
@@ -156,8 +162,10 @@ Keep every other section's default text. Do not invent sections.
 3. Run `notme config --check`. On errors (exit 4), restore every file from its
    copy, show the errors with layer, file and line, and stop.
 4. Run `notme config --explain` again and show which layer now wins per doc.
-5. Labels: run `notme labels-ensure --check`, show `missing`, and ask before
-   running `notme labels-ensure`. With `--answers`, create only when
+5. Labels: run `notme labels-ensure --check`, show `missing` (state labels and
+   the pass labels role.md names), and ask before running `notme labels-ensure`.
+   A declined pass label is not an error: that role gets no pass label and a
+   review run warns once. With `--answers`, create only when
    `create_labels` is true. A `"dry_run": true` result created nothing: say so.
 
 ## Step 7: finish

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
-from . import humans, migrations, paths, roster
+from . import humans, migrations, paths, roles as roles_mod, roster
 from .frontmatter import FrontmatterError, parse_with_lines
 from .layers import (DOC_NAMES, LAYER_ORDER, SCHEMA, Doc, KeyPath, Layers, Schema, confirmed, discover, dotted,
                      item_ok, merge_meta, resolve_body, spec_for, split_sections)
@@ -39,6 +39,7 @@ class Config:
     # by them (higher first) so an old config keeps its order; plain picking.fields never rank
     ranked_fields: List[str] = field(default_factory=list)
     _errors: List[str] = field(default_factory=list)
+    _roles: Optional[roles_mod.Roles] = None
 
     def display(self, path: Optional[Path]) -> Optional[str]:
         if path is None:
@@ -69,8 +70,56 @@ class Config:
             "keys": keys,
             "bodies": bodies,
             "picking": self.picking(),
+            "roles": self.roles_explain(),
             "warnings": list(self.warnings),
         }
+
+    def _trusted_body(self, name: str) -> str:
+        """A doc's body from the default and global layers only (the repo layer is committed, so untrusted)."""
+        docs = self.docs.get(name, {})
+        return resolve_body(name, {layer: docs.get(layer) for layer in ("default", "global")}, [])[0]
+
+    def roles(self) -> roles_mod.Roles:
+        """The approval gate's role table: trusted rows plus repo-layer rows for new logins (no rows: one approval
+        is enough). Cached."""
+        if self._roles is None:
+            trusted = roles_mod.parse_roles(self._trusted_body("role"))
+            from_repo = (self.body_layers.get("role") or [None])[-1] == "repo"
+            repo = roles_mod.parse_roles(self.bodies.get("role", "")) if from_repo else []
+            self._roles = roles_mod.trusted_merge(trusted, repo)
+        return self._roles
+
+    def gate_reviewers(self) -> List[str]:
+        """Reviewers whose approval the gate requires: the effective roster's reviewers plus the trusted layers'
+        (a repo-layer roster cannot drop a trusted reviewer)."""
+        out = list(self.effective_roster().reviewers)
+        seen = {x.lower() for x in out}
+        for login in roster.Roster(roster.parse_roster(self._trusted_body("project"))).reviewers:
+            if login.lower() not in seen:
+                seen.add(login.lower())
+                out.append(login)
+        return out
+
+    def role_errors(self) -> List[str]:
+        """role.md errors, prefixed with the layer and file the table came from."""
+        rows = self.roles().rows
+        if not rows:
+            return []
+        known = [m.login for m in self.effective_roster().entries]
+        known += [m.login for m in roster.parse_roster(self._trusted_body("project"))]
+        found = roles_mod.errors(rows, known, self.meta.get("project", {}).get("labels") or {})
+        layer = (self.body_layers.get("role") or [None])[-1]
+        doc = self.docs.get("role", {}).get(layer or "")
+        where = f"{layer} {doc.path}" if doc else "role.md"
+        return [f"{where}: {e}" for e in found]
+
+    def roles_explain(self) -> Dict[str, Any]:
+        """{configured, layer (of the role.md body in force), reviewers: [{login, role, pass_label}], ignored
+        (repo rows that tried to change a trusted row), errors}."""
+        current = self.roles()
+        layers = self.body_layers.get("role") or []
+        return {"configured": current.configured, "layer": layers[-1] if layers else None,
+                "reviewers": current.describe(), "ignored": list(current.ignored), "errors": self.role_errors()}
 
     def picking(self) -> Dict[str, Any]:
         """The picking rules in effect: the text of the `## Picking work` section of the effective project.md body
@@ -97,7 +146,15 @@ class Config:
             for layer in LAYER_ORDER:
                 if layer in docs:
                     _check_map(docs[layer], docs[layer].meta, reference, (), SCHEMA.get(name, {}), errors)
-        return errors
+        return errors + self._review_label_errors() + self.role_errors()
+
+    def _review_label_errors(self) -> List[str]:
+        """review.changes_label may not name ready_to_merge: a request for changes must never mark a PR ready."""
+        if (self.meta.get("review") or {}).get("changes_label") != "ready_to_merge":
+            return []
+        src = self.sources.get("review.changes_label") or {}
+        return [f"{src.get('layer')} {src.get('path')}:{src.get('line') or 1}: review.changes_label must not be "
+                "ready_to_merge"]
 
     def effective_roster(self, operator: Optional[str] = None) -> roster.Roster:
         """The roster in force; operator defaults to project.operator unless it is auto."""
@@ -276,6 +333,9 @@ def load(project_dir: Optional[os.PathLike] = None, home: Optional[os.PathLike] 
         cfg.sources.update({f"{name}.{key}": src for key, src in sources.items()})
         cfg.bodies[name], cfg.body_sources[name], cfg.body_layers[name] = resolve_body(name, docs, cfg.warnings)
     cfg.warnings.extend(roster.bot_row_warnings(roster.parse_roster(cfg.bodies.get("project", ""))))
+    cfg.warnings.extend(roles_mod.warnings(cfg.roles().rows, cfg.effective_roster()))
+    cfg.warnings.extend(f"repo role.md: row for {i['login']} is ignored: {i['reason']}; change it in the global "
+                        "role.md" for i in cfg.roles().ignored)
     _move_priority_fields(cfg)
     _confirm_live(cfg)
     return cfg

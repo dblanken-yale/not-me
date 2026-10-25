@@ -166,16 +166,21 @@ Follow `${CLAUDE_PLUGIN_ROOT}/skills/review/references/posting.md`. Read
 2. `notme check-text --file <body>` and the same on the comment bodies. Fix and
    rerun until both pass.
 3. Approve with `review.auto_approve` true:
-   `notme review-post <ref> --event APPROVE --body-file <b> --labels-set <set>
-   --log <path>`, with the set holding `review.approve_label` and not
-   `needs_review`.
+   `notme review-post <ref> --event APPROVE --body-file <b> --labels-auto
+   --log <path>`. The CLI works out the labels from the PR's reviews, role.md
+   and the roster: `review.approve_label` once every required reviewer
+   approved, else `needs_review` stays and the PR gains the pass label of each
+   approving role. Name the logins in the output's approval `waiting` list, if any,
+   in the result note.
 4. Approve with `review.auto_approve` false: the CLI refuses APPROVE. Post
-   `--event COMMENT` with the same body, no `--labels-set`, so `needs_review`
+   `--event COMMENT` with the same body and no label flag, so `needs_review`
    stays. The summary says approval is reserved for a person, by login.
-5. Request changes: `--event REQUEST_CHANGES --comments-file <c>` and a set
-   holding `review.changes_label` and not `needs_review`.
+5. Request changes: `--event REQUEST_CHANGES --comments-file <c> --labels-auto`.
+   The PR moves to `review.changes_label` and loses the operator's pass label
+   unless another reviewer in that role still approves.
 6. The CLI posts, sets the full label set and reads both back. A mismatch is a
-   mechanical failure.
+   mechanical failure. A warning about a missing pass label is not a failure:
+   name it in the result note.
 7. Earlier threads the operator started and judged fixed on this head, only those:
    `notme resolve-threads <ref> --ids-file <ids> --log <path>` to resolve the fixed
    threads. This skill is the only one allowed to resolve, and only fixed ones.

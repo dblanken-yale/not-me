@@ -18,7 +18,7 @@ if str(PLUGIN) not in sys.path:
 from notme import frontmatter  # noqa: E402
 
 GUIDES = ("requirements.md", "install.md", "config.md", "guards.md")
-DOC_NAMES = ("project", "standards", "verify", "review", "prove")
+DOC_NAMES = ("project", "standards", "verify", "review", "prove", "role")
 RULES = ("other_repo", "protected_branches", "force_push", "destructive_git")
 NEW_DOCS = ("workflow.md", "testing.md")
 READMES = (ROOT / "README.md", PLUGIN / "README.md")

@@ -122,11 +122,33 @@ def as_if(current_labels: Sequence[str], state: str, labels: Labels, kind: str =
     """The label set as if the item were in `state`: unchanged when it carries that label, else every main-state
     label swapped for it. Dry run only, where earlier writes reached the ledger and not GitHub."""
     current = list(current_labels)
-    name = labels.name(state)
-    if name.lower() in {c.lower() for c in current}:
+    if labels.name(state).lower() in {c.lower() for c in current}:
         return current
-    main = set(labels.current(current, kind))
-    return [c for c in current if not (labels.knows(c) and labels.abstract(c) in main)] + [name]
+    return swap_state(current, state, labels, kind)
+
+
+def swap_state(current_labels: Sequence[str], state: str, labels: Labels, kind: str = "issue") -> List[str]:
+    """The label set with every main-state label replaced by `state` (unchanged when it already carries only that
+    one). Additive labels, pass labels and unrelated labels are kept. No edge check: callers that need one use
+    transition()."""
+    current = list(current_labels)
+    name = labels.name(state)
+    main = set(labels.current(current, kind)) - {state}
+    out = [c for c in current if not (labels.knows(c) and labels.abstract(c) in main)]
+    if name.lower() not in {c.lower() for c in out}:
+        out.append(name)
+    return out
+
+
+def set_pass_labels(current_labels: Sequence[str], earned: Iterable[str], managed: Iterable[str]) -> List[str]:
+    """Pass labels (role.md) are additive: they sit next to the main state and never count as it. Drop each
+    managed pass label that is not earned, add each earned one, keep every other label as it is."""
+    earned = list(earned)
+    keep = {e.lower() for e in earned}
+    drop = {m.lower() for m in managed} - keep
+    out = [c for c in current_labels if c.lower() not in drop]
+    have = {c.lower() for c in out}
+    return out + [e for e in earned if e.lower() not in have]
 
 
 def apply(gh: Any, repo: str, n: int, frm: str, to: str, labels: Labels, kind: str = "issue") -> List[str]:
@@ -158,26 +180,36 @@ LABEL_STYLE = {
     "paused": ("c5def5", "Skipped until this label is removed"),
 }
 NEUTRAL_STYLE = ("ededed", "not-me label")
+PASS_STYLE = ("c2e0c6", "A required reviewer in this role approved")  # pass labels named in role.md
 
 
-def ensure_labels(gh: Any, repo: str, mapping: Mapping[str, Any], check: bool = False) -> Dict[str, Any]:
-    """Create the mapped labels the repo lacks (only report them with check=True).
+def repo_label_names(gh: Any, repo: str) -> List[str]:
+    """The names of the labels repo has, as the repo spells them (first 500)."""
+    return [x.get("name", "") for x in gh.read(["label", "list", "-R", repo, "--json", "name", "--limit", "500"]) or []]
+
+
+def ensure_labels(gh: Any, repo: str, mapping: Mapping[str, Any], check: bool = False,
+                  pass_labels: Iterable[str] = ()) -> Dict[str, Any]:
+    """Create the mapped labels and the role.md pass labels the repo lacks (only report them with check=True).
 
     Returns {repo, ok (nothing missing), present, missing, created}. ValueError for a name starting with a dash.
     """
     from .writes import WriteTarget
 
-    have = {x.get("name", "").lower() for x in
-            gh.read(["label", "list", "-R", repo, "--json", "name", "--limit", "500"]) or []}
-    wanted = {role: str(name) for role, name in mapping.items()}
-    present = sorted(n for n in wanted.values() if n.lower() in have)
-    missing = [(role, name) for role, name in wanted.items() if name.lower() not in have]
+    have = {x.lower() for x in repo_label_names(gh, repo)}
+    wanted = [(LABEL_STYLE.get(role, NEUTRAL_STYLE), str(name)) for role, name in mapping.items()]
+    seen = {name.lower() for _, name in wanted}
+    for name in pass_labels:
+        if str(name).lower() not in seen:
+            seen.add(str(name).lower())
+            wanted.append((PASS_STYLE, str(name)))
+    present = sorted(name for _, name in wanted if name.lower() in have)
+    missing = [(style, name) for style, name in wanted if name.lower() not in have]
     created: List[str] = []
     if not check:
-        for role, name in missing:
+        for (color, description), name in missing:
             if name.startswith("-"):
                 raise ValueError(f"label name {name!r} must not start with a dash")
-            color, description = LABEL_STYLE.get(role, NEUTRAL_STYLE)
             gh.write(WriteTarget.repo(repo),
                      ["label", "create", name, "-R", repo, "--color", color, "--description", description],
                      description=f"create label {name} on {repo}")

@@ -10,7 +10,7 @@ from pathlib import Path
 from notme import config, frontmatter, paths
 from tests import PLUGIN_ROOT, TempCase
 
-DOCS = ("project", "standards", "verify", "review", "prove")
+DOCS = ("project", "standards", "verify", "review", "prove", "role")
 
 
 def line_of(path: Path, prefix: str) -> int:

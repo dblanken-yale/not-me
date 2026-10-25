@@ -25,7 +25,8 @@ Make one work directory in the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/
    whose line is on the right side of a diff hunk. Each body starts with the level
    and says what is wrong and what would fix it.
 3. `comments.md`: every comment body, one after another, for the text check.
-4. `labels.txt`: the full label set, computed from the bundle's `labels`.
+
+The labels are not written by hand: `--labels-auto` lets the CLI work them out.
 
 Name people by login, never "you". No AI or model mention anywhere.
 
@@ -41,13 +42,19 @@ One command posts the review and sets the labels:
 ```
 notme review-post <ref> --event <APPROVE|REQUEST_CHANGES|COMMENT> \
   --body-file body.md --comments-file comments.json \
-  --labels-set <full set> --log <path>
+  --labels-auto --log <path>
 ```
 
 1. APPROVE only when `review.auto_approve` is true; otherwise COMMENT with no
-   `--labels-set` (see `verdict.md`).
+   `--labels-auto` (see `verdict.md`).
 2. Leave out `--comments-file` when the list is empty.
-3. The CLI reads the review and the labels back. Any nonzero exit is a mechanical
+3. With `--labels-auto` the CLI reads the PR's reviews after posting and sets the
+   full label set from them, role.md and the roster: the approve label once every
+   required reviewer approved, else `needs_review` plus the pass label of each
+   approving role (see `${CLAUDE_PLUGIN_ROOT}/defaults/role.md`). The output's
+   `approval` says who is still `waiting`; a warning names a pass label missing
+   from the repo, which is skipped.
+4. The CLI reads the review and the labels back. Any nonzero exit is a mechanical
    failure (see `failures.md`). Do not post a second review to fix it.
 
 ## Resolve fixed threads
@@ -85,5 +92,5 @@ multiplying, so acme/app#12's criterion "mul(2, 3) is 6" fails.
 - [ ] Body leads with the marker and `**TL;DR:**`, people named by login.
 - [ ] Every inline comment has a path and a line in the diff.
 - [ ] Both text files passed `notme check-text`.
-- [ ] Posted one review with the full label set, read back by the CLI.
+- [ ] Posted one review with `--labels-auto`, read back by the CLI.
 - [ ] Resolved only the operator's earlier threads judged fixed.

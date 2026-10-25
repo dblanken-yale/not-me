@@ -8,7 +8,7 @@ from notme import frontmatter
 PLUGIN = Path(__file__).resolve().parent.parent
 REFS = PLUGIN / "references"
 DEFAULTS = PLUGIN / "defaults"
-DOC_NAMES = ("project", "standards", "verify", "review", "prove")
+DOC_NAMES = ("project", "standards", "verify", "review", "prove", "role")
 
 FILES = [
     "verification.md", "gate.md", "branching.md", "autonomy-and-logging.md",

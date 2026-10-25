@@ -13,6 +13,7 @@ doc is not in scope for this run.
 | 2 | Pick work from labels or from a project board? Which board? | `queue.source`, `queue.board`, `queue.board_states`, `queue.pick_label`, `queue.opt_in_label` | project |
 | 3 | Who is on the roster, with what tier? (lead, authority, member; assignable; reviewer) | `## Roster` table rows | project |
 | 4 | Who is requested as reviewer by default, and per repo? | `reviewers` | project |
+| 4a | Must every reviewer approve before a PR is ready to merge? If yes, each reviewer's role and pass label (both may stay empty) | `## Roles` table rows | role |
 | 5 | Which sibling checkouts are companions, and in what push order? | `repos` | project |
 | 6 | Per state: create, map to an existing label, or skip (see `labels.md`) | `labels` | project |
 | 7 | Which branches beyond main, master and develop are protected? | `protected_branches` (add only) | project |
@@ -34,7 +35,7 @@ the user with `/not-me:mode live`. Never ask `allow_repos`; the allow list is
 changed only with `/not-me:allow-repo`.
 
 Refuse repo-only keys in the global layer, and say why: `tracker`, `repos`,
-`queue`, `labels`, `reviewers`, the roster table, verify commands, and the
+`queue`, `labels`, `reviewers`, the roster table, the roles table, verify commands, and the
 `## Ticket format` section. They describe one project and belong in its repo layer.
 
 ## Answers file (`--answers FILE`)
@@ -47,12 +48,13 @@ nothing, treats every confirmation as given except `create_labels` and
 ```json
 {
   "layer": "repo",
-  "docs": ["project", "standards", "verify", "review", "prove"],
+  "docs": ["project", "standards", "verify", "review", "prove", "role"],
   "body": "extend",
   "tracker": "owner/name",
   "queue": {"source": "board", "board": {"owner": "owner", "number": 3}},
   "roster": [{"login": "someone", "name": "Some One", "tier": "lead", "assignable": true, "reviewer": true}],
   "reviewers": {"default": ["someone"]},
+  "roles": [{"login": "someone", "role": "code", "pass_label": "pass code review"}],
   "repos": [{"name": "owner/app", "role": "primary"}, {"name": "owner/app-ui", "role": "companion"}],
   "companion_docs": false,
   "labels": {"todo": "ready", "in_progress": "create", "epic": "skip"},
@@ -68,7 +70,8 @@ nothing, treats every confirmation as given except `create_labels` and
 }
 ```
 
-Field notes: `body` is `extend` (write `extends: global`) or `replace`. A `labels`
+Field notes: the roles rows go in the role.md table; leave it out (or empty) to keep
+one approval enough. `body` is `extend` (write `extends: global`) or `replace`. A `labels`
 value is `create`, `skip`, or the existing label name to map to. `ticket_format`
 is `keep` (the default text), `detected`, or the literal markdown to write. A
 global run may also carry `attribution`, `limits`, `router` and `logs` objects

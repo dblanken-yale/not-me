@@ -397,7 +397,7 @@ class ResolveBodyTests(unittest.TestCase):
         found = layers.discover(tc.project, tc.home)
         self.assertEqual(found.files["global"], ["standards"])
         self.assertEqual(found.files["repo"], ["standards"])
-        self.assertEqual(len(found.files["default"]), 5)
+        self.assertEqual(len(found.files["default"]), 6)
         shutil.rmtree(tc.home)
         self.assertIsNone(layers.discover(tc.project, tc.home).dirs["global"])
 
