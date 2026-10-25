@@ -266,3 +266,91 @@ class ReviewBlockOnTests(unittest.TestCase):
         cfg = self.tc.load()
         self.assertEqual(cfg.meta["review"]["block_on"], ["blocker", "major"])
         self.assertTrue(cfg.check())
+
+
+class PickingConfigTests(unittest.TestCase):
+    """The Picking work section, picking.fields and picking.target_epics across the layers."""
+
+    def load(self, global_text=None, repo_text=None):
+        tc = TempCase()
+        self.addCleanup(tc.cleanup)
+        if global_text is not None:
+            tc.write("global", "project", global_text)
+        if repo_text is not None:
+            tc.write("repo", "project", repo_text)
+        return tc.load()
+
+    def test_default_rules_are_the_impact_default(self):
+        picking = self.load().picking()
+        self.assertEqual(picking["layer"], "default")
+        self.assertIn("impact", picking["rules"])
+        self.assertTrue(picking["rules"].startswith("No picking rules are set"), picking["rules"])
+        self.assertEqual((picking["fields"], picking["target_epics"]), ([], []))
+        self.assertEqual(config.picking_summary(picking), "impact default")
+
+    def test_global_rules_replace_the_default(self):
+        cfg = self.load("---\nschema: 1\n---\n# Project\n\n## Picking work\n\nPrefer the highest `Priority`.\n")
+        picking = cfg.picking()
+        self.assertEqual((picking["layer"], picking["rules"]), ("global", "Prefer the highest `Priority`."))
+
+    def test_repo_rules_beat_global_rules(self):
+        cfg = self.load("---\nschema: 1\n---\n## Picking work\n\nGlobal rule.\n",
+                        "---\nextends: global\n---\n## Picking work\n\nRepo rule.\n\n## Other\n\nx\n")
+        picking = cfg.picking()
+        self.assertEqual((picking["layer"], picking["rules"]), ("repo", "Repo rule."))
+
+    def test_a_layer_without_the_section_falls_back_to_the_default_text(self):
+        picking = self.load("---\nschema: 1\n---\n# Project\n\n## Roster\n\nnone\n").picking()
+        self.assertEqual(picking["layer"], "default")
+        self.assertIn("impact", picking["rules"])
+
+    def test_repo_layer_may_set_fields_and_target_epics(self):
+        cfg = self.load("---\nschema: 1\npicking: {fields: [Size]}\n---\n",
+                        "---\npicking: {fields: [Priority], target_epics: [74, 80]}\n---\n")
+        self.assertEqual({k: cfg.meta["project"]["picking"][k] for k in ("fields", "target_epics")},
+                         {"fields": ["Priority"], "target_epics": [74, 80]})
+        self.assertEqual(cfg.sources["project.picking.fields"]["layer"], "repo")
+        self.assertEqual([w for w in cfg.warnings if "only tighten" in w], [])
+        self.assertEqual(cfg.check(), [])
+        self.assertEqual(config.picking_summary(cfg.picking()),
+                         "impact default; fields: Priority; target epics: #74, #80")
+
+    def test_summary_names_the_rules_layer(self):
+        cfg = self.load(None, "---\nschema: 1\n---\n## Picking work\n\nLabels first.\n")
+        self.assertEqual(config.picking_summary(cfg.picking()), "rules from repo layer")
+
+    def test_invalid_fields_and_target_epics_are_errors(self):
+        cases = [("picking: {fields: [3]}\n", "picking.fields"),
+                 ("picking: {fields: ['x\"){evil}']}\n", "picking.fields"),
+                 ("picking: {fields: Priority}\n", "picking.fields"),
+                 ("picking: {target_epics: [0]}\n", "picking.target_epics"),
+                 ("picking: {target_epics: [-2]}\n", "picking.target_epics"),
+                 ("picking: {target_epics: ['74']}\n", "picking.target_epics"),
+                 ("picking: {target_epics: [true]}\n", "picking.target_epics")]
+        for text, key in cases:
+            with self.subTest(text):
+                errors = self.load(None, "---\n" + text + "---\n").check()
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(key, errors[0])
+                self.assertTrue(errors[0].startswith("repo .claude/not-me/project.md:2: "), errors[0])
+
+    def test_old_priority_fields_move_to_picking_fields_with_a_warning(self):
+        cfg = self.load("---\nschema: 1\nqueue:\n  source: board\n"
+                        "  board: {owner: acme, number: 6, priority_fields: [Priority, Size]}\n"
+                        "picking: {fields: [Size, Team]}\n---\n")
+        self.assertEqual(cfg.meta["project"]["picking"]["fields"], ["Size", "Team", "Priority"])
+        self.assertEqual(cfg.ranked_fields, ["Priority", "Size"])  # the old board ranking, in its own order
+        self.assertNotIn("priority_fields", cfg.meta["project"]["queue"]["board"])
+        self.assertNotIn("project.queue.board.priority_fields", cfg.explain()["keys"])
+        warning = [w for w in cfg.warnings if "priority_fields" in w]
+        self.assertEqual(len(warning), 1, cfg.warnings)
+        self.assertTrue(warning[0].startswith("global $NOT_ME_HOME/project.md:5: "), warning[0])
+        self.assertIn("picking.fields", warning[0])
+        self.assertEqual(cfg.explain()["keys"]["project.picking.fields"]["migrated"],
+                         {"from": "queue.board.priority_fields", "added": ["Priority"]})
+        self.assertEqual(cfg.check(), [])
+
+    def test_explain_shows_the_picking_rules_and_their_layer(self):
+        cfg = self.load(None, "---\nschema: 1\n---\n## Picking work\n\nLabels first.\n")
+        self.assertEqual(cfg.explain()["picking"], {"rules": "Labels first.", "layer": "repo", "fields": [],
+                                                    "target_epics": []})

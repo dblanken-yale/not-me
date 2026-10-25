@@ -270,6 +270,19 @@ class LayerCaseTests(unittest.TestCase):
         self.assertTrue(guard)
         self.assertTrue(all(v == "on" for v in guard.values()), guard)
 
+    def test_repo_may_lower_picking_value_max_chars_but_never_raise_or_clear_it(self):
+        # Field values can hold text other people wrote: the repo layer may only shorten what reaches the model.
+        default = self.global_and_repo(None, "---\nschema: 1\n---\n").meta["project"]["picking"]["value_max_chars"]
+        self.assertTrue(isinstance(default, int) and default > 0, default)
+        cfg = self.global_and_repo(None, "---\npicking: {value_max_chars: 5}\n---\n")
+        self.assertEqual(cfg.meta["project"]["picking"]["value_max_chars"], 5)
+        self.assertEqual([w for w in cfg.warnings if "only tighten" in w], [])
+        for loosening in (str(default + 1), "null", "'5'"):
+            with self.subTest(loosening):
+                cfg = self.global_and_repo(None, f"---\npicking: {{value_max_chars: {loosening}}}\n---\n")
+                self.assertEqual(cfg.meta["project"]["picking"]["value_max_chars"], default)
+                self.assertEqual(len([w for w in cfg.warnings if "only tighten" in w]), 1)
+
     def test_global_may_raise_list_limit(self):
         cfg = self.global_and_repo("---\nqueue: {list_limit: 40}\n---\n", "---\nschema: 1\n---\n")
         self.assertEqual(cfg.meta["project"]["queue"]["list_limit"], 40)

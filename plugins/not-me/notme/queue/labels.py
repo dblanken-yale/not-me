@@ -92,8 +92,9 @@ class LabelQueue(BaseQueue):
                 and self._assignees_allow(_assignees(issue)))  # last, so only otherwise eligible ones are counted
 
     def candidates(self) -> List[Candidate]:
-        """Eligible issues: epic children first (epic order, then task-list order), then the rest oldest first.
-        An issue behind an earlier open, unstarted issue in a trusted epic is left out (see held_back)."""
+        """Eligible issues: target epic issues first (see target_order), then epic children (epic order, then
+        task-list order), then the rest oldest first. An issue behind an earlier open, unstarted issue in a trusted
+        epic is left out (see held_back)."""
         self.unassigned_skipped, self.held_back = 0, []
         opt_in = self.queue_cfg.get("opt_in_label")
         listed = self._list("todo", extra=[opt_in] if opt_in else [])
@@ -108,7 +109,7 @@ class LabelQueue(BaseQueue):
             if number not in placed:
                 placed[number] = self._candidate(issue, (1, 0, 0), None, None)
         known = {int(i["number"]): sibling_info(i) for i in listed}  # open issues already read: no second read
-        return sorted(self.epic_order(list(placed.values()), epics, known), key=Candidate.sort_key)
+        return self.order(list(placed.values()), epics, known)
 
     @staticmethod
     def _candidate(issue: Dict[str, Any], priority: tuple, parent: Optional[int],

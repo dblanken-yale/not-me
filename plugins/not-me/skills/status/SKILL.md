@@ -22,6 +22,7 @@ Read-only report. It never writes: no label, no log, no post. It owns the marker
 - Paused: say which of `paused.global` and `paused.project` is true.
 - `repo`, `tracker`, `operator`.
 - Active run: `skill`, `ref`, `started`, or "no active run".
+- Picking: the `picking` line as given (rules and their layer, or the impact default).
 
 ### Waiting on a person
 
@@ -29,7 +30,7 @@ For each entry in `items`: kind and number, title, URL, and its `states`
 (`needs_human`, `question`, `paused`). Say who is owed what:
 
 - `question`: a named person owes an answer. `needs_human`: a run stopped and a
-  person must act. `paused`: every leg skips it until a person removes the label.
+  person must act. `paused`: skipped until a person removes the label.
 
 ### Stale claims
 
