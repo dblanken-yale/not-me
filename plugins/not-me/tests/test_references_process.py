@@ -121,6 +121,17 @@ class ProcessReferenceDocsTest(unittest.TestCase):
     def test_gate(self):
         self._check("gate.md")
 
+    def test_gate_code_review_fallback(self):
+        text = (REFS / "gate.md").read_text(encoding="utf-8")
+        start = text.index("3. **Code review.**")
+        step = text[start:text.index("4. **Security review.**")]
+        self.assertIn("pr-review-toolkit:code-reviewer", step)
+        self.assertIn("general-purpose", step)
+        self.assertIn("reviewer=", step)
+        self.assertIn("no fallback", step)
+        cannot = text[text.index("## When a gate step cannot run"):text.index("## Order with the rest")]
+        self.assertIn("general-purpose", cannot)
+
     def test_branching(self):
         self._check("branching.md")
 

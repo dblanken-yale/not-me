@@ -145,7 +145,8 @@ the effective verify doc; never invent a test or lint command.
 4. UI diff: one `Visual check:` line in one of the two allowed forms, and the
    light accessibility pass.
 5. Gate: tests red then green, `/simplify` when over about 20 changed lines, the
-   code-reviewer agent, the security review as a foreground general-purpose
+   code review (the `pr-review-toolkit` agent, or a general-purpose subagent when
+   it is not installed), the security review as a foreground general-purpose
    subagent, CI-parity lint on the whole tree, final tests, then each step under
    `## Gate additions`. Log each as `GATE`. Fix findings in this run (gate.md).
 6. Cross-model claim check on `models.verifier` before anything is posted.
