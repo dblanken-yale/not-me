@@ -159,7 +159,7 @@ Anyone with push access can edit the repo layer, and it is committed, so not-me 
 | `mode` | set `dry-run` | set `live`. The value is ignored |
 | `enabled` | set `false` | set `true` over a lower `false` |
 | `queue.include_unassigned` | set `false` | set `true` over a lower `false` |
-| `queue.list_limit` | lower it | raise it above the lower layer's value, or set `null` |
+| `queue.list_limit` | lower it | raise it above the lower layer's value, or set it (or the whole `queue` map) to `null` |
 | `protected_branches` | add names | remove names. Its `!name` entries are dropped |
 | `allow_repos` | nothing | add repos. Every entry is dropped |
 | `review.block_on` | add levels | drop a level the global or default list has. The whole value is ignored |

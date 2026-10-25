@@ -240,6 +240,36 @@ class LayerCaseTests(unittest.TestCase):
         self.assertEqual(cfg.meta["project"]["queue"]["list_limit"], 20)  # equal is not a loosening
         self.assertEqual([w for w in cfg.warnings if "only tighten" in w], [])
 
+    def test_repo_cannot_clear_the_queue_map_to_drop_list_limit(self):
+        for repo in ("null", "5", "[]", "off"):
+            for global_ in (None, "---\nqueue: {list_limit: 20}\n---\n"):
+                with self.subTest(repo=repo, global_=global_):
+                    cfg = self.global_and_repo(global_, f"---\nqueue: {repo}\n---\n")
+                    want = 20 if global_ else 10
+                    self.assertEqual(cfg.meta["project"]["queue"]["list_limit"], want)
+                    warned = [w for w in cfg.warnings if "only tighten" in w]
+                    self.assertTrue(warned, cfg.warnings)
+                    self.assertIn("queue", " ".join(warned))
+                    keys = cfg.explain()["keys"]
+                    ignored = keys.get("project.queue.list_limit", {}).get("ignored", []) \
+                        + keys.get("project.queue", {}).get("ignored", [])
+                    self.assertIn("repo", [i["layer"] for i in ignored])
+        # a repo null still clears what is not tighten-only, and a lower true include_unassigned may go
+        cfg = self.global_and_repo("---\nqueue: {include_unassigned: true, list_limit: 20}\n---\n",
+                                   "---\nqueue: null\n---\n")
+        self.assertEqual(cfg.meta["project"]["queue"]["list_limit"], 20)
+        self.assertNotEqual(cfg.meta["project"]["queue"].get("include_unassigned"), True)
+
+    def test_global_may_clear_the_queue_map(self):
+        cfg = self.global_and_repo("---\nqueue: null\n---\n", "---\nschema: 1\n---\n")
+        self.assertNotIn("queue", cfg.meta["project"])
+
+    def test_repo_cannot_clear_guard_map(self):
+        cfg = self.global_and_repo(None, "---\nguard: null\n---\n")
+        guard = cfg.meta["project"]["guard"]
+        self.assertTrue(guard)
+        self.assertTrue(all(v == "on" for v in guard.values()), guard)
+
     def test_global_may_raise_list_limit(self):
         cfg = self.global_and_repo("---\nqueue: {list_limit: 40}\n---\n", "---\nschema: 1\n---\n")
         self.assertEqual(cfg.meta["project"]["queue"]["list_limit"], 40)

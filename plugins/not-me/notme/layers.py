@@ -8,7 +8,7 @@ from __future__ import annotations
 import copy
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -237,6 +237,27 @@ def _ignore_loosening(sources: Dict[str, dict], name: str, value: Any, p: "_Pass
     p.warnings.append(f"{p.layer} {p.path}:{line or 1}: {name} = {value!r} is ignored: {REPO_TIGHTEN_REASON}")
 
 
+def _guards_children(schema: Schema, name: str) -> bool:
+    """True when the schema has a tighten-only key anywhere under the map `name`."""
+    return any(k.startswith(name + ".") and s.tighten_only for k, s in schema.items())
+
+
+def _clear_guarded_map(target: Dict[str, Any], sources: Dict[str, dict], key: str, key_path: KeyPath,
+                       line: Optional[int], p: _Pass) -> None:
+    """A repo-layer null on a map with tighten-only keys: null each child instead, so the
+    tighten-only rules decide per key, then drop the map if nothing is left."""
+    children = list(target[key])
+    lines = dict(p.lines)
+    for child in children:
+        lines.setdefault(key_path + (child,), line)
+    _apply(target[key], sources, {child: None for child in children}, key_path, replace(p, lines=lines))
+    if not target[key]:
+        name = dotted(key_path)
+        shadowed = _take_over(target, sources, key, name)
+        del target[key]
+        sources[name] = dict(_source(p.layer, p.path, line, shadowed), removed=True)
+
+
 def _apply(target: Dict[str, Any], sources: Dict[str, dict], meta: Mapping[str, Any], prefix: KeyPath,
            p: _Pass) -> None:
     for key, value in meta.items():
@@ -251,6 +272,12 @@ def _apply(target: Dict[str, Any], sources: Dict[str, dict], meta: Mapping[str, 
                 and (spec.tighten_only == "superset" or not isinstance(value, dict)) \
                 and _loosens(spec, value, target.get(key)):
             _ignore_loosening(sources, name, value, p, line)
+        elif p.layer == "repo" and not isinstance(value, dict) and isinstance(target.get(key), dict) \
+                and _guards_children(p.schema, name):
+            if value is None:
+                _clear_guarded_map(target, sources, key, key_path, line, p)
+            else:  # a scalar or list cannot hold the tighten-only keys below it
+                _ignore_loosening(sources, name, value, p, line)
         elif _invalid_list(spec, value):
             src = sources.setdefault(name, _source(None, None, None, []))
             src.setdefault("ignored", []).append({"layer": p.layer, "value": value, "reason": "invalid value"})
