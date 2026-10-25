@@ -4,6 +4,8 @@ import unittest
 from unittest import mock
 
 from notme import claims
+from notme.dryrun import Ledger
+from notme.gh import GhClient
 from notme.queue.board import BoardQueue, UnmappedState, priority_value
 from tests.fakes.fakegh import FakeRunner
 from tests.test_queue_labels import REPO, QueueTestCase, add_issue, make_cfg
@@ -418,6 +420,16 @@ class ReleaseAndMoveTests(BoardTestCase):
         self.assertEqual(self.status(5), "To Do")
         self.q.move(5, "in_progress", require_current="todo")
         self.assertEqual(self.status(5), "In progress")
+
+    def test_dry_run_claim_then_move_records_the_status_write(self):
+        ledger = Ledger(self.dir / "dry.jsonl")
+        self.gh = GhClient(self.ctx, runner=self.fake, dry_run=True, ledger=ledger)
+        self.q = self.queue("run-1")
+        self.q.claim(5)
+        self.q.move(5, "needs_review", require_current="in_progress")
+        self.assertEqual(self.status(5), "To Do")
+        writes = [e for e in ledger.read() if e["description"].startswith("set board status")]
+        self.assertEqual(len(writes), 2)
 
     def test_states_without_a_column_are_refused(self):
         with self.assertRaises(UnmappedState):

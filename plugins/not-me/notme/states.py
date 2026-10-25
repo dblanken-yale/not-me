@@ -118,9 +118,25 @@ def transition(current_labels: Sequence[str], frm: str, to: str, labels: Labels,
     return out
 
 
+def as_if(current_labels: Sequence[str], state: str, labels: Labels, kind: str = "issue") -> List[str]:
+    """The label set as if the item were in `state`: unchanged when it carries that label, else every main-state
+    label swapped for it. Dry run only, where earlier writes reached the ledger and not GitHub."""
+    current = list(current_labels)
+    name = labels.name(state)
+    if name.lower() in {c.lower() for c in current}:
+        return current
+    main = set(labels.current(current, kind))
+    return [c for c in current if not (labels.knows(c) and labels.abstract(c) in main)] + [name]
+
+
 def apply(gh: Any, repo: str, n: int, frm: str, to: str, labels: Labels, kind: str = "issue") -> List[str]:
-    """Read the labels, validate the edge, then replace the whole label set (PUT + read-back)."""
-    new = transition(gh.labels(repo, n), frm, to, labels, kind)
+    """Read the labels, validate the edge, then replace the whole label set (PUT + read-back).
+
+    In dry run an item not in `frm` is taken to be in it (the state earlier dry-run writes would have set)."""
+    current = gh.labels(repo, n)
+    if getattr(gh, "dry_run", False) and allowed(frm, to, kind):
+        current = as_if(current, frm, labels, kind)
+    new = transition(current, frm, to, labels, kind)
     gh.labels_set(repo, n, new)
     return new
 

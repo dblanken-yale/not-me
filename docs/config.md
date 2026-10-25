@@ -159,7 +159,7 @@ Anyone with push access can edit the repo layer, and it is committed, so not-me 
 | `mode` | set `dry-run` | set `live`. The value is ignored |
 | `enabled` | set `false` | set `true` over a lower `false` |
 | `queue.include_unassigned` | set `false` | set `true` over a lower `false` |
-| `queue.list_limit` | lower it | raise it above the lower layer's value, or set `null` |
+| `queue.list_limit` | lower it | raise it above the lower layer's value, or set it (or the whole `queue` map) to `null` |
 | `picking.value_max_chars` | lower it | raise it above the lower layer's value, or set `null` |
 | `picking.fields`, `picking.target_epics` and the `## Picking work` section | set anything | nothing: they only order eligible issues |
 | `protected_branches` | add names | remove names. Its `!name` entries are dropped |

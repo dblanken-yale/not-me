@@ -233,6 +233,8 @@ class LabelQueue(BaseQueue):
 
     def _relabel(self, n: int, to: str) -> None:
         names = self.gh.labels(self.tracker, n)
+        if self.gh.dry_run and self._has(names, "todo"):  # a dry-run claim set in_progress only in the ledger
+            names = states.as_if(names, "in_progress", self.labels)
         if self._has(names, "in_progress"):
             self.gh.labels_set(self.tracker, n, states.transition(names, "in_progress", to, self.labels))
 
@@ -248,7 +250,7 @@ class LabelQueue(BaseQueue):
     def move(self, n: int, state: str, require_current: Optional[str] = None) -> None:
         n = _num(n)
         current = self.labels.current(self.gh.labels(self.tracker, n))
-        if require_current is not None and require_current not in current:
+        if require_current is not None and require_current not in current and not self.gh.dry_run:
             raise states.StateMismatch(f"{self.tracker}#{n} is {', '.join(current) or 'in no state'}, "
                                        f"not {require_current}")
         frm = require_current or (current[0] if current else None)

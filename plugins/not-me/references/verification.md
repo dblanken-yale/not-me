@@ -47,11 +47,20 @@ Example: `CHECK baseline: 212 passed, 2 failed (test_tz_offset, test_locale_sort
 
 ## Visual check
 
-UI diffs need a visual check line in the run log and the PR. There are exactly two
-forms:
+UI diffs need a visual check line in the run log and another in the PR. The run
+log keeps the path. Text bound for GitHub never holds a local path.
+
+Run log:
 
 ```
 Visual check: <path of the screenshot you actually read>
+Visual check: not run (<named reason>)
+```
+
+PR body and any other text bound for GitHub:
+
+```
+Visual check: read <what was checked, in words>
 Visual check: not run (<named reason>)
 ```
 
@@ -59,8 +68,13 @@ Visual check: not run (<named reason>)
    compare it with what the issue asks for.
 2. The reason in the second form names the cause: `no env`, `no UI files changed`,
    `browser tool missing`. Never "skipped" or "not needed" alone.
-3. No other wording. "Looks fine" or "verified visually" without a path is a false
-   claim.
+3. No other wording. "Looks fine" or "verified visually" without a path (log) or
+   without words that say what was compared with what the issue asks (PR) is a
+   false claim. Example: `Visual check: read the settings page at 375px; the Save
+   button sits below the form as the issue asks`.
+4. Link a screenshot in the PR only when `prove.screenshots` names a branch
+   (`branch:<name>`) and the image already exists on it. The run never pushes
+   images.
 
 ## Light accessibility pass
 
@@ -114,7 +128,7 @@ Before you post, check the claims this run originated with a second model.
 - [ ] Reproduced the bug, or held the issue when it could not be reproduced.
 - [ ] Saw each new test fail before the change and pass after it.
 - [ ] Ran every CI step locally with the project's own commands.
-- [ ] Wrote one `Visual check:` line in one of the two allowed forms for UI diffs.
+- [ ] Wrote a `Visual check:` line for UI diffs: path form in the log, words form in the PR.
 - [ ] Did the accessibility pass and flagged what was not auto-fixed.
 - [ ] Ran the cross-model claim check, or logged that `models.verifier` is `none`.
 - [ ] Waited on CI for the pushed head and stopped at `limits.fix_loop`.

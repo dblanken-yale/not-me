@@ -248,6 +248,18 @@ class IssueTests(base.CliCase):
         pr = self.ok("transition", "3", "--kind", "pr", "--from", "needs_review", "--to", "needs_work")
         self.assertEqual(pr["labels"], ["needs work"])
 
+    def test_dry_run_assumes_the_state_earlier_dry_run_steps_set(self):
+        moved = self.ok("move-issue", "1", "--to", "needs_review", "--require-current", "in_progress", "--dry-run")
+        self.assertEqual(moved["to"], "needs_review")
+        payload = self.ok("transition", "1", "--from", "in_progress", "--to", "needs_review", "--dry-run")
+        self.assertEqual(payload["labels"], ["needs review"])
+        self.assertEqual(self.fake.writes_made(), [])
+        self.assertEqual(things(self.fake)["1"]["labels"], ["to do"])
+        code, payload, _ = self.cli("transition", "1", "--from", "in_progress", "--to", "needs_review")
+        self.assertEqual((code, payload["kind"]), (1, "illegal_transition"))
+        code, payload, _ = self.cli("transition", "1", "--from", "todo", "--to", "ready_to_merge", "--dry-run")
+        self.assertEqual((code, payload["kind"]), (1, "illegal_transition"))
+
     def test_issue_withholds_text_from_untrusted_authors(self):
         self.assertEqual(self.ok("issue", "1")["body"], "Body of First issue")
         things(self.fake)["1"]["author"] = "mallory"

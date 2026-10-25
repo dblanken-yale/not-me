@@ -21,8 +21,9 @@ Make one work directory in the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/
    - `## References`: the issue as `<owner>/<repo>#N`, with the closing keyword
      from `standards.closing_keyword` (`auto`: `Closes <owner>/<repo>#N` when the
      tracker is this repo, else no keyword and the full ref). Never a bare `#N`.
-   - For a UI diff, the `Visual check:` line from the run, and any accessibility
-     finding not auto-fixed, with file and line.
+   - For a UI diff, the PR form of the `Visual check:` line, in words with
+     no local path (see `verification.md`), and any accessibility finding not
+     auto-fixed, with file and line.
    - Any gate finding left unfixed, with a one-line reason and a named login.
 3. Do not add the attribution line yourself. `notme pr-open` adds the configured
    one.

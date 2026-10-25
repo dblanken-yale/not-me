@@ -15,8 +15,16 @@ Run these in order. Log each as a `GATE` line with its result.
    and then pass (see `verification.md`).
 2. **Simplify.** When the diff is over about 20 changed lines, not counting tests
    and lock files, run `/simplify` and apply what it finds.
-3. **Code review.** Run the `pr-review-toolkit:code-reviewer` agent on the diff.
-   Do not rely on `/code-review`: it may be user-invocation only.
+3. **Code review.** Run the `pr-review-toolkit:code-reviewer` agent on the diff
+   when it is in the list of available agent types. When it is not, run the review
+   as a foreground general-purpose subagent with a code review brief, the way step 4
+   runs the security review. Name the reviewer that ran in the log line, for example
+   `GATE code-review reviewer=pr-review-toolkit:code-reviewer pass` or
+   `reviewer=general-purpose`. Decide from the available agent list before
+   dispatching: the fallback applies only when the agent is not listed. A listed
+   agent whose dispatch fails or times out is a failed step: `WARN` with the exact
+   error, the gate is not claimed as passed, and no fallback. Do not rely on
+   `/code-review`: it may be user-invocation only.
 4. **Security review.** Run it as a foreground general-purpose subagent with a
    security review brief. Not through the Skill tool: a skill run there ends on its
    own report and the run loses control.
@@ -49,7 +57,10 @@ follow-up for @octocat.
 
 ## When a gate step cannot run
 
-1. A tool or agent that is missing is a `WARN` line with the exact error.
+1. A tool or agent that is missing is a `WARN` line with the exact error. The
+   one exception is the optional code reviewer agent in step 3 when it is absent
+   from the agent list: the general-purpose fallback review counts as the step
+   having run, and the `reviewer=` field says so.
 2. The run does not claim the gate passed. The PR says which step did not run and
    why.
 3. A failed step is never retried by routing around it, for example by running a
@@ -65,7 +76,7 @@ follow-up for @octocat.
 
 - [ ] Saw every new test fail and then pass.
 - [ ] Ran `/simplify` when the diff is over about 20 changed lines.
-- [ ] Ran the code-reviewer agent and briefed it to flag only bugs and missed requirements.
+- [ ] Ran the code review (the named agent, or a general-purpose subagent when it is not installed), briefed it to flag only bugs and missed requirements, and logged `reviewer=`.
 - [ ] Ran the security review as a foreground general-purpose subagent.
 - [ ] Ran the CI lint command on the whole tree and the full tests last.
 - [ ] Ran every step under `## Gate additions` in `verify.md`.

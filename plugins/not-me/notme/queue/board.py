@@ -199,6 +199,7 @@ class BoardQueue(BaseQueue):
         n = _num(n)
         board = self._fetch()
         item = self._item(board, n)
-        if require_current is not None and self.abstract(item["status"]) != require_current:
+        if require_current is not None and self.abstract(item["status"]) != require_current \
+                and not self.gh.dry_run:  # a dry run's earlier moves reached only the ledger
             raise claims.ClaimLost(f"{self.tracker}#{n} is in {item['status']!r}, not {self.column(require_current)!r}")
         self._set_status(board, item, state)

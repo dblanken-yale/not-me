@@ -111,6 +111,7 @@ The full list is in `plugins/not-me/references/prohibitions.md`. No config setti
 - Bash, for `notme`, `git`, `gh`, and `playwright-cli`.
 - Read, Write, Edit, and MultiEdit, for code in the checkout and for body files in the private temp directory.
 - Subagents (the Agent tool), to hand units of work to implementers and reviewers. The `models.*` keys choose the model for each. A `--bg` run needs `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` of at least 3, and `/not-me:doctor` checks it.
+- Optional: the `pr-review-toolkit` plugin's `code-reviewer` agent, for the gate's code review step. Without it, a general-purpose subagent runs the review (see `install.md`).
 - Any GitHub MCP tool you have installed, which the hook also covers (below).
 
 ### What the PreToolUse hook intercepts
