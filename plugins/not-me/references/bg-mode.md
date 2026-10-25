@@ -23,7 +23,9 @@ also in `write-back.md`; this file owns the contract around it.
 2. `AskUserQuestion` is not available. There is no question window. For every
    choice, take the safe default and log QUESTION, DECISION, UNDO (see
    `autonomy-and-logging.md`).
-3. Do the work, finish the log, and return exactly one line as the final message.
+3. Run every subagent you dispatch (implementers, reviewers, fix rounds) in the
+   foreground as `delegation.md` says. Never resume one with `SendMessage`.
+4. Do the work, finish the log, and return exactly one line as the final message.
    Nothing before it, nothing after it.
 
 ## The result line

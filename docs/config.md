@@ -266,7 +266,7 @@ repos:
 | `orchestrate` (default) | The running session is the orchestrator. It splits the work into units and sends each to a model by kind: read-only support to `models.triage`, judgment-heavy or security-sensitive units to `models.review`, everything else to `models.implement`. The `## Delegation` section of `standards.md` lists the paths and kinds that count as judgment-heavy |
 | `single` | Everything, including the run itself, uses `models.single_model`. No classification |
 
-Related keys: `models.bg` is the model for `--bg` runs. `models.verifier` is the model that double-checks claims before posting: `auto` picks one from a different model family, `none` skips the check and logs that it was skipped. `models.max_tries` is how many tries a unit gets before the orchestrator does it itself: first the dispatched agent, then the same agent with the exact failure, then a fresh agent one tier up.
+Related keys: `models.bg` is the model for `--bg` runs. `models.verifier` is the model that double-checks claims before posting: `auto` picks one from a different model family, `none` skips the check and logs that it was skipped. `models.max_tries` is how many tries a unit gets before the orchestrator does it itself: first the dispatched agent, then a fresh agent on the same model with the exact failure, then a fresh agent one tier up.
 
 The accepted values for `models.strategy` are `orchestrate` and `single`. The other model keys take the model names your Claude Code client accepts.
 

@@ -211,8 +211,10 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/pr-shape.md` and
    (`branching.md`). Restore a stash with `notme git unstash <sha>`. A tree you
    cannot clean is a `WARN`.
 2. `notme log finish <path> --status "PR <repo>#<pr> needs review"`.
-3. `notme prove-target <repo>#<pr>` finds a URL: start `/not-me:prove <repo>#<pr>`
-   in the background. No target: skip it.
+3. `notme prove-target <repo>#<pr>` finds a URL: when attended, start
+   `/not-me:prove <repo>#<pr>` in the background. Under `--bg`, do not start it;
+   log a `DECISION` that the proof is pending for a person or a later run, and
+   add ` - prove pending` to the result line note. No target: skip it.
 4. `notify.command` set and the result is not NONE: run it with the result line
    and the log path.
 5. Print the result line: `PR <repo>#<pr> opened  log=<path>`.
