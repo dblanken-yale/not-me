@@ -1870,18 +1870,20 @@ def cmd_mode_live(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     arg("--init-token", action="store_true", help="create the operator token (a person only; shown once)")])
 def cmd_doctor(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """Check the tools and setup: python, git and gh versions, config, mode (a warning when `mode: live` is set but
-    not confirmed by `notme mode live`), gh auth and scopes, guard self-test, spawn depth. Exit 7 when the only failed required checks are gh, gh auth or gh scopes; exit 1 when another
+    not confirmed by `notme mode live`), config files (a warning when neither the global nor the repo layer holds a not-me config file), gh auth
+    and scopes, guard self-test, spawn depth. Exit 7 when the only failed required checks are gh, gh auth or gh scopes; exit 1 when another
     required check fails. --init-token instead creates <not-me home>/operator-token (random, mode 0600) and shows
     it once; only a person may run it (kind human_only otherwise), and an existing token is never replaced
     (kind token_exists: delete the file to make a new one).
 
-    Output: ok, checks (name, ok, detail, required); with --init-token token, path
+    Output: ok, checks (name, ok, detail, required, fix, hint); with --init-token token, path
     """
     if args.init_token:
         return _init_token(ctx)
     checks = doctor_mod.run(ctx.deps.runner or gh_mod._default_runner, ctx.config_errors(), lambda: ctx.gh,
                             ctx.guard_state, ctx.env,
-                            doctor_mod.mode_check(ctx.meta.get("mode"), ctx.cfg.live_unconfirmed))
+                            doctor_mod.mode_check(ctx.meta.get("mode"), ctx.cfg.live_unconfirmed),
+                            config_files=ctx.cfg.layers.files)
     verdict = doctor_mod.exit_kind(checks)
     if verdict:
         code = ExitCode.DEPENDENCY if verdict == "dependency" else ExitCode.ERROR
