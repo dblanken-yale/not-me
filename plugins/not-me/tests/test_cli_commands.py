@@ -92,6 +92,48 @@ class IssueTests(base.CliCase):
         things(self.fake)["1"]["labels"] = []
         self.assertEqual(self.ok("pick-issue"), {"none": True})
 
+    def test_pick_keeps_the_top_level_keys_and_lists_the_eligible_issues(self):
+        things(self.fake)["2"]["labels"] = ["to do"]
+        self.fake.add_assignee(REPO, 2, "octocat")
+        things(self.fake)["1"]["reactions"] = [{"user": "hubot", "content": "+1"}, {"user": "mallory", "content": "+1"}]
+        picked = self.ok("pick-issue")
+        self.assertEqual({k: picked[k] for k in ("number", "title", "author", "labels", "parent", "candidates")},
+                         {"number": 1, "title": "First issue", "author": "octocat", "labels": ["to do"],
+                          "parent": None, "candidates": 2})
+        self.assertTrue(picked["url"].endswith("/issues/1"))
+        self.assertEqual([i["number"] for i in picked["issues"]], [1, 2])
+        self.assertEqual(picked["issues"][0]["reactions"], {"+1": 1})
+        self.assertEqual((picked["truncated"], picked["held_back"]), (False, []))
+        self.assertNotIn("Body of", json.dumps(picked))
+
+    def test_pick_excludes_issues_from_the_list_and_the_top(self):
+        things(self.fake)["2"]["labels"] = ["to do"]
+        self.fake.add_assignee(REPO, 2, "octocat")
+        picked = self.ok("pick-issue", "--exclude", "1")
+        self.assertEqual(picked["number"], 2)
+        self.assertEqual([i["number"] for i in picked["issues"]], [2])
+        self.assertEqual(picked["candidates"], 1)
+
+    def test_pick_list_is_capped_by_queue_list_limit(self):
+        things(self.fake)["2"]["labels"] = ["to do"]
+        self.fake.add_assignee(REPO, 2, "octocat")
+        self.tc.write("global", "project", base.GLOBAL_PROJECT.replace(
+            "operator: octocat", "operator: octocat\nqueue: {list_limit: 1}"))
+        picked = self.ok("pick-issue")
+        self.assertEqual([i["number"] for i in picked["issues"]], [1])
+        self.assertEqual((picked["candidates"], picked["truncated"]), (2, True))
+
+    def test_pick_removes_an_issue_waiting_behind_an_earlier_epic_sibling(self):
+        things(self.fake)["2"]["labels"] = ["epic"]
+        things(self.fake)["2"]["body"] = "- [ ] #5\n- [ ] #1\n"
+        things(self.fake)["5"] = {"number": 5, "title": "Earlier", "body": "", "state": "OPEN", "labels": [],
+                                  "assignees": [], "author": "octocat", "comments": [], "kind": "issue"}
+        self.assertEqual(self.ok("pick-issue"), {"none": True, "held_back": [{"number": 1, "behind": 5, "epic": 2}]})
+        things(self.fake)["5"]["state"] = "CLOSED"
+        picked = self.ok("pick-issue")
+        self.assertEqual((picked["number"], picked["parent"], picked["held_back"]), (1, 2, []))
+        self.assertEqual(picked["issues"][0]["position"], 2)
+
     def test_pick_then_claim_then_release(self):
         picked = self.ok("pick-issue")
         self.assertEqual(picked["number"], 1)

@@ -153,8 +153,10 @@ class CandidateTests(QueueTestCase):
         add_issue(self.fake, 13, created="2026-02-20T00:00:00Z")
         add_issue(self.fake, 20, created="2026-01-01T00:00:00Z")  # older, but loose
         got = self.q.candidates()
-        self.assertEqual([c.number for c in got], [13, 11, 20, 12])
-        self.assertEqual([c.parent for c in got], [10, 10, None, None])
+        self.assertEqual([c.number for c in got], [13, 20, 12])  # 11 waits behind 13, earlier in the epic
+        self.assertEqual([c.parent for c in got], [10, None, None])
+        self.assertEqual([c.position for c in got], [1, None, None])
+        self.assertEqual(self.q.held_back, [{"number": 11, "behind": 13, "epic": 10}])
 
     def test_untrusted_epic_does_not_order_its_children(self):
         add_issue(self.fake, 10, labels=["epic"], author="mallory", body="- [ ] #13\n- [ ] #11\n")
@@ -180,6 +182,131 @@ class CandidateTests(QueueTestCase):
         self.assertEqual((c.number, c.title, c.author, c.labels, c.is_epic, c.created),
                          (5, "Fix it", "octocat", ["to do"], False, "2026-02-03T00:00:00Z"))
         self.assertTrue(c.url.endswith("/issues/5"))
+
+
+class EpicOrderTests(QueueTestCase):
+    """An issue inside a trusted epic is not offered while an earlier open, unstarted sibling exists."""
+    cfg_overrides = {"include_unassigned": True}
+
+    def setUp(self):
+        super().setUp()
+        self.fake.state["repos"][REPO]["things"].pop("1")
+        self.fake.state["repos"][REPO]["things"].pop("2")
+        add_issue(self.fake, 10, labels=["epic"], body="- [ ] #11\n- [ ] #12\n- [ ] #13\n")
+        add_issue(self.fake, 12, created="2026-01-01T00:00:00Z")
+        add_issue(self.fake, 13)
+
+    def numbers(self):
+        return [c.number for c in self.q.candidates()]
+
+    def test_a_later_sibling_waits_for_an_earlier_unstarted_one(self):
+        add_issue(self.fake, 11, labels=["paused"])  # not eligible, still open and unstarted
+        self.assertEqual(self.numbers(), [])
+        self.assertEqual(self.q.held_back, [{"number": 12, "behind": 11, "epic": 10},
+                                            {"number": 13, "behind": 11, "epic": 10}])
+
+    def test_an_eligible_earlier_sibling_comes_alone(self):
+        add_issue(self.fake, 11, created="2026-03-01T00:00:00Z")
+        self.assertEqual(self.numbers(), [11])
+        self.assertEqual([h["number"] for h in self.q.held_back], [12, 13])
+
+    def test_a_blocked_earlier_sibling_releases_the_next(self):
+        add_issue(self.fake, 11, labels=["blocked"])
+        self.assertEqual(self.numbers(), [12])
+        self.assertEqual(self.q.held_back, [{"number": 13, "behind": 12, "epic": 10}])
+
+    def test_a_claimed_earlier_sibling_releases_the_next(self):
+        for labels, assignees in ((["in progress"], []), (["needs review"], []), ([], ["hubot"]),
+                                  (["to do"], ["hubot"])):
+            with self.subTest(labels=labels, assignees=assignees):
+                add_issue(self.fake, 11, labels=labels, assignees=assignees)
+                self.assertEqual(self.numbers(), [12])
+
+    def test_a_closed_earlier_sibling_releases_the_next(self):
+        add_issue(self.fake, 11, state="CLOSED")
+        self.assertEqual(self.numbers(), [12])
+
+    def test_a_missing_earlier_sibling_does_not_hold_anything(self):
+        self.assertEqual(self.numbers(), [12])  # #11 cannot be read
+
+    def test_an_untrusted_epic_orders_and_holds_nothing(self):
+        self.thing(10)["author"] = "mallory"
+        add_issue(self.fake, 11, labels=["paused"])
+        self.assertEqual(self.numbers(), [12, 13])
+        self.assertEqual(self.q.held_back, [])
+        self.assertEqual([c.parent for c in self.q.candidates()], [None, None])
+
+    def test_held_back_in_any_trusted_epic(self):
+        add_issue(self.fake, 11, state="CLOSED")
+        add_issue(self.fake, 20, labels=["epic"], body="- [ ] #14\n- [ ] #13\n")
+        add_issue(self.fake, 14, labels=["paused"])
+        self.assertEqual(self.numbers(), [12])
+        self.assertEqual(self.q.held_back, [{"number": 13, "behind": 12, "epic": 10}])
+
+    def test_sibling_reads_stop_at_the_first_holder(self):
+        add_issue(self.fake, 10, labels=["epic"], body="- [ ] #11\n- [ ] #30\n- [ ] #31\n- [ ] #12\n")
+        add_issue(self.fake, 11, labels=["to do", "paused"])
+        self.assertEqual(self.numbers(), [13])
+        views = [c for c in self.fake.calls if c[:2] == ["issue", "view"]]
+        self.assertEqual([c[2] for c in views], [])  # #11 came with the to-do list: no reads at all
+
+
+class FactsTests(QueueTestCase):
+    cfg_overrides = {"include_unassigned": True}
+
+    def setUp(self):
+        super().setUp()
+        self.fake.state["repos"][REPO]["things"].pop("1")
+        self.fake.state["repos"][REPO]["things"].pop("2")
+
+    def test_label_queue_facts(self):
+        add_issue(self.fake, 10, labels=["epic"], body="- [ ] #5\n")
+        add_issue(self.fake, 5, created="2026-02-20T12:00:00Z", body="SECRET BODY TEXT")
+        add_issue(self.fake, 6, state="OPEN")
+        self.thing(5)["reactions"] = [{"user": "octocat", "content": "+1"}, {"user": "hubot", "content": "+1"},
+                                      {"user": "hubot", "content": "heart"}, {"user": "mallory", "content": "+1"},
+                                      {"user": "monalisa", "content": "rocket"}]
+        self.thing(5)["blocking"] = [6]
+        facts = self.q.facts(self.q.candidates())
+        five = [f for f in facts if f["number"] == 5][0]
+        self.assertEqual(five["reactions"], {"+1": 2, "heart": 1})
+        self.assertEqual(five["blocking"], [{"repo": REPO, "number": 6, "state": "open"}])
+        self.assertEqual(five["blocked_by"], [])
+        self.assertEqual((five["parent"], five["position"]), (10, 1))
+        self.assertEqual((five["created"], five["age_days"]), ("2026-02-20T12:00:00Z", 9))
+        self.assertEqual(five["labels"], ["to do"])
+        self.assertIsNone(five["board"])
+        self.assertNotIn("SECRET", json.dumps(facts))
+        self.assertNotIn("body", five)
+
+    def test_a_failing_dependency_read_is_null_for_that_issue_only(self):
+        add_issue(self.fake, 5)
+        add_issue(self.fake, 6)
+        self.thing(5)["deps_fail"] = True
+        facts = {f["number"]: f for f in self.q.facts(self.q.candidates())}
+        self.assertIsNone(facts[5]["blocked_by"])
+        self.assertIsNone(facts[5]["blocking"])
+        self.assertEqual(facts[6]["blocked_by"], [])
+        self.assertEqual(facts[5]["reactions"], {})
+
+    def test_a_full_first_page_of_reactions_is_unknown(self):
+        add_issue(self.fake, 5)
+        add_issue(self.fake, 6)
+        self.thing(5)["reactions"] = [{"user": "octocat", "content": "+1"}] + \
+            [{"user": f"user{i}", "content": "-1"} for i in range(99)]  # 100: there may be a second page
+        self.thing(6)["reactions"] = [{"user": "octocat", "content": "+1"}] * 99
+        facts = {f["number"]: f for f in self.q.facts(self.q.candidates())}
+        self.assertIsNone(facts[5]["reactions"])
+        self.assertEqual(facts[6]["reactions"], {"+1": 99})
+
+    def test_list_limit_comes_from_config(self):
+        self.assertIsNone(self.q.list_limit())  # not set: no cap
+        self.cfg = make_cfg(include_unassigned=True, list_limit=2)
+        self.assertEqual(self.queue("run-1").list_limit(), 2)
+        for bad in (0, -1, "3", True):
+            self.cfg = make_cfg(list_limit=bad)
+            with self.assertRaises(ValueError, msg=bad):
+                self.queue("run-1").list_limit()
 
 
 class AssignmentTests(QueueTestCase):
@@ -230,11 +357,12 @@ class AssignmentTests(QueueTestCase):
         self.assertEqual(self.numbers(), [])
         self.assertEqual(self.q.unassigned_skipped, 1)
 
-    def test_an_unassigned_epic_child_waits_for_the_setting(self):
+    def test_an_unassigned_earlier_epic_child_holds_back_the_later_one(self):
         add_issue(self.fake, 10, labels=["epic"], body="- [ ] #11\n- [ ] #12\n")
-        add_issue(self.fake, 11)
+        add_issue(self.fake, 11)  # not eligible (nobody assigned), but open and unstarted
         add_issue(self.fake, 12, assignees=["octocat"])
-        self.assertEqual([(c.number, c.parent) for c in self.q.candidates()], [(12, 10)])
+        self.assertEqual(self.q.candidates(), [])
+        self.assertEqual(self.q.held_back, [{"number": 12, "behind": 11, "epic": 10}])
 
 
 class ClaimTests(QueueTestCase):

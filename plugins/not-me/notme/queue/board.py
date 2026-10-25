@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .. import claims
 from ..gh import _node, _num, _owner, login_of
-from . import BaseQueue, Candidate, Claim
+from . import UNMAPPED_COLUMN, BaseQueue, Candidate, Claim, sibling_info
 
 # abstract state -> key in queue.board_states. Other states (needs_work, question, ...) have no column.
 ABSTRACT_TO_BOARD = {"todo": "todo", "in_progress": "in_progress", "needs_review": "in_review", "blocked": "blocked"}
@@ -82,8 +82,7 @@ class BoardQueue(BaseQueue):
                 "assignees": [x["login"] for x in (content.get("assignees") or {}).get("nodes") or []],
                 "repo": (content.get("repository") or {}).get("nameWithOwner"),
                 "status": (node.get("fieldValueByName") or {}).get("name"),
-                "priorities": [priority_value((node.get(f"p{i}") or {}).get("name"))
-                               for i in range(len(self.priority_fields))],
+                "field_values": [(node.get(f"p{i}") or {}).get("name") for i in range(len(self.priority_fields))],
             })
         return {"project_id": project.get("id"), "field_id": field.get("id"),
                 "options": {o["name"]: o["id"] for o in field.get("options") or []}, "items": items}
@@ -108,6 +107,12 @@ class BoardQueue(BaseQueue):
                 return abstract
         return None
 
+    def _sibling_column(self, column: Optional[str]) -> Optional[str]:
+        """The abstract state of a board column for epic order: None only when the item has no Status value."""
+        if not column:
+            return None
+        return self.abstract(column) or UNMAPPED_COLUMN
+
     def _set_status(self, board: Dict[str, Any], item: Dict[str, Any], abstract: str) -> None:
         column = self.column(abstract)
         option = board["options"].get(column)
@@ -118,7 +123,9 @@ class BoardQueue(BaseQueue):
     # --- queue ---
 
     def candidates(self) -> List[Candidate]:
-        self.unassigned_skipped = 0
+        """To Do items, by priority fields (higher first, none last), then oldest. An issue behind an earlier
+        open, unstarted issue in a trusted epic is left out (see held_back)."""
+        self.unassigned_skipped, self.held_back = 0, []
         opt_in = self.queue_cfg.get("opt_in_label")
         todo = self.board_states.get("todo")
         skip = set()
@@ -128,23 +135,27 @@ class BoardQueue(BaseQueue):
             except KeyError:
                 pass
         found = []
-        for item in self._fetch()["items"]:
+        items = [i for i in self._fetch()["items"] if (i["repo"] or "").lower() == self.tracker.lower()]
+        for item in items:
             names = {n.lower() for n in item["labels"]}
-            if ((item["repo"] or "").lower() != self.tracker.lower() or item["status"] != todo
+            if (item["status"] != todo
                     or str(item["state"]).upper() != "OPEN"
                     or (opt_in and opt_in.lower() not in names) or names & skip
                     or not self.trusted(item["author"])
                     or not self._assignees_allow(item["assignees"])):  # last, so only eligible ones are counted
                 continue
             found.append(self._candidate(item))
-        return sorted(found, key=Candidate.sort_key)
+        known = {i["number"]: sibling_info(i, self._sibling_column(i["status"])) for i in items}
+        return sorted(self.epic_order(found, self._read_epics(), known), key=Candidate.sort_key)
 
-    @staticmethod
-    def _candidate(item: Dict[str, Any]) -> Candidate:
-        priority: Tuple = tuple((1, 0) if v is None else (0, -v) for v in item["priorities"])  # higher first, null last
+    def _candidate(self, item: Dict[str, Any]) -> Candidate:
+        values = [priority_value(v) for v in item["field_values"]]
+        priority: Tuple = tuple((1, 0) if v is None else (0, -v) for v in values)  # higher first, null last
         return Candidate(number=item["number"], title=item["title"], url=item["url"], author=item["author"],
                          labels=item["labels"], priority=priority, is_epic=False, parent=None,
-                         created=item["created"])
+                         created=item["created"],
+                         board={"status": item["status"],
+                                "fields": dict(zip(self.priority_fields, item["field_values"]))})
 
     def state(self, n: int) -> Optional[str]:
         return self.abstract(self._item(self._fetch(), _num(n))["status"])
