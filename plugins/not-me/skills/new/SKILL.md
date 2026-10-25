@@ -142,8 +142,8 @@ the effective verify doc; never invent a test or lint command.
 2. Reproduce a bug on the base before fixing. Cannot reproduce, or already fixed
    on the default branch: HELD (failure table). Do not guess at a fix.
 3. Red then green for every new behaviour.
-4. UI diff: one `Visual check:` line in one of the two allowed forms, and the
-   light accessibility pass.
+4. UI diff: one `Visual check:` line (path form in the log, words form in the
+   PR), and the light accessibility pass.
 5. Gate: tests red then green, `/simplify` when over about 20 changed lines, the
    code review (the `pr-review-toolkit` agent, or a general-purpose subagent when
    it is not installed), the security review as a foreground general-purpose
