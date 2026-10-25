@@ -106,7 +106,8 @@ def merge_section(lower: str, upper: str) -> str:
 @dataclass
 class Roles:
     """The effective role table. `configured` is false when it has no rows (the one-approval rule applies).
-    `ignored` holds repo-layer rows dropped because they would change a trusted row (see trusted_merge)."""
+    `ignored` holds repo-layer rows dropped because they would change a trusted row, and repo-layer pass labels
+    dropped because only the trusted layers set pass labels (see trusted_merge; `part` says which)."""
 
     rows: List[RoleRow] = field(default_factory=list)
     ignored: List[Dict[str, str]] = field(default_factory=list)
@@ -143,21 +144,32 @@ def _same(a: RoleRow, b: RoleRow) -> bool:
     return a.role.lower() == b.role.lower() and a.pass_label.lower() == b.pass_label.lower()
 
 
+LABEL_REASON = "repo layer may not name pass labels; set them in the global role.md"
+
+
 def trusted_merge(trusted: Iterable[RoleRow], repo: Iterable[RoleRow]) -> Roles:
     """The approval gate's table: the trusted rows (default and global layers) plus repo-layer rows for logins the
-    trusted rows lack. The repo layer is committed, so it may only add: a repo row that blanks or changes a trusted
-    row's role or pass label is ignored and listed in `ignored`, and a repo table without a trusted login keeps
+    trusted rows lack. The repo layer is committed, so it may only add reviewers and roles, never pass labels:
+    not-me adds and removes pass labels on PRs, so a repo-named one could strip any label (`do not merge`). A repo
+    row that blanks or changes a trusted row's role or pass label is ignored; a new repo row keeps its login and
+    role and drops its pass label, which is listed in `ignored` unless it is the trusted label of that role (a
+    repo reviewer in a trusted role earns that role's trusted label). A repo table without a trusted login keeps
     that login's trusted row."""
     rows = list(trusted)
+    labels = {role: label.lower() for role, label in Roles(rows).pass_labels().items()}
     index = {r.login.lower(): r for r in rows}
     ignored: List[Dict[str, str]] = []
     for row in repo:
         known = index.get(row.login.lower())
         if known is None:
+            if row.pass_label and row.pass_label.lower() != labels.get(row.role.lower()):
+                ignored.append({"login": row.login, "role": row.role, "pass_label": row.pass_label,
+                                "part": "pass_label", "reason": LABEL_REASON})
+            row = RoleRow(row.login, row.role, "")
             index[row.login.lower()] = row
             rows.append(row)
         elif not _same(known, row):
-            ignored.append({"login": row.login, "role": row.role, "pass_label": row.pass_label,
+            ignored.append({"login": row.login, "role": row.role, "pass_label": row.pass_label, "part": "row",
                             "reason": "repo layer may only add role rows"})
     return Roles(rows, ignored)
 

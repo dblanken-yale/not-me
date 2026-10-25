@@ -179,16 +179,21 @@ class ConfigTests(unittest.TestCase):
     def test_repo_layer_may_add_role_rows_with_extends(self):
         self.tc.write("global", "role", role_doc("octocat | code | pass code review"))
         self.tc.write("repo", "role", "---\nextends: global\n---\n## Roles\n\n| GitHub login | Role | Pass label |\n"
-                                      "|---|---|---|\n| hubot | functional | pass functional review |\n")
+                                      "|---|---|---|\n| hubot | code | |\n")
         cfg = self.tc.load()
         self.assertEqual(cfg.roles().describe(),
                          [{"login": "octocat", "role": "code", "pass_label": "pass code review"},
-                          {"login": "hubot", "role": "functional", "pass_label": "pass functional review"}])
+                          {"login": "hubot", "role": "code", "pass_label": "pass code review"}])
+        self.assertEqual(cfg.roles().ignored, [])
         self.assertEqual(cfg.check(), [])
 
     def test_repo_layer_may_set_roles_on_its_own(self):
         self.tc.write("repo", "role", ROLES)
-        self.assertTrue(self.tc.load().roles().configured)
+        current = self.tc.load().roles()
+        self.assertTrue(current.configured)
+        self.assertEqual(current.pass_labels(), {})  # the reviewers count, their labels are global-only
+        self.assertEqual([(i["login"], i["part"]) for i in current.ignored],
+                         [("octocat", "pass_label"), ("hubot", "pass_label")])
 
     def test_repo_role_doc_with_an_empty_table_keeps_the_global_rows(self):
         self.tc.write("global", "role", ROLES)
@@ -203,10 +208,33 @@ class ConfigTests(unittest.TestCase):
                                                "monalisa | qa | pass qa"))
         cfg = self.tc.load()
         self.assertEqual(cfg.roles().pass_label_of("octocat"), "pass code review")
-        self.assertEqual(cfg.roles().pass_label_of("monalisa"), "pass qa")
+        self.assertEqual(cfg.roles().pass_label_of("monalisa"), "")
         ignored = cfg.explain()["roles"]["ignored"]
-        self.assertEqual([i["login"] for i in ignored], ["octocat"])
+        self.assertEqual([(i["login"], i["part"]) for i in ignored], [("octocat", "row"), ("monalisa", "pass_label")])
         self.assertTrue(any("row for octocat is ignored" in w for w in cfg.warnings), cfg.warnings)
+
+    def test_repo_row_may_not_name_a_new_pass_label(self):
+        self.tc.write("global", "role", ROLES)
+        self.tc.write("repo", "role", role_doc("monalisa | qa | do not merge"))
+        cfg = self.tc.load()
+        current = cfg.roles()
+        self.assertNotIn("do not merge", [x.lower() for x in current.pass_labels().values()])
+        self.assertEqual(current.pass_label_of("monalisa"), "")
+        self.assertEqual(current.role_of("monalisa"), "qa")
+        self.assertIn({"login": "monalisa", "role": "qa", "pass_label": ""}, current.describe())
+        ignored = cfg.explain()["roles"]["ignored"]
+        self.assertEqual([(i["login"], i["pass_label"]) for i in ignored], [("monalisa", "do not merge")])
+        self.assertIn("may not name pass labels", ignored[0]["reason"])
+        self.assertTrue(any("monalisa" in w and "do not merge" in w and "may not name pass labels" in w
+                            for w in cfg.warnings), cfg.warnings)
+
+    def test_repo_row_joining_a_trusted_role_earns_the_trusted_label(self):
+        self.tc.write("global", "role", ROLES)
+        self.tc.write("repo", "role", role_doc("monalisa | code | ", "dev | functional | Pass Functional Review"))
+        cfg = self.tc.load()
+        self.assertEqual(cfg.roles().pass_label_of("monalisa"), "pass code review")
+        self.assertEqual(cfg.roles().pass_label_of("dev"), "pass functional review")
+        self.assertEqual(cfg.roles().ignored, [])
 
     def test_repo_roster_cannot_drop_a_trusted_reviewer_but_may_add_one(self):
         self.tc.write("repo", "project", "---\nschema: 1\n---\n# Project\n\n## Roster\n\n"
@@ -222,6 +250,7 @@ class ConfigTests(unittest.TestCase):
                             for e in errs), errs)
 
     def test_errors_reach_check_and_explain_with_the_file(self):
+        self.tc.write("global", "role", role_doc("octocat | code | needs review"))
         self.tc.write("repo", "role", role_doc("stranger | code | needs review"))
         cfg = self.tc.load()
         errs = cfg.check()
@@ -249,8 +278,8 @@ class ReviewPostCliTests(base.CliCase):
             self.defs[name] = {"color": "000000", "description": ""}
         self.body = self.write_file("body.md", "Reviewed.\n")
 
-    def roles_on(self, text=ROLES):
-        self.tc.write("repo", "role", text)
+    def roles_on(self, text=ROLES, layer="global"):
+        self.tc.write(layer, "role", text)
 
     def others(self, *reviews):
         things(self.fake)["3"]["reviews"].extend({"id": 900 + i, "user": u, "state": s, "body": ""}
@@ -395,8 +424,34 @@ class ReviewPostCliTests(base.CliCase):
         self.ok("labels-ensure")
         self.assertIn("pass functional review", self.defs)
 
+    def test_repo_only_row_naming_do_not_merge_leaves_it_on_the_pr(self):
+        self.roles_on(role_doc("hubot | functional | do not merge"), layer="repo")
+        self.defs["do not merge"] = {"color": "000000", "description": ""}
+        things(self.fake)["3"]["labels"] = ["needs review", "do not merge"]
+        out = self.post()
+        self.assertEqual(self.labels(), ["needs review", "do not merge"])
+        self.assertNotIn("do not merge", out["approval"]["pass_labels"])
+
+    def test_repo_pass_label_is_not_managed_added_or_created(self):
+        self.tc.write("global", "role", ROLES)
+        self.roles_on(role_doc("monalisa | qa | pass qa"), layer="repo")
+        check = self.ok("labels-ensure", "--check")
+        self.assertNotIn("pass qa", check["missing"] + check.get("pass_labels", {}).get("missing", []))
+        self.ok("labels-ensure")
+        self.assertNotIn("pass qa", self.defs)
+        doctor = self.ok("doctor")
+        self.assertNotIn("pass qa", next(c for c in doctor["checks"] if c["name"] == "pass labels")["detail"])
+        self.defs["pass qa"] = {"color": "000000", "description": ""}
+        things(self.fake)["3"]["labels"] = ["needs review", "pass qa"]
+        self.others(("monalisa", "APPROVED"))
+        self.post("COMMENT")
+        self.assertEqual(self.labels(), ["needs review", "pass qa"])  # neither removed now nor added on approval
+        things(self.fake)["3"]["labels"] = ["needs review"]
+        self.post()
+        self.assertNotIn("pass qa", self.labels())
+
     def test_config_explain_and_check_report_role_errors(self):
-        self.roles_on(role_doc("stranger | code | pass"))
+        self.roles_on(role_doc("stranger | code | pass"), layer="repo")
         explain = self.ok("config", "--explain")
         self.assertTrue(explain["roles"]["errors"])
         code, payload, _ = self.cli("config", "--check")

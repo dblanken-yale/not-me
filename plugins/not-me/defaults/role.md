@@ -28,5 +28,8 @@ another reviewer in that role still approves. A reviewer with no row, or a role
 with no pass label, still counts toward everyone approved; only the label is
 skipped.
 
-The rows here and in the global layer always apply. A repo-layer role.md may add
-rows for new logins; a repo row that changes a row from those layers is ignored.
+The rows here and in the global layer always apply. Pass labels are set only
+here or in the global role.md. A repo-layer role.md may add reviewers and roles:
+rows for new logins, whose reviewers earn the pass label the global layer gives
+their role. A pass label named in a repo row is ignored, and a repo row that
+changes a row from those layers is ignored.

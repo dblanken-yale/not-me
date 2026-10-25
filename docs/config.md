@@ -174,6 +174,7 @@ The roster is special under `extends`. Instead of the `## Roster` section being 
 Layers: the repo layer may add to the approval gate, never loosen it.
 
 - The rows from the default and global layers always apply. A repo `role.md` adds rows for logins those layers do not list. A repo row that changes or blanks a global row's role or pass label is ignored, with a warning and an `ignored` entry under `roles` in `/not-me:config`. A repo `role.md` with an empty table keeps the global rows.
+- Pass labels are set only in the global (or default) `role.md`. A repo `role.md` may add reviewers and roles: a repo reviewer whose role has a pass label in the global layer earns that label, and a repo-only role counts toward everyone approved but has no pass label. A pass label written in a repo row is ignored, with a warning and an `ignored` entry, unless it is the global label of that role. Reason: not-me adds and removes pass labels on pull requests, so a committed repo file must not be able to make it strip a label such as `do not merge`.
 - The required reviewers are the roster reviewers of the effective `project.md` plus those of the global and default rosters. A repo roster can add a reviewer but cannot drop a global one, even by setting Reviewer to `no`.
 - With `extends: global` or `extends: default`, the `## Roles` rows merge by login like the roster.
 - Roles cannot turn a guard rule off or enable approval (`review.auto_approve` stays global only).

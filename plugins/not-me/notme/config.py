@@ -80,8 +80,8 @@ class Config:
         return resolve_body(name, {layer: docs.get(layer) for layer in ("default", "global")}, [])[0]
 
     def roles(self) -> roles_mod.Roles:
-        """The approval gate's role table: trusted rows plus repo-layer rows for new logins (no rows: one approval
-        is enough). Cached."""
+        """The approval gate's role table: trusted rows plus repo-layer rows for new logins, without their pass
+        labels (only the trusted layers set those; no rows: one approval is enough). Cached."""
         if self._roles is None:
             trusted = roles_mod.parse_roles(self._trusted_body("role"))
             from_repo = (self.body_layers.get("role") or [None])[-1] == "repo"
@@ -115,7 +115,7 @@ class Config:
 
     def roles_explain(self) -> Dict[str, Any]:
         """{configured, layer (of the role.md body in force), reviewers: [{login, role, pass_label}], ignored
-        (repo rows that tried to change a trusted row), errors}."""
+        (repo rows that tried to change a trusted row, and repo-layer pass labels), errors}."""
         current = self.roles()
         layers = self.body_layers.get("role") or []
         return {"configured": current.configured, "layer": layers[-1] if layers else None,
@@ -334,7 +334,9 @@ def load(project_dir: Optional[os.PathLike] = None, home: Optional[os.PathLike] 
         cfg.bodies[name], cfg.body_sources[name], cfg.body_layers[name] = resolve_body(name, docs, cfg.warnings)
     cfg.warnings.extend(roster.bot_row_warnings(roster.parse_roster(cfg.bodies.get("project", ""))))
     cfg.warnings.extend(roles_mod.warnings(cfg.roles().rows, cfg.effective_roster()))
-    cfg.warnings.extend(f"repo role.md: row for {i['login']} is ignored: {i['reason']}; change it in the global "
+    cfg.warnings.extend(f"repo role.md: pass label {i['pass_label']!r} for {i['login']} is ignored: {i['reason']}"
+                        if i.get("part") == "pass_label" else
+                        f"repo role.md: row for {i['login']} is ignored: {i['reason']}; change it in the global "
                         "role.md" for i in cfg.roles().ignored)
     _move_priority_fields(cfg)
     _confirm_live(cfg)
