@@ -179,7 +179,7 @@ The running skill is the orchestrator. With `models.strategy: orchestrate` (the 
 
 1. Each unit gets a self-contained brief: goal, files, conventions, scope (no commits, pushes or posts), and acceptance.
 2. The orchestrator audits the result itself. It reads the diff and runs the checks. It never trusts a subagent summary.
-3. A failed unit retries with the same agent and the exact failure, then a fresh agent one tier up. After `models.max_tries` the orchestrator does the unit itself.
+3. A failed unit retries with a fresh agent on the same model and the exact failure, then a fresh agent one tier up. After `models.max_tries` the orchestrator does the unit itself.
 4. The decisions stay with the orchestrator: review verdicts, what to post, what to refuse or park, and whether a unit passed.
 5. Each dispatch is logged as `DELEGATE` and each check as `AUDIT`.
 

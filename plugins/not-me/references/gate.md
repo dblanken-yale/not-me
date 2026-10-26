@@ -41,7 +41,7 @@ Then run each step listed under `## Gate additions` in `verify.md`, in order.
 
 ## Fix, don't defer
 
-A gate finding is fixed in this run. Park it only when it is one of:
+A gate finding is fixed in this run, as a new foreground dispatch through `delegation.md`. Park it only when it is one of:
 
 1. A product reversal: the finding asks for the opposite of what the issue asks.
 2. Scope that adds a new feature the issue does not ask for.
