@@ -37,13 +37,22 @@ case-insensitively, else a likely synonym such as "ready" for `todo` or "wip" fo
 3. Write only the states whose name differs from the default. An unlisted state
    keeps its default name.
 
+## Pass labels
+
+role.md may name a pass label per reviewer role, such as "pass code review". A PR
+gets it, next to `needs_review`, once a reviewer in that role approves. Pass labels
+are optional. Each one must differ from every state label and from the other
+roles' pass labels; `notme config --check` reports a clash as an error.
+
 ## Creating labels
 
 1. After the docs are written and `notme config --check` passes, run
    `notme labels-ensure --check` and show `missing`.
 2. Ask once: "Create these N labels in owner/name?" Only on an explicit yes, run
-   `notme labels-ensure`. It creates every missing configured label, so when any
-   state was skipped, say so in the question.
+   `notme labels-ensure`. It creates every missing configured label and every
+   missing pass label, so when any state was skipped, say so in the question.
+   When the user declines a pass label, that role gets no pass label; a review run
+   then warns once and goes on.
 3. In dry-run the result carries `"dry_run": true` and nothing was created; the
    labels are only in the ledger. Say that, and that the same command creates
    them once `mode` is live.

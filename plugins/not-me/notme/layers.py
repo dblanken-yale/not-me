@@ -12,11 +12,11 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from . import paths, roster
+from . import paths, roles, roster
 from .frontmatter import iter_unfenced_lines
 
 LAYER_ORDER = ("default", "global", "repo")
-DOC_NAMES = ("project", "standards", "verify", "review", "prove")
+DOC_NAMES = ("project", "standards", "verify", "review", "prove", "role")
 REPO_SUBDIR = (".claude", "not-me")
 PROJECT_FILE = "project.md"  # the doc that holds mode, in the global dir and in REPO_SUBDIR
 
@@ -386,7 +386,8 @@ def merge_meta(default: Optional[Mapping[str, Any]], global_: Optional[Mapping[s
 SectionMerger = Callable[[str, str], str]
 
 # Same-named H2 sections normally replace in place; these merge instead.
-SECTION_MERGERS: Dict[str, SectionMerger] = {"roster": roster.merge_section}
+SECTION_MERGERS: Dict[str, SectionMerger] = {"roster": roster.merge_section,
+                                              roles.HEADING.casefold(): roles.merge_section}
 
 
 def split_sections(body: str) -> Tuple[str, List[Tuple[str, str]]]:

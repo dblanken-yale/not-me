@@ -24,14 +24,15 @@ Arguments: `$ARGUMENTS`. An optional `--layer` limits the output to one layer.
 
    Use `value`, `source.layer`, `source.path` and `source.line`. Show `contributors`
    for union lists and `removed` entries for `!name` removals.
-4. Render `bodies`: for each of the five docs, the layers used and each section's
+4. Render `bodies`: for each of the six docs, the layers used and each section's
    layer. A prose doc resolves per file: the highest layer with the file wins,
    unless it declares `extends`.
 5. Render `picking`: the rules in effect (`rules`, quoted) and the `layer` they came
    from (`default` is the impact default; a `## Picking work` section in a global or
    repo `project.md` replaces it), then `fields` and `target_epics`.
-6. List every `ignored` entry (layer, value, reason) and every string in `warnings`.
-   These are loosening attempts the CLI dropped, or schema notes. Report them.
+6. Render `roles`: whether role.md is `configured`, each login's role and pass
+   label, and every string in its `errors` (config errors).
+7. List every `ignored` entry (layer, value, reason) and every `warnings` string.
 
 ## How to change a value
 
@@ -58,8 +59,7 @@ The repo layer is committed by anyone with push access, so it may only tighten:
 5. `allow_repos`: it may not add any. Only the operator's own allow list can
    (see `/not-me:allow-repo`).
 
-A value that tries is shown as ignored. Setup upgrades (`setup --upgrade`) are the
-operator's to run.
+A value that tries is shown as ignored. Setup upgrades are the operator's to run.
 
 ## Checklist
 

@@ -17,9 +17,15 @@ Read-only checklist. It fixes nothing and installs nothing.
    operating system, exactly as given. Do not restate or invent a hint.
 4. Run `notme guard selftest`. Report `ok` and `active`. Exit 8 means the guard is
    enabled but not working: every run stops with `FAILED - guard not working`.
-5. Run `notme config --check`. Print each error with its layer, file and line. Exit
-   4 means the config is invalid. Then run `notme config --explain` only if the
-   operator asks about a warning, and print its `warnings`.
+5. A failed `pass labels` check lists pass labels from role.md that the repo
+   lacks. Recommend creating them and offer to: on a yes, the operator runs
+   `/not-me:setup project`, whose labels step creates them. Declined: those
+   roles get no pass label and a later run warns once; nothing fails.
+6. Run `notme config --check`. Print each error with its layer, file and line
+   (role.md errors included: a login not on the roster, two roles sharing a pass
+   label, a pass label equal to a state label). Exit 4 means the config is
+   invalid. Then run `notme config --explain` only if the operator asks about a
+   warning, and print its `warnings`.
 
 ## Reading the exit code of `notme doctor`
 
