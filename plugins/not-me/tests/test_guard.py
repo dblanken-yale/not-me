@@ -491,6 +491,37 @@ class BlocklogTests(unittest.TestCase):
         runlog.guard_log_append(blocker / "guard.jsonl", {"rule": "force_push"})  # unwritable: no exception
 
 
+class DoctorFixBoundaryTests(_Fixtures):
+    """The one write /not-me:doctor makes (the Claude Code settings `env` key) passes the guard, while the
+    not-me global config stays blocked during an active run, so a blocked config fix is reported, not retried."""
+
+    def decide(self, tool, tin, variant="running"):
+        ctx = self.ctx(variant)
+        self.assertTrue(guard.is_active(ctx))
+        cwd, _ = gc.variant_paths(self.root, variant)
+        return guard.decide({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tin,
+                             "cwd": str(cwd), "session_id": gc.SESSION}, ctx)
+
+    def test_settings_json_edit_is_allowed_during_a_run(self):
+        _, home = gc.variant_paths(self.root, "running")
+        settings = str(home.parent / "settings.json")  # NOT_ME_HOME is ~/.claude/not-me; settings sit beside it
+        key = '"CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "3"'
+        for tool, tin in (("Edit", {"file_path": settings, "old_string": '"env": {', "new_string": '"env": {' + key}),
+                          ("Write", {"file_path": settings, "content": '{"env": {' + key + "}}\n"})):
+            with self.subTest(tool=tool):
+                self.assertIsNone(self.decide(tool, tin))
+
+    def test_global_config_edit_is_blocked_during_a_run(self):
+        _, home = gc.variant_paths(self.root, "running")
+        for tool, tin in (("Edit", {"file_path": str(home / "project.md"), "old_string": "# Project",
+                                    "new_string": "# Project notes"}),
+                          ("Write", {"file_path": str(home / "project.md"), "content": "---\nschema: 1\n---\n"})):
+            with self.subTest(tool=tool):
+                result = self.decide(tool, tin)
+                self.assertIsInstance(result, Block)
+                self.assertEqual(result.rule, "self_protect")
+
+
 class HookTests(_Fixtures):
     def event(self, tool, tin, variant="app"):
         cwd, _ = gc.variant_paths(self.root, variant)

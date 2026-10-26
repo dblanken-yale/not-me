@@ -835,12 +835,15 @@ class DoctorAndPreflightTests(base.CliCase):
     def test_doctor_lists_checks(self):
         payload = self.ok("doctor")
         names = [c["name"] for c in payload["checks"]]
-        self.assertEqual(names, ["python", "git", "gh", "config", "mode", "gh auth", "gh scopes", "guard",
-                                 "spawn depth"])
+        self.assertEqual(names, ["python", "git", "gh", "config", "config files", "mode", "gh auth", "gh scopes",
+                                 "guard", "spawn depth"])
         self.assertTrue(payload["ok"])
-        self.assertTrue(all({"name", "ok", "detail", "required"} <= set(c) for c in payload["checks"]))
-        self.assertEqual(payload["checks"][4], {"name": "mode", "ok": True, "detail": "live (confirmed)",
-                                                "required": False})
+        files = payload["checks"][4]
+        self.assertTrue(files["ok"], files)
+        self.assertIn("global: project.md", files["detail"])
+        self.assertTrue(all({"name", "ok", "detail", "required", "fix", "hint"} <= set(c) for c in payload["checks"]))
+        self.assertEqual(payload["checks"][5], {"name": "mode", "ok": True, "detail": "live (confirmed)",
+                                                "required": False, "fix": None, "hint": None})
 
     def test_doctor_warns_about_an_unconfirmed_live(self):
         from notme import humans
@@ -859,7 +862,10 @@ class DoctorAndPreflightTests(base.CliCase):
 
         code, payload, _ = self.cli("doctor", runner=no_gh)
         self.assertEqual((code, payload["kind"]), (7, "doctor"))
-        self.assertFalse(next(c for c in payload["checks"] if c["name"] == "gh")["ok"])
+        gh = next(c for c in payload["checks"] if c["name"] == "gh")
+        self.assertFalse(gh["ok"])
+        self.assertIsNone(gh["fix"])
+        self.assertTrue(gh["hint"])
 
     def test_preflight_in_a_scratch_repo(self):
         init_repo(self.project)

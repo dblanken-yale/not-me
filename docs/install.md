@@ -150,7 +150,7 @@ A new token also turns live mode off, because the live switch is signed with the
 
 Run these in the repo you want to automate, in a Claude Code session started in that repo:
 
-1. `/not-me:doctor` checks the tool versions, the effective config, and that the guard hook really blocks something. Fix anything it reports before you go on.
+1. `/not-me:doctor` checks the tool versions, the effective config, and that the guard hook really blocks something. Each failed check comes with an install hint for your operating system when one applies. After the list, it asks once which failed checks you want it to fix, and changes only the ones you pick. It sets `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` in your `~/.claude/settings.json` itself (start a new Claude Code session for that to take effect). For the rest it gives you the step to take: `gh auth login` or `gh auth refresh -s repo` in a terminal, or `/not-me:setup` for a missing config. Run `/not-me:doctor` again after you take those steps. It never installs tools or changes the guard, the allow list, or the not-me config. If a hook or the sandbox blocks a change, it shows you the exact change to make by hand. Fix anything still failing before you go on.
 2. `/not-me:setup` asks a few questions and writes `.claude/not-me/*.md` in the repo. Commit those files. They are the only thing not-me asks you to commit. Setup also records the allowed repos on your allow list.
 3. `/not-me --dry-run` runs the whole loop as if live. Reads are real. Every write goes into a ledger instead of GitHub.
 
