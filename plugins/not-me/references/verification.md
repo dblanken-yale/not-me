@@ -101,15 +101,20 @@ Before you post, check the claims this run originated with a second model.
 
 1. Claims to check: each disagreement with a reviewer, each deferral, each
    "already fixed", and each unfixed gate finding with its reason.
-2. Dispatch one subagent on `models.verifier`. `auto` means a model from the other
-   family than the one running; `none` means skip this check and log that it was
+2. Dispatch one subagent on `models.verifier`. `auto` means a
+   different model than the one running: a run on `opus` is checked by `sonnet`, a
+   run on any other model is checked by `opus`. Never ask the operator about it. A
+   model name pins that model. `none` means skip this check and log that it was
    skipped.
 3. Give it the claims, the diff, and the file paths. Ask for one verdict per
    claim: confirm or reject, with a reason.
 4. Apply verdicts mechanically. A rejected disagreement becomes an implement. A
    rejected "already fixed" becomes a fix. A rejected deferral is implemented when
    in scope, else deferred with the verifier's reason added.
-5. Log each verdict as a `CHECK` line. Do not argue with the verdict.
+5. Log each verdict as a `CHECK` line that names the model that verified, for
+   example `CHECK verifier(sonnet) confirm: <claim>`. When `models.verifier` is
+   `none`, log `CHECK claim check skipped: models.verifier is none`. Do not argue
+   with the verdict.
 
 ## CI wait and fix loop
 
@@ -130,5 +135,5 @@ Before you post, check the claims this run originated with a second model.
 - [ ] Ran every CI step locally with the project's own commands.
 - [ ] Wrote a `Visual check:` line for UI diffs: path form in the log, words form in the PR.
 - [ ] Did the accessibility pass and flagged what was not auto-fixed.
-- [ ] Ran the cross-model claim check, or logged that `models.verifier` is `none`.
+- [ ] Ran the cross-model claim check, or logged that `models.verifier` is `none`; verdict lines name the verifier.
 - [ ] Waited on CI for the pushed head and stopped at `limits.fix_loop`.

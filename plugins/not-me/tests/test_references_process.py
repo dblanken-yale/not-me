@@ -163,6 +163,17 @@ class ProcessReferenceDocsTest(unittest.TestCase):
         sample = "Add `needs_humans` and the `review` label; run `test_sync`."
         self.assertEqual(label_mentions(sample, self.labels) - self.labels, {"needs_humans", "review"})
 
+    def test_verifier_auto_defined_without_model_family(self):
+        ver = (REFS / "verification.md").read_text(encoding="utf-8")
+        self.assertNotIn("other family", ver.lower())
+        self.assertIn("different model than the one running", ver)
+        self.assertIn("verifier(", ver)
+        cfg = (PLUGIN.parent.parent / "docs" / "config.md").read_text(encoding="utf-8")
+        for line in cfg.splitlines():
+            if "models.verifier" in line:
+                self.assertNotIn("family", line.lower())
+        self.assertIn("Pin `models.verifier`", cfg)
+
 
 if __name__ == "__main__":
     unittest.main()

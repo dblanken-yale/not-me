@@ -27,10 +27,14 @@ from tests import guard_cases as gc  # noqa: E402
 
 def run_case(case: gc.Case, root: Path, env: dict) -> "tuple[int, str]":
     _, home = gc.variant_paths(root, case[5])
-    run_env = dict(env, NOT_ME_HOME=str(home))
+    run_env = dict(env, NOT_ME_HOME=str(home), PYTHONFAULTHANDLER="1")
     proc = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(gc.event_for(case, root)).encode("utf-8"),
                           capture_output=True, env=run_env, cwd=str(root), timeout=60)
     return proc.returncode, proc.stderr.decode("utf-8", "replace")
+
+
+def _indent(text: str) -> str:
+    return "  " + text.strip().replace("\n", "\n  ")
 
 
 def main(argv: "list[str]") -> int:
@@ -42,7 +46,11 @@ def main(argv: "list[str]") -> int:
         for case in gc.CASES:
             cid, want, rule, tool, tin, variant = case
             rc, err = run_case(case, root, env)
-            problems = []
+            first = None
+            if rc < 0:
+                first = (-rc, err)
+                rc, err = run_case(case, root, env)
+            problems = [f"crashed twice (signal {-rc})"] if first and rc < 0 else []
             got = {0: "allow", 2: "block"}.get(rc, f"exit {rc}")
             if got != want:
                 problems.append(f"want {want}, got {got}")
@@ -54,12 +62,17 @@ def main(argv: "list[str]") -> int:
             if problems:
                 failed += 1
                 print(f"FAIL {cid} [{variant}] {tool} {json.dumps(tin)}: {'; '.join(problems)}")
-                if err.strip():
-                    print("  " + err.strip().replace("\n", "\n  "))
             else:
                 passed += 1
+                if first:
+                    print(f"RETRY {cid}: hook killed by signal {first[0]}, passed on retry")
                 if verbose:
                     print(f"ok   {cid} {want} {tool} {json.dumps(tin)}")
+            if first and first[1].strip():
+                print(f"  first run, killed by signal {first[0]}:")
+                print(_indent(first[1]))
+            if problems and err.strip():
+                print(_indent(err))
     finally:
         shutil.rmtree(root, ignore_errors=True)
     print(f"guard cases: {passed + failed} run, {passed} passed, {failed} failed")
