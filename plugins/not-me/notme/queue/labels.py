@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from .. import claims, states
 from ..gh import _num, login_of
-from . import BaseQueue, Candidate, Claim
+from . import BaseQueue, Candidate, Claim, sibling_info
 
 _LIST_FIELDS = "number,title,body,state,labels,assignees,author,createdAt,url"
 _TASK_RE = re.compile(r"^\s*[-*]\s*\[ \]\s*(?:([A-Za-z0-9][\w.-]*/[\w.-]+))?#(\d+)\b", re.M)
@@ -92,28 +92,31 @@ class LabelQueue(BaseQueue):
                 and self._assignees_allow(_assignees(issue)))  # last, so only otherwise eligible ones are counted
 
     def candidates(self) -> List[Candidate]:
-        """Eligible issues: epic children first (epic order, then task-list order), then the rest oldest first."""
-        self.unassigned_skipped = 0
+        """Eligible issues: target epic issues first (see target_order), then epic children (epic order, then
+        task-list order), then the rest oldest first. An issue behind an earlier open, unstarted issue in a trusted
+        epic is left out (see held_back)."""
+        self.unassigned_skipped, self.held_back = 0, []
         opt_in = self.queue_cfg.get("opt_in_label")
-        eligible = {i["number"]: i for i in self._list("todo", extra=[opt_in] if opt_in else []) if self._eligible(i)}
+        listed = self._list("todo", extra=[opt_in] if opt_in else [])
+        eligible = {i["number"]: i for i in listed if self._eligible(i)}
         placed: Dict[int, Candidate] = {}
-        epics = sorted(self._list("epic"), key=lambda e: e["number"])
-        for epic in epics:
-            if not self.trusted(_author(epic)):
-                continue  # an untrusted epic body must not steer the queue
-            for position, number in enumerate(task_list_numbers(epic.get("body"), self.tracker)):
+        epics = self._list("epic")
+        for epic, numbers in self.trusted_epics(epics):  # an untrusted epic body must not steer the queue
+            for position, number in enumerate(numbers):
                 if number in eligible and number not in placed:
-                    placed[number] = self._candidate(eligible[number], (0, epic["number"], position), epic["number"])
+                    placed[number] = self._candidate(eligible[number], (0, epic, position), epic, position + 1)
         for number, issue in eligible.items():
             if number not in placed:
-                placed[number] = self._candidate(issue, (1, 0, 0), None)
-        return sorted(placed.values(), key=Candidate.sort_key)
+                placed[number] = self._candidate(issue, (1, 0, 0), None, None)
+        known = {int(i["number"]): sibling_info(i) for i in listed}  # open issues already read: no second read
+        return self.order(list(placed.values()), epics, known)
 
     @staticmethod
-    def _candidate(issue: Dict[str, Any], priority: tuple, parent: Optional[int]) -> Candidate:
+    def _candidate(issue: Dict[str, Any], priority: tuple, parent: Optional[int],
+                   position: Optional[int]) -> Candidate:
         return Candidate(number=issue["number"], title=issue.get("title", ""), url=issue.get("url", ""),
                          author=_author(issue), labels=_names(issue), priority=priority, is_epic=False,
-                         parent=parent, created=issue.get("createdAt", ""))
+                         parent=parent, created=issue.get("createdAt", ""), position=position)
 
     def state(self, n: int) -> Optional[str]:
         current = self.labels.current(self.gh.labels(self.tracker, _num(n)))
@@ -230,6 +233,8 @@ class LabelQueue(BaseQueue):
 
     def _relabel(self, n: int, to: str) -> None:
         names = self.gh.labels(self.tracker, n)
+        if self.gh.dry_run and self._has(names, "todo"):  # a dry-run claim set in_progress only in the ledger
+            names = states.as_if(names, "in_progress", self.labels)
         if self._has(names, "in_progress"):
             self.gh.labels_set(self.tracker, n, states.transition(names, "in_progress", to, self.labels))
 
@@ -245,7 +250,7 @@ class LabelQueue(BaseQueue):
     def move(self, n: int, state: str, require_current: Optional[str] = None) -> None:
         n = _num(n)
         current = self.labels.current(self.gh.labels(self.tracker, n))
-        if require_current is not None and require_current not in current:
+        if require_current is not None and require_current not in current and not self.gh.dry_run:
             raise states.StateMismatch(f"{self.tracker}#{n} is {', '.join(current) or 'in no state'}, "
                                        f"not {require_current}")
         frm = require_current or (current[0] if current else None)

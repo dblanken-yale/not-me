@@ -81,7 +81,7 @@ notme followup --title-file "$d/title.txt" --body-file "$d/body.md" \
    issue's task list.
 6. `queue.source` is `board`: the CLI cannot add an issue to a board. Say that a
    person must place it in the To Do column. When the board has fields named in
-   `queue.board.priority_fields`, suggest values in the report; set nothing.
+   `picking.fields`, suggest values in the report; set nothing.
 7. Result: `TICKET <tracker>#<N> created`. In a dry run the number is null:
    `TICKET - created - dry-run`.
 

@@ -126,5 +126,26 @@ class ApplyTests(unittest.TestCase):
             states.apply(self.gh, "acme/app", 1, "todo", "in_progress", LABELS)
 
 
+    def test_dry_run_apply_assumes_the_from_state(self):
+        ledger = Ledger(self.dir / "dry.jsonl")
+        gh = GhClient(self.gh.ctx, runner=self.fake, dry_run=True, ledger=ledger)
+        self.fake.state["repos"]["acme/app"]["things"]["1"]["labels"] = ["to do", "bug"]
+        new = states.apply(gh, "acme/app", 1, "in_progress", "needs_review", LABELS)
+        self.assertEqual(sorted(new), ["bug", "needs review"])
+        self.assertEqual(self.fake.writes_made(), [])
+        self.assertEqual(len(ledger.read()), 1)
+        with self.assertRaises(IllegalTransition):
+            states.apply(gh, "acme/app", 1, "todo", "needs_review", LABELS)
+
+    def test_live_apply_still_requires_the_from_label(self):
+        with self.assertRaises(IllegalTransition):
+            states.apply(self.gh, "acme/app", 1, "in_progress", "needs_review", LABELS)
+        self.assertEqual(self.fake.writes_made(), [])
+
+    def test_as_if_swaps_every_main_state_label(self):
+        got = states.as_if(["to do", "blocked", "bug", "paused"], "in_progress", LABELS)
+        self.assertEqual(sorted(got), ["bug", "in progress", "paused"])
+        self.assertEqual(states.as_if(["in progress", "bug"], "in_progress", LABELS), ["in progress", "bug"])
+
 if __name__ == "__main__":
     unittest.main()

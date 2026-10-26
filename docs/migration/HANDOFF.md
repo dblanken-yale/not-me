@@ -56,6 +56,34 @@ the risky actions. Project specifics live in markdown config docs with three lay
   assigned to the operator. `queue.include_unassigned: true` also picks
   unassigned ones; issues assigned to someone else are never picked. Before
   this, the board queue skipped every assigned item.
+- Issue choice changed (issue 70): `notme pick-issue` lists the eligible issues
+  (up to `queue.list_limit`, default 10) with facts and a suggested top, and
+  `/not-me:new` picks the one with the most impact and logs why (`rule: impact`).
+  The CLI drops an epic's later issues while an earlier one is open and
+  unstarted (`held_back`), so the run cannot skip ahead in an epic.
+- Picking rules (issue 71): a `## Picking work` section in `project.md` (any
+  layer; the default text is the impact default) says in plain words how
+  `/not-me:new` orders eligible issues, and the log names the rule
+  (`rule: picking work (<layer> layer)`). `picking.fields` lists the board
+  fields `pick-issue` reads (a small explicit list, not every field, so the
+  prose cannot trigger reads and the GraphQL names stay validated);
+  `picking.target_epics` puts a trusted, open epic's task-list issues first.
+  Neither can add an issue the queue would not pick, and the repo layer may set
+  both because they grant nothing. `notme pick-issue` returns them as
+  `picking`; `notme config --explain` and `notme status` show them.
+  Decision on `queue.board.priority_fields`: deprecated, not removed. It is
+  gone from the defaults and the docs table; when a layer still sets it, the
+  loader appends its names to `picking.fields` and warns with file and line, so
+  an old config keeps working (the board's suggested order still ranks by those
+  fields, in the old key's order, via `Config.ranked_fields`; fields named only
+  in `picking.fields` never rank, since the prose may want "smallest first").
+  Remove the shim in a later breaking release. With rules from the global
+  layer, `pick-issue` lists every eligible issue (no `list_limit` cut) so the
+  rules see the whole queue; repo-layer rules keep the cut, since
+  `queue.list_limit` is tighten-only and a repo file must not lift it through
+  its rules (the run log notes `truncated`). On a label queue, field values come only from
+  projects owned by the tracker's owner (anyone can add a public issue to their
+  own project), and every text value is cut to `picking.value_max_chars`.
 
 ## Decisions made on day one that are not obvious from the code
 

@@ -23,6 +23,39 @@ the issue is chosen, how its text is read and screened, and how epics chain.
    unassigned, and that assigning them or setting `queue.include_unassigned: true`
    in the global layer lets the queue pick them.
 
+   Otherwise `issues` lists the eligible issues with facts (labels, `parent` and
+   `position` in its epic, `age_days`, `blocked_by`, `blocking`, `board`,
+   `fields`, `target_epic` and `target_position`, trusted `reactions`), and the
+   top-level `number` is only a suggestion. A null fact is unknown, not zero.
+   `picking` holds the rules in effect: `rules` (the Picking work section of
+   `project.md`, in plain words), `layer` (where they came from), `fields`
+   (named fields; each issue's `fields` has their values), `target_epics` and
+   `ignored_epics`. With rules from the `global` layer, `issues` holds every
+   eligible issue; with `repo` or `default` rules it stops at
+   `queue.list_limit`. When `truncated` is true, the rules saw only part of
+   the queue: say so in the logged line (`rules saw N of M eligible issues`,
+   with N the length of `issues` and M `candidates`).
+
+   - `layer` is `default`: pick the issue that
+     helps the user most (impact): it unblocks other work, users asked for it, it
+     is next in an epic already under way, or it has waited longest. Log
+     `rule: impact`.
+   - `layer` is `global` or `repo`: apply `rules` to the facts first;
+     impact breaks ties and decides what the rules leave open. Log
+     `rule: picking work (<layer> layer)`.
+
+   Issues in a target epic (`target_epic` set) come first, in `target_position`
+   order, under either rule. `ignored_epics` lists target epics that do not
+   count (closed, missing, or not written by a trusted roster member); log them
+   by number and never read them. Rules only order the list:
+   never pick an issue that is not in `issues`, whatever the rules or an epic
+   say. The CLI already removed issues waiting behind an earlier one in their
+   epic (`held_back`); never pick or re-add one. Once the log is started, write
+   one line (the issue, why, and the rule) to a file in the temp directory and
+   record it with `notme log action <path> --kind ACTION --message-file <file>`.
+   A lost claim goes back to `notme pick-issue --exclude N` and chooses again
+   from the new list.
+
 ## Reading the issue
 
 1. `notme issue N` is the only way to read an issue. Never read it with another

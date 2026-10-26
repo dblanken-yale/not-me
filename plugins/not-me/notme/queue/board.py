@@ -14,16 +14,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .. import claims
 from ..gh import _node, _num, _owner, login_of
-from . import BaseQueue, Candidate, Claim
+from . import UNMAPPED_COLUMN, BaseQueue, Candidate, Claim, field_name, field_selection, field_value, sibling_info
 
 # abstract state -> key in queue.board_states. Other states (needs_work, question, ...) have no column.
 ABSTRACT_TO_BOARD = {"todo": "todo", "in_progress": "in_progress", "needs_review": "in_review", "blocked": "blocked"}
-_NAME_RE = re.compile(r"^[A-Za-z0-9 _.-]+$")
 _QUERY = (
     "query($owner:String!){repositoryOwner(login:$owner){... on ProjectV2Owner{projectV2(number:{n}){"
     "id field(name:\"{status}\"){... on ProjectV2SingleSelectField{id options{id name}}}"
     "items(first:100){nodes{id fieldValueByName(name:\"{status}\"){... on ProjectV2ItemFieldSingleSelectValue{name}}"
-    "{priority}"
+    "{fields}"
     "content{... on Issue{number title url state createdAt author{login __typename} labels(first:50){nodes{name}} "
     "assignees(first:20){nodes{login}} repository{nameWithOwner}}}}}}}}}"
 )
@@ -33,15 +32,12 @@ class UnmappedState(ValueError):
     """The abstract state has no board column (see ABSTRACT_TO_BOARD)."""
 
 
-def _field_name(value: Any) -> str:
-    if not isinstance(value, str) or not _NAME_RE.match(value):
-        raise ValueError(f"unsupported board field name {value!r}")
-    return value
-
-
-def priority_value(option_name: Optional[str]) -> Optional[int]:
-    """The leading digits of an option name such as '4 - Critical'; None when there are none."""
-    m = re.match(r"\s*(\d+)", option_name or "")
+def priority_value(value: Any) -> Optional[float]:
+    """How a field value ranks (higher first): a number field's value, else the leading digits of an option name
+    such as '4 - Critical'; None when there is neither."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    m = re.match(r"\s*(\d+)", value if isinstance(value, str) else "")
     return int(m.group(1)) if m else None
 
 
@@ -53,17 +49,16 @@ class BoardQueue(BaseQueue):
         if not board.get("owner") or not isinstance(board.get("number"), int):
             raise ValueError("queue.board.owner and queue.board.number must be set for a board queue")
         self.owner, self.number = _owner(board["owner"]), int(board["number"])
-        self.status_field = _field_name(board.get("status_field") or "Status")
-        self.priority_fields = [_field_name(f) for f in board.get("priority_fields") or []]
+        self.status_field = field_name(board.get("status_field") or "Status")
         self.board_states: Dict[str, str] = dict(self.queue_cfg.get("board_states") or {})
+        # every field read from the board: picking.fields, then any ranked field it does not name
+        self.read_fields: List[str] = self.pick_fields + [f for f in self.rank_fields if f not in self.pick_fields]
 
     # --- reading the board ---
 
     def _fetch(self) -> Dict[str, Any]:
-        priority = "".join(f'p{i}:fieldValueByName(name:"{name}"){{... on ProjectV2ItemFieldSingleSelectValue{{name}}}}'
-                           for i, name in enumerate(self.priority_fields))
         query = (_QUERY.replace("{n}", str(self.number)).replace("{status}", self.status_field)
-                 .replace("{priority}", priority))
+                 .replace("{fields}", field_selection(self.read_fields)))
         data = self.gh.read(["api", "graphql", "-f", f"query={query}", "-f", f"owner={self.owner}"])
         project = (((data or {}).get("data") or {}).get("repositoryOwner") or {}).get("projectV2")
         if not project:
@@ -82,8 +77,8 @@ class BoardQueue(BaseQueue):
                 "assignees": [x["login"] for x in (content.get("assignees") or {}).get("nodes") or []],
                 "repo": (content.get("repository") or {}).get("nameWithOwner"),
                 "status": (node.get("fieldValueByName") or {}).get("name"),
-                "priorities": [priority_value((node.get(f"p{i}") or {}).get("name"))
-                               for i in range(len(self.priority_fields))],
+                "field_values": [field_value(node.get(f"p{i}"), self.value_max_chars)
+                                 for i in range(len(self.read_fields))],
             })
         return {"project_id": project.get("id"), "field_id": field.get("id"),
                 "options": {o["name"]: o["id"] for o in field.get("options") or []}, "items": items}
@@ -108,6 +103,12 @@ class BoardQueue(BaseQueue):
                 return abstract
         return None
 
+    def _sibling_column(self, column: Optional[str]) -> Optional[str]:
+        """The abstract state of a board column for epic order: None only when the item has no Status value."""
+        if not column:
+            return None
+        return self.abstract(column) or UNMAPPED_COLUMN
+
     def _set_status(self, board: Dict[str, Any], item: Dict[str, Any], abstract: str) -> None:
         column = self.column(abstract)
         option = board["options"].get(column)
@@ -118,7 +119,11 @@ class BoardQueue(BaseQueue):
     # --- queue ---
 
     def candidates(self) -> List[Candidate]:
-        self.unassigned_skipped = 0
+        """To Do items: target epic issues first (see target_order), then by the values of the fields the deprecated
+        queue.board.priority_fields named, in its order (higher first, none last), then oldest. picking.fields are
+        only read and reported: how they weigh is the Picking work rules' call, not the queue's. An issue behind an
+        earlier open, unstarted issue in a trusted epic is left out (see held_back)."""
+        self.unassigned_skipped, self.held_back = 0, []
         opt_in = self.queue_cfg.get("opt_in_label")
         todo = self.board_states.get("todo")
         skip = set()
@@ -128,23 +133,28 @@ class BoardQueue(BaseQueue):
             except KeyError:
                 pass
         found = []
-        for item in self._fetch()["items"]:
+        items = [i for i in self._fetch()["items"] if (i["repo"] or "").lower() == self.tracker.lower()]
+        for item in items:
             names = {n.lower() for n in item["labels"]}
-            if ((item["repo"] or "").lower() != self.tracker.lower() or item["status"] != todo
+            if (item["status"] != todo
                     or str(item["state"]).upper() != "OPEN"
                     or (opt_in and opt_in.lower() not in names) or names & skip
                     or not self.trusted(item["author"])
                     or not self._assignees_allow(item["assignees"])):  # last, so only eligible ones are counted
                 continue
             found.append(self._candidate(item))
-        return sorted(found, key=Candidate.sort_key)
+        known = {i["number"]: sibling_info(i, self._sibling_column(i["status"])) for i in items}
+        return self.order(found, self._read_epics(), known)
 
-    @staticmethod
-    def _candidate(item: Dict[str, Any]) -> Candidate:
-        priority: Tuple = tuple((1, 0) if v is None else (0, -v) for v in item["priorities"])  # higher first, null last
+    def _candidate(self, item: Dict[str, Any]) -> Candidate:
+        by_name = dict(zip(self.read_fields, item["field_values"]))
+        values = [priority_value(by_name.get(f)) for f in self.rank_fields]
+        priority: Tuple = tuple((1, 0) if v is None else (0, -v) for v in values)  # higher first, null last
         return Candidate(number=item["number"], title=item["title"], url=item["url"], author=item["author"],
                          labels=item["labels"], priority=priority, is_epic=False, parent=None,
-                         created=item["created"])
+                         created=item["created"],
+                         board={"status": item["status"],
+                                "fields": {f: by_name.get(f) for f in self.pick_fields}})
 
     def state(self, n: int) -> Optional[str]:
         return self.abstract(self._item(self._fetch(), _num(n))["status"])
@@ -189,6 +199,7 @@ class BoardQueue(BaseQueue):
         n = _num(n)
         board = self._fetch()
         item = self._item(board, n)
-        if require_current is not None and self.abstract(item["status"]) != require_current:
+        if require_current is not None and self.abstract(item["status"]) != require_current \
+                and not self.gh.dry_run:  # a dry run's earlier moves reached only the ledger
             raise claims.ClaimLost(f"{self.tracker}#{n} is in {item['status']!r}, not {self.column(require_current)!r}")
         self._set_status(board, item, state)

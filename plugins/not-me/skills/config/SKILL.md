@@ -27,9 +27,11 @@ Arguments: `$ARGUMENTS`. An optional `--layer` limits the output to one layer.
 4. Render `bodies`: for each of the five docs, the layers used and each section's
    layer. A prose doc resolves per file: the highest layer with the file wins,
    unless it declares `extends`.
-5. List every `ignored` entry (layer, value, reason) and every string in `warnings`.
-   These are loosening attempts the CLI dropped, or schema notes. Report them; do
-   not try to honour them.
+5. Render `picking`: the rules in effect (`rules`, quoted) and the `layer` they came
+   from (`default` is the impact default; a `## Picking work` section in a global or
+   repo `project.md` replaces it), then `fields` and `target_epics`.
+6. List every `ignored` entry (layer, value, reason) and every string in `warnings`.
+   These are loosening attempts the CLI dropped, or schema notes. Report them.
 
 ## How to change a value
 
@@ -63,6 +65,6 @@ operator's to run.
 
 - [ ] Ran `notme config --explain`; edited nothing.
 - [ ] Showed every key with value, layer and file:line.
-- [ ] Showed the layer used by each prose doc and section.
+- [ ] Showed the layer used by each prose doc and section, and the picking rules.
 - [ ] Listed ignored loosening attempts and warnings.
 - [ ] Said which layer to edit, and what the repo layer cannot loosen.

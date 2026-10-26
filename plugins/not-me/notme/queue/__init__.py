@@ -16,9 +16,57 @@ except ImportError:  # pragma: no cover
     Protocol = object  # type: ignore
 
 from .. import claims, paths
-from ..gh import GhClient, _login, tmp_text_file
+from ..gh import GhClient, GhError, _login, login_of, names_of, tmp_text_file
+from ..layers import is_field_name, is_positive_int
 from ..states import Labels
 from ..writes import WriteTarget, valid_slug
+
+
+# sibling_info column for a board item in a named column that board_states does not map (Done, Backlog, ...):
+# started, unlike None (no column at all: a label queue, or a board item with no Status value).
+UNMAPPED_COLUMN = "<unmapped column>"
+
+# One project field value of any kind, as one GraphQL selection; field_value() reads it back.
+FIELD_VALUE = ("... on ProjectV2ItemFieldSingleSelectValue{name} ... on ProjectV2ItemFieldTextValue{text} "
+               "... on ProjectV2ItemFieldNumberValue{number} ... on ProjectV2ItemFieldDateValue{date} "
+               "... on ProjectV2ItemFieldIterationValue{title}")
+# An issue's project items with the named field values and each project's owner: any GitHub user can add a public
+# issue to a project they own, so only items in projects the tracker's owner owns are read (see _fields_of).
+_ISSUE_FIELDS_QUERY = ("query($owner:String!,$name:String!){repository(owner:$owner,name:$name){issue(number:{n}){"
+                       "projectItems(first:20){nodes{project{owner{... on User{login} ... on Organization{login}}} "
+                       "{fields}}}}}}")
+
+
+def field_name(value: Any) -> str:
+    """A board field name that is safe to write into a GraphQL query; ValueError otherwise."""
+    if not is_field_name(value):
+        raise ValueError(f"unsupported board field name {value!r}")
+    return value
+
+
+def field_selection(names: Sequence[str]) -> str:
+    """`p0:fieldValueByName(name:"A"){...} p1:...` for already checked field names."""
+    return "".join(f'p{i}:fieldValueByName(name:"{field_name(n)}"){{{FIELD_VALUE}}}' for i, n in enumerate(names))
+
+
+def field_value(node: Any, max_chars: int) -> Any:
+    """The value of one field selection: option name, text, iteration title, number or date; None when unset.
+    Text is cut to max_chars (picking.value_max_chars): field text can be written by people off the roster."""
+    if not isinstance(node, dict):
+        return None
+    for key in ("name", "text", "title", "number", "date"):
+        value = node.get(key)
+        if isinstance(value, str):
+            return value[:max_chars]
+        if value is not None:
+            return value
+    return None
+
+
+def _project_owner(item: Dict[str, Any]) -> str:
+    """The owner login of a project item's project; "" when it cannot be read."""
+    login = (((item.get("project") or {}).get("owner")) or {}).get("login")
+    return login if isinstance(login, str) else ""
 
 
 @dataclass
@@ -32,9 +80,14 @@ class Candidate:
     is_epic: bool = False
     parent: Optional[int] = None
     created: str = ""
+    position: Optional[int] = None  # 1-based place in the parent epic's unchecked task list
+    board: Optional[Dict[str, Any]] = None  # board queues only: {status: column, fields: {field: value}}
+    target: Optional[Tuple[int, int]] = None  # (rank in picking.target_epics, 1-based place in that epic's list)
+    target_epic: Optional[int] = None  # the target epic whose task list holds this issue
 
     def sort_key(self) -> Tuple:
-        return (self.priority, self.created, self.number)
+        """Target epic issues first (epic order, then task-list order), then the queue's own order."""
+        return ((0,) + self.target if self.target else (1, 0, 0), self.priority, self.created, self.number)
 
 
 @dataclass
@@ -62,6 +115,9 @@ class NotOpen(Exception):
     """The pull request is closed or merged, so it cannot be claimed."""
 
 
+_REACTION_PAGE = 100  # GitHub's largest page; reactions are read one page only
+
+
 class BaseQueue:
     """What both queues share: config, the claim marker comment, assignee edits and the local lock."""
 
@@ -79,6 +135,27 @@ class BaseQueue:
         self._clock = clock or claims.utcnow
         self.include_unassigned = self.queue_cfg.get("include_unassigned") is True
         self.unassigned_skipped = 0  # eligible issues the last candidates() left out only because nobody is assigned
+        self.held_back: List[Dict[str, int]] = []  # eligible issues the last candidates() left out for epic order
+        picking = self.meta.get("picking") or {}
+        if not isinstance(picking, dict):
+            raise ValueError("picking must be a map")
+        fields, targets = picking.get("fields") or [], picking.get("target_epics") or []
+        if not isinstance(fields, list) or not isinstance(targets, list):
+            raise ValueError("picking.fields and picking.target_epics must be lists")
+        self.pick_fields: List[str] = [field_name(f) for f in fields]
+        if not all(is_positive_int(n) for n in targets):
+            raise ValueError(f"picking.target_epics must be issue numbers, got {targets!r}")
+        self.target_epics: List[int] = list(targets)
+        # the deprecated queue.board.priority_fields, which a board queue still ranks by (see Config.ranked_fields)
+        self.rank_fields: List[str] = [field_name(f) for f in getattr(cfg, "ranked_fields", None) or []]
+        self.value_max_chars: int = 0  # picking.value_max_chars; checked only when a field is read
+        if self.pick_fields or self.rank_fields:
+            cap = picking.get("value_max_chars")
+            if not is_positive_int(cap):
+                raise ValueError(f"picking.value_max_chars must be a whole number of at least 1, got {cap!r}")
+            self.value_max_chars = cap
+        self.target_epics_used: List[int] = []  # target epics the last candidates() honoured
+        self.target_epics_ignored: List[Dict[str, Any]] = []  # [{number, reason}]: not found, closed, untrusted
 
     def now(self) -> datetime:
         return self._clock()
@@ -133,6 +210,196 @@ class BaseQueue:
             return True
         self.unassigned_skipped += 1
         return False
+
+    def list_limit(self) -> Optional[int]:
+        """queue.list_limit: how many issues pick-issue lists with facts. Not set: no cap."""
+        value = self.queue_cfg.get("list_limit")
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"queue.list_limit must be a whole number of at least 1, got {value!r}")
+        return value
+
+    # --- epic order ---
+
+    def _read_epics(self) -> List[Dict[str, Any]]:
+        return self.gh.read(["issue", "list", "-R", self.tracker, "--state", "open", "--label",
+                             self.labels.name("epic"), "--json", "number,body,author", "--limit", "200"]) or []
+
+    def trusted_epics(self, epics: Sequence[Dict[str, Any]]) -> List[Tuple[int, List[int]]]:
+        """(epic number, unchecked task-list numbers) for each epic a trusted author wrote, lowest number first.
+        An untrusted epic is dropped whole: its body must not steer the queue."""
+        from .labels import task_list_numbers
+        return [(int(e["number"]), task_list_numbers(e.get("body"), self.tracker))
+                for e in sorted(epics, key=lambda e: e["number"]) if self.trusted(login_of(e.get("author")))]
+
+    def _sibling(self, n: int, known: Dict[int, Optional[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+        """open, labels, assignees (and board column) of issue n; None when it cannot be read."""
+        if n not in known:
+            issue = self._read_issue(n, "state,labels,assignees")  # never the body
+            known[n] = sibling_info(issue) if issue is not None else None
+        return known[n]
+
+    def _unstarted(self, info: Optional[Dict[str, Any]]) -> bool:
+        """Open, not blocked and not claimed. Claimed: any state but to do (label or board column), or assigned
+        to someone other than the operator. On a board, any named column but To Do (UNMAPPED_COLUMN included)
+        counts as started; no Status value does not. Unknown (unreadable): not unstarted, so it holds nothing back."""
+        if not info or not info["open"]:
+            return False
+        names, column = info["labels"], info.get("column")
+        if self._has(names, "blocked") or column == "blocked":
+            return False
+        if any(not self._is_me(a) for a in info["assignees"]):
+            return False
+        if any(s != "todo" for s in self.labels.current(names)):
+            return False
+        return column in (None, "todo")
+
+    def epic_order(self, found: List[Candidate], epics: Sequence[Dict[str, Any]],
+                   known: Dict[int, Optional[Dict[str, Any]]]) -> List[Candidate]:
+        """Set parent and position from trusted epics, then drop every issue that sits in an epic's task list
+        after an earlier open, unstarted issue; held_back records them as {number, behind, epic}.
+
+        known: sibling facts already read (number -> sibling_info), so only the rest are read, one at a time,
+        and each epic stops reading at its first unstarted issue."""
+        by_number = {c.number: c for c in found}
+        held: Dict[int, Dict[str, int]] = {}
+        for epic, numbers in self.trusted_epics(epics):
+            for place, n in enumerate(numbers, start=1):
+                c = by_number.get(n)
+                if c is not None and c.parent is None:
+                    c.parent, c.position = epic, place
+            last = max((i for i, n in enumerate(numbers) if n in by_number), default=-1)
+            holder: Optional[int] = None
+            for n in numbers[:last + 1]:
+                if holder is not None:
+                    if n in by_number and n not in held:
+                        held[n] = {"number": n, "behind": holder, "epic": epic}
+                elif n in by_number or self._unstarted(self._sibling(n, known)):
+                    holder = n
+        self.held_back = sorted(held.values(), key=lambda h: h["number"])
+        return [c for c in found if c.number not in held]
+
+    def order(self, found: List[Candidate], epics: Sequence[Dict[str, Any]],
+              known: Dict[int, Optional[Dict[str, Any]]]) -> List[Candidate]:
+        """Epic order (drops held-back issues), then target epics, then sorted by Candidate.sort_key."""
+        return sorted(self.target_order(self.epic_order(found, epics, known), epics), key=Candidate.sort_key)
+
+    # --- target epics (picking.target_epics) ---
+
+    def target_order(self, found: List[Candidate], epics: Sequence[Dict[str, Any]]) -> List[Candidate]:
+        """Mark each candidate in a target epic's unchecked task list with its epic and place, so sort_key puts
+        them first in picking.target_epics order, then task-list order. Only candidates are marked: a target
+        epic never adds an issue. A target epic counts only when it is open and a trusted roster member wrote
+        it; the others are recorded in target_epics_ignored by number and reason only (never their text).
+
+        epics: open epics already read (with number, body, author); a target not among them is read alone."""
+        from .labels import task_list_numbers
+        self.target_epics_used, self.target_epics_ignored = [], []
+        by_number = {c.number: c for c in found}
+        read = {int(e["number"]): e for e in epics if isinstance(e, dict) and "number" in e}
+        for rank, n in enumerate(self.target_epics):
+            epic = read.get(n) or self._read_issue(n, "number,body,author,state")
+            reason = None
+            if epic is None:
+                reason = "not found"
+            elif str(epic.get("state", "OPEN")).upper() != "OPEN":
+                reason = "closed"
+            elif not self.trusted(login_of(epic.get("author"))):
+                reason = "untrusted author"
+            if reason:
+                self.target_epics_ignored.append({"number": n, "reason": reason})
+                continue
+            self.target_epics_used.append(n)
+            for place, m in enumerate(task_list_numbers(epic.get("body"), self.tracker), start=1):
+                c = by_number.get(m)
+                if c is not None and c.target is None:
+                    c.target, c.target_epic = (rank, place), n
+        return found
+
+    def _read_issue(self, n: int, fields: str) -> Optional[Dict[str, Any]]:
+        try:
+            issue = self.gh.read(["issue", "view", str(int(n)), "-R", self.tracker, "--json", fields])
+        except (GhError, ValueError):
+            return None
+        return issue if isinstance(issue, dict) else None
+
+    # --- facts for pick-issue ---
+
+    def facts(self, found: Sequence[Candidate]) -> List[Dict[str, Any]]:
+        """Metadata to judge each issue by. Never a body; reactions count only the operator and trusted logins.
+        A fact whose read fails is null for that issue only."""
+        now = self.now()
+        out = []
+        for c in found:
+            created = claims.parse_ts(c.created)
+            out.append({"number": c.number, "title": c.title, "url": c.url, "author": c.author,
+                        "labels": list(c.labels), "created": c.created or None,
+                        "age_days": (now - created).days if created else None,
+                        "parent": c.parent, "position": c.position,
+                        "target_epic": c.target_epic, "target_position": c.target[1] if c.target else None,
+                        "blocked_by": self._dependencies(c.number, "blocked_by"),
+                        "blocking": self._dependencies(c.number, "blocking"),
+                        "reactions": self._reactions(c.number), "fields": self._fields_of(c), "board": c.board})
+        return out
+
+    def _fields_of(self, c: Candidate) -> Optional[Dict[str, Any]]:
+        """{field: value} for each picking.fields name: from the board item on a board queue, else from the
+        issue's project items in projects owned by the tracker's owner (the first such item with a value wins;
+        items in anyone else's project are ignored). {} when no field is named; None when the read fails."""
+        if not self.pick_fields:
+            return {}
+        if c.board is not None:
+            return dict(c.board.get("fields") or {})
+        owner, name = self.tracker.split("/", 1)
+        query = (_ISSUE_FIELDS_QUERY.replace("{n}", str(int(c.number)))
+                 .replace("{fields}", field_selection(self.pick_fields)))
+        try:
+            data = self.gh.read(["api", "graphql", "-f", f"query={query}", "-f", f"owner={owner}", "-f", f"name={name}"])
+        except GhError:
+            return None
+        issue = (((data or {}).get("data") or {}).get("repository") or {}).get("issue")
+        if not isinstance(issue, dict):
+            return None
+        nodes = [x for x in (issue.get("projectItems") or {}).get("nodes") or []
+                 if isinstance(x, dict) and _project_owner(x).casefold() == owner.casefold()]
+        out: Dict[str, Any] = {}
+        for i, f in enumerate(self.pick_fields):
+            values = (field_value(x.get(f"p{i}"), self.value_max_chars) for x in nodes)
+            out[f] = next((v for v in values if v is not None), None)
+        return out
+
+    def _api_list(self, path: str) -> Optional[List[Any]]:
+        try:
+            data = self.gh.read(["api", f"repos/{self.tracker}/issues/{path}"])
+        except GhError:
+            return None
+        return data if isinstance(data, list) else ([] if data is None else None)
+
+    def _dependencies(self, n: int, kind: str) -> Optional[List[Dict[str, Any]]]:
+        """Issues GitHub records as blocking n (blocked_by) or blocked by n (blocking): repo, number, state."""
+        data = self._api_list(f"{int(n)}/dependencies/{kind}?per_page=100")
+        if data is None:
+            return None
+        out = []
+        for item in data:
+            if isinstance(item, dict) and isinstance(item.get("number"), int):
+                url = str(item.get("repository_url") or "")
+                repo = "/".join(url.rstrip("/").split("/")[-2:]) if "/repos/" in url else None
+                out.append({"repo": repo, "number": item["number"], "state": item.get("state")})
+        return out
+
+    def _reactions(self, n: int) -> Optional[Dict[str, int]]:
+        """Reaction counts by kind, counting only reactions by the operator or a login the roster trusts."""
+        data = self._api_list(f"{int(n)}/reactions?per_page={_REACTION_PAGE}")
+        if data is None or len(data) >= _REACTION_PAGE:
+            return None  # a full page may have more: a partial count could hide trusted reactions
+        counts: Dict[str, int] = {}
+        for r in data:
+            if isinstance(r, dict) and isinstance(r.get("content"), str) \
+                    and self.marker_trusted(login_of(r.get("user")) or None):
+                counts[r["content"]] = counts.get(r["content"], 0) + 1
+        return counts
 
     # --- the marker comment ---
 
@@ -246,6 +513,13 @@ class BaseQueue:
         self.mark_released(n)
         if not self.gh.dry_run:
             self.unlock(n, "pr", force=True)
+
+
+def sibling_info(issue: Dict[str, Any], column: Optional[str] = None) -> Dict[str, Any]:
+    """What epic order needs to know of an issue: open, label names, assignee logins, board column (abstract)."""
+    return {"open": str(issue.get("state", "OPEN")).upper() == "OPEN",
+            "labels": names_of(issue.get("labels")),
+            "assignees": [login_of(x) for x in issue.get("assignees") or []], "column": column}
 
 
 def stale_claims(gh: GhClient, tracker: str, labels: Labels, hours: float, branches: Sequence[str],

@@ -159,6 +159,9 @@ Anyone with push access can edit the repo layer, and it is committed, so not-me 
 | `mode` | set `dry-run` | set `live`. The value is ignored |
 | `enabled` | set `false` | set `true` over a lower `false` |
 | `queue.include_unassigned` | set `false` | set `true` over a lower `false` |
+| `queue.list_limit` | lower it | raise it above the lower layer's value, or set it (or the whole `queue` map) to `null` |
+| `picking.value_max_chars` | lower it | raise it above the lower layer's value, or set `null` |
+| `picking.fields`, `picking.target_epics` and the `## Picking work` section | set anything | nothing: they only order eligible issues |
 | `protected_branches` | add names | remove names. Its `!name` entries are dropped |
 | `allow_repos` | nothing | add repos. Every entry is dropped |
 | `review.block_on` | add levels | drop a level the global or default list has. The whole value is ignored |
@@ -225,6 +228,59 @@ queue: {include_unassigned: true}
 
 A repo file cannot turn this on, because it would widen what not-me picks. When nothing is assigned to you but unassigned issues are ready, `notme pick-issue` returns `{"none": true, "reason": "unassigned_only", "unassigned": <count>, "setting": "queue.include_unassigned"}`.
 
+An issue listed in a trusted epic's task list also waits its turn: it is left out while an earlier unchecked issue in that list is still open, not blocked and not started (no state but `to do`, and nobody but you assigned). `notme pick-issue` reports these under `held_back`.
+
+With the default picking rules or rules from the repo layer, `notme pick-issue` lists up to `queue.list_limit` eligible issues (10 by default); with `## Picking work` rules in your global layer it lists every eligible issue, so the rules can reach an issue the queue's own order puts last (see [Picking work](#picking-work)). Each listed issue comes with the facts the run weighs: labels, epic and place in its task list, age, GitHub issue dependencies, board fields, and reaction counts from you and trusted roster members. Each listed issue costs about three GitHub reads, so a higher limit means a slower pick. See [workflow.md](workflow.md#how-the-next-issue-is-chosen).
+
+### Picking work
+
+Which eligible issue `/not-me:new` takes is up to you. Write your rules in plain words in a `## Picking work` section of `project.md`, in your global layer (`~/.claude/not-me/project.md`) or the repo layer (`.claude/not-me/project.md`). With no such section the shipped default applies: pick by impact (what unblocks other work, what people asked for, what is next in an epic already under way, what has waited longest).
+
+Two frontmatter keys feed the rules:
+
+- `picking.fields` names the board fields the rules use. `notme pick-issue` then lists each issue's value for them under `fields` (on a board queue from the board item; on a label queue from the issue's project items in projects owned by the tracker repository's owner, the first one with a value). Items in anyone else's project are ignored, because any GitHub user can add a public issue to a project of their own and fill in its fields. Text values are cut to `picking.value_max_chars` characters (80 by default). Only named fields are read, so a rule cannot trigger reads by itself. The fields are only reported: how they weigh is up to your rules, so "prefer the smallest `Size`" works as written.
+- `picking.target_epics` names epics to finish first. Their open task-list issues come first, epic by epic in the order you list them, then in task-list order. Without it, epics get no priority beyond the epic order rule above.
+
+Rules only order the issues the queue may pick. They never add one: a paused, blocked, held-back or unassigned issue, or one assigned to someone else, stays out whatever the rules or a target epic say. A target epic counts only when it is open and its author is a lead or authority on the roster; any other is ignored and reported by number under `picking.ignored_epics`.
+
+When the rules come from your global layer, `notme pick-issue` lists every eligible issue instead of the first `queue.list_limit`, so a rule can reach any of them; each listed issue costs about three GitHub reads. Rules from the repo layer and the plugin default rules keep the `queue.list_limit` cut, because the repo layer may only lower `queue.list_limit` and its rules must not lift it either. When `truncated` is true, the run log says the rules saw only part of the queue.
+
+Layers: the section resolves like any other prose (see [Prose: replace, or extend](#prose-replace-or-extend)). The highest layer with a `project.md` supplies the body; with `extends: global`, its sections replace same-named lower ones and the rest are kept. When the resulting body has no `## Picking work` section, the default rules (impact) apply. So a repo `project.md` without `extends` and without the section turns global rules off for that repo. `picking.fields` and `picking.target_epics` merge like other keys. The repo layer may set both and the section: they only order work and grant nothing. It may lower `picking.value_max_chars`, never raise it. As always, the repo layer is read from the main checkout only. `/not-me:config` shows the rules in effect and the layer they came from, and `/not-me:status` states them in one line. Each run logs which rule decided (`rule: impact` or `rule: picking work (repo layer)`).
+
+Example: a board priority field.
+
+```markdown
+---
+picking: {fields: [Priority]}
+---
+## Picking work
+
+Prefer the highest value of the board field `Priority`. Issues without one come
+after those with one. Impact breaks ties.
+```
+
+Example: priority labels.
+
+```markdown
+## Picking work
+
+Take issues labeled `priority: high` first, then `priority: medium`, then the
+rest. Among issues with the same label, pick by impact.
+```
+
+Example: a target epic. Finish epic 74 before anything else, then pick by impact:
+
+```markdown
+---
+picking: {target_epics: [74]}
+---
+## Picking work
+
+Finish the target epic first, in its task-list order. After that, pick by impact.
+```
+
+`queue.board.priority_fields` was the old way to name board fields and is deprecated. When a layer still sets it, not-me moves its names into `picking.fields` and warns with the file and line, so an old config keeps working: a board queue still ranks by those fields (higher first, in the order the old key listed them) for its suggested order, as before. Fields named only in `picking.fields` never change that order. Move the names to `picking.fields` and add a `## Picking work` section to say how to weigh them.
+
 ### Board queues
 
 With `queue.source: board`, work is picked from a Projects v2 board. Set the board and its column names:
@@ -266,7 +322,7 @@ repos:
 | `orchestrate` (default) | The running session is the orchestrator. It splits the work into units and sends each to a model by kind: read-only support to `models.triage`, judgment-heavy or security-sensitive units to `models.review`, everything else to `models.implement`. The `## Delegation` section of `standards.md` lists the paths and kinds that count as judgment-heavy |
 | `single` | Everything, including the run itself, uses `models.single_model`. No classification |
 
-Related keys: `models.bg` is the model for `--bg` runs. `models.verifier` is the model that double-checks claims before posting: `auto` picks one from a different model family, `none` skips the check and logs that it was skipped. `models.max_tries` is how many tries a unit gets before the orchestrator does it itself: first the dispatched agent, then a fresh agent on the same model with the exact failure, then a fresh agent one tier up.
+Related keys: `models.bg` is the model for `--bg` runs. `models.verifier` is the model that double-checks claims before posting: `auto` (the default) picks a different model than the one running: a run on `opus` is checked by `sonnet`, a run on any other model by `opus`. Nothing is asked of you. Leave it on. `none` skips the check and logs that it was skipped; it is reasonable when no good verifier model is available or people verify the work themselves. Pin `models.verifier` to a model name (for example `verifier: sonnet`) only when you want that model instead of the auto choice. Set it in your global layer, `~/.claude/not-me/project.md`, for a personal preference across repos, or in the repo layer, `.claude/not-me/project.md`, for a team-wide choice. Either layer may set it. `models.max_tries` is how many tries a unit gets before the orchestrator does it itself: first the dispatched agent, then a fresh agent on the same model with the exact failure, then a fresh agent one tier up.
 
 The accepted values for `models.strategy` are `orchestrate` and `single`. The other model keys take the model names your Claude Code client accepts.
 
@@ -331,14 +387,17 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `queue.pick_label` | `to do` | Label that marks an issue as ready to pick up |
 | `queue.opt_in_label` | `null` | An extra label an issue must also carry. `null` means none required |
 | `queue.include_unassigned` | `false` | `false` picks only issues assigned to you. `true` also picks issues with no assignee. Issues assigned to someone else are never picked. The repo layer may set `false`, never `true` over a lower `false` (see [Which issues the queue picks](#which-issues-the-queue-picks)) |
+| `queue.list_limit` | `10` | Most eligible issues `notme pick-issue` lists with facts for the run to choose from. A whole number of at least 1. The repo layer may lower it, never raise it or set it to `null` (see [Which issues the queue picks](#which-issues-the-queue-picks)) |
 | `queue.board.owner` | `null` | Board owner, used when `queue.source` is `board` |
 | `queue.board.number` | `null` | Board number, used when `queue.source` is `board` |
 | `queue.board.status_field` | `Status` | Name of the board column field |
-| `queue.board.priority_fields` | `[]` | Board fields used to rank items |
 | `queue.board_states.todo` | `To Do` | Board column name for ready work |
 | `queue.board_states.in_progress` | `In progress` | Board column name for claimed work |
 | `queue.board_states.in_review` | `In review` | Board column name for work waiting on review |
 | `queue.board_states.blocked` | `Blocked` | Board column name for blocked work |
+| `picking.fields` | `[]` | Board field names whose values `notme pick-issue` lists for each issue, for the rules in the `## Picking work` section to use. Any layer may set it (see [Picking work](#picking-work)) |
+| `picking.target_epics` | `[]` | Epic issue numbers to finish first, in this order. One counts only when a trusted roster member wrote it. Any layer may set it (see [Picking work](#picking-work)) |
+| `picking.value_max_chars` | `80` | Longest text field value `notme pick-issue` reports under `fields`; longer ones are cut. A whole number of at least 1. The repo layer may lower it, never raise it or set it to `null` (see [Picking work](#picking-work)) |
 | `labels.todo` | `to do` | Label for ready to be picked up |
 | `labels.in_progress` | `in progress` | Label for claimed and being worked |
 | `labels.needs_review` | `needs review` | Label for PR open and waiting for a reviewer |
@@ -373,7 +432,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `models.implement` | `sonnet` | The model for ordinary implementation units |
 | `models.review` | `opus` | The model for reviews and judgment-heavy units |
 | `models.triage` | `haiku` | The model for read-only support work |
-| `models.verifier` | `auto` | The model that double-checks claims. `auto` picks another family, `none` skips |
+| `models.verifier` | `auto` | The model that double-checks claims. `auto` picks a different model than the run's, a model name pins it, `none` skips |
 | `models.max_tries` | `3` | Tries per unit before the orchestrator takes it over |
 | `notify.command` | `null` | A shell command run with the result line and log path when a run ends with something to report. `null` means none. Prefer your global layer, because a repo-layer command would run on every teammate's machine |
 | `retro.file_upstream` | `false` | `true` files retro findings as issues on the plugin repo |
