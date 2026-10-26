@@ -192,7 +192,7 @@ notme git push <head_ref> --log <path>
 
 Before anything is posted, check this run's own claims (each disagreement, each
 deferral, each "already fixed", each unfixed gate finding) on `models.verifier`
-as verification.md says. `none`: skip and log that it was skipped. Apply the
+as verification.md says; verdict lines name the verifying model. `none`: skip and log that it was skipped. Apply the
 verdicts mechanically; a rejected disagreement goes back to step 5.
 
 ## Step 8: Write back

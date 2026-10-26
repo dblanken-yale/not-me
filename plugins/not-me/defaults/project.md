@@ -40,7 +40,7 @@ logs: {root: null}               # directory for run logs; null = <git-common-di
 markers: {legacy: []}            # older run-marker strings still recognised; union across layers
 attribution: inherit             # inherit | none | "<text>"
 limits: {fix_loop: 3, ci_wait_minutes: 20, claim_stale_hours: 8}  # fix rounds, CI wait, hours before a claim is stale
-models: {strategy: orchestrate, single_model: opus, bg: opus, implement: sonnet, review: opus, triage: haiku, verifier: auto, max_tries: 3}  # strategy: orchestrate | single
+models: {strategy: orchestrate, single_model: opus, bg: opus, implement: sonnet, review: opus, triage: haiku, verifier: auto, max_tries: 3}  # strategy: orchestrate | single; verifier: auto (a different model than the run's) | a model name | none
 notify: {command: null}          # shell command run with a summary when a run ends; null = none
 retro: {file_upstream: false}    # true files retro findings as issues on the plugin repo
 ---
