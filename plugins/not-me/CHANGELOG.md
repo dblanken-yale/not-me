@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.5.0](https://github.com/dblanken-yale/not-me/compare/not-me-v0.4.0...not-me-v0.5.0) (2026-10-26)
+
+
+### Features
+
+* **50:** offer to fix failed checks in /not-me:doctor ([#89](https://github.com/dblanken-yale/not-me/issues/89)) ([650e66d](https://github.com/dblanken-yale/not-me/commit/650e66d1a537b9dc82e0b16526bdb09cffea1e04))
+* pick-issue gathers facts for every eligible issue and new picks by impact ([#82](https://github.com/dblanken-yale/not-me/issues/82)) ([b93079b](https://github.com/dblanken-yale/not-me/commit/b93079b63300b067b45ecb7e4f80200f08aa17f4))
+* set ready to merge only when every required reviewer approved ([#95](https://github.com/dblanken-yale/not-me/issues/95)) ([5f301f2](https://github.com/dblanken-yale/not-me/commit/5f301f22c6431a03011376c12447a9dd42964e6e))
+* user-defined picking rules and a target epic in a Picking work config section ([#83](https://github.com/dblanken-yale/not-me/issues/83)) ([a8350e7](https://github.com/dblanken-yale/not-me/commit/a8350e7310fcacdcdeb873e43649624a380dd0a2))
+
+
+### Bug Fixes
+
+* **43:** keep the visual check path out of the PR ([#84](https://github.com/dblanken-yale/not-me/issues/84)) ([a828187](https://github.com/dblanken-yale/not-me/commit/a8281871a526b6e07c1d2da98276112532291850))
+* **44:** let dry-run state moves assume the state earlier dry-run writes set ([#85](https://github.com/dblanken-yale/not-me/issues/85)) ([1b3fd35](https://github.com/dblanken-yale/not-me/commit/1b3fd35afb363239f3eb3ae7e7b76e28750efbbc))
+* **45:** fall back to a general-purpose code review when the reviewer agent is missing ([#86](https://github.com/dblanken-yale/not-me/issues/86)) ([3b235a4](https://github.com/dblanken-yale/not-me/commit/3b235a443580c7babfe20ebaaf815fb66fc12918))
+* **46:** define models.verifier auto as a different model than the run's ([#96](https://github.com/dblanken-yale/not-me/issues/96)) ([db17184](https://github.com/dblanken-yale/not-me/commit/db17184b08513140f9c1ec31f1bc62bb923f1515))
+* **92:** retry a guard case once when the hook is killed by a signal ([#97](https://github.com/dblanken-yale/not-me/issues/97)) ([2d825f1](https://github.com/dblanken-yale/not-me/commit/2d825f1e757cd05030a35e9024b11c854efd0c77))
+* dispatch every subagent in the foreground so bg runs finish ([#88](https://github.com/dblanken-yale/not-me/issues/88)) ([9c57c6d](https://github.com/dblanken-yale/not-me/commit/9c57c6d677f22152c250352dca997dea8abe8e66))
+
 ## [0.4.0](https://github.com/dblanken-yale/not-me/compare/not-me-v0.3.0...not-me-v0.4.0) (2026-10-23)
 
 
