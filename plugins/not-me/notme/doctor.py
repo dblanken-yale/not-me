@@ -140,11 +140,27 @@ def mode_check(mode: Any, unconfirmed: Optional[str]) -> Check:
     return check("mode", True, "live (confirmed)" if mode == "live" else str(mode or "dry-run"), required=False)
 
 
+def pass_label_check(result: Mapping[str, Any]) -> Check:
+    """Advice on the role.md pass labels, from an ensure_labels(check=True) result."""
+    if result.get("ok"):
+        return check("pass labels", True, f"present in {result.get('repo')}", required=False)
+    return check("pass labels", False, f"missing in {result.get('repo')}: {', '.join(result.get('missing') or [])}; "
+                                       "create them with `notme labels-ensure`, or leave them out and those roles "
+                                       "get no pass label", required=False)
+
+
+def pass_label_error(error: str) -> Check:
+    """The pass labels could not be read."""
+    return check("pass labels", False, f"could not be read ({error})", required=False)
+
+
 def run(runner: Callable[[Sequence[str]], Any], config_errors: List[str], gh: Callable[[], GhClient],
         guard_state: Callable[[], Mapping[str, Any]], env: Mapping[str, str],
-        mode: Optional[Check] = None, config_files: Optional[Mapping[str, Sequence[str]]] = None) -> List[Check]:
-    """Every probe in order. gh and guard_state are called only when needed (gh needs a valid config).
-    config_files maps a layer to the config docs found in it; the "config files" probe runs only when it is given."""
+        mode: Optional[Check] = None, config_files: Optional[Mapping[str, Sequence[str]]] = None,
+        pass_labels: Optional[Callable[[], Optional[Check]]] = None) -> List[Check]:
+    """Every probe in order. gh, guard_state and pass_labels are called only when needed (gh needs a valid
+    config; pass_labels also a logged-in gh). config_files maps a layer to the config docs found in it; the
+    "config files" probe runs only when it is given."""
     checks = [python_check(), git_check(), gh_check(runner)]
     installed = checks[-1]["ok"]
     detail = "valid" if not config_errors else f"{len(config_errors)} error(s): {config_errors[0]}"
@@ -154,7 +170,11 @@ def run(runner: Callable[[Sequence[str]], Any], config_errors: List[str], gh: Ca
     if mode is not None:
         checks.append(mode)
     if installed and not config_errors:
-        checks += auth_checks(gh())
+        auth = auth_checks(gh())
+        checks += auth
+        labels = pass_labels() if pass_labels is not None and auth[0]["ok"] else None
+        if labels is not None:
+            checks.append(labels)
     checks += [guard_check(guard_state()), depth_check(env)]
     return checks
 

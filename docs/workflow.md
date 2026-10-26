@@ -21,6 +21,7 @@ stateDiagram-v2
     in_progress --> todo: new fails before a push and gives the issue back
     needs_review --> needs_work: review requests changes
     needs_review --> needs_work: prove fails a testing step
+    needs_review --> needs_review: one reviewer approves, others still owe a review (role.md)
     needs_review --> ready_to_merge: review approves (only when auto_approve is on)
     needs_review --> ready_to_merge: a person approves
     needs_work --> needs_review: update pushes fixes
@@ -41,6 +42,19 @@ Six more states sit next to the main flow. They do not replace the state above.
 
 That makes eleven: `to do`, `in progress`, `needs review`, `needs work`, `ready to merge`, `question`, `blocked`, `epic`, `needs help`, `needs human`, `paused`.
 
+### Approval with reviewer roles
+
+By default one approval moves a PR from `needs review` to `ready to merge`. When `role.md` lists reviewer roles (see "Reviewer roles" in [config.md](config.md)), every roster reviewer except the author must approve first:
+
+1. A reviewer approves. If others still owe an approval, the PR stays in `needs review` and gains the pass label of that reviewer's role, for example `pass code review`.
+2. Each further approval adds its role's pass label, if the role has one.
+3. When the last required reviewer approves, the PR swaps `needs review` for `ready to merge`. The pass labels may stay. A PR in another state, such as `needs work`, keeps it and the run warns.
+4. A reviewer who later requests changes, or whose approval is dismissed, no longer counts. At the next review not-me posts on the PR, their role's pass label goes away unless another reviewer in that role still approves. A request for changes sends the PR to `needs work` as usual.
+
+An approval made outside a review run, for example a person approving on GitHub, does not move the PR or add a pass label. not-me does not watch for reviews. The labels catch up the next time `/not-me:review` posts a review on the PR, or when a person moves the label by hand.
+
+Pass labels sit next to the state and are never the state. A role without a pass label still has to approve; only the label is skipped. `/not-me:review` applies this rule on its own reviews through `notme review-post --labels-auto`.
+
 Who acts where:
 
 | Step | Who | What happens |
@@ -48,7 +62,7 @@ Who acts where:
 | Issue is ready | a person, or `/not-me:ticket` | The issue gets `to do` (and the opt-in label, if the project sets one) |
 | Pick up | new | Claims the issue, branches, implements, gates, pushes, opens the PR, moves the issue to `needs review` |
 | Proof | prove | Runs the PR's testing steps on its preview. A pass changes no label. A fail sends the PR to `needs work` |
-| Review | review | Approves, requests changes, or asks a named person. Never merges |
+| Review | review | Approves, requests changes, or asks a named person. With roles in `role.md`, approval moves the PR only once every reviewer approved. Never merges |
 | Rework | update | Decides each finding, fixes the right ones, replies on every thread, swaps back to `needs review` |
 | Merge | a person | Always. Nothing in not-me merges, deletes branches, or changes repository settings |
 
@@ -179,7 +193,7 @@ The running skill is the orchestrator. With `models.strategy: orchestrate` (the 
 
 1. Each unit gets a self-contained brief: goal, files, conventions, scope (no commits, pushes or posts), and acceptance.
 2. The orchestrator audits the result itself. It reads the diff and runs the checks. It never trusts a subagent summary.
-3. A failed unit retries with the same agent and the exact failure, then a fresh agent one tier up. After `models.max_tries` the orchestrator does the unit itself.
+3. A failed unit retries with a fresh agent on the same model and the exact failure, then a fresh agent one tier up. After `models.max_tries` the orchestrator does the unit itself.
 4. The decisions stay with the orchestrator: review verdicts, what to post, what to refuse or park, and whether a unit passed.
 5. Each dispatch is logged as `DELEGATE` and each check as `AUDIT`.
 

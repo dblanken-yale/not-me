@@ -14,7 +14,7 @@ DEFAULTS = PLUGIN / "defaults"
 KNOWN = ROOT / "scripts" / "known-commands.txt"
 DENYLIST = ROOT / "scripts" / "lint-denylist.txt"
 
-DOCS = ("project", "standards", "verify", "review", "prove")
+DOCS = ("project", "standards", "verify", "review", "prove", "role")
 MAX_LINES = 250
 
 # Backticked lowercase words in the skill that are not config keys: layer and doc

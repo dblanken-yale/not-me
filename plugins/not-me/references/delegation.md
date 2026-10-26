@@ -65,7 +65,7 @@ a failing test first. Acceptance: the project test command passes and
 | Try | Who |
 |-----|-----|
 | 1 | The agent you dispatched. |
-| 2 | Resume the same agent with the exact failure from your check. |
+| 2 | A fresh foreground agent on the same model. Brief it with the original brief, the note that its predecessor's edits are already in the working tree, and the exact failure quoted from your check. |
 | 3 | A fresh agent one tier up (triage to implement, implement to review). |
 | after `models.max_tries` | Do the unit yourself in the main model. |
 
@@ -73,6 +73,21 @@ a failing test first. Acceptance: the project test command passes and
 2. A unit already on the top tier retries on the same model with a fresh agent.
 3. Doing it yourself is not a failure. Failing to finish it then is a normal
    failure (see `autonomy-and-logging.md`).
+
+## Dispatch in the foreground
+
+1. Every dispatch is a foreground `Agent` call whose result comes back in the same
+   turn.
+2. Never resume an agent with `SendMessage`, and never dispatch with
+   `run_in_background`.
+3. Never end your turn while a dispatch is outstanding.
+
+A resumed or background agent replies after your turn ends, and in a `--bg` run
+ending the turn ends the run.
+
+The one exception: `/not-me:new` and `/not-me:update` start `/not-me:prove` in
+the background as their last step, after the log is finished. Prove is its own run
+with its own log and result, so nothing in the leg waits on it.
 
 ## Log every dispatch
 
@@ -102,6 +117,7 @@ A subagent may draft text. You read it, own it, and decide whether it goes out.
 - [ ] Classified each unit as triage, review, or implement before dispatch.
 - [ ] Wrote a self-contained brief with goal, files, conventions, scope, acceptance.
 - [ ] Audited by reading the diff and running the checks myself.
+- [ ] Dispatched every agent in the foreground: no `SendMessage` resume, no `run_in_background`, no turn ended with a dispatch outstanding.
 - [ ] Followed the retry ladder and took the unit over after `models.max_tries`.
 - [ ] Logged a `DELEGATE` and an `AUDIT` line for each dispatch.
 - [ ] Kept verdicts, posts, and refusals in the orchestrator.

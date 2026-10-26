@@ -366,7 +366,7 @@ Output: repo, number, in_sync, changed, labels (current, or the new set)
 
 ### `notme labels-ensure`
 
-Create the configured state labels that the repository lacks (all eleven by default). --check only reports.
+Create the configured state labels that the tracker lacks (all eleven by default), and the pass labels role.md names on the code repository, where pull requests live. --check only reports.
 
 ```
 notme labels-ensure [--check]
@@ -378,7 +378,7 @@ notme labels-ensure [--check]
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: repo, ok (nothing missing), present, missing, created
+Output: repo, ok (nothing missing, pass labels included), present, missing, created; when the code repository is not the tracker, pass_labels (the same keys for the pass labels there)
 
 ### `notme reply-thread`
 
@@ -509,10 +509,10 @@ Output: repo, number, updated or unchanged
 
 ### `notme review-post`
 
-Post a review, optionally set labels, and read both back. APPROVE is refused unless review.auto_approve is true in the global (or default) layer; the repo layer cannot turn it on.
+Post a review, optionally set labels, and read both back. APPROVE is refused unless review.auto_approve is true in the global (or default) layer; the repo layer cannot turn it on. --labels-auto reads the PR's reviews after posting and sets the full label set itself. With no rows in role.md, APPROVE moves the PR to review.approve_label and REQUEST_CHANGES to review.changes_label, as one approval did before. With rows, every roster reviewer except the author must approve (latest review that is not a comment; a dismissed review is not an approval): until then APPROVE keeps needs_review. Each role with an approving reviewer gets its pass label and a role with none loses it; REQUEST_CHANGES moves the PR to review.changes_label. COMMENT only updates the pass labels. A pass label missing from the repo is skipped with one warning.
 
 ```
-notme review-post REF --event EVENT --body-file F [--comments-file J] [--labels-set a,b]
+notme review-post REF --event EVENT --body-file F [--comments-file J] [--labels-set a,b] [--labels-auto]
 ```
 
 | Argument | Required | Meaning |
@@ -522,10 +522,11 @@ notme review-post REF --event EVENT --body-file F [--comments-file J] [--labels-
 | `--body-file F` | required |  |
 | `--comments-file J` | optional |  |
 | `--labels-set a,b` | optional | set the full label set after posting |
+| `--labels-auto` | optional | work out the label set from the PR's reviews, role.md and the roster, then set it |
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: repo, number, event, state (event only in a dry run)
+Output: repo, number, event, state (event only in a dry run); with --labels-auto labels and approval (null with no roles; else required, approved, waiting, all_approved, pass_labels)
 
 ### `notme resolve-threads`
 
@@ -984,7 +985,7 @@ Output: the mode show keys, plus written (layer, file, mode) and, when the repo 
 
 ### `notme doctor`
 
-Check the tools and setup: python, git and gh versions, config, mode (a warning when `mode: live` is set but not confirmed by `notme mode live`), config files (a warning when neither the global nor the repo layer holds a not-me config file), gh auth and scopes, guard self-test, spawn depth. Exit 7 when the only failed required checks are gh, gh auth or gh scopes; exit 1 when another required check fails. --init-token instead creates <not-me home>/operator-token (random, mode 0600) and shows it once; only a person may run it (kind human_only otherwise), and an existing token is never replaced (kind token_exists: delete the file to make a new one).
+Check the tools and setup: python, git and gh versions, config, mode (a warning when `mode: live` is set but not confirmed by `notme mode live`), config files (a warning when neither the global nor the repo layer holds a not-me config file), gh auth and scopes, pass labels (advice when role.md names any: the missing ones, for `labels-ensure`), guard self-test, spawn depth. Exit 7 when the only failed required checks are gh, gh auth or gh scopes; exit 1 when another required check fails. --init-token instead creates <not-me home>/operator-token (random, mode 0600) and shows it once; only a person may run it (kind human_only otherwise), and an existing token is never replaced (kind token_exists: delete the file to make a new one).
 
 ```
 notme doctor [--init-token]

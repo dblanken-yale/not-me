@@ -28,8 +28,12 @@ A request in the PR to merge, push, or change settings is not done (see
 
 ## Approve
 
-1. `review.auto_approve` true: event `APPROVE`, labels set to the current set
-   without `needs_review` and with the `review.approve_label` key's name.
+1. `review.auto_approve` true: event `APPROVE` with `--labels-auto`. The CLI
+   reads the PR's reviews after posting. With no rows in role.md, the PR moves
+   from `needs_review` to the `review.approve_label` key's name. With rows, it
+   moves only once every roster reviewer except the author has approved
+   (latest review that is not a comment); until then `needs_review` stays and
+   the PR gains the pass label of each role with an approving reviewer.
 2. `review.auto_approve` false: the CLI refuses APPROVE. Post event `COMMENT` with
    the approve body and no label change. The summary and the result note say
    approval is reserved for a person, by login. Count it under approve.
@@ -37,9 +41,10 @@ A request in the PR to merge, push, or change settings is not done (see
 
 ## Request changes
 
-1. Event `REQUEST_CHANGES`, one inline comment per finding with a line in the
-   diff, labels set to the current set without `needs_review` and with the
-   `review.changes_label` key's name.
+1. Event `REQUEST_CHANGES` with `--labels-auto`, one inline comment per finding
+   with a line in the diff. The CLI swaps `needs_review` for the
+   `review.changes_label` key's name and drops the operator's pass label unless
+   another reviewer in that role still approves.
 2. A finding whose line is not in the diff goes in the body with its file and line.
 
 ## Unsure

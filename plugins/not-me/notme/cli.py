@@ -49,7 +49,7 @@ if _PLUGIN_DIR not in sys.path:  # lets scripts load this file by path (the docs
 
 from notme import claims, config as config_mod, doctor as doctor_mod, feedback as feedback_mod  # noqa: E402
 from notme import gh as gh_mod, git as git_mod, guard as guard_mod, paths, prove, runlog, states  # noqa: E402
-from notme import humans, modeswitch, writeback, writes  # noqa: E402
+from notme import humans, modeswitch, roles as roles_mod, writeback, writes  # noqa: E402
 from notme.dryrun import LedgerError  # noqa: E402
 from notme.gh import csv, names_of, login_of  # noqa: E402
 from notme.queue import NotOpen, make_queue, stale_claims  # noqa: E402
@@ -1063,14 +1063,32 @@ def cmd_labels_sync(ctx: Context, args: argparse.Namespace, repo: str, n: int) -
                                 add=csv(args.add), remove=csv(args.remove), check=args.check)
 
 
-@command("labels-ensure", "create the state labels the repo lacks", writes=True, args=[
+@command("labels-ensure", "create the state and pass labels the repo lacks", writes=True, args=[
     arg("--check", action="store_true", help="only report what is missing")])
 def cmd_labels_ensure(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Create the configured state labels that the repository lacks (all eleven by default). --check only reports.
+    """Create the configured state labels that the tracker lacks (all eleven by default), and the pass labels
+    role.md names on the code repository, where pull requests live. --check only reports.
 
-    Output: repo, ok (nothing missing), present, missing, created
+    Output: repo, ok (nothing missing, pass labels included), present, missing, created; when the code repository
+    is not the tracker, pass_labels (the same keys for the pass labels there)
     """
-    return states.ensure_labels(ctx.gh, ctx.tracker, ctx.meta.get("labels") or {}, check=args.check)
+    tracker, code = ctx.tracker, _code_repo(ctx)
+    wanted = list(ctx.cfg.roles().pass_labels().values())
+    if not wanted or code.lower() == tracker.lower():
+        return states.ensure_labels(ctx.gh, tracker, ctx.meta.get("labels") or {}, check=args.check,
+                                    pass_labels=wanted)
+    out = states.ensure_labels(ctx.gh, tracker, ctx.meta.get("labels") or {}, check=args.check)
+    out["pass_labels"] = states.ensure_labels(ctx.gh, code, {}, check=args.check, pass_labels=wanted)
+    out["ok"] = out["ok"] and out["pass_labels"]["ok"]
+    return out
+
+
+def _code_repo(ctx: Context) -> str:
+    """The repository pull requests live in (--repo or origin), else the tracker."""
+    try:
+        return ctx.repo
+    except CliExit:
+        return ctx.tracker
 
 
 # --- handlers: write-back --------------------------------------------------------
@@ -1184,12 +1202,23 @@ def cmd_testing_steps(ctx: Context, args: argparse.Namespace, repo: str, n: int)
 @command("review-post", "post a review", writes=True, ref="repo", args=[
     ref_arg, arg("--event", required=True, choices=("APPROVE", "REQUEST_CHANGES", "COMMENT")), body_file_arg,
     arg("--comments-file", metavar="J"),
-    arg("--labels-set", metavar="a,b", help="set the full label set after posting")])
+    OneOf(arg("--labels-set", metavar="a,b", help="set the full label set after posting"),
+          arg("--labels-auto", action="store_true",
+              help="work out the label set from the PR's reviews, role.md and the roster, then set it"))])
 def cmd_review_post(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
     """Post a review, optionally set labels, and read both back. APPROVE is refused unless review.auto_approve is
     true in the global (or default) layer; the repo layer cannot turn it on.
 
-    Output: repo, number, event, state (event only in a dry run)
+    --labels-auto reads the PR's reviews after posting and sets the full label set itself. With no rows in role.md,
+    APPROVE moves the PR to review.approve_label and REQUEST_CHANGES to review.changes_label, as one approval did
+    before. With rows, every roster reviewer except the author must approve (latest review that is not a comment;
+    a dismissed review is not an approval): until then APPROVE keeps needs_review. Each role with an approving
+    reviewer gets its pass label and a role with none loses it; REQUEST_CHANGES moves the PR to
+    review.changes_label. COMMENT only updates the pass labels. A pass label missing from the repo is skipped with
+    one warning.
+
+    Output: repo, number, event, state (event only in a dry run); with --labels-auto labels and approval (null with
+    no roles; else required, approved, waiting, all_approved, pass_labels)
     """
     if args.event == "APPROVE" and ctx.trusted_meta("review").get("auto_approve") is not True:
         raise fail(ExitCode.ERROR, "approve_refused", "APPROVE needs review.auto_approve: true in the global layer")
@@ -1199,9 +1228,66 @@ def cmd_review_post(ctx: Context, args: argparse.Namespace, repo: str, n: int) -
         if not isinstance(inline, list) or not all(isinstance(c, dict) and {"path", "line", "body"} <= set(c)
                                                     for c in inline):
             raise fail(ExitCode.USAGE, "usage", "comments file must be a JSON list of {path, line, body}")
+    report: Dict[str, Any] = {}
+    auto = _labels_after_review(ctx, repo, n, args.event, report) if args.labels_auto else None
     out = writeback.review_post(ctx.gh, repo, n, args.event.lower(), ctx.read_input(args.body_file), inline,
-                                csv(args.labels_set) if args.labels_set is not None else None, ctx.run_id)
-    return {"repo": repo, "number": n, **out}
+                                csv(args.labels_set) if args.labels_set is not None else None, ctx.run_id,
+                                labels_from_reviews=auto)
+    return {"repo": repo, "number": n, **out, **report}
+
+
+_POSTED_STATE = {"APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED", "COMMENT": "COMMENTED"}
+
+
+def _labels_after_review(ctx: Context, repo: str, n: int, event: str,
+                         report: Dict[str, Any]) -> Callable[[List[Dict[str, Any]], bool], List[str]]:
+    """The callback review-post uses with --labels-auto: (reviews read after posting, dry run) -> the full label
+    set. Fills report["approval"]."""
+    review = ctx.cfg.meta.get("review") or {}
+    target = {"APPROVE": review.get("approve_label"), "REQUEST_CHANGES": review.get("changes_label")}.get(event)
+    if event != "COMMENT" and target not in states.STATES:
+        raise fail(ExitCode.CONFIG, "config_invalid", "review.approve_label and review.changes_label must name a "
+                                                      "state", errors=[f"review label key {target!r}"])
+
+    def compute(reviews: List[Dict[str, Any]], dry: bool) -> List[str]:
+        pairs = [(login_of(r.get("user")), str(r.get("state") or "")) for r in reviews]
+        if dry:  # the review just posted went to the ledger, not GitHub
+            pairs.append((ctx.operator, _POSTED_STATE[event]))
+        current = ctx.gh.labels(repo, n)
+        roles = ctx.cfg.roles()
+        report["approval"] = None
+        if not roles.configured:
+            return states.swap_state(current, target, ctx.labels, "pr") if target else current
+        result = roles_mod.outcome(pairs, login_of((ctx.gh.pr(repo, n) or {}).get("author")),
+                                   ctx.cfg.gate_reviewers(), roles, _usable_pass_labels(ctx, repo, roles))
+        report["approval"] = result.to_json()
+        new = states.set_pass_labels(current, result.earned, result.managed)
+        if event == "REQUEST_CHANGES":
+            return states.swap_state(new, target, ctx.labels, "pr")
+        if event == "APPROVE" and result.all_approved:
+            main = ctx.labels.current(new, "pr")
+            if main == [target]:
+                return new
+            if main and states.allowed(main[0], target, "pr"):
+                return states.swap_state(new, target, ctx.labels, "pr")
+            ctx.warn(f"every required reviewer approved, but {repo}#{n} is in {', '.join(main) or 'no state'}, "
+                     f"which cannot move to {target}; its state label was left as it is")
+        return new  # not final, or COMMENT: only the pass labels change
+    return compute
+
+
+def _usable_pass_labels(ctx: Context, repo: str, roles: Any) -> List[str]:
+    """The role.md pass labels that exist in repo, in the repo's own spelling; one warning names the rest
+    (treated as no pass label)."""
+    wanted = list(roles.pass_labels().values())
+    if not wanted:
+        return []
+    have = {name.lower(): name for name in states.repo_label_names(ctx.gh, repo)}
+    missing = [w for w in wanted if w.lower() not in have]
+    if missing:
+        ctx.warn(f"pass label(s) {', '.join(missing)} from role.md are not in {repo}; treated as no pass label. "
+                 "Create them with /not-me:doctor or `notme labels-ensure`")
+    return [have[w.lower()] for w in wanted if w.lower() in have]
 
 
 @command("resolve-threads", "resolve review threads", writes=True, ref="repo", args=[
@@ -1871,7 +1957,8 @@ def cmd_mode_live(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
 def cmd_doctor(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """Check the tools and setup: python, git and gh versions, config, mode (a warning when `mode: live` is set but
     not confirmed by `notme mode live`), config files (a warning when neither the global nor the repo layer holds a not-me config file), gh auth
-    and scopes, guard self-test, spawn depth. Exit 7 when the only failed required checks are gh, gh auth or gh scopes; exit 1 when another
+    and scopes, pass labels (advice when role.md names any: the missing ones, for `labels-ensure`), guard self-test, spawn depth.
+    Exit 7 when the only failed required checks are gh, gh auth or gh scopes; exit 1 when another
     required check fails. --init-token instead creates <not-me home>/operator-token (random, mode 0600) and shows
     it once; only a person may run it (kind human_only otherwise), and an existing token is never replaced
     (kind token_exists: delete the file to make a new one).
@@ -1883,12 +1970,25 @@ def cmd_doctor(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     checks = doctor_mod.run(ctx.deps.runner or gh_mod._default_runner, ctx.config_errors(), lambda: ctx.gh,
                             ctx.guard_state, ctx.env,
                             doctor_mod.mode_check(ctx.meta.get("mode"), ctx.cfg.live_unconfirmed),
-                            config_files=ctx.cfg.layers.files)
+                            config_files=ctx.cfg.layers.files, pass_labels=lambda: _pass_label_check(ctx))
     verdict = doctor_mod.exit_kind(checks)
     if verdict:
         code = ExitCode.DEPENDENCY if verdict == "dependency" else ExitCode.ERROR
         raise CliExit(code, {"error": "a required check failed", "kind": "doctor", "ok": False, "checks": checks})
     return {"ok": True, "checks": checks}
+
+
+def _pass_label_check(ctx: Context) -> Optional[Dict[str, Any]]:
+    """The doctor's advice on the role.md pass labels, checked on the code repository (None when role.md names
+    none)."""
+    wanted = list(ctx.cfg.roles().pass_labels().values())
+    if not wanted:
+        return None
+    try:
+        result = states.ensure_labels(ctx.gh, _code_repo(ctx), {}, check=True, pass_labels=wanted)
+    except (gh_mod.GhError, CliExit) as exc:
+        return doctor_mod.pass_label_error(str(exc) or exc.__class__.__name__)
+    return doctor_mod.pass_label_check(result)
 
 
 def _init_token(ctx: Context) -> Dict[str, Any]:

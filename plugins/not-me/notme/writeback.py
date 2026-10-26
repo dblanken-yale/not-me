@@ -9,7 +9,7 @@ import html
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import gh as _gh
 from . import writes
@@ -420,8 +420,13 @@ def open_pr(gh: Any, cfg: Any, repo: str, head: str, base: str, title: str, body
 
 def review_post(gh: Any, repo: str, n: int, verdict: str, body_text: str,
                 inline: Optional[Sequence[Dict[str, Any]]] = None, labels_set: Optional[Sequence[str]] = None,
-                run_id: str = "") -> Dict[str, Any]:
-    """Post a review, set labels if asked, then read both back and raise WritebackMismatch on a difference."""
+                run_id: str = "",
+                labels_from_reviews: Optional[Callable[[List[Dict[str, Any]], bool], List[str]]] = None
+                ) -> Dict[str, Any]:
+    """Post a review, set labels if asked, then read both back and raise WritebackMismatch on a difference.
+
+    labels_from_reviews(reviews, dry_run), instead of labels_set, computes the full label set from the PR's reviews
+    read after posting (in a dry run the new review is not among them). The result then carries `labels`."""
     if verdict not in _VERDICTS:
         raise ValueError(f"unknown verdict {verdict!r}")
     event, state = _VERDICTS[verdict]
@@ -435,26 +440,41 @@ def review_post(gh: Any, repo: str, n: int, verdict: str, body_text: str,
                                         allow_approve=(verdict == "approve"))
         else:
             result = gh.review_post(repo, n, event, body_path, allow_approve=(verdict == "approve"))
+    dry = bool(gh.dry_run or (isinstance(result, dict) and result.get("dry_run")))
+    reviews = _reviews(gh, repo, n) if not dry or labels_from_reviews is not None else []
+    if not dry:
+        _check_review(reviews, run_marker, state, repo, n)
+    extra: Dict[str, Any] = {}
+    if labels_from_reviews is not None:
+        labels_set = labels_from_reviews(reviews, dry)
+        extra["labels"] = list(labels_set)
     if labels_set is not None:
         try:
             gh.labels_set(repo, n, list(labels_set))
         except _gh.ReadbackMismatch as exc:
             raise WritebackMismatch(str(exc)) from exc
-    if gh.dry_run or (isinstance(result, dict) and result.get("dry_run")):
-        return {"dry_run": True, "event": event}
+    if dry:
+        return {"dry_run": True, "event": event, **extra}
+    if labels_set is not None:
+        actual = gh.labels(repo, n)
+        if set(actual) != set(labels_set):
+            raise WritebackMismatch(f"labels on {repo}#{n} read back as {sorted(actual)}, wanted {sorted(labels_set)}")
+    return {"event": event, "state": state, **extra}
+
+
+def _reviews(gh: Any, repo: str, n: int) -> List[Dict[str, Any]]:
+    """The PR's reviews, oldest first (first 100)."""
     if not writes.valid_slug(repo):
         raise ValueError(f"invalid repo {repo!r}")
-    reviews = gh.read(["api", f"repos/{repo}/pulls/{_gh._num(n)}/reviews?per_page=100"]) or []
+    return gh.read(["api", f"repos/{repo}/pulls/{_gh._num(n)}/reviews?per_page=100"]) or []
+
+
+def _check_review(reviews: List[Dict[str, Any]], run_marker: str, state: str, repo: str, n: int) -> None:
     mine = [r for r in reviews if run_marker in (r.get("body") or "")]
     if not mine:
         raise WritebackMismatch(f"review on {repo}#{n} not found after posting")
     if mine[-1].get("state") != state:
         raise WritebackMismatch(f"review on {repo}#{n} reads back as {mine[-1].get('state')}, wanted {state}")
-    if labels_set is not None:
-        actual = gh.labels(repo, n)
-        if set(actual) != set(labels_set):
-            raise WritebackMismatch(f"labels on {repo}#{n} read back as {sorted(actual)}, wanted {sorted(labels_set)}")
-    return {"event": event, "state": state}
 
 
 def label_swap(gh: Any, repo: str, n: int, remove: Sequence[str], add: Sequence[str],

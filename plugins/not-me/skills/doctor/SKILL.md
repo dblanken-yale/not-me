@@ -18,10 +18,11 @@ nothing the operator did not pick.
    null. Do not restate or invent a hint.
 4. Run `notme guard selftest`. Report `ok` and `active`. Exit 8 means the guard is
    enabled but not working: every run stops with `FAILED - guard not working`.
-5. Run `notme config --check`. Print each error with its layer, file and line. Exit
-   4 means the config is invalid. Run `notme config --explain` only if the operator
-   asks about a warning, and print its `warnings`.
-6. Offer fixes (below). Then point to `docs/install.md` in the plugin repository.
+5. A failed `pass labels` check: recommend `/not-me:setup project` to create them.
+6. Run `notme config --check`; print each error (role.md ones too) with its layer,
+   file and line. Exit 4 means the config is invalid. Run `notme config --explain`
+   only if the operator asks about a warning, and print its `warnings`.
+7. Offer fixes (below). Then point to `docs/install.md` in the plugin repository.
 
 ## Offering fixes
 

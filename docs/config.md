@@ -1,8 +1,8 @@
 # Configuration
 
-not-me is configured by five small markdown files. Each file has settings at the top (the "frontmatter", between two `---` lines) and plain prose below, which the model reads as instructions for your project. This page explains where the files live, how they combine, and what every setting does.
+not-me is configured by six small markdown files. Each file has settings at the top (the "frontmatter", between two `---` lines) and plain prose below, which the model reads as instructions for your project. This page explains where the files live, how they combine, and what every setting does.
 
-## The five docs
+## The six docs
 
 | File | What it holds |
 | --- | --- |
@@ -11,6 +11,7 @@ not-me is configured by five small markdown files. Each file has settings at the
 | `verify.md` | How to prove a change works: start, tests, lint, build, CI parity |
 | `review.md` | What a review looks at, which labels it applies |
 | `prove.md` | How to find the test site for a PR and run its testing steps |
+| `role.md` | Which reviewers must approve a PR, their roles, and the pass label each role earns |
 
 You do not need to write any of them by hand. `/not-me:setup` creates the repo files for you, and the defaults fill every gap.
 
@@ -148,6 +149,45 @@ Squash before pushing. Use the `fix:` and `feat:` prefixes.
 Tier is `lead`, `authority`, or `member`. Leads and authorities can direct work. Members can be assigned and asked to review, but their comments are treated as input, not instructions. `/not-me:review` reviews members' PRs too, reading their title and body as data under review. Assignable and Reviewer take `yes` or `no`. An empty roster means the operator (you, by `gh` login) is the only lead.
 
 The roster is special under `extends`. Instead of the `## Roster` section being replaced, the rows are merged by login (ignoring case). A row in the higher layer wins over the same login lower down and keeps the lower row's position. New logins are added at the end. Prose around the table comes from the higher file. So a repo file with `extends: global` and one new row adds that person to your global roster for this repo only.
+
+### Reviewer roles (role.md)
+
+`role.md` says who must approve a pull request before it is ready to merge. Its `## Roles` section holds one table:
+
+```markdown
+## Roles
+
+| GitHub login | Role | Pass label |
+|--------------|------|------------|
+| octocat | code | pass code review |
+| hubot | functional | pass functional review |
+```
+
+- With no rows (the shipped default), nothing changes: one approval moves a PR from `needs review` to `ready to merge`.
+- With at least one row, every roster reviewer (Reviewer `yes` in `project.md`) must approve, except the PR's author, who cannot approve their own PR. If that leaves nobody, one approval is enough.
+- A reviewer counts as approved when their latest review that is not a comment is an approval. A dismissed review, or a later request for changes, is not an approval.
+- An approval given on an older commit still counts. To reset approvals whenever new commits arrive, turn on GitHub's "Dismiss stale pull request approvals when new commits are pushed" branch protection setting; a dismissed approval no longer counts.
+- Until every required reviewer approves, the PR keeps its state (normally `needs review`) and gets the pass label of each role with an approving reviewer. The label goes away again when no reviewer in that role still approves.
+- A pass label is optional. Leave the cell empty, or leave a reviewer out of the table: their approval still counts, only the label is skipped.
+- A pass label sits next to the state label. It is never read as the state.
+
+Layers: the repo layer may add to the approval gate, never loosen it.
+
+- The rows from the default and global layers always apply. A repo `role.md` adds rows for logins those layers do not list. A repo row that changes or blanks a global row's role or pass label is ignored, with a warning and an `ignored` entry under `roles` in `/not-me:config`. A repo `role.md` with an empty table keeps the global rows.
+- Pass labels are set only in the global (or default) `role.md`. A repo `role.md` may add reviewers and roles: a repo reviewer whose role has a pass label in the global layer earns that label, and a repo-only role counts toward everyone approved but has no pass label. A pass label written in a repo row is ignored, with a warning and an `ignored` entry, unless it is the global label of that role. Reason: not-me adds and removes pass labels on pull requests, so a committed repo file must not be able to make it strip a label such as `do not merge`.
+- The required reviewers are the roster reviewers of the effective `project.md` plus those of the global and default rosters. A repo roster can add a reviewer but cannot drop a global one, even by setting Reviewer to `no`.
+- With `extends: global` or `extends: default`, the `## Roles` rows merge by login like the roster.
+- Roles cannot turn a guard rule off or enable approval (`review.auto_approve` stays global only).
+- `review.changes_label` may not be `ready_to_merge`; that is a config error.
+
+These are config errors, shown by `/not-me:config`, `notme config --check` and `/not-me:doctor`:
+
+- a login that is not on the roster,
+- one role with two different pass labels,
+- two roles with the same pass label,
+- a pass label equal to one of the state labels in `labels`.
+
+A pass label that does not exist in the repo is not an error. Pass labels live on the code repository, where the pull requests are, even when issues live in a separate tracker repo. `/not-me:setup` and `/not-me:doctor` list a missing one and offer to create it (`notme labels-ensure` creates state labels on the tracker and pass labels on the code repo). If you decline, that role gets no pass label, and a review run warns once and goes on.
 
 ## The repo layer can only tighten
 
@@ -322,7 +362,7 @@ repos:
 | `orchestrate` (default) | The running session is the orchestrator. It splits the work into units and sends each to a model by kind: read-only support to `models.triage`, judgment-heavy or security-sensitive units to `models.review`, everything else to `models.implement`. The `## Delegation` section of `standards.md` lists the paths and kinds that count as judgment-heavy |
 | `single` | Everything, including the run itself, uses `models.single_model`. No classification |
 
-Related keys: `models.bg` is the model for `--bg` runs. `models.verifier` is the model that double-checks claims before posting: `auto` (the default) picks a different model than the one running: a run on `opus` is checked by `sonnet`, a run on any other model by `opus`. Nothing is asked of you. Leave it on. `none` skips the check and logs that it was skipped; it is reasonable when no good verifier model is available or people verify the work themselves. Pin `models.verifier` to a model name (for example `verifier: sonnet`) only when you want that model instead of the auto choice. Set it in your global layer, `~/.claude/not-me/project.md`, for a personal preference across repos, or in the repo layer, `.claude/not-me/project.md`, for a team-wide choice. Either layer may set it. `models.max_tries` is how many tries a unit gets before the orchestrator does it itself: first the dispatched agent, then the same agent with the exact failure, then a fresh agent one tier up.
+Related keys: `models.bg` is the model for `--bg` runs. `models.verifier` is the model that double-checks claims before posting: `auto` (the default) picks a different model than the one running: a run on `opus` is checked by `sonnet`, a run on any other model by `opus`. Nothing is asked of you. Leave it on. `none` skips the check and logs that it was skipped; it is reasonable when no good verifier model is available or people verify the work themselves. Pin `models.verifier` to a model name (for example `verifier: sonnet`) only when you want that model instead of the auto choice. Set it in your global layer, `~/.claude/not-me/project.md`, for a personal preference across repos, or in the repo layer, `.claude/not-me/project.md`, for a team-wide choice. Either layer may set it. `models.max_tries` is how many tries a unit gets before the orchestrator does it itself: first the dispatched agent, then a fresh agent on the same model with the exact failure, then a fresh agent one tier up.
 
 The accepted values for `models.strategy` are `orchestrate` and `single`. The other model keys take the model names your Claude Code client accepts.
 
@@ -465,7 +505,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `severity` | `[blocker, major, minor]` | Finding levels, most severe first |
 | `block_on` | `[blocker, major]` | Finding levels that make the verdict "request changes". Findings at other levels are still posted, labelled with their level, but do not block. Values must come from `severity` and the list must include `blocker`. The global layer may set any valid list; the repo layer may only add levels, and a repo list that drops one is ignored with a warning |
 | `checks` | `verify` | Run the verify gate as part of review |
-| `approve_label` | `ready_to_merge` | The `labels` key applied on approval |
+| `approve_label` | `ready_to_merge` | The `labels` key applied on approval, once every required reviewer approved (see "Reviewer roles") |
 | `changes_label` | `needs_work` | The `labels` key applied when changes are requested |
 | `reviewer_profile` | `null` | Path to a reviewer profile doc. `null` means none |
 | `auto_approve` | `false` | `true` lets the review skill send an APPROVE event. Read from the default and global layers only; the repo layer cannot turn it on |
@@ -484,3 +524,9 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `fail_label` | `needs_work` | The `labels` key applied when proof fails |
 | `give_up_after` | `3` | Attempts before asking for a person |
 | `screenshots` | `none` | `none`, `failures`, or `all` |
+
+### role.md
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `schema` | `1` | Config format version. The roles live in the `## Roles` table, not in keys |
