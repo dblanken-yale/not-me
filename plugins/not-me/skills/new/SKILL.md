@@ -153,7 +153,7 @@ the effective verify doc; never invent a test or lint command.
    it is not installed), the security review as a foreground general-purpose
    subagent, CI-parity lint on the whole tree, final tests, then each step under
    `## Gate additions`. Log each as `GATE`. Fix findings in this run (gate.md).
-6. Cross-model claim check on `models.verifier` before anything is posted.
+6. Cross-model claim check on `models.verifier` before posting; verdicts name the model.
 
 ## Step 7: Commit
 

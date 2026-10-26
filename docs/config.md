@@ -322,7 +322,7 @@ repos:
 | `orchestrate` (default) | The running session is the orchestrator. It splits the work into units and sends each to a model by kind: read-only support to `models.triage`, judgment-heavy or security-sensitive units to `models.review`, everything else to `models.implement`. The `## Delegation` section of `standards.md` lists the paths and kinds that count as judgment-heavy |
 | `single` | Everything, including the run itself, uses `models.single_model`. No classification |
 
-Related keys: `models.bg` is the model for `--bg` runs. `models.verifier` is the model that double-checks claims before posting: `auto` picks one from a different model family, `none` skips the check and logs that it was skipped. `models.max_tries` is how many tries a unit gets before the orchestrator does it itself: first the dispatched agent, then the same agent with the exact failure, then a fresh agent one tier up.
+Related keys: `models.bg` is the model for `--bg` runs. `models.verifier` is the model that double-checks claims before posting: `auto` (the default) picks a different model than the one running: a run on `opus` is checked by `sonnet`, a run on any other model by `opus`. Nothing is asked of you. Leave it on. `none` skips the check and logs that it was skipped; it is reasonable when no good verifier model is available or people verify the work themselves. Pin `models.verifier` to a model name (for example `verifier: sonnet`) only when you want that model instead of the auto choice. Set it in your global layer, `~/.claude/not-me/project.md`, for a personal preference across repos, or in the repo layer, `.claude/not-me/project.md`, for a team-wide choice. Either layer may set it. `models.max_tries` is how many tries a unit gets before the orchestrator does it itself: first the dispatched agent, then the same agent with the exact failure, then a fresh agent one tier up.
 
 The accepted values for `models.strategy` are `orchestrate` and `single`. The other model keys take the model names your Claude Code client accepts.
 
@@ -432,7 +432,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `models.implement` | `sonnet` | The model for ordinary implementation units |
 | `models.review` | `opus` | The model for reviews and judgment-heavy units |
 | `models.triage` | `haiku` | The model for read-only support work |
-| `models.verifier` | `auto` | The model that double-checks claims. `auto` picks another family, `none` skips |
+| `models.verifier` | `auto` | The model that double-checks claims. `auto` picks a different model than the run's, a model name pins it, `none` skips |
 | `models.max_tries` | `3` | Tries per unit before the orchestrator takes it over |
 | `notify.command` | `null` | A shell command run with the result line and log path when a run ends with something to report. `null` means none. Prefer your global layer, because a repo-layer command would run on every teammate's machine |
 | `retro.file_upstream` | `false` | `true` files retro findings as issues on the plugin repo |
