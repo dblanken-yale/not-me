@@ -45,6 +45,9 @@ An issue is ready to pick up when it has:
 - reproduction steps or context
 - what is out of scope
 
+An issue whose body says another PR or issue must merge first is not ready
+until that one is merged or closed.
+
 ## Ticket format
 
 New issues use the same four parts as Issue readiness.
