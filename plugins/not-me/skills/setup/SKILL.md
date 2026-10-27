@@ -1,7 +1,7 @@
 ---
 name: setup
-description: Interactive setup for not-me. Detects the repo, labels, boards, roster candidates, companion checkouts and verify commands, runs one batched interview, then writes the six config docs (project, standards, verify, review, prove, role) to the repo layer or, with --global, the global layer, keeping the shipped comments. Also checks the current config (--check), upgrades old schemas (--upgrade) and runs non-interactively from an answers file (--answers). NOT for running work (use /not-me), NOT for diagnosing a broken install (use /not-me:doctor), NOT for changing the allow list (use /not-me:allow-repo).
-argument-hint: "[--global] [all|project|standards|verify|review|prove|role] [--picking] [--check] [--upgrade] [--answers FILE] [--import SOURCE]"
+description: Interactive setup for not-me. Detects the repo, labels, boards, roster candidates, companion checkouts and verify commands, runs one batched interview, then writes the six config docs (project, standards, verify, review, prove, role) to the repo layer or, with --global, the global layer, keeping the shipped comments. Also reruns only the queue choice (project --queue) or the picking rules (project --picking), checks the current config (--check), upgrades old schemas (--upgrade) and runs non-interactively from an answers file (--answers). NOT for running work (use /not-me), NOT for diagnosing a broken install (use /not-me:doctor), NOT for changing the allow list (use /not-me:allow-repo).
+argument-hint: "[--global] [all|project|standards|verify|review|prove|role] [--queue] [--picking] [--check] [--upgrade] [--answers FILE] [--import SOURCE]"
 disable-model-invocation: true
 allowed-tools: AskUserQuestion, Read, Write, Edit, Bash, Glob, Grep
 ---
@@ -40,6 +40,8 @@ Read before starting: `${CLAUDE_PLUGIN_ROOT}/references/config-and-layers.md`
 - Scope: `all` (default) or one doc name: `project`, `standards`, `verify`,
   `review`, `prove`, `role`.
 - `--global`: target the global layer and ask only operator-level keys.
+- `--queue`: with scope `project` (or no scope), rerun only the queue choice
+  (see Queue mode).
 - `--picking`: only the picking step (Step 2a) on `project.md`. Alone, it means
   scope `project`; with another doc name, print the argument hint and stop. With
   `--global`, it targets the global layer.
@@ -63,7 +65,7 @@ An unknown argument: print the argument hint and stop.
    today (default, global layer, repo layer), the file path, and warnings.
 4. Without `--global`, run `git rev-parse --show-toplevel`. Outside a git checkout,
    refuse to write the repo layer and offer `--global` instead.
-5. In `--check` and `--upgrade` mode, go to that section now.
+5. In `--queue`, `--check` and `--upgrade` mode, go to that section now.
 
 ## Step 1: detect
 
@@ -199,6 +201,16 @@ Keep every other section's default text. Do not invent sections.
    ledger and nothing is sent, until the user runs `/not-me:mode live`.
 4. Print the next commands: `/not-me:doctor`, `/not-me --dry-run`, and each
    `/not-me:allow-repo` confirmation from Step 4.
+
+## Queue mode (`project --queue`)
+
+Follow `${CLAUDE_PLUGIN_ROOT}/skills/setup/references/queue.md`: show the current
+source and what it picks (the queue summary from `notme config --explain`), list
+the tracker's labels and its owner's boards so the user picks, write only the queue
+keys of the repo layer's `project.md`, and for a board print the
+`/not-me:allow-repo owner/name --board owner/number` command for the user. Skip
+Steps 1 to 5 and the other questions. With `--global`, refuse: the queue belongs in
+a repo layer.
 
 ## Check mode (`--check`)
 

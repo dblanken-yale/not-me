@@ -325,7 +325,13 @@ Finish the target epic first, in its task-list order. After that, pick by impact
 
 ### Board queues
 
-With `queue.source: board`, work is picked from a Projects v2 board. Set the board and its column names:
+not-me finds work in one of two places: issues carrying a label (`queue.source: labels`, the default), or a column of a Projects v2 board (`queue.source: board`).
+
+The easy way to see or change it is `/not-me:setup project --queue`. It shows what the queue picks today, lists the repo's labels and the owner's boards and columns so you pick instead of typing, writes only the queue keys of the repo layer's `project.md`, and for a board prints the `/not-me:allow-repo owner/name --board owner/number` command you run to confirm it. The labels source picks by the `labels.todo` label, so for labels setup writes that name to both `labels.todo` and `queue.pick_label`.
+
+To see where the queue looks without changing anything, `/not-me:status` and `/not-me:config` print it in plain words, for example "picks issues labeled `to do`, assigned to you" or "picks issues in the `To Do` column of board acme/7, assigned to you". In JSON this is the `queue` object of `notme status` and `notme config --explain`, and `notme pick-issue` adds the same sentence as `queue_summary` whenever it finds nothing. `/not-me:doctor` warns when the source cannot work: the pick label does not exist, the board is not confirmed in your allow list or cannot be found, or a `queue.board_states` column is not one of the board's Status options.
+
+To set it by hand, with `queue.source: board` set the board and its column names:
 
 ```yaml
 queue:
@@ -335,6 +341,8 @@ queue:
 ```
 
 Your token needs the `project` scope, and the board must be confirmed with `/not-me:allow-repo --board acme/7` if it was set in the repo layer. Pull request states always use labels.
+
+Picking from labels and a board at once (a `queue.source: either`) is not supported for now. Claims and state moves are owned separately by the label queue (`notme/queue/labels.py`) and the board queue (`notme/queue/board.py`): one moves labels, the other moves the Status column. A source that reads both needs a design for which side owns an issue's state, so a claim on one side cannot leave the other stale. A follow-up issue can propose that design. Until then, any other `queue.source` value is reported as not supported by `notme status`, `notme config --explain` and `notme doctor`, and a run refuses it.
 
 ## Companion sets
 

@@ -162,6 +162,15 @@ class SetupSkillTest(unittest.TestCase):
         self.assertIn("Never put `mode: live` in the repo layer", self.text)
         self.assertIn("active_run", self.text)
 
+    def test_queue_mode(self):
+        self.assertIn("--queue", self.meta["argument-hint"])
+        self.assertIn("## Queue mode (`project --queue`)", self.text)
+        queue = (SKILL_DIR / "references" / "queue.md").read_text(encoding="utf-8")
+        self.assertIn("references/queue.md", self.text)
+        for needle in ("notme config --explain", "gh label list", "gh project list", "gh project field-list",
+                       "--board owner/number", "notme doctor", "keep everything else", "--global"):
+            self.assertIn(needle, queue)
+
     def test_no_forbidden_strings(self):
         tokens = [ln.strip().lower() for ln in DENYLIST.read_text(encoding="utf-8").splitlines()
                   if ln.strip() and not ln.startswith("#")]

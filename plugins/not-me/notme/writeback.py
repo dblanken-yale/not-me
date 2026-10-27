@@ -301,47 +301,83 @@ def _template_text(cfg: Any) -> Optional[str]:
     return None
 
 
-def pr_body(cfg: Any, issue_number: int, issue_title: str, description: str, testing_steps: Sequence[str],
-            companions: Sequence[Dict[str, Any]] = (), refs: Sequence[str] = (),
+# Characters that would end, nest or restyle markdown link text, or trigger a GitHub mention, reference,
+# math or HTML entity. Each is escaped with a backslash; nothing is dropped.
+_LINK_TEXT_SPECIAL_RE = re.compile(r"([\\`*_\[\]<>#!|~&@$])")
+
+
+def _link_text(text: str) -> str:
+    """text on one line, escaped so it renders literally as markdown link text."""
+    one_line = re.sub(r"\s*[\r\n]+\s*", " ", str(text)).strip()
+    return _LINK_TEXT_SPECIAL_RE.sub(r"\\\1", one_line)
+
+
+def _issue_number(value: Any) -> Optional[int]:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def _issue_heading(number: Optional[int], title: str, slug: Optional[str]) -> Optional[str]:
+    """The linked H2 that opens a PR body; None when there is no issue or no safe repo to link to."""
+    if number is None or not writes.valid_slug(slug):
+        return None
+    return f"## [{number}: {_link_text(title)}](https://github.com/{slug}/issues/{number})"
+
+
+def pr_body(cfg: Any, issue_number: Optional[int], issue_title: str, description: str,
+            testing_steps: Sequence[str], companions: Sequence[Dict[str, Any]] = (), refs: Sequence[str] = (),
             repo: Optional[str] = None) -> Tuple[str, str]:
-    """(title, body). repo is the repository the PR opens in; it decides how the issue is referenced."""
+    """(title, body). repo is the repository the PR opens in; it decides how the issue is referenced.
+
+    The body opens with a linked heading for the issue. With no issue_number there is no heading and no
+    closing line, and the title is the issue_title as given.
+    """
     standards = _meta(cfg, "standards")
-    title = str(standards.get("pr_title") or "{issue}: {issue_title}")
-    title = title.replace("{issue_title}", issue_title).replace("{issue}", str(issue_number))
+    number = _issue_number(issue_number)
+    if number is None:
+        title = issue_title
+    else:
+        title = str(standards.get("pr_title") or "{issue}: {issue_title}")
+        title = title.replace("{issue_title}", issue_title).replace("{issue}", str(number))
 
     tracker = _tracker(cfg, repo)
     local = _same(tracker, repo) or _meta(cfg, "project").get("tracker") in (None, "auto")
     # Always owner/repo#N, even in the same repo: a bare #N is ambiguous across a companion set and GitHub
     # honours a qualified closer in the same repository just the same.
-    issue_ref = f"{tracker or repo}#{issue_number}" if (tracker or repo) else f"#{issue_number}"
-    keyword = standards.get("closing_keyword", "auto")
-    if keyword in (None, "", "auto"):
-        keyword = "Closes" if local else "Refs"
+    references = []
+    issue_ref = None
+    if number is not None:
+        issue_ref = f"{tracker or repo}#{number}" if (tracker or repo) else f"#{number}"
+        keyword = standards.get("closing_keyword", "auto")
+        if keyword in (None, "", "auto"):
+            keyword = "Closes" if local else "Refs"
+        references.append(f"{keyword} {issue_ref}")
     qualified = []
     for ref in refs:
         ref = f"{tracker or repo}{ref}" if re.fullmatch(r"#\d+", ref) and (tracker or repo) else str(ref)
         if ref != issue_ref and ref not in qualified:
             qualified.append(ref)
-    references = [f"{keyword} {issue_ref}"]
     if qualified:
         references.append("**References:** " + ", ".join(qualified))
 
-    references_block = "## References\n\n" + "\n\n".join(references)
+    references_block = ["## References\n\n" + "\n\n".join(references)] if references else []
     template = _template_text(cfg)
     if template is None:
         body = "\n\n".join([
             "## Summary\n\n" + description.strip(),
             "## Testing steps\n\n" + _checklist(testing_steps),
             "## Companion PRs\n\n" + _companion_lines(companions),
-            references_block,
-        ])
+        ] + references_block)
     else:
         body = template.replace("\r\n", "\n").rstrip()
         body = _set_section(body, _SUMMARY_HEADING, "## Summary", description.strip())
         body = _set_section(body, _steps_pattern(cfg), "## Testing steps", _checklist(testing_steps))
         if companions or _find_section(body.split("\n"), _COMPANION_HEADING):
             body = _set_section(body, _COMPANION_HEADING, "## Companion PRs", _companion_lines(companions))
-        body = body.rstrip() + "\n\n" + references_block
+        if references_block:
+            body = body.rstrip() + "\n\n" + references_block[0]
+    heading = _issue_heading(number, issue_title, tracker or repo)
+    if heading:
+        body = heading + "\n\n" + body.lstrip("\n")
     body += "\n\n" + _kind_marker(NEW_PR_KIND) + "\n"
     return title, apply_attribution(body, cfg)
 
@@ -554,6 +590,9 @@ def followup(gh: Any, cfg: Any, title: str, body: str, source_number: Optional[i
 
 _CODE_RE = re.compile(r"```.*?```|~~~.*?~~~|`[^`\n]*`", re.S)
 _BARE_REF_RE = re.compile(r"(?<![\w/&#])#(\d+)\b")
+# The issue heading pr_body writes as line 1; group 1 is the link text, a copy of the issue title.
+_ISSUE_HEADING_RE = re.compile(
+    r"^## \[(\d+: (?:\\.|[^\\\]])*)\]\(https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/\d+\)")
 _PATH_RE = re.compile("(?:/" + "Users/|/home/[^/\\s]+/|[A-Za-z]:\\\\" + "Users\\\\)")
 _AI_RES = (re.compile(r"\bAI\b"), re.compile("\\bCl" + "aude\\b", re.I), re.compile(r"\bmodels?\b", re.I))
 
@@ -575,15 +614,23 @@ def check_text(body: str, tracker: Optional[str] = None, repo: Optional[str] = N
             problems.append("summary does not start with a TL;DR line")
     blank = lambda m: "\n" * m.group(0).count("\n")  # noqa: E731 - keeps line numbers stable
     scan = re.sub(r"<!--.*?-->", blank, text, flags=re.S)
-    ref_lines = _CODE_RE.sub(blank, scan).split("\n")
-    for number, line in enumerate(scan.split("\n"), 1):
+    lines = scan.split("\n")
+    # The issue heading's link text is the issue title, quoted rather than written by us, and GitHub never
+    # autolinks inside link text: skip the AI-word and bare-ref rules on it, keep the path rule.
+    heading = _ISSUE_HEADING_RE.match(lines[0])
+    first = lines[0]
+    if heading:
+        first = first[:heading.start(1)] + " " * len(heading.group(1)) + first[heading.end(1):]
+    ref_lines = _CODE_RE.sub(blank, "\n".join([first] + lines[1:])).split("\n")
+    for number, line in enumerate(lines, 1):
+        ai_line = first if number == 1 else line
         if not _same(tracker, repo):
             for m in _BARE_REF_RE.finditer(ref_lines[number - 1]):
                 problems.append(f"line {number}: bare #{m.group(1)}; write owner/repo#{m.group(1)}")
         if _PATH_RE.search(line):
             problems.append(f"line {number}: local file path")
         for pattern in _AI_RES:
-            m = pattern.search(line)
+            m = pattern.search(ai_line)
             if m:
                 problems.append(f"line {number}: mentions {m.group(0)!r}")
     for m in re.finditer(r"<details[^>]*>", text):

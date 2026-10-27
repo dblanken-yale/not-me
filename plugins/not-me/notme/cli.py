@@ -52,7 +52,7 @@ from notme import gh as gh_mod, git as git_mod, guard as guard_mod, paths, prove
 from notme import humans, modeswitch, roles as roles_mod, writeback, writes  # noqa: E402
 from notme.dryrun import LedgerError  # noqa: E402
 from notme.gh import csv, names_of, login_of  # noqa: E402
-from notme.queue import NotOpen, make_queue, stale_claims  # noqa: E402
+from notme.queue import NotOpen, describe as describe_queue, make_queue, stale_claims  # noqa: E402
 from notme.queue.signals import picking_signals  # noqa: E402
 from notme.redact import redact, redact_obj  # noqa: E402
 
@@ -689,8 +689,9 @@ def cmd_config(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     repo).
 
     Output: config (per document) and roster; with --explain layers, keys, bodies, picking (rules: the effective
-    Picking work section of project.md, layer: where it came from, fields, target_epics), warnings; with --check
-    ok, errors
+    Picking work section of project.md, layer: where it came from, fields, target_epics), queue (where the issue
+    queue looks: source, ok, summary, opt_in_label, and label or board and column), warnings; with --check ok,
+    errors
     """
     cfg = ctx.cfg
     if args.check:
@@ -698,6 +699,7 @@ def cmd_config(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
         return {"ok": True, "errors": [], "warnings": list(cfg.warnings)}
     if args.explain:
         out = cfg.explain()
+        out["queue"] = describe_queue(ctx.meta)
         if args.layer:
             out["keys"] = {k: v for k, v in out["keys"].items() if v["source"]["layer"] == args.layer}
             out["layer"] = args.layer
@@ -771,7 +773,7 @@ def push_check(ctx: Context) -> Dict[str, Any]:
 # --- handlers: issues ----------------------------------------------------------
 
 
-@command("pick-issue", "the next issue to work (claims nothing)", running="none", args=[
+@command("pick-issue", "the next issue to work (claims nothing)", args=[
     arg("--exclude", type=int, action="append", metavar="N", help="skip this issue (repeatable)")])
 def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """The eligible issues with the facts to choose between them, and a suggested top issue. Nothing is claimed.
@@ -793,11 +795,18 @@ def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     than listed: the rules saw only part of the queue); held_back:
     [{number, behind, epic}]; picking: {rules (the effective Picking work section of project.md), layer (where
     the rules came from), fields, target_epics (the ones honoured: open and written by a trusted roster member),
-    ignored_epics ([{number, reason}])}. Or none (with held_back when not empty), with reason when paused or
-    disabled, and with reason unassigned_only, unassigned (count) and setting when the queue found no issue and
+    ignored_epics ([{number, reason}])}. Or none with queue_summary (where the queue looked, in plain words) and
+    held_back when not empty, with reason when paused or disabled, and with reason unassigned_only, unassigned (count) and setting when the queue found no issue and
     the only eligible issues have no assignee (only issues assigned to the operator are picked unless
     queue.include_unassigned is true)
     """
+    def none(**extra: Any) -> Dict[str, Any]:
+        return {"none": True, **extra, "queue_summary": describe_queue(ctx.meta)["summary"]}
+
+    try:  # handled here, not with running="none", so the paused and disabled results say where it looked too
+        ctx.require_running()
+    except Halted as exc:
+        return none(reason=exc.reason)
     skip = set(args.exclude or [])
     queue = ctx.queue()
     for warning in ctx.cfg.picking_warnings:
@@ -812,13 +821,13 @@ def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     every = queue.candidates()
     found = [c for c in every if c.number not in skip]
     if not found:
-        out: Dict[str, Any] = {"none": True}
+        out: Dict[str, Any] = {}
         if not every and queue.unassigned_skipped:
             out.update({"reason": "unassigned_only", "unassigned": queue.unassigned_skipped,
                         "setting": "queue.include_unassigned"})
         if queue.held_back:
             out["held_back"] = queue.held_back
-        return out
+        return none(**out)
     top, listed = found[0], found[:limit]
     picking = {**rules, "target_epics": list(queue.target_epics_used),
                "ignored_epics": list(queue.target_epics_ignored)}
@@ -1805,13 +1814,14 @@ def cmd_git_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
 
 @command("status", "read-only summary of state, items and runs")
 def cmd_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """A read-only summary: enabled and paused state, the active run, items needing a person, stale claims, and the
-    last run of each skill, and one line on how issues are picked. When GitHub cannot be read the items are left
-    out with a warning. Creates nothing.
+    """A read-only summary: enabled and paused state, the active run, items needing a person, stale claims, runs that
+    died before they finished, and the last run of each skill, and one line on how issues are picked. When GitHub
+    cannot be read the items are left out with a warning. Creates nothing.
 
-    Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, items, stale_claims,
-    last_runs, picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and
-    "; target epics: #N, ..." when set), warnings
+    Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, queue (where the issue
+    queue looks, as in config --explain), items, stale_claims, interrupted_runs (skill, run_id, ref, file), last_runs,
+    picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and "; target epics:
+    #N, ..." when set), warnings
     """
     ctx.require_valid()
     pauses = {scope: path.exists() for scope, path in ctx.pause_files().items()}
@@ -1819,13 +1829,18 @@ def cmd_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
         "enabled": ctx.meta.get("enabled") is not False,
         "paused": {"global": pauses.get("global", False), "project": pauses.get("project", False)},
         "mode": str(ctx.meta.get("mode") or "dry-run"), "repo": None, "tracker": None, "operator": None,
-        "active_run": ctx.active_run(), "items": [], "stale_claims": [], "last_runs": {},
-        "picking": config_mod.picking_summary(ctx.cfg.picking()), "warnings": list(ctx.guard.warnings)}
+        "active_run": ctx.active_run(), "queue": describe_queue(ctx.meta), "items": [], "stale_claims": [],
+        "interrupted_runs": [], "last_runs": {}, "picking": config_mod.picking_summary(ctx.cfg.picking()),
+        "warnings": list(ctx.guard.warnings)}
     try:
         root = ctx.log_root()
+        active_id = (out["active_run"] or {}).get("run_id")
         for folder in sorted(p for p in root.iterdir() if p.is_dir()):
             log = runlog.last(root, folder.name)
             if log is not None:
+                if log.status is None and log.run_id != active_id and runlog.is_run_log(log.path):  # never finished
+                    out["interrupted_runs"].append({"skill": folder.name, "run_id": log.run_id, "ref": log.ref,
+                                                    "file": log.path.name})
                 out["last_runs"][folder.name] = {"run_id": log.run_id, "ref": log.ref, "status": log.status,
                                                  "file": log.path.name}
     except (ValueError, OSError):
@@ -1981,7 +1996,9 @@ def cmd_mode_live(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
 def cmd_doctor(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """Check the tools and setup: python, git and gh versions, config, mode (a warning when `mode: live` is set but
     not confirmed by `notme mode live`), config files (a warning when neither the global nor the repo layer holds a not-me config file), gh auth
-    and scopes, pass labels (advice when role.md names any: the missing ones, for `labels-ensure`), guard self-test, spawn depth.
+    and scopes, pass labels (advice when role.md names any: the missing ones, for `labels-ensure`), the queue
+    source (a warning when the pick label is missing, the board is not confirmed or not found, or a
+    board_states column is not a status option; not run without gh), guard self-test, spawn depth.
     Exit 7 when the only failed required checks are gh, gh auth or gh scopes; exit 1 when another
     required check fails. --init-token instead creates <not-me home>/operator-token (random, mode 0600) and shows
     it once; only a person may run it (kind human_only otherwise), and an existing token is never replaced
@@ -1994,7 +2011,8 @@ def cmd_doctor(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     checks = doctor_mod.run(ctx.deps.runner or gh_mod._default_runner, ctx.config_errors(), lambda: ctx.gh,
                             ctx.guard_state, ctx.env,
                             doctor_mod.mode_check(ctx.meta.get("mode"), ctx.cfg.live_unconfirmed),
-                            config_files=ctx.cfg.layers.files, pass_labels=lambda: _pass_label_check(ctx))
+                            config_files=ctx.cfg.layers.files, pass_labels=lambda: _pass_label_check(ctx),
+                            queue=lambda: _doctor_queue(ctx))
     verdict = doctor_mod.exit_kind(checks)
     if verdict:
         code = ExitCode.DEPENDENCY if verdict == "dependency" else ExitCode.ERROR
@@ -2013,6 +2031,14 @@ def _pass_label_check(ctx: Context) -> Optional[Dict[str, Any]]:
     except (gh_mod.GhError, CliExit) as exc:
         return doctor_mod.pass_label_error(str(exc) or exc.__class__.__name__)
     return doctor_mod.pass_label_check(result)
+
+
+def _doctor_queue(ctx: Context) -> Dict[str, Any]:
+    try:
+        tracker = ctx.tracker
+    except CliExit as exc:
+        return doctor_mod.queue_not_run(str(exc.payload.get("error")))
+    return doctor_mod.queue_check(ctx.meta, ctx.gh, tracker, ctx.guard.board, origin=ctx.guard.origin_repo or tracker)
 
 
 def _init_token(ctx: Context) -> Dict[str, Any]:

@@ -1,6 +1,6 @@
 ---
 name: doctor
-description: "Check that not-me can run here: tools, GitHub auth and scopes, config, the guard self-test and the subagent depth setting, with install hints for this operating system, then offer to fix the failed checks it can fix and apply each fix only when the operator says yes. Use when the operator runs /not-me:doctor, a run reported exit 7 or 8, or after installing the plugin. NOT for installing tools or changing the guard, allow list, mode or not-me config, NOT for showing run state (use /not-me:status), NOT for explaining a setting (use /not-me:config)."
+description: "Check that not-me can run here: tools, GitHub auth and scopes, config, the queue source, the guard self-test and the subagent depth setting, with install hints for this operating system, then offer to fix the failed checks it can fix and apply each fix only when the operator says yes. Use when the operator runs /not-me:doctor, a run reported exit 7 or 8, or after installing the plugin. NOT for installing tools or changing the guard, allow list, mode or not-me config, NOT for showing run state (use /not-me:status), NOT for explaining a setting (use /not-me:config)."
 argument-hint: ""
 ---
 
@@ -50,8 +50,8 @@ For each picked item:
   `enabledPlugins` and `permissions` are off limits. After the edit, re-read the
   file and confirm only `env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` changed; if not,
   say so and give the exact change to make by hand.
-- `config files` and `config`: tell the operator to run `/not-me:setup` to write the
-  config, or `/not-me:config` to see each error. Never write the config yourself.
+- `config files`, `config` and `queue`: tell the operator to run `/not-me:setup` (for
+  `queue`, `/not-me:setup project --queue`) or `/not-me:config`. Never write the config yourself.
 - `gh auth` and `gh scopes`: give the command from `fix`. The operator runs it in
   a terminal, because it signs in through a browser.
 

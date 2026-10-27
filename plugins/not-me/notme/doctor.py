@@ -1,4 +1,5 @@
-"""The `notme doctor` probes: tools, gh auth and scopes, config, mode, the guard self-test and the spawn depth.
+"""The `notme doctor` probes: tools, gh auth and scopes, config, mode, the queue source, the guard self-test and the
+spawn depth.
 
 Each probe gives {name, ok, detail, required, fix, hint}. `fix` is a short description of a safe change that clears
 a failed check; `hint` is an install or repair hint for this operating system (sys.platform). Both are null on a
@@ -12,7 +13,10 @@ import subprocess
 import sys
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
+from . import states
 from .gh import GhClient, GhError
+from .queue import board_ref, describe
+from .queue.board import ABSTRACT_TO_BOARD, status_options
 
 SUBAGENT_DEPTH_ENV = "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"
 GH_CHECKS = frozenset({"gh", "gh auth", "gh scopes"})
@@ -154,13 +158,89 @@ def pass_label_error(error: str) -> Check:
     return check("pass labels", False, f"could not be read ({error})", required=False)
 
 
+QUEUE_FIX = "/not-me:setup project --queue"
+QUEUE_FIX_TEXT = f"run `{QUEUE_FIX}` to choose a queue source that works"
+
+
+def _queue_failed(detail: str) -> Check:
+    """An optional queue check that failed; its fix points to the queue setup."""
+    return check("queue", False, detail, required=False, fix=QUEUE_FIX_TEXT)
+
+
+def queue_not_run(why: str, summary: Optional[str] = None) -> Check:
+    """The queue check when it could not run: not a failure, and the detail says why."""
+    return check("queue", True, f"{summary + '; ' if summary else ''}not run: {why}", required=False)
+
+
+def _label_problems(q: Mapping[str, Any], where: Mapping[str, Any], gh: GhClient, tracker: str) -> List[str]:
+    """The pick label or the opt-in label missing from the tracker, and a queue.pick_label nobody reads."""
+    wanted = {"todo": where["label"]}
+    if where["opt_in_label"]:
+        wanted["opt_in"] = where["opt_in_label"]
+    problems = [f"{tracker} has no `{name}` label; create it or choose another with {QUEUE_FIX}"
+                for name in states.ensure_labels(gh, tracker, wanted, check=True)["missing"]]
+    pick = q.get("pick_label")
+    if pick and str(pick).lower() != str(where["label"]).lower():
+        problems.append(f"queue.pick_label `{pick}` is not used: the labels source picks the `labels.todo` "
+                        f"label `{where['label']}`; set both to one name with {QUEUE_FIX}")
+    return problems
+
+
+def _board_problems(q: Mapping[str, Any], gh: GhClient, confirmed_board: Optional[Sequence[Any]],
+                    origin: Optional[str]) -> List[str]:
+    """An unconfirmed or missing board, and queue.board_states columns that are not status options."""
+    owner, number = board_ref(q) or ("", 0)  # describe() said ok, so the board is set
+    label = f"{owner}/{number}"
+    problems: List[str] = []
+    if not confirmed_board or str(confirmed_board[0]).lower() != owner.lower() or int(confirmed_board[1]) != number:
+        problems.append(f"board {label} is not confirmed in your allow list, so not-me cannot move its "
+                        f"cards; run /not-me:allow-repo {origin + ' ' if origin else ''}--board {label}")
+    status_field = (q.get("board") or {}).get("status_field") or ""
+    options = status_options(gh, owner, number, status_field)
+    if options is None:
+        return problems + [f"board {label} was not found, or this token cannot read it (it needs the project scope)"]
+    columns = q.get("board_states") or {}
+    for key in dict.fromkeys(ABSTRACT_TO_BOARD.values()):
+        column = columns.get(key)
+        if column and column not in options:
+            problems.append(f"board {label} has no `{column}` option (queue.board_states.{key}); its "
+                            f"{status_field} options are: {', '.join(options) or 'none'}")
+    return problems
+
+
+def queue_check(meta: Mapping[str, Any], gh: GhClient, tracker: str, confirmed_board: Optional[Sequence[Any]],
+                origin: Optional[str] = None) -> Check:
+    """A warning when the chosen queue source cannot work. Labels: the pick label (or the opt-in label) does not
+    exist in the tracker, or queue.pick_label differs from labels.todo. Board: the write gate does not trust the
+    board (confirmed_board is the guard's board, None when unconfirmed), it cannot be found, or a queue.board_states
+    column is not an option of its status field. Only reads; a GitHub error reports the check as not run."""
+    where = describe(meta)
+    if not where["ok"]:
+        return _queue_failed(f"{where['summary']}; fix it with {QUEUE_FIX}")
+    q = meta.get("queue") or {}
+    try:
+        if where["source"] == "labels":
+            problems = _label_problems(q, where, gh, tracker)
+        else:
+            problems = _board_problems(q, gh, confirmed_board, origin)
+    except GhError as exc:
+        return queue_not_run(f"GitHub could not be read ({exc})", where["summary"])
+    except ValueError as exc:  # a board owner or status field name the client refuses to put in a query
+        return _queue_failed(f"{where['summary']}, but {exc}; fix it with {QUEUE_FIX}")
+    if problems:
+        return _queue_failed(f"{where['summary']}, but " + "; ".join(problems))
+    return check("queue", True, where["summary"], required=False)
+
+
 def run(runner: Callable[[Sequence[str]], Any], config_errors: List[str], gh: Callable[[], GhClient],
         guard_state: Callable[[], Mapping[str, Any]], env: Mapping[str, str],
         mode: Optional[Check] = None, config_files: Optional[Mapping[str, Sequence[str]]] = None,
-        pass_labels: Optional[Callable[[], Optional[Check]]] = None) -> List[Check]:
-    """Every probe in order. gh, guard_state and pass_labels are called only when needed (gh needs a valid
-    config; pass_labels also a logged-in gh). config_files maps a layer to the config docs found in it; the
-    "config files" probe runs only when it is given."""
+        pass_labels: Optional[Callable[[], Optional[Check]]] = None,
+        queue: Optional[Callable[[], Check]] = None) -> List[Check]:
+    """Every probe in order. gh, guard_state, pass_labels and queue are called only when needed (gh needs a valid
+    config; pass_labels and queue also a logged-in gh, and the queue check is reported as not run otherwise).
+    config_files maps a layer to the config docs found in it; the "config files" probe runs only when it is
+    given."""
     checks = [python_check(), git_check(), gh_check(runner)]
     installed = checks[-1]["ok"]
     detail = "valid" if not config_errors else f"{len(config_errors)} error(s): {config_errors[0]}"
@@ -169,12 +249,17 @@ def run(runner: Callable[[Sequence[str]], Any], config_errors: List[str], gh: Ca
         checks.append(config_files_check(config_files))
     if mode is not None:
         checks.append(mode)
+    signed_in = False
     if installed and not config_errors:
         auth = auth_checks(gh())
+        signed_in = auth[0]["ok"]
         checks += auth
-        labels = pass_labels() if pass_labels is not None and auth[0]["ok"] else None
+        labels = pass_labels() if pass_labels is not None and signed_in else None
         if labels is not None:
             checks.append(labels)
+    if queue is not None:
+        checks.append(queue() if signed_in else
+                      queue_not_run("needs gh installed and signed in, and a valid config"))
     checks += [guard_check(guard_state()), depth_check(env)]
     return checks
 

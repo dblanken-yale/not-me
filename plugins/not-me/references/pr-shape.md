@@ -14,8 +14,15 @@ comment looks like and how labels are written are in `write-back.md`.
 
 ## Body
 
-If `standards.pr_template` resolves to a template, fill its sections. Otherwise use
-these, in order:
+The first line is a linked heading for the issue, so a reader sees the issue first:
+`## [88: Last page drops the final item](https://github.com/acme/app/issues/88)`.
+The link text is always `<n>: <issue title>`, whatever `standards.pr_title` says.
+Put a backslash before each of these in the title: ``\ ` * _ [ ] < > # ! | ~ & @ $``.
+The URL points at the tracker repo, which may be another repo than the PR. A PR with
+no issue has no heading. Section edits on an existing body keep this line in place.
+
+Below the heading: if `standards.pr_template` resolves to a template, fill its
+sections. Otherwise use these, in order:
 
 1. `## Summary`: what changed and why, in a few lines.
 2. `## Testing steps`: a checklist a person can follow on a deploy target. Never
@@ -55,6 +62,8 @@ For chained sub-issues of an epic (see `branching.md`):
 ## Example body
 
 ```markdown
+## [88: Last page drops the final item](https://github.com/acme/app/issues/88)
+
 ## Summary
 
 The pager dropped the last item when the total was a multiple of the page size.
@@ -78,6 +87,7 @@ The pager dropped the last item when the total was a multiple of the page size.
 ## Checklist
 
 - [ ] Title follows `standards.pr_title`.
+- [ ] Body starts with the linked issue heading, when there is an issue.
 - [ ] Body has Summary, uncollapsed Testing steps, Companion PRs when needed, References.
 - [ ] References are `owner/repo#N`; the closing keyword follows the auto rule.
 - [ ] Opened ready for review, not as a draft.

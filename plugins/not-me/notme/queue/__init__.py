@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 try:  # Protocol is 3.8+
     from typing import Protocol
@@ -18,7 +18,7 @@ except ImportError:  # pragma: no cover
 from .. import claims, paths
 from ..gh import GhClient, GhError, _login, login_of, names_of, tmp_text_file
 from ..layers import is_field_name, is_positive_int
-from ..states import Labels
+from ..states import LabelCollision, Labels
 from ..writes import WriteTarget, valid_slug
 
 
@@ -536,6 +536,56 @@ def stale_claims(gh: GhClient, tracker: str, labels: Labels, hours: float, branc
     return [{"number": i["number"], "title": i.get("title"), "url": i.get("url")} for i in issues
             if is_stale({**i, "comments": gh.comments(tracker, i["number"])}, hours, branches, name,
                         is_trusted=is_trusted)]
+
+
+def board_ref(queue_cfg: Mapping[str, Any]) -> Optional[Tuple[str, int]]:
+    """(owner, number) of queue.board, or None when either is not set (a bool is not a number)."""
+    board = queue_cfg.get("board") or {}
+    owner, number = board.get("owner"), board.get("number")
+    if owner and is_positive_int(number):
+        return str(owner), number
+    return None
+
+
+def describe(meta: Mapping[str, Any]) -> Dict[str, Any]:
+    """Where the issue queue looks, from the project config alone (never calls GitHub).
+
+    {source, ok, summary, opt_in_label, label (labels source) | board and column (board source)}. summary is one
+    plain sentence such as "picks issues labeled `to do`, assigned to you"; ok is false when the config cannot
+    work as written (no board, no to-do column, an unknown source), and summary then says why.
+    """
+    q = meta.get("queue") or {}
+    source = q.get("source")
+    opt_in = q.get("opt_in_label") or None
+    out: Dict[str, Any] = {"source": source}
+    suffix = (f" that also carry `{opt_in}`" if opt_in else "") + \
+        (", assigned to you or to nobody" if q.get("include_unassigned") is True else ", assigned to you")
+    if source == "labels":
+        try:
+            label: Optional[str] = Labels(meta.get("labels") or {}).name("todo")
+        except (KeyError, LabelCollision):
+            label = None
+        out["label"] = label
+        if label:
+            out.update(ok=True, summary=f"picks issues labeled `{label}`{suffix}")
+        else:
+            out.update(ok=False, summary="labels source, but `labels.todo` names no label")
+    elif source == "board":
+        ref = board_ref(q)
+        column = (q.get("board_states") or {}).get("todo")
+        out["board"] = f"{ref[0]}/{ref[1]}" if ref else None
+        out["column"] = column
+        if not ref:
+            out.update(ok=False, summary="board source, but queue.board.owner and queue.board.number are not set")
+        elif not column:
+            out.update(ok=False, summary=f"board source, but queue.board_states.todo names no column of board "
+                                         f"{out['board']}")
+        else:
+            out.update(ok=True, summary=f"picks issues in the `{column}` column of board {out['board']}{suffix}")
+    else:
+        out.update(ok=False, summary=f"queue.source `{source}` is not supported; use labels or board")
+    out["opt_in_label"] = opt_in
+    return out
 
 
 def make_queue(cfg: Any, gh: GhClient, roster: Any, operator: str, run_id: str, *, kind: str = "issue",

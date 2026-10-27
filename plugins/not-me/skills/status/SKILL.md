@@ -20,7 +20,7 @@ Read-only report. It never writes: no label, no log, no post. It owns the marker
 
 - Enabled or disabled, and `mode` (`dry-run` or `live`).
 - Paused: say which of `paused.global` and `paused.project` is true.
-- `repo`, `tracker`, `operator`.
+- `repo`, `tracker`, `operator`, and the `queue` summary (if not `ok`, it cannot pick).
 - Active run: `skill`, `ref`, `started`, or "no active run".
 - Picking: the `picking` line as given (rules and their layer, or the impact default).
 
@@ -32,10 +32,10 @@ For each entry in `items`: kind and number, title, URL, and its `states`
 - `question`: a named person owes an answer. `needs_human`: a run stopped and a
   person must act. `paused`: skipped until a person removes the label.
 
-### Stale claims
+### Stale claims and interrupted runs
 
-List each entry in `stale_claims` with its URL and age. Say a person decides: not-me
-never releases or takes over a claim by itself.
+List each `stale_claims` entry (URL, age) and each `interrupted_runs` entry (a run that
+died before it finished: skill, ref, run_id, file). A person decides; not-me never releases a claim.
 
 ### Last run per skill
 
@@ -56,5 +56,5 @@ so and do not offer to do it.
 ## Checklist
 
 - [ ] Ran only `notme status`; changed nothing.
-- [ ] Showed state, items with URLs and who is owed what, stale claims, last runs.
+- [ ] Showed state (with the queue summary), items with URLs and who is owed what, stale claims, last runs.
 - [ ] Printed warnings and named where the pause switches live.
