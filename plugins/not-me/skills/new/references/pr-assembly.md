@@ -11,8 +11,15 @@ rules themselves are in `pr-shape.md`, `companions.md` and `write-back.md`.
 Make one work directory in the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/references/autonomy-and-logging.md` (Text to GitHub, rule 2) and write:
 
 1. `title.txt`: one line from `standards.pr_title`, default `{issue}: {issue_title}`.
-2. `body.md`: the template at `standards.pr_template` when it resolves, else the
-   default sections from `pr-shape.md`:
+2. `body.md`: the first line is a linked heading for the issue,
+   `## [<n>: <issue title>](https://github.com/<tracker owner>/<tracker repo>/issues/<n>)`,
+   then a blank line. The link text is always number, colon, title, whatever
+   `standards.pr_title` says. Put the title on one line, with a backslash before
+   each of these: ``\ ` * _ [ ] < > # ! | ~ & @ $``. No issue, no heading. The
+   update skill's section edits keep this line, and a full body passed to
+   `notme pr-body` must keep it too. After it comes the template at
+   `standards.pr_template` when it resolves, else the default sections from
+   `pr-shape.md`:
    - `## Summary`. For a chained sub-issue the first line is
      `Builds on <owner>/<repo>#<n>`.
    - `## Testing steps`: a checklist a person can follow. Tick only what this run

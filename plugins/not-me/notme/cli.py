@@ -1790,13 +1790,14 @@ def cmd_git_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
 
 @command("status", "read-only summary of state, items and runs")
 def cmd_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """A read-only summary: enabled and paused state, the active run, items needing a person, stale claims, and the
-    last run of each skill, and one line on how issues are picked. When GitHub cannot be read the items are left
-    out with a warning. Creates nothing.
+    """A read-only summary: enabled and paused state, the active run, items needing a person, stale claims, runs that
+    died before they finished, and the last run of each skill, and one line on how issues are picked. When GitHub
+    cannot be read the items are left out with a warning. Creates nothing.
 
     Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, queue (where the issue
-    queue looks, as in config --explain), items, stale_claims, last_runs, picking (one line: "impact default" or
-    "rules from <layer> layer", then "; fields: ..." and "; target epics: #N, ..." when set), warnings
+    queue looks, as in config --explain), items, stale_claims, interrupted_runs (skill, run_id, ref, file), last_runs,
+    picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and "; target epics:
+    #N, ..." when set), warnings
     """
     ctx.require_valid()
     pauses = {scope: path.exists() for scope, path in ctx.pause_files().items()}
@@ -1805,13 +1806,17 @@ def cmd_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
         "paused": {"global": pauses.get("global", False), "project": pauses.get("project", False)},
         "mode": str(ctx.meta.get("mode") or "dry-run"), "repo": None, "tracker": None, "operator": None,
         "active_run": ctx.active_run(), "queue": describe_queue(ctx.meta), "items": [], "stale_claims": [],
-        "last_runs": {}, "picking": config_mod.picking_summary(ctx.cfg.picking()),
+        "interrupted_runs": [], "last_runs": {}, "picking": config_mod.picking_summary(ctx.cfg.picking()),
         "warnings": list(ctx.guard.warnings)}
     try:
         root = ctx.log_root()
+        active_id = (out["active_run"] or {}).get("run_id")
         for folder in sorted(p for p in root.iterdir() if p.is_dir()):
             log = runlog.last(root, folder.name)
             if log is not None:
+                if log.status is None and log.run_id != active_id and runlog.is_run_log(log.path):  # never finished
+                    out["interrupted_runs"].append({"skill": folder.name, "run_id": log.run_id, "ref": log.ref,
+                                                    "file": log.path.name})
                 out["last_runs"][folder.name] = {"run_id": log.run_id, "ref": log.ref, "status": log.status,
                                                  "file": log.path.name}
     except (ValueError, OSError):

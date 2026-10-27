@@ -926,13 +926,13 @@ Output: branch, clean, default_branch, origin
 
 ### `notme status`
 
-A read-only summary: enabled and paused state, the active run, items needing a person, stale claims, and the last run of each skill, and one line on how issues are picked. When GitHub cannot be read the items are left out with a warning. Creates nothing.
+A read-only summary: enabled and paused state, the active run, items needing a person, stale claims, runs that died before they finished, and the last run of each skill, and one line on how issues are picked. When GitHub cannot be read the items are left out with a warning. Creates nothing.
 
 ```
 notme status
 ```
 
-Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, queue (where the issue queue looks, as in config --explain), items, stale_claims, last_runs, picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and "; target epics: #N, ..." when set), warnings
+Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, queue (where the issue queue looks, as in config --explain), items, stale_claims, interrupted_runs (skill, run_id, ref, file), last_runs, picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and "; target epics: #N, ..." when set), warnings
 
 ### `notme pause`
 
