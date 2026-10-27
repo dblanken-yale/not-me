@@ -232,7 +232,8 @@ class PrBodyTests(Base):
         self.write_template("## Checklist\n\n- [ ] done\n")
         _, body = wb.pr_body(self.cfg, 2, "T", "My change.", ["Step one"],
                              [{"repo": "acme/app-ui", "number": 4}], repo=REPO)
-        self.assertTrue(body.startswith("## Checklist\n\n- [ ] done\n\n## Summary\n\nMy change."))
+        self.assertTrue(body.startswith("## [2: T](https://github.com/acme/app/issues/2)\n\n"
+                                        "## Checklist\n\n- [ ] done\n\n## Summary\n\nMy change."))
         self.assertIn("## Testing steps\n\n- [ ] Step one", body)
         self.assertIn("## Companion PRs\n\n- acme/app-ui#4", body)
 
@@ -240,7 +241,7 @@ class PrBodyTests(Base):
         (self.case.project / "tpl.md").write_text("## Summary\n\nx\n", encoding="utf-8")
         self.cfg.meta["standards"]["pr_template"] = "tpl.md"
         _, body = wb.pr_body(self.cfg, 2, "T", "Mine.", [], repo=REPO)
-        self.assertTrue(body.startswith("## Summary\n\nMine."))
+        self.assertTrue(body.startswith("## [2: T](https://github.com/acme/app/issues/2)\n\n## Summary\n\nMine."))
         self.cfg.meta["standards"]["pr_template"] = "nope.md"
         _, body = wb.pr_body(self.cfg, 2, "T", "Mine.", [], repo=REPO)
         self.assertIn("## Testing steps", body)
@@ -251,6 +252,166 @@ class PrBodyTests(Base):
         self.cfg.meta["standards"]["pr_template"] = str(outside)
         with self.assertRaises(ghmod.UnsafePath):
             wb.pr_body(self.cfg, 2, "T", "Mine.", [], repo=REPO)
+
+
+class PrBodyHeadingTests(Base):
+    def write_template(self, text):
+        path = self.case.project / ".github" / "pull_request_template.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(text, encoding="utf-8")
+
+    def test_same_repo_tracker_heading_is_first_line(self):
+        _, body = wb.pr_body(self.cfg, 12, "Add widget", "Adds a widget.", ["Open it"], repo=REPO)
+        self.assertTrue(body.startswith(
+            "## [12: Add widget](https://github.com/acme/app/issues/12)\n\n## Summary\n\nAdds a widget."))
+        self.assertIn(f"## References\n\nCloses {REPO}#12", body)
+
+    def test_other_repo_tracker_links_to_tracker(self):
+        self.cfg.meta["project"]["tracker"] = "acme/tracker"
+        _, body = wb.pr_body(self.cfg, 7, "Fix it", "d", [], repo=REPO)
+        self.assertEqual(body.split("\n")[0], "## [7: Fix it](https://github.com/acme/tracker/issues/7)")
+        self.assertIn("## References\n\nRefs acme/tracker#7", body)
+
+    def test_heading_text_ignores_title_template(self):
+        self.cfg.meta["standards"]["pr_title"] = "[{issue}] {issue_title}"
+        title, body = wb.pr_body(self.cfg, 5, "Thing", "d", [], repo=REPO)
+        self.assertEqual(title, "[5] Thing")
+        self.assertEqual(body.split("\n")[0], "## [5: Thing](https://github.com/acme/app/issues/5)")
+
+    def test_heading_above_repo_template(self):
+        self.write_template("## Checklist\n\n- [ ] done\n")
+        _, body = wb.pr_body(self.cfg, 2, "T", "My change.", ["Step one"], repo=REPO)
+        self.assertTrue(body.startswith(
+            "## [2: T](https://github.com/acme/app/issues/2)\n\n## Checklist\n\n- [ ] done\n\n## Summary"))
+
+    def test_heading_above_template_with_matching_headings(self):
+        self.write_template("## Description\n\n<!-- what -->\n\n## Test plan\n\n- [ ] \n")
+        _, body = wb.pr_body(self.cfg, 2, "T", "My change.", ["Step one"], repo=REPO)
+        self.assertTrue(body.startswith(
+            "## [2: T](https://github.com/acme/app/issues/2)\n\n## Description\n\nMy change.\n\n## Test plan"))
+
+    def test_no_issue_no_heading_and_no_closing_line(self):
+        title, body = wb.pr_body(self.cfg, None, "Tidy docs", "d", ["One"], refs=["acme/app-ui#9"], repo=REPO)
+        self.assertTrue(body.startswith("## Summary\n\nd"))
+        self.assertNotIn("https://github.com/", body)
+        self.assertNotRegex(body, r"(?m)^(Closes|Refs) ")
+        self.assertIn("## References\n\n**References:** acme/app-ui#9", body)
+        self.assertEqual(title, "Tidy docs")
+        self.assertEqual(wb.check_text(body, tracker=REPO, repo="acme/app-ui"), [])
+
+    def test_no_issue_and_no_refs_drops_references_section(self):
+        _, body = wb.pr_body(self.cfg, None, "Tidy docs", "d", [], repo=REPO)
+        self.assertNotIn("## References", body)
+        self.assertIn("<!-- not-me:new -->", body)
+
+    def test_no_repo_or_tracker_no_heading(self):
+        _, body = wb.pr_body(self.cfg, 12, "T", "d", [])
+        self.assertTrue(body.startswith("## Summary"))
+        self.assertIn("Closes #12", body)
+
+    def test_unsafe_tracker_no_heading(self):
+        self.cfg.meta["project"]["tracker"] = "acme/tracker)evil"
+        _, body = wb.pr_body(self.cfg, 12, "T", "d", [], repo=REPO)
+        self.assertTrue(body.startswith("## Summary"))
+
+    def test_title_is_escaped_and_newlines_collapsed(self):
+        raw = "Fix [a] \\ `b` <c> *d* _e_ @octocat #5 & ok\nsecond line"
+        _, body = wb.pr_body(self.cfg, 3, raw, "d", [], repo=REPO)
+        first = body.split("\n")[0]
+        self.assertEqual(
+            first,
+            "## [3: Fix \\[a\\] \\\\ \\`b\\` \\<c\\> \\*d\\* \\_e\\_ \\@octocat \\#5 \\& ok second line]"
+            "(https://github.com/acme/app/issues/3)")
+        # exactly one unescaped ] closes the link text, right before the URL
+        unescaped = [m.start() for m in re.finditer(r"(?<!\\)(?:\\\\)*\]", first)]
+        self.assertEqual(len(unescaped), 1)
+        self.assertTrue(first[unescaped[0]:].startswith("](https://github.com/acme/app/issues/3)"))
+
+    def test_body_with_heading_passes_check_text(self):
+        _, body = wb.pr_body(self.cfg, 12, "Add widget", "Adds a widget.", ["Open it"], repo=REPO)
+        self.assertEqual(wb.check_text(body, tracker=REPO, repo=REPO), [])
+        self.cfg.meta["project"]["tracker"] = "acme/tracker"
+        _, body = wb.pr_body(self.cfg, 12, "Add widget", "Adds a widget.", ["Open it"], repo=REPO)
+        self.assertEqual(wb.check_text(body, tracker="acme/tracker", repo=REPO), [])
+        _, body = wb.pr_body(self.cfg, 12, "Follow up on #5", "d", [], repo=REPO)
+        self.assertEqual(wb.check_text(body, tracker="acme/tracker", repo=REPO), [])
+
+    def test_escaped_hash_in_body_text_is_still_a_bare_ref(self):
+        self.assertEqual(wb.check_text("fixes \\#5", tracker="acme/tracker", repo=REPO),
+                         ["line 1: bare #5; write owner/repo#5"])
+        self.assertEqual(wb.check_text("a\\\\#6", tracker="acme/tracker", repo=REPO),
+                         ["line 1: bare #6; write owner/repo#6"])
+
+    def test_hash_in_issue_heading_link_text_is_not_a_bare_ref(self):
+        heading = "## [3: Fix #5 and \\#6](https://github.com/acme/app/issues/3)"
+        self.assertEqual(wb.check_text(heading, tracker="acme/tracker", repo=REPO), [])
+
+    def test_hash_outside_issue_heading_link_text_is_still_a_bare_ref(self):
+        heading = "## [3: Fix \\#5](https://github.com/acme/app/issues/3)"
+        self.assertEqual(wb.check_text(heading + " see #7\nand #8", tracker="acme/tracker", repo=REPO),
+                         ["line 1: bare #7; write owner/repo#7", "line 2: bare #8; write owner/repo#8"])
+        self.assertEqual(wb.check_text("\n" + heading, tracker="acme/tracker", repo=REPO),
+                         ["line 2: bare #5; write owner/repo#5"])
+
+    def test_ai_words_in_issue_heading_link_text_pass(self):
+        heading = "## [3: Add data model for AI widgets](https://github.com/acme/app/issues/3)\n"
+        self.assertEqual(wb.check_text(heading, tracker=REPO, repo=REPO), [])
+        _, body = wb.pr_body(self.cfg, 3, "Add data model for AI widgets", "Adds it.", ["Open it"], repo=REPO)
+        self.assertEqual(wb.check_text(body, tracker=REPO, repo=REPO), [])
+
+    def test_ai_words_outside_heading_link_text_still_flagged(self):
+        heading = "## [3: Add data model for AI widgets](https://github.com/acme/app/issues/3)"
+        self.assertEqual(wb.check_text(heading + "\nUses an AI model.", tracker=REPO, repo=REPO),
+                         ["line 2: mentions 'AI'", "line 2: mentions 'model'"])
+        self.assertEqual(wb.check_text(heading + " AI", tracker=REPO, repo=REPO), ["line 1: mentions 'AI'"])
+        self.assertEqual(wb.check_text("\n" + heading, tracker=REPO, repo=REPO),
+                         ["line 2: mentions 'AI'", "line 2: mentions 'model'"])
+
+    def test_ai_words_on_plain_first_line_still_flagged(self):
+        self.assertEqual(wb.check_text("## Add AI widgets\n", tracker=REPO, repo=REPO), ["line 1: mentions 'AI'"])
+        self.assertEqual(wb.check_text("## [3: AI](https://example.test/3)", tracker=REPO, repo=REPO),
+                         ["line 1: mentions 'AI'"])
+
+    def test_issue_heading_keeps_path_rule(self):
+        line = "## [3: Fix #5 in /" + "Users/x/y](https://github.com/acme/app/issues/3)"
+        problems = wb.check_text(line, tracker="acme/tracker", repo=REPO)
+        self.assertEqual(problems, ["line 1: local file path"])
+
+    def make_pr(self, **kw):
+        _, body = wb.pr_body(self.cfg, 12, "Add widget", "Desc.", ["One"], repo=REPO, **kw)
+        things(self.fake)["3"]["body"] = body
+        return body
+
+    HEADING = "## [12: Add widget](https://github.com/acme/app/issues/12)\n\n"
+
+    def test_companion_upsert_keeps_heading(self):
+        self.make_pr()
+        wb.companion_prs_upsert(self.gh, REPO, 3, [{"repo": "acme/app-ui", "number": 4}])
+        after = things(self.fake)["3"]["body"]
+        self.assertTrue(after.startswith(self.HEADING + "## Summary"))
+        self.assertIn("## Companion PRs\n\n- acme/app-ui#4", after)
+
+    def test_testing_steps_append_keeps_heading(self):
+        self.make_pr()
+        wb.testing_steps_append(self.gh, REPO, 3, ["Two"])
+        after = things(self.fake)["3"]["body"]
+        self.assertTrue(after.startswith(self.HEADING + "## Summary"))
+        self.assertIn("- [ ] One\n- [ ] Two", after)
+
+    def test_set_section_keeps_heading_when_replacing_and_adding(self):
+        body = self.make_pr()
+        replaced = wb._set_section(body, wb._SUMMARY_HEADING, "## Summary", "New text.")
+        self.assertTrue(replaced.startswith(self.HEADING + "## Summary\n\nNew text."))
+        added = wb._set_section(body, r"(?i:notes)\b", "## Notes", "A note.")
+        self.assertTrue(added.startswith(self.HEADING + "## Summary"))
+        self.assertIn("## Notes\n\nA note.", added)
+
+    def test_set_section_keeps_heading_when_section_missing_in_template_body(self):
+        self.write_template("Free text only.\n")
+        body = self.make_pr()
+        self.assertTrue(body.startswith(self.HEADING + "Free text only.\n\n## Summary"))
+        wb.companion_prs_upsert(self.gh, REPO, 3, [{"repo": "acme/app-ui", "number": 4}])
+        self.assertTrue(things(self.fake)["3"]["body"].startswith(self.HEADING + "Free text only."))
 
 
 class PrSectionTests(Base):
