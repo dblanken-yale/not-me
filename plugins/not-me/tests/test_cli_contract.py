@@ -333,6 +333,7 @@ class DryRunTests(CliCase):
         self.write_file("ids.json", json.dumps(["PRRT_1"]))
         self.cases = {
             "claim-issue": ["claim-issue", "4"],
+            "assign-issue": ["assign-issue", "4"],
             "release-issue": ["release-issue", "1"],
             "move-issue": ["move-issue", "1", "--to", "needs_review"],
             "transition": ["transition", "1", "--from", "in_progress", "--to", "needs_review"],

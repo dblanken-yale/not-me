@@ -298,6 +298,17 @@ class AssignmentTests(BoardTestCase):
         self.assertEqual(self.q.unassigned_skipped, 1)
 
 
+class SuggestTests(BoardTestCase):
+    def test_only_unassigned_lists_only_unassigned_to_do_items(self):
+        self.put(5, assignees=["octocat"])
+        self.put(6)
+        self.put(7, assignees=["hubot"])
+        self.put(8, author="mallory")
+        self.q.only_unassigned = True
+        self.assertEqual(self.numbers(), [6])
+        self.assertEqual(self.q.untrusted_skipped, [{"number": 8, "author": "mallory"}])
+
+
 class ClaimTests(BoardTestCase):
     def setUp(self):
         super().setUp()

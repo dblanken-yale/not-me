@@ -88,14 +88,14 @@ class LabelQueue(BaseQueue):
                 and self._has(names, "todo")
                 and (not opt_in or opt_in.lower() in {n.lower() for n in names})
                 and not any(self._has(names, x) for x in _EXCLUDED)
-                and self.trusted(_author(issue))
+                and self._trusted_author(issue["number"], _author(issue), _assignees(issue))
                 and self._assignees_allow(_assignees(issue)))  # last, so only otherwise eligible ones are counted
 
     def candidates(self) -> List[Candidate]:
         """Eligible issues: target epic issues first (see target_order), then epic children (epic order, then
         task-list order), then the rest oldest first. An issue behind an earlier open, unstarted issue in a trusted
         epic is left out (see held_back)."""
-        self.unassigned_skipped, self.held_back = 0, []
+        self.unassigned_skipped, self.held_back, self.untrusted_skipped = 0, [], []
         opt_in = self.queue_cfg.get("opt_in_label")
         listed = self._list("todo", extra=[opt_in] if opt_in else [])
         eligible = {i["number"]: i for i in listed if self._eligible(i)}

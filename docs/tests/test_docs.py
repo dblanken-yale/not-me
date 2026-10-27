@@ -23,7 +23,7 @@ RULES = ("other_repo", "protected_branches", "force_push", "destructive_git")
 NEW_DOCS = ("workflow.md", "testing.md")
 READMES = (ROOT / "README.md", PLUGIN / "README.md")
 VERBS = ("NONE", "PR", "PUSHED", "PARKED", "HELD", "REVIEWED", "PROVED", "FAILED", "STOP")
-SKILLS = ("not-me", "new", "update", "review", "prove", "ticket", "retro", "status", "setup", "config",
+SKILLS = ("not-me", "new", "update", "review", "prove", "ticket", "suggest", "retro", "status", "setup", "config",
           "doctor", "allow-repo", "mode")
 
 # Built from pieces so this file does not trip the repo's own denylist lint.
@@ -257,7 +257,7 @@ class TestReadmes(unittest.TestCase):
 
     def test_command_tables_list_all_skills(self):
         wanted = {skill_command(n) for n in SKILLS}
-        self.assertEqual(len(wanted), 13)
+        self.assertEqual(len(wanted), 14)
         for readme in READMES:
             found = self.table_names(readme.read_text(encoding="utf-8"))
             self.assertEqual(found, wanted, f"{readme.relative_to(ROOT)} command table differs")
