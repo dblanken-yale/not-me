@@ -10,7 +10,7 @@ doc is not in scope for this run.
 | # | Ask | Writes | Doc |
 |---|-----|--------|-----|
 | 1 | Is this repo where issues live, or does another repo hold them? | `tracker` | project |
-| 2 | Pick work from labels or from a project board? Which board? | `queue.source`, `queue.board`, `queue.board_states`, `queue.pick_label`, `queue.opt_in_label` | project |
+| 2 | Pick work from labels or from a project board? Which board? (`project --queue` reruns only this one; see `queue.md`) | `queue.source`, `queue.board`, `queue.board_states`, `queue.pick_label` with `labels.todo`, `queue.opt_in_label` | project |
 | 3 | Who is on the roster, with what tier? (lead, authority, member; assignable; reviewer) | `## Roster` table rows | project |
 | 4 | Who is requested as reviewer by default, and per repo? | `reviewers` | project |
 | 4a | Must every reviewer approve before a PR is ready to merge? If yes, each reviewer's role and pass label (both may stay empty) | `## Roles` table rows | role |

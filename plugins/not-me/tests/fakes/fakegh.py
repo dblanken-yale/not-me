@@ -502,6 +502,8 @@ class FakeGitHub:
             if "createdAt" in query:  # the rich board query: item content and priority fields
                 project["field"] = board["status_field"]
                 project["items"] = {"nodes": [self._rich_item(i, query) for i in board["items"]]}
+            elif "items(" not in query and "field(" in query:  # only the status field's options
+                project["field"] = board["status_field"]
             elif "items(" in query:
                 project["field"] = board["status_field"]
                 project["items"] = {"nodes": [

@@ -18,14 +18,22 @@ from . import UNMAPPED_COLUMN, BaseQueue, Candidate, Claim, field_name, field_se
 
 # abstract state -> key in queue.board_states. Other states (needs_work, question, ...) have no column.
 ABSTRACT_TO_BOARD = {"todo": "todo", "in_progress": "in_progress", "needs_review": "in_review", "blocked": "blocked"}
-_QUERY = (
+# The board and its status field's options; {n} and {status} are formatted in after validation. Each query adds
+# what it needs inside projectV2, then closes projectV2, the owner fragment, repositoryOwner and the query.
+_PROJECT_STATUS = (
     "query($owner:String!){repositoryOwner(login:$owner){... on ProjectV2Owner{projectV2(number:{n}){"
     "id field(name:\"{status}\"){... on ProjectV2SingleSelectField{id options{id name}}}"
-    "items(first:100){nodes{id fieldValueByName(name:\"{status}\"){... on ProjectV2ItemFieldSingleSelectValue{name}}"
+)
+_CLOSE = "}}}}"
+_QUERY = (
+    _PROJECT_STATUS
+    + "items(first:100){nodes{id fieldValueByName(name:\"{status}\"){... on ProjectV2ItemFieldSingleSelectValue{name}}"
     "{fields}"
     "content{... on Issue{number title url state createdAt author{login __typename} labels(first:50){nodes{name}} "
-    "assignees(first:20){nodes{login}} repository{nameWithOwner}}}}}}}}}"
+    "assignees(first:20){nodes{login}} repository{nameWithOwner}}}}}"
+    + _CLOSE
 )
+_OPTIONS_QUERY = _PROJECT_STATUS + _CLOSE
 
 
 class UnmappedState(ValueError):
@@ -39,6 +47,18 @@ def priority_value(value: Any) -> Optional[float]:
         return value
     m = re.match(r"\s*(\d+)", value if isinstance(value, str) else "")
     return int(m.group(1)) if m else None
+
+
+def status_options(gh: Any, owner: str, number: int, status_field: str) -> Optional[List[str]]:
+    """The option names of the board's status field, in board order: a read through the client's read path.
+    None when the board is not found (or this token cannot see it); [] when it has no such single-select field.
+    GhError when GitHub cannot be read."""
+    query = (_OPTIONS_QUERY.replace("{n}", str(_num(number))).replace("{status}", field_name(status_field)))
+    data = gh.read(["api", "graphql", "-f", f"query={query}", "-f", f"owner={_owner(owner)}"])
+    project = (((data or {}).get("data") or {}).get("repositoryOwner") or {}).get("projectV2")
+    if not project:
+        return None
+    return [str(o.get("name")) for o in (project.get("field") or {}).get("options") or []]
 
 
 class BoardQueue(BaseQueue):

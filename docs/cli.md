@@ -86,7 +86,7 @@ notme config [--explain] [--check] [--layer LAYER]
 | `--check` | optional | list configuration errors (exit 4 when any) |
 | `--layer LAYER {default|global|repo}` | optional | limit to one layer |
 
-Output: config (per document) and roster; with --explain layers, keys, bodies, picking (rules: the effective Picking work section of project.md, layer: where it came from, fields, target_epics), warnings; with --check ok, errors
+Output: config (per document) and roster; with --explain layers, keys, bodies, picking (rules: the effective Picking work section of project.md, layer: where it came from, fields, target_epics), queue (where the issue queue looks: source, ok, summary, opt_in_label, and label or board and column), warnings; with --check ok, errors
 
 ### `notme preflight`
 
@@ -114,7 +114,7 @@ notme pick-issue [--exclude N]
 |----------|----------|---------|
 | `--exclude N` | optional | skip this issue (repeatable) |
 
-Output: number, title, url, author, labels, parent, candidates (count): the suggested top issue by the queue's order; issues: the eligible issues in that order, all of them when the Picking work rules come from the global layer (the rules must see the whole queue), else up to queue.list_limit; each with number, title, url, author, labels, created, age_days, parent (epic number), position (1-based in the epic's open task list), blocked_by and blocking ([{repo, number, state}] from GitHub issue dependencies), reactions (counts by kind, from the operator and trusted logins only), target_epic and target_position (the picking.target_epics epic whose task list holds it, and its 1-based place there; issues in a target epic come first), fields ({name: value} for each picking.fields name, text cut to picking.value_max_chars; on a label queue only from projects the tracker's owner owns; {} when none is named), board ({status, fields} on a board queue, else null); a fact that cannot be read is null; never a body. truncated (more eligible issues than listed: the rules saw only part of the queue); held_back: [{number, behind, epic}]; picking: {rules (the effective Picking work section of project.md), layer (where the rules came from), fields, target_epics (the ones honoured: open and written by a trusted roster member), ignored_epics ([{number, reason}])}. Or none (with held_back when not empty), with reason when paused or disabled, and with reason unassigned_only, unassigned (count) and setting when the queue found no issue and the only eligible issues have no assignee (only issues assigned to the operator are picked unless queue.include_unassigned is true)
+Output: number, title, url, author, labels, parent, candidates (count): the suggested top issue by the queue's order; issues: the eligible issues in that order, all of them when the Picking work rules come from the global layer (the rules must see the whole queue), else up to queue.list_limit; each with number, title, url, author, labels, created, age_days, parent (epic number), position (1-based in the epic's open task list), blocked_by and blocking ([{repo, number, state}] from GitHub issue dependencies), reactions (counts by kind, from the operator and trusted logins only), target_epic and target_position (the picking.target_epics epic whose task list holds it, and its 1-based place there; issues in a target epic come first), fields ({name: value} for each picking.fields name, text cut to picking.value_max_chars; on a label queue only from projects the tracker's owner owns; {} when none is named), board ({status, fields} on a board queue, else null); a fact that cannot be read is null; never a body. truncated (more eligible issues than listed: the rules saw only part of the queue); held_back: [{number, behind, epic}]; picking: {rules (the effective Picking work section of project.md), layer (where the rules came from), fields, target_epics (the ones honoured: open and written by a trusted roster member), ignored_epics ([{number, reason}])}. Or none with queue_summary (where the queue looked, in plain words) and held_back when not empty, with reason when paused or disabled, and with reason unassigned_only, unassigned (count) and setting when the queue found no issue and the only eligible issues have no assignee (only issues assigned to the operator are picked unless queue.include_unassigned is true)
 
 ### `notme claim-issue`
 
@@ -932,7 +932,7 @@ A read-only summary: enabled and paused state, the active run, items needing a p
 notme status
 ```
 
-Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, items, stale_claims, interrupted_runs (skill, run_id, ref, file), last_runs, picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and "; target epics: #N, ..." when set), warnings
+Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, queue (where the issue queue looks, as in config --explain), items, stale_claims, interrupted_runs (skill, run_id, ref, file), last_runs, picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and "; target epics: #N, ..." when set), warnings
 
 ### `notme pause`
 
@@ -985,7 +985,7 @@ Output: the mode show keys, plus written (layer, file, mode) and, when the repo 
 
 ### `notme doctor`
 
-Check the tools and setup: python, git and gh versions, config, mode (a warning when `mode: live` is set but not confirmed by `notme mode live`), config files (a warning when neither the global nor the repo layer holds a not-me config file), gh auth and scopes, pass labels (advice when role.md names any: the missing ones, for `labels-ensure`), guard self-test, spawn depth. Exit 7 when the only failed required checks are gh, gh auth or gh scopes; exit 1 when another required check fails. --init-token instead creates <not-me home>/operator-token (random, mode 0600) and shows it once; only a person may run it (kind human_only otherwise), and an existing token is never replaced (kind token_exists: delete the file to make a new one).
+Check the tools and setup: python, git and gh versions, config, mode (a warning when `mode: live` is set but not confirmed by `notme mode live`), config files (a warning when neither the global nor the repo layer holds a not-me config file), gh auth and scopes, pass labels (advice when role.md names any: the missing ones, for `labels-ensure`), the queue source (a warning when the pick label is missing, the board is not confirmed or not found, or a board_states column is not a status option; not run without gh), guard self-test, spawn depth. Exit 7 when the only failed required checks are gh, gh auth or gh scopes; exit 1 when another required check fails. --init-token instead creates <not-me home>/operator-token (random, mode 0600) and shows it once; only a person may run it (kind human_only otherwise), and an existing token is never replaced (kind token_exists: delete the file to make a new one).
 
 ```
 notme doctor [--init-token]
