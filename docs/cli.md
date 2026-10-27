@@ -116,6 +116,20 @@ notme pick-issue [--exclude N]
 
 Output: number, title, url, author, labels, parent, candidates (count): the suggested top issue by the queue's order; issues: the eligible issues in that order, all of them when the Picking work rules come from the global layer (the rules must see the whole queue), else up to queue.list_limit; each with number, title, url, author, labels, created, age_days, parent (epic number), position (1-based in the epic's open task list), blocked_by and blocking ([{repo, number, state}] from GitHub issue dependencies), reactions (counts by kind, from the operator and trusted logins only), target_epic and target_position (the picking.target_epics epic whose task list holds it, and its 1-based place there; issues in a target epic come first), fields ({name: value} for each picking.fields name, text cut to picking.value_max_chars; on a label queue only from projects the tracker's owner owns; {} when none is named), board ({status, fields} on a board queue, else null); a fact that cannot be read is null; never a body. truncated (more eligible issues than listed: the rules saw only part of the queue); held_back: [{number, behind, epic}]; picking: {rules (the effective Picking work section of project.md), layer (where the rules came from), fields, target_epics (the ones honoured: open and written by a trusted roster member), ignored_epics ([{number, reason}])}. Or none (with held_back when not empty), with reason when paused or disabled, and with reason unassigned_only, unassigned (count) and setting when the queue found no issue and the only eligible issues have no assignee (only issues assigned to the operator are picked unless queue.include_unassigned is true)
 
+### `notme picking-signals`
+
+The board fields and labels on the eligible issues (the issues pick-issue would choose from), with the values in use and how many issues carry each, for the picking step of /not-me:setup. A read: nothing is claimed or written, and it runs while not-me is paused. Field values come only from projects owned by the tracker's owner (on a board queue, only the configured board). Never an issue title or body, and never a text field's value.
+
+```
+notme picking-signals [--include-unassigned]
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `--include-unassigned` | optional | count unassigned issues as eligible too, as queue.include_unassigned: true would (changes no setting) |
+
+Output: tracker, source (labels or board), board ({owner, number} or null), eligible (count), include_unassigned, unassigned (eligible but left out for having no assignee), held_back (count left out for epic order); fields: [{name, type (single_select, number, text, date or iteration), usable (the name is valid in picking.fields), projects (numbers), issues (how many carry a value), values ([{value, issues}], most used first, option and iteration names cut to picking.value_max_chars; null for text), more_values}]; labels: [{name, issues, ranking_like (priority, severity, size, P0-P4 and similar)}]; other_owner_items (project items in projects of other owners, ignored); fields_unread (issues whose project items could not be read)
+
 ### `notme claim-issue`
 
 Claim an issue: assign, move to in progress, post the claim marker. Exit 3 when someone else holds it.

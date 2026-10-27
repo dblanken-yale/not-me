@@ -3,6 +3,7 @@ tmp-dir
 config
 preflight
 pick-issue
+picking-signals
 claim-issue
 release-issue
 move-issue

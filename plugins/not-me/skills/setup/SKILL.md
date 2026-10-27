@@ -1,7 +1,7 @@
 ---
 name: setup
 description: Interactive setup for not-me. Detects the repo, labels, boards, roster candidates, companion checkouts and verify commands, runs one batched interview, then writes the six config docs (project, standards, verify, review, prove, role) to the repo layer or, with --global, the global layer, keeping the shipped comments. Also checks the current config (--check), upgrades old schemas (--upgrade) and runs non-interactively from an answers file (--answers). NOT for running work (use /not-me), NOT for diagnosing a broken install (use /not-me:doctor), NOT for changing the allow list (use /not-me:allow-repo).
-argument-hint: "[--global] [all|project|standards|verify|review|prove|role] [--check] [--upgrade] [--answers FILE] [--import SOURCE]"
+argument-hint: "[--global] [all|project|standards|verify|review|prove|role] [--picking] [--check] [--upgrade] [--answers FILE] [--import SOURCE]"
 disable-model-invocation: true
 allowed-tools: AskUserQuestion, Read, Write, Edit, Bash, Glob, Grep
 ---
@@ -40,6 +40,9 @@ Read before starting: `${CLAUDE_PLUGIN_ROOT}/references/config-and-layers.md`
 - Scope: `all` (default) or one doc name: `project`, `standards`, `verify`,
   `review`, `prove`, `role`.
 - `--global`: target the global layer and ask only operator-level keys.
+- `--picking`: only the picking step (Step 2a) on `project.md`. Alone, it means
+  scope `project`; with another doc name, print the argument hint and stop. With
+  `--global`, it targets the global layer.
 - `--check`: report only, write nothing (see Check mode).
 - `--upgrade`: schema upgrade only (see Upgrade mode).
 - `--answers FILE`: read answers from a JSON file and ask nothing. Keys are in
@@ -76,7 +79,7 @@ at most four questions per call, several calls allowed, detected values offered
 first, each key explained with its comment from the shipped defaults. With
 `--answers`, read the file instead and ask nothing.
 
-Cover: tracker vs code repo; queue source (labels or a board, and which board);
+In a full or `project` run, Step 2a follows the interview. Cover: tracker vs code repo; queue source (labels or a board, and which board);
 roster rows and tiers; reviewers; whether every reviewer must approve, and
 each reviewer's role and pass label; companion set and push order; label mapping;
 protected branches to add; `models.strategy` (`orchestrate` or `single`);
@@ -85,9 +88,25 @@ and whether to turn on live mode at the end.
 
 With `--global`, ask only `mode`, `attribution`, `limits`, `models`, `router`,
 `notify` and `logs.root` (write `mode` only as `dry-run`; live is Step 7's
-command). Refuse repo-only answers (tracker, repos, queue, labels,
+command), plus Step 2a's picking answers. `queue.include_unassigned` is the one
+`queue` key the global layer may get, and only through Step 2a. Refuse repo-only
+answers (tracker, repos, other `queue` keys, labels,
 reviewers, roster, roles, verify commands, ticket format) with one line saying they
 belong in a repo layer. Never ask about `allow_repos`.
+
+## Step 2a: picking (project scope, or `--picking`)
+
+Follow `${CLAUDE_PLUGIN_ROOT}/skills/setup/references/picking.md`: show how issues
+are picked now, list the ranking signals from `notme picking-signals` (board fields,
+labels), ask which layer to write, what to rank by, whether to include unassigned
+issues and which epics to target, then write only `picking.fields`,
+`picking.target_epics`, `queue.include_unassigned` and the `## Picking work` section,
+keeping the rest of the file. Keeping the current rules writes no section and no
+`picking.fields`.
+
+With `--picking`, run Step 0, then this step, then Step 5 (picking keys only), Step 6
+items 1 to 4 and Step 7 items 1 and 3. It skips Step 1, `notme labels-ensure`, the
+live-mode prompt and the `/not-me:allow-repo` commands: it changes nothing on GitHub.
 
 ## Step 3: labels (project scope, repo layer)
 
@@ -141,7 +160,8 @@ Frontmatter:
 
 Body sections the interview produces:
 
-- `project.md`: `## Roster` table rows (login, name, tier, assignable, reviewer).
+- `project.md`: `## Roster` table rows (login, name, tier, assignable, reviewer),
+  and `## Picking work` (Step 2a).
 - `standards.md`: `## Delegation` paths and kinds, `## Ticket format`,
   `## Issue readiness`.
 - `verify.md`: `## Tests`, `## Lint`, `## Build`, `## Environment start` with the
@@ -197,6 +217,7 @@ a newer plugin: report it and change nothing.
 
 ## Result
 
-End with one block: the layer written, each file written or left alone, labels
-created or pending, companions needing confirmation, the mode, and the next
+End with one block: the layer written, each file written or left alone, the picking
+rules and keys written (or the current rules kept) and any file whose `## Picking work`
+shadows them, labels created or pending, companions needing confirmation, the mode, and the next
 commands.

@@ -24,6 +24,7 @@ doc is not in scope for this run.
 | 12 | Extra checks before review? | `## Gate additions` | verify |
 | 13 | Where is the URL to test a PR found, in what order? | `target` | prove |
 | 14 | A command to run when a run ends? | `notify.command` | project |
+| 14a | Which layer gets the picking rules? Keep the current rules, or rank by a board field or label found? Include unassigned issues? Target epics? (see `picking.md`) | `picking.fields`, `picking.target_epics`, `queue.include_unassigned`, `## Picking work` | project |
 | 15 | Add to the global docs, or replace them? (only when a global doc exists) | `extends` | each doc |
 | 16 | Turn on live mode at the end if doctor passes? | none: the user runs `/not-me:mode live` | none (signed by the user) |
 
@@ -34,8 +35,14 @@ Ask only operator-level keys: `mode`, `attribution`, `limits`, `models`, `router
 the user with `/not-me:mode live`. Never ask `allow_repos`; the allow list is
 changed only with `/not-me:allow-repo`.
 
+The picking step (`picking.md`) may also write the global layer: `picking.fields`,
+`picking.target_epics`, `## Picking work`, and `queue.include_unassigned`, which is
+the only queue key the global layer may get. The repo layer may only set it to
+`false`; refuse a `true` there in one line (it belongs in the global layer; the CLI
+drops it), and never write it.
+
 Refuse repo-only keys in the global layer, and say why: `tracker`, `repos`,
-`queue`, `labels`, `reviewers`, the roster table, the roles table, verify commands, and the
+every other `queue` key, `labels`, `reviewers`, the roster table, the roles table, verify commands, and the
 `## Ticket format` section. They describe one project and belong in its repo layer.
 
 ## Answers file (`--answers FILE`)
@@ -66,6 +73,7 @@ nothing, treats every confirmation as given except `create_labels` and
   "ticket_format": "keep",
   "prove": {"strategy": ["deployments", "local"]},
   "notify": {"command": null},
+  "picking": {"layer": "global", "fields": ["Priority"], "rules": "Prefer the highest value of the board field `Priority`. Issues without one come after. Impact breaks ties.", "target_epics": [], "include_unassigned": false},
   "mode_live": false
 }
 ```
@@ -73,7 +81,11 @@ nothing, treats every confirmation as given except `create_labels` and
 Field notes: the roles rows go in the role.md table; leave it out (or empty) to keep
 one approval enough. `body` is `extend` (write `extends: global`) or `replace`. A `labels`
 value is `create`, `skip`, or the existing label name to map to. `ticket_format`
-is `keep` (the default text), `detected`, or the literal markdown to write. A
+is `keep` (the default text), `detected`, or the literal markdown to write. The
+`picking` object is optional: `layer` is `global` or `repo`; `rules` is the plain-words
+section body or `keep` (keep the current rules: no section and no `fields` written;
+`target_epics` and `include_unassigned` are still written when given);
+`include_unassigned` of `true` with layer `repo` is an error. A
 global run may also carry `attribution`, `limits`, `router` and `logs` objects
 shaped like the keys in the shipped `project.md`; any repo-only field in a global
 run is an error that stops setup before writing.
