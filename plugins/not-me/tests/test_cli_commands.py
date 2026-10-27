@@ -17,6 +17,7 @@ from notme import claims
 from notme import feedback as feedback_mod
 from notme import gh as gh_mod
 from notme import git as git_mod
+from notme import runlog
 from tests import PLUGIN_ROOT, TempCase
 from tests import test_cli_contract as base
 from tests.test_cli_contract import REPO, add_pr_state, things
@@ -453,7 +454,8 @@ class StatusAndPauseTests(base.CliCase):
         things(self.fake)["3"]["labels"] = ["question", "paused"]
         payload = self.ok("status")
         self.assertEqual(set(payload), {"enabled", "paused", "mode", "repo", "tracker", "operator", "active_run",
-                                        "items", "stale_claims", "last_runs", "picking", "warnings"})
+                                        "items", "stale_claims", "interrupted_runs", "last_runs", "picking",
+                                        "warnings"})
         self.assertEqual(payload["picking"], "impact default")
         self.assertTrue(payload["enabled"])
         self.assertEqual(payload["paused"], {"global": False, "project": False})
@@ -477,6 +479,33 @@ class StatusAndPauseTests(base.CliCase):
         self.assertEqual([c["number"] for c in payload["stale_claims"]], [1])
         self.assertEqual(payload["last_runs"]["new"]["status"], "done")
         self.assertIsNone(payload["active_run"])
+
+    def test_status_lists_an_unfinished_log_that_is_not_the_active_run(self):
+        started = self.ok("log", "start", "--skill", "new", "--ref", "7")
+        runlog.default_marker_path(self.project).unlink()  # the run died; its marker is gone
+        payload = self.ok("status")
+        self.assertEqual(payload["interrupted_runs"], [{"skill": "new", "run_id": started["run_id"], "ref": "7",
+                                                        "file": Path(started["path"]).name}])
+        self.assertEqual(self.fake.writes_made(), [])
+
+    def test_status_does_not_list_a_finished_log_as_interrupted(self):
+        started = self.ok("log", "start", "--skill", "new", "--ref", "7")
+        self.ok("log", "finish", started["path"], "--status", "done")
+        self.assertEqual(self.ok("status")["interrupted_runs"], [])
+
+    def test_status_does_not_list_the_active_run_as_interrupted(self):
+        started = self.ok("log", "start", "--skill", "new", "--ref", "7")
+        payload = self.ok("status")
+        self.assertEqual(payload["active_run"]["run_id"], started["run_id"])
+        self.assertEqual(payload["interrupted_runs"], [])
+
+    def test_status_does_not_list_a_file_that_is_not_a_run_log(self):
+        started = self.ok("log", "start", "--skill", "new", "--ref", "7")
+        self.ok("log", "finish", started["path"], "--status", "done")
+        stray = Path(started["path"]).parent.parent / "payloads"
+        stray.mkdir()
+        (stray / "abc.md").write_text("just some notes\n", encoding="utf-8")
+        self.assertEqual(self.ok("status")["interrupted_runs"], [])
 
     def test_status_survives_unreadable_github(self):
         def broken(argv):
