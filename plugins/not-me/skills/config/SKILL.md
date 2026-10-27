@@ -17,8 +17,7 @@ Arguments: `$ARGUMENTS`. An optional `--layer` limits the output to one layer.
    layer, file and line, then stop.
 2. Print the layer directories from `layers` (default, global, repo) and say which
    exist. A missing layer is fine; defaults fill the gaps. Then print the `queue`
-   summary as given; if its `ok` is false, say it cannot pick. To change the
-   source: `/not-me:setup project --queue`.
+   summary (if not `ok`, it cannot pick; change it with `/not-me:setup project --queue`).
 3. Render `keys` as a table, one row per key:
 
    | Key | Effective value | Layer | File:line |
@@ -58,8 +57,7 @@ The repo layer is committed by anyone with push access, so it may only tighten:
 2. `mode`: it may set `dry-run`, never `live` over a lower `dry-run`.
 3. `enabled`: it may set `false`, never `true` over a lower `false`.
 4. `protected_branches`: it may add names, never remove one.
-5. `allow_repos`: it may not add any. Only the operator's own allow list can
-   (see `/not-me:allow-repo`).
+5. `allow_repos`: it may not add any; only the operator can (`/not-me:allow-repo`).
 
 A value that tries is shown as ignored. Setup upgrades are the operator's to run.
 

@@ -188,7 +188,8 @@ class IssueTests(base.CliCase):
         things(self.fake)["2"]["body"] = "- [ ] #5\n- [ ] #1\n"
         things(self.fake)["5"] = {"number": 5, "title": "Earlier", "body": "", "state": "OPEN", "labels": [],
                                   "assignees": [], "author": "octocat", "comments": [], "kind": "issue"}
-        self.assertEqual(self.ok("pick-issue"), {"none": True, "held_back": [{"number": 1, "behind": 5, "epic": 2}]})
+        self.assertEqual(self.ok("pick-issue"), {"none": True, "held_back": [{"number": 1, "behind": 5, "epic": 2}],
+                                                 "queue_summary": WHERE})
         things(self.fake)["5"]["state"] = "CLOSED"
         picked = self.ok("pick-issue")
         self.assertEqual((picked["number"], picked["parent"], picked["held_back"]), (1, 2, []))

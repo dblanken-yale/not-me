@@ -20,8 +20,7 @@ Read-only report. It never writes: no label, no log, no post. It owns the marker
 
 - Enabled or disabled, and `mode` (`dry-run` or `live`).
 - Paused: say which of `paused.global` and `paused.project` is true.
-- `repo`, `tracker`, `operator`.
-- Queue: the `queue` summary as given; if its `ok` is false, say it cannot pick.
+- `repo`, `tracker`, `operator`, and the `queue` summary (if not `ok`, it cannot pick).
 - Active run: `skill`, `ref`, `started`, or "no active run".
 - Picking: the `picking` line as given (rules and their layer, or the impact default).
 
