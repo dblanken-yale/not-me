@@ -1,6 +1,6 @@
 ---
 name: doctor
-description: "Check that not-me can run here: tools, GitHub auth and scopes, config, the guard self-test and the subagent depth setting, with install hints for this operating system, then offer to fix the failed checks it can fix and apply each fix only when the operator says yes. Use when the operator runs /not-me:doctor, a run reported exit 7 or 8, or after installing the plugin. NOT for installing tools or changing the guard, allow list, mode or not-me config, NOT for showing run state (use /not-me:status), NOT for explaining a setting (use /not-me:config)."
+description: "Check that not-me can run here: tools, GitHub auth and scopes, config, the queue source, the guard self-test and the subagent depth setting, with install hints for this operating system, then offer to fix the failed checks it can fix and apply each fix only when the operator says yes. Use when the operator runs /not-me:doctor, a run reported exit 7 or 8, or after installing the plugin. NOT for installing tools or changing the guard, allow list, mode or not-me config, NOT for showing run state (use /not-me:status), NOT for explaining a setting (use /not-me:config)."
 argument-hint: ""
 ---
 
@@ -19,6 +19,11 @@ nothing the operator did not pick.
 4. Run `notme guard selftest`. Report `ok` and `active`. Exit 8 means the guard is
    enabled but not working: every run stops with `FAILED - guard not working`.
 5. A failed `pass labels` check: recommend `/not-me:setup project` to create them.
+   A failed `queue` check means the queue source cannot work: the pick label is
+   missing, the board is not confirmed in the allow list (the detail gives the
+   `/not-me:allow-repo` command for the operator) or not found, or a
+   `queue.board_states` column is not a status option. "not run" in its detail
+   means GitHub could not be read, which is not a failure.
 6. Run `notme config --check`; print each error (role.md ones too) with its layer,
    file and line. Exit 4 means the config is invalid. Run `notme config --explain`
    only if the operator asks about a warning, and print its `warnings`.
@@ -52,6 +57,9 @@ For each picked item:
   say so and give the exact change to make by hand.
 - `config files` and `config`: tell the operator to run `/not-me:setup` to write the
   config, or `/not-me:config` to see each error. Never write the config yourself.
+- `queue`: tell the operator to run `/not-me:setup project --queue` to choose a
+  source that works, and, for an unconfirmed board, to run the `/not-me:allow-repo`
+  command themselves. Never write the queue keys or the allow list yourself.
 - `gh auth` and `gh scopes`: give the command from `fix`. The operator runs it in
   a terminal, because it signs in through a browser.
 

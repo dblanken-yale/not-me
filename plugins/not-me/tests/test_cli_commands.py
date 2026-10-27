@@ -22,6 +22,7 @@ from tests import test_cli_contract as base
 from tests.test_cli_contract import REPO, add_pr_state, things
 
 SHA = "a" * 40
+WHERE = "picks issues labeled `to do`, assigned to you"
 
 
 class ConfigTests(base.CliCase):
@@ -65,6 +66,17 @@ class ConfigTests(base.CliCase):
         self.tc.write("global", "project", base.GLOBAL_PROJECT.replace("operator: octocat", "operator: auto"))
         self.assertEqual(self.ok("me"), {"operator": "octocat", "source": "gh"})
 
+    def test_explain_says_where_the_queue_looks(self):
+        payload = self.ok("config", "--explain")
+        self.assertEqual(payload["queue"]["summary"], WHERE)
+        self.tc.write("repo", "project", "---\nschema: 1\nqueue: {source: board, board: {owner: acme, number: 6}}"
+                                         "\n---\n# Project\n")
+        payload = self.ok("config", "--explain")
+        self.assertEqual(payload["queue"]["summary"],
+                         "picks issues in the `To Do` column of board acme/6, assigned to you")
+        self.assertEqual(self.ok("config", "--explain", "--layer", "repo")["queue"]["source"], "board")
+        self.assertEqual(self.fake.calls, [])
+
     def test_config_commands_never_call_gh(self):
         self.ok("config")
         self.ok("config", "--explain")
@@ -81,13 +93,13 @@ class IssueTests(base.CliCase):
         things(self.fake)["1"]["assignees"] = []
         things(self.fake)["2"]["labels"] = ["to do"]
         self.assertEqual(self.ok("pick-issue"), {"none": True, "reason": "unassigned_only", "unassigned": 2,
-                                                 "setting": "queue.include_unassigned"})
+                                                 "setting": "queue.include_unassigned", "queue_summary": WHERE})
         things(self.fake)["2"]["assignees"] = ["hubot"]  # someone else's: never counted
         self.assertEqual(self.ok("pick-issue")["unassigned"], 1)
 
     def test_excluding_every_candidate_is_not_reported_as_unassigned_only(self):
         things(self.fake)["2"]["labels"] = ["to do"]  # unassigned and eligible
-        self.assertEqual(self.ok("pick-issue", "--exclude", "1"), {"none": True})
+        self.assertEqual(self.ok("pick-issue", "--exclude", "1"), {"none": True, "queue_summary": WHERE})
 
     def test_include_unassigned_picks_an_unassigned_issue(self):
         things(self.fake)["1"]["assignees"] = []
@@ -97,7 +109,14 @@ class IssueTests(base.CliCase):
 
     def test_pick_with_nothing_ready_has_no_reason(self):
         things(self.fake)["1"]["labels"] = []
-        self.assertEqual(self.ok("pick-issue"), {"none": True})
+        self.assertEqual(self.ok("pick-issue"), {"none": True, "queue_summary": WHERE})
+
+    def test_pick_from_an_empty_board_says_where_it_looked(self):
+        self.tc.write("repo", "project", "---\nschema: 1\nqueue: {source: board, board: {owner: acme, number: 6}}"
+                                         "\n---\n# Project\n")
+        self.fake.state["board"]["items"] = []
+        self.assertEqual(self.ok("pick-issue"), {
+            "none": True, "queue_summary": "picks issues in the `To Do` column of board acme/6, assigned to you"})
 
     def test_pick_keeps_the_top_level_keys_and_lists_the_eligible_issues(self):
         things(self.fake)["2"]["labels"] = ["to do"]
@@ -453,8 +472,11 @@ class StatusAndPauseTests(base.CliCase):
         things(self.fake)["3"]["labels"] = ["question", "paused"]
         payload = self.ok("status")
         self.assertEqual(set(payload), {"enabled", "paused", "mode", "repo", "tracker", "operator", "active_run",
-                                        "items", "stale_claims", "last_runs", "picking", "warnings"})
+                                        "queue", "items", "stale_claims", "last_runs", "picking",
+                                        "warnings"})
         self.assertEqual(payload["picking"], "impact default")
+        self.assertEqual(payload["queue"], {"source": "labels", "label": "to do", "opt_in_label": None, "ok": True,
+                                            "summary": WHERE})
         self.assertTrue(payload["enabled"])
         self.assertEqual(payload["paused"], {"global": False, "project": False})
         self.assertEqual(payload["operator"], "octocat")
@@ -491,7 +513,7 @@ class StatusAndPauseTests(base.CliCase):
         self.fake.add_assignee(REPO, 1, "octocat")  # the default queue picks only issues assigned to me
         self.assertEqual(self.ok("pause", "on"), {"paused": True, "scope": "project"})
         self.assertEqual(self.ok("status")["paused"]["project"], True)
-        self.assertEqual(self.ok("pick-issue"), {"none": True, "reason": "paused"})
+        self.assertEqual(self.ok("pick-issue"), {"none": True, "reason": "paused", "queue_summary": WHERE})
         code, payload, _ = self.cli("claim-issue", "1")
         self.assertEqual((code, payload["kind"]), (1, "paused"))
         self.assertEqual(self.ok("pause", "off"), {"paused": False, "scope": "project"})
@@ -506,7 +528,7 @@ class StatusAndPauseTests(base.CliCase):
 
     def test_disabled_config_stops_picking(self):
         self.tc.write("global", "project", base.GLOBAL_PROJECT.replace("mode: live", "mode: live\nenabled: false"))
-        self.assertEqual(self.ok("pick-issue"), {"none": True, "reason": "disabled"})
+        self.assertEqual(self.ok("pick-issue"), {"none": True, "reason": "disabled", "queue_summary": WHERE})
         self.assertFalse(self.ok("status")["enabled"])
 
 
@@ -831,11 +853,17 @@ class PullRequestTests(base.CliCase):
         self.assertTrue(any("TL;DR" in p for p in payload["problems"]))
 
 
+def queue_check(payload):
+    """The `queue` check of a doctor payload."""
+    return next(c for c in payload["checks"] if c["name"] == "queue")
+
+
 class DoctorAndPreflightTests(base.CliCase):
     def test_doctor_lists_checks(self):
         payload = self.ok("doctor")
         names = [c["name"] for c in payload["checks"]]
         self.assertEqual(names, ["python", "git", "gh", "config", "config files", "mode", "gh auth", "gh scopes",
+                                 "queue",
                                  "guard", "spawn depth"])
         self.assertTrue(payload["ok"])
         files = payload["checks"][4]
@@ -855,6 +883,35 @@ class DoctorAndPreflightTests(base.CliCase):
         self.assertIn("not confirmed", mode["detail"])
         self.assertIn("/not-me:mode live", mode["detail"])
         self.assertTrue(payload["ok"])
+
+    def test_doctor_queue_check_warns_about_a_missing_pick_label(self):
+        payload = self.ok("doctor")  # the fake repo has no labels defined
+        queue = queue_check(payload)
+        self.assertEqual((queue["ok"], queue["required"]), (False, False))
+        self.assertIn("no `to do` label", queue["detail"])
+        self.assertTrue(payload["ok"])
+        self.fake.state["repos"][REPO]["label_defs"] = {"to do": {}}
+        queue = queue_check(self.ok("doctor"))
+        self.assertTrue(queue["ok"], queue)
+        self.assertEqual([c for c in self.fake.writes_made() if c != ["--version"]], [])
+
+    def test_doctor_queue_check_names_the_allow_command_for_a_repo_layer_board(self):
+        self.tc.write("repo", "project", "---\nschema: 1\nqueue: {source: board, board: {owner: acme, number: 6}, "
+                                         "board_states: {todo: To Do}}\n---\n# Project\n")
+        payload = self.ok("doctor")
+        queue = queue_check(payload)
+        self.assertFalse(queue["ok"])
+        self.assertIn("--board acme/6", queue["detail"])
+        self.assertEqual([c for c in self.fake.writes_made() if c != ["--version"]], [])
+
+    def test_doctor_queue_check_is_not_run_when_gh_is_missing(self):
+        def no_gh(argv):
+            raise FileNotFoundError(2, "no", "gh")
+
+        _, payload, _ = self.cli("doctor", runner=no_gh)
+        queue = queue_check(payload)
+        self.assertEqual((queue["ok"], queue["required"]), (True, False))
+        self.assertIn("not run", queue["detail"])
 
     def test_doctor_fails_when_gh_is_missing(self):
         def no_gh(argv):

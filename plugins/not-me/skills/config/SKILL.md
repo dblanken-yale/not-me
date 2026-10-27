@@ -16,7 +16,9 @@ Arguments: `$ARGUMENTS`. An optional `--layer` limits the output to one layer.
    the config is invalid: run `notme config --check` and print each error with its
    layer, file and line, then stop.
 2. Print the layer directories from `layers` (default, global, repo) and say which
-   exist. A missing layer is fine; defaults fill the gaps.
+   exist. A missing layer is fine; defaults fill the gaps. Then print the `queue`
+   summary as given; if its `ok` is false, say it cannot pick. To change the
+   source: `/not-me:setup project --queue`.
 3. Render `keys` as a table, one row per key:
 
    | Key | Effective value | Layer | File:line |
@@ -64,7 +66,7 @@ A value that tries is shown as ignored. Setup upgrades are the operator's to run
 ## Checklist
 
 - [ ] Ran `notme config --explain`; edited nothing.
-- [ ] Showed every key with value, layer and file:line.
+- [ ] Showed the queue summary and every key with value, layer and file:line.
 - [ ] Showed the layer used by each prose doc and section, and the picking rules.
 - [ ] Listed ignored loosening attempts and warnings.
 - [ ] Said which layer to edit, and what the repo layer cannot loosen.
