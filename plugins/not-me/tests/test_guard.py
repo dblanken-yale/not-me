@@ -460,6 +460,45 @@ class MessageTests(unittest.TestCase):
         msg = guard.render(Block("self_protect", "x", command="y"), self.ctx())
         self.assertNotIn("Relax this rule", msg)
 
+    def test_variable_git_path_says_spell_it_out(self):
+        ctx = self.ctx()
+        ctx.git = lambda args, cwd: None
+        for cmd, opt in (("git -C $W commit -m x", "-C"), ('git -C "$W" push origin HEAD:refs/heads/x', "-C"),
+                         ("git --git-dir=$G commit -m x", "--git-dir"), ("git --work-tree `pwd` commit", "--work-tree"),
+                         ("git -C $W merge feature/y", "-C"), ("git -C $W reset --hard", "-C")):
+            with self.subTest(cmd=cmd):
+                r = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": "."}, ctx)
+                self.assertIsInstance(r, Block)
+                self.assertEqual(r.rule, "other_repo")
+                self.assertIn(f"Why: the guard does not expand shell variables in a `git {opt}` path.", r.message)
+                if opt == "-C":
+                    self.assertIn("Instead: write the path out in full (`git -C /abs/path <sub> ...`); a rewritten "
+                                  "command is checked afresh, so this is not a retry.", r.message)
+                else:
+                    self.assertIn(f"Instead: drop {opt} and run `git -C /abs/path <sub> ...` with the path written "
+                                  "out in full; a rewritten command is checked afresh, so this is not a retry.",
+                                  r.message)
+                self.assertNotIn("Relax this rule", r.message)
+                self.assertNotIn("no github origin", r.message)
+        r = guard.decide({"tool_name": "Bash", "tool_input": {"command": "git -C /nowhere commit -m x"}, "cwd": "."},
+                         ctx)
+        self.assertIn("no github origin", r.message)
+        self.assertIn("Relax this rule (not recommended): set guard.other_repo: off", r.message)
+        # with other_repo off the unknown path is still a possible protected branch; with both off it passes
+        def off(*names: str) -> GuardContext:
+            c = GuardContext(write_ctx=writes.GuardContext(
+                origin_repo="acme/app", allowed_repos=("acme/app",), protected_branches=("main",),
+                rules={r: r not in names for r in guard.RULES}))
+            c.git = lambda args, cwd: None
+            return c
+        ev = {"tool_name": "Bash", "tool_input": {"command": "git -C $W merge x"}, "cwd": "."}
+        r = guard.decide(ev, off("other_repo"))
+        self.assertIsInstance(r, Block)
+        self.assertEqual(r.rule, "protected_branches")
+        self.assertIn("shell variables in a `git -C` path", r.message)
+        self.assertNotIn("Relax this rule", r.message)
+        self.assertIsNone(guard.decide(ev, off("other_repo", "protected_branches")))
+
     def test_decide_fills_message_and_tool(self):
         ctx = self.ctx()
         ctx.git = lambda args, cwd: None

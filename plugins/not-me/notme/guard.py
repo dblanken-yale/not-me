@@ -306,6 +306,8 @@ class Block:
     tool: str = ""
     message: str = ""
     rules: Tuple[str, ...] = ()  # for OPAQUE: the rules it may be reported under, in order
+    no_relax: bool = False  # the fix is to rewrite the command, so the message leaves out how to relax the rule
+    no_checkout: bool = False  # raised because the checkout (or its push URL) could not be resolved
 
 
 Decision = Optional[Block]  # None = allow
@@ -1049,7 +1051,7 @@ def render(block: Block, ctx: GuardContext) -> str:
         if block.hint:
             lines.append(f"Instead: {block.hint}.")
     lines.append("Autonomous runs: do not retry; log a QUESTION naming the operator and continue.")
-    if block.rule in RULES:
+    if block.rule in RULES and not block.no_relax:
         lines.append(f"Relax this rule (not recommended): set guard.{block.rule}: off and "
                      f"confirm_guard_off: [{block.rule}] in {CONFIG_HINT}")
     lines.append("See effective config: /not-me:config")
@@ -1122,7 +1124,9 @@ def _check_target(ctx: GuardContext, target: str, blk: Blk) -> Iterator[Block]:
 
 
 def _unknown_target(blk: Blk, why: str, fix: str) -> Block:
-    return blk("other_repo", f"could not tell which repo it targets ({why})", fix)
+    b = blk("other_repo", f"could not tell which repo it targets ({why})", fix)
+    b.no_checkout = True
+    return b
 
 
 _READ_TOOLS = ("Read", "NotebookRead", "LS", "Grep", "Glob")
@@ -1966,11 +1970,17 @@ def _cmd_git(t, c, st, ctx, blk, depth: int = 0):
     d = st.dir
     c_keys: List[str] = []
     redirect: Optional[str] = None
+    var_opt: Optional[str] = None  # the first -C, --git-dir or --work-tree whose path the shell fills in
+    var_redirect: Optional[str] = None  # the first --git-dir or --work-tree whose path the shell fills in
     i = 1
     while i < len(t) and t[i].startswith("-"):
         a = t[i]
         name, eq, val = a.partition("=")
         nxt = t[i + 1] if i + 1 < len(t) else ""
+        if (a == "-C" or name in ("--git-dir", "--work-tree")) and _unresolved(val if eq else nxt):
+            var_opt = var_opt or name
+            if name != "-C":
+                var_redirect = var_redirect or name
         if a == "-C":  # as typed: with unquoted backslashes bash would hand git a path that does not exist
             d = _norm(getattr(nxt, "raw", "") or nxt or ".", d)
             i += 2
@@ -2001,16 +2011,79 @@ def _cmd_git(t, c, st, ctx, blk, depth: int = 0):
         alias = st.once(("alias", d, sub), lambda: ctx.git(["config", "--get", f"alias.{sub}"], d))
         if alias:
             yield from _git_alias(alias, sub, args, t[:i], c, st, ctx, blk, depth)
+        if var_opt is not None:
+            # the alias that runs lives in the repo the shell names, which may not be the one looked up here: after
+            # any rules the alias found here raises (decide takes the first enabled one), fail closed
+            yield _var_path(blk, var_opt)
         return  # an external git-<name> program is outside the guard's view
     redirect = redirect or st.once(("git-env",), lambda: (lambda m: _short(m.group(0), 40) if m else None)(
         _GIT_ENV.search(st.plain_text)))
     if redirect and sub in _GIT_RULES and sub not in ("checkout", "switch"):
-        yield blk("other_repo", f"{redirect} changes which repository or config git uses",
-                  "run git without it, in the checkout it should change")
+        if var_redirect is not None:
+            yield _var_path(blk, var_redirect)
+        else:
+            yield blk("other_repo", f"{redirect} changes which repository or config git uses",
+                      "run git without it, in the checkout it should change")
         return
     handler = _GIT_RULES.get(sub)
     if handler is not None:
-        yield from handler(_GitCall(ctx, st, blk, d, sub, args))
+        for b in handler(_GitCall(ctx, st, blk, d, sub, args)):
+            # the guard looked for a checkout literally named $W: say so rather than blame the repo (blocks that do
+            # not come from the unresolved checkout keep their own message)
+            if var_opt is not None and b.no_checkout:
+                b = _var_path(blk, var_opt)
+            yield b
+        if var_opt is not None and not _git_reads(sub, args):
+            # the handler judged the checkout _norm made of the path ("$W" names nothing, "$W/.." names this one),
+            # not the one the shell will pick: after its own rules, fail closed on any write
+            yield _var_path(blk, var_opt)
+
+
+# git branch options that only list; git accepts abbreviated long options, so anything not spelled out here is a write
+_BRANCH_READ_SHORT = set("arvliq")
+_BRANCH_READ_LONG = {"--list", "--all", "--remotes", "--verbose", "--show-current", "--color", "--no-color", "--format",
+                     "--sort", "--ignore-case", "--column", "--no-column", "--abbrev", "--no-abbrev", "--quiet",
+                     "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--omit-empty"}
+
+
+def _branch_lists(args: List[str]) -> bool:
+    opts = [a for a in args if a.startswith("-")]
+    if not set(_short_flags(opts)) <= _BRANCH_READ_SHORT or \
+            any(a.startswith("--") and a.split("=", 1)[0] not in _BRANCH_READ_LONG for a in opts):
+        return False
+    return not _positionals(args) or "--list" in args or "l" in _short_flags(opts)
+
+
+def _git_reads(sub: str, args: List[str]) -> bool:
+    """A subcommand with a _GIT_RULES handler, used in a form that changes nothing git would push or keep."""
+    # checkout and switch are not reads here: the guard would track the branch of the wrong checkout, and a later
+    # commit or push in the same command would be judged on that drifted branch
+    if sub == "config":
+        return _config_reads(args)
+    if sub == "remote":
+        return _remote_verb(args) in ("", "show", "get-url")
+    if sub == "submodule":
+        return next((a for a in args if not a.startswith("-")), "") in ("", "status", "summary")
+    if sub == "clean":  # -e (or any abbreviation of --exclude) takes a value and -- starts pathspecs: no -n after them
+        opts = args[:args.index("--")] if "--" in args else args
+        flags = _short_flags(opts)
+        if "e" in flags or any(len(n) > 2 and "--exclude".startswith(n) for n in (a.split("=", 1)[0] for a in opts)):
+            return False
+        return "n" in flags or "--dry-run" in opts
+    if sub == "branch":
+        return _branch_lists(args)
+    return False
+
+
+def _var_path(blk: Blk, opt: str) -> Block:
+    fix = "write the path out in full (`git -C /abs/path <sub> ...`)" if opt == "-C" else \
+        f"drop {opt} and run `git -C /abs/path <sub> ...` with the path written out in full"
+    # the unknown checkout may be another repo or on a protected branch: reported under the first of those rules on
+    b = blk(OPAQUE, f"the guard does not expand shell variables in a `git {opt}` path",
+            fix + "; a rewritten command is checked afresh, so this is not a retry",
+            rules=("other_repo", "protected_branches"))
+    b.no_relax = True
+    return b
 
 
 def _git_alias(alias: str, sub: str, args: List[str], prefix: List[str], c: SimpleCommand, st: _State,
@@ -2089,9 +2162,16 @@ def _git_commit(c: _GitCall) -> Iterator[Block]:
         yield _unknown_target(c.blk, "the checkout has no github origin", "commit in a checkout of an allowed repo")
 
 
+def _remote_verb(args: List[str]) -> str:
+    """The git remote subcommand after every leading option ("" for a plain listing): git takes -vv, -v -v and
+    abbreviations such as --verb, so no option spelling may hide the verb."""
+    return next((a for a in args if not a.startswith("-")), "")
+
+
 def _git_remote(c: _GitCall) -> Iterator[Block]:
-    if c.args and c.args[0] in ("add", "set-url", "rename"):
-        yield c.blk("other_repo", f"git remote {c.args[0]} can redirect pushes", "ask the operator to change remotes")
+    verb = _remote_verb(c.args)
+    if verb in ("add", "set-url", "rename"):
+        yield c.blk("other_repo", f"git remote {verb} can redirect pushes", "ask the operator to change remotes")
 
 
 _CONFIG_READ_OPTS = {"--get", "--get-all", "--get-regexp", "--list", "-l", "--show-origin", "--show-scope", "--global",
@@ -2317,8 +2397,10 @@ def _git_push(c: _GitCall) -> Iterator[Block]:
     out = st.once(("push-urls", d, remote), lambda: ctx.git(["remote", "get-url", "--push", "--all", remote], d))
     urls = [u.strip() for u in (out or "").splitlines() if u.strip()]
     if not urls:
-        yield blk("other_repo", f"remote '{remote}' has no push URL here",
-                  "push to a remote that exists and points at an allowed repo")
+        b = blk("other_repo", f"remote '{remote}' has no push URL here",
+                "push to a remote that exists and points at an allowed repo")
+        b.no_checkout = True
+        yield b
     for url in urls:
         slug = parse_origin(url)
         if slug:
