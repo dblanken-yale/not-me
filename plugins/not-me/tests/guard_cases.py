@@ -125,6 +125,12 @@ def hermetic_env(root: Path) -> Dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_", "CLAUDE_", "NOT_ME_"))}
     env.update(HOME=str(user), USERPROFILE=str(user), GIT_CONFIG_GLOBAL=str(gitconfig), GIT_CONFIG_NOSYSTEM="1",
                NOT_ME_HOME=str(Path(root) / "homes" / "h0"))
+    if os.name != "nt":
+        # the guard exempts a grep or sed pattern only when the program resolves to a file the user cannot change:
+        # find the system copies first and drop relative entries, so no case depends on the developer's PATH
+        system = [d for d in ("/usr/bin", "/bin") if os.path.isdir(d)]
+        rest = [e for e in env.get("PATH", "").split(os.pathsep) if os.path.isabs(e) and e not in system]
+        env["PATH"] = os.pathsep.join(system + rest)
     return env
 
 
@@ -256,6 +262,9 @@ def write(want: str, rule: Optional[str], tool: str, path: str, variant: str = "
 
 
 A, B = "allow", "block"
+# A grep or sed pattern exemption needs the program to resolve to a file the user cannot change, which the guard
+# never trusts on Windows: there these cases block like any other word naming a protected file.
+PAT = (B, SP) if os.name == "nt" else (A, None)
 
 # Ported reference cases. The reference allowed one fixed repo; here the
 # allowed repo is the origin of the checkout the call runs in, so its
@@ -752,6 +761,92 @@ bash(B, SP, "ln -s {H}/operator-token x", "alloff")
 bash(A, None, "cat README.md")
 bash(A, None, "grep -r x scripts")
 bash(A, None, "cp -r scripts {F}/app/scripts-copy")
+# A grep, rg or sed pattern that only mentions a protected name reads nothing: the pattern operand is not a path.
+bash(*PAT, "grep -n 'x/operator-token' plugins/not-me/tests/guard_cases.py")
+bash(*PAT, "grep -nE 'NOT_ME_HOME=$HOME/.claude/not-me/operator-token' plugins/not-me/tests/guard_cases.py")
+# (these four are allowed with or without the exemption: no word is a path to a protected file)
+bash(A, None, "sed -n '/operator-token/p' plugins/not-me/notme/guard.py")
+bash(A, None, "grep -e{H}/mode-live.sig README.md")
+bash(A, None, "sed -n -e 's|~/.claude/not-me/operator-token|T|p' README.md")
+bash(A, None, "sed -E '/x\\/operator-token/d;s/a/b/g' README.md")
+bash(*PAT, "grep -A 2 -e '{H}/operator-token' README.md")
+bash(*PAT, "grep --regexp={H}/allowed-repos.json README.md", "alloff")
+bash(*PAT, "egrep -i -m 3 x/operator-token README.md")
+# ...while every real path use of the name stays blocked.
+bash(B, SP, "grep x ~/.claude/not-me/operator-token")
+bash(B, SP, "grep -e x {H}/operator-token")
+bash(B, SP, "grep -f {H}/operator-token README.md")
+bash(B, SP, "grep --file={H}/operator-token README.md", "alloff")
+bash(B, SP, "grep x/operator-token -e y README.md")
+bash(B, SP, "grep README.md -e x {H}/operator-token")
+bash(B, SP, "grep --exclude-from {H}/operator-token x README.md")
+bash(B, SP, "grep --unknown-opt {H}/operator-token x")
+bash(B, SP, "rg x {H}")
+bash(B, SP, "rg --ignore-file {H}/operator-token x scripts")
+bash(B, SP, "NOT_ME_HOME=x cat {H}/operator-token")
+bash(B, SP, "X={H}/operator-token grep y README.md")
+bash(B, SP, "{H}/operator-token")
+bash(B, SP, "grep x README.md > {H}/operator-token")
+bash(B, SP, "echo y >> ~/.claude/not-me/operator-token")
+bash(B, SP, "cat <<EOF > {H}/operator-token\nfake\nEOF")
+bash(B, SP, "tee {H}/operator-token")
+bash(B, SP, "grep \"$(cat {H}/operator-token)\" README.md")
+bash(B, SP, "sed -i 's/a/b/' {H}/operator-token")
+bash(B, SP, "sed -i '' '/x/d' {H}/operator-token")
+bash(B, SP, "sed -n 'w ~/.claude/not-me/operator-token' README.md")
+bash(B, SP, "sed 's/a/b/w {H}/operator-token' README.md")
+bash(B, SP, "sed 'r {H}/operator-token' README.md")
+bash(B, SP, "sed -f {H}/operator-token README.md")
+bash(B, SP, "sed -e p {H}/operator-token")
+# The pattern exemption holds only for a bare program name with nothing that could add options or redefine it.
+bash(B, SP, "./grep {H}/operator-token")
+bash(B, SP, "/opt/x/grep {H}/operator-token")
+bash(B, SP, "/opt/x/rg ~/.claude/not-me/operator-token")
+bash(B, SP, "PATH=/opt/x:$PATH grep {H}/operator-token")
+bash(B, SP, "export PATH=/opt/x:$PATH; grep {H}/operator-token")
+bash(B, SP, "path=(/opt/x $path); grep {H}/operator-token")
+bash(B, SP, "grep() { command grep -e x \"$@\"; }; grep {H}/operator-token")
+bash(B, SP, "function grep { cat \"$1\"; }; grep {H}/operator-token")
+bash(B, SP, "alias grep=cat; grep {H}/operator-token")
+bash(B, SP, "source ./x.sh; grep {H}/operator-token")
+bash(B, SP, "X=ali; ${X}as grep=cat; grep {H}/operator-token")
+bash(B, SP, "grep() { cat \"$1\"; }; export -f grep; bash -c 'grep {H}/operator-token'")
+bash(B, SP, "GREP_OPTIONS=-e. grep {H}/operator-token")
+bash(B, SP, "export GREP_OPTIONS=-ex; grep {H}/operator-token")
+bash(B, SP, "env GREP_OPTIONS=-e. grep {H}/operator-token")
+bash(B, SP, "env -P/opt/x grep {H}/operator-token")
+bash(B, SP, "RIPGREP_CONFIG_PATH=cfg rg {H}/operator-token")
+bash(B, SP, "export RIPGREP_CONFIG_PATH=cfg; rg {H}/operator-token")
+bash(B, SP, "F=-e.; grep {H}/operator-token $F")
+bash(B, SP, "grep {H}/operator-token \"$F\"")
+bash(B, SP, "grep {H}/operator-token ${V}")
+bash(B, SP, "grep {H}/operator-token $(printf -- -e.)")
+bash(B, SP, "grep {H}/operator-token `printf -- -e.`")
+bash(B, SP, "rg {H}/operator-token $F")
+bash(B, SP, "grep {H}/operator-token *")
+bash(B, SP, "grep {H}/operator-token {-e.,x}")
+bash(B, SP, "xargs grep {H}/operator-token < README.md")
+bash(B, SP, "sed -n \"/$X/p\" {H}/operator-token")
+# Only a line that is one bare command keeps the exemption: a hash, function or alias table write before it loses it.
+bash(B, SP, "BASH_CMDS[grep]=/bin/cat; grep {H}/operator-token")
+bash(B, SP, "commands[grep]=/bin/cat; grep {H}/operator-token")
+bash(B, SP, "functions[grep]='cat \"$1\"'; grep {H}/operator-token")
+bash(B, SP, "aliases[grep]=cat; grep {H}/operator-token")
+bash(B, SP, "BASH_ALIASES[grep]=cat; grep {H}/operator-token")
+bash(B, SP, "declare 'BASH_CMDS[grep]=/bin/cat'; grep {H}/operator-token")
+bash(B, SP, "typeset 'BASH_CMDS[grep]=/bin/cat'; grep {H}/operator-token")
+bash(B, SP, "printf -v 'BASH_CMDS[grep]' /bin/cat; grep {H}/operator-token")
+bash(B, SP, "read 'functions[grep]' <<< 'cat $1'; grep {H}/operator-token")
+bash(B, SP, "set -A commands grep /bin/cat; grep {H}/operator-token")
+bash(B, SP, "commands+=(grep /bin/cat); grep {H}/operator-token")
+bash(B, SP, "fpath=(./x $fpath); autoload -U grep; grep {H}/operator-token")
+bash(B, SP, "X=1 grep {H}/operator-token")
+bash(B, SP, "command grep {H}/operator-token")
+bash(B, SP, "grep {H}/operator-token README.md | head")
+# ...and planting a program on the same line loses it too (two commands on the line); a program planted on PATH
+# in an earlier call is covered by PatternProgramTests in test_guard.
+bash(B, SP, "ln -sf /bin/cat /opt/homebrew/bin/grep; grep {H}/operator-token")
+bash(B, SP, "cp /bin/cat ~/.local/bin/rg; rg {H}/operator-token")
 # Glob arguments are expanded for real against the fixture token.
 bash(B, SP, "cat {H}/*")
 bash(B, SP, "head {H}/**/operator*", "alloff")
