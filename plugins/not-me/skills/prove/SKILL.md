@@ -1,6 +1,6 @@
 ---
 name: prove
-description: "Prove one pull request works: find its deploy target on a trusted preview host, run the testing steps from the PR body in a browser with a screenshot per step, and post one proof comment with pass or fail per step. A failed proof sends the PR back for work; repeated failures ask for a person. Use when the operator runs /not-me:prove with a PR reference, or /not-me:new starts it in the background after opening a PR. NOT for reviewing code or approving (use /not-me:review), NOT for fixing what the proof finds (use /not-me:update), NOT for browser work with no PR."
+description: "Prove one pull request works: find its deploy target on a trusted preview host, run the testing steps from the PR body in a browser with a screenshot per step, and post one proof comment with pass or fail per step. A failed proof sends the PR back for work; repeated failures ask for a person. Use when the operator runs /not-me:prove with a PR reference, or /not-me:new starts it in the background after opening a PR, or the /not-me router starts it after a --bg leg. NOT for reviewing code or approving (use /not-me:review), NOT for fixing what the proof finds (use /not-me:update), NOT for browser work with no PR."
 argument-hint: "<pr-ref> [--dry-run] [--bg]"
 ---
 

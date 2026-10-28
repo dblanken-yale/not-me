@@ -105,7 +105,7 @@ flowchart TD
     merge(["A person approves, if review did not, and merges"])
 
     router -.-> review
-    n6 -. "preview URL found" .-> prove
+    n6 -. "preview URL found; under --bg the router proves after a PR or PUSHED leg" .-> prove
     u5 --> retro
     n6 --> retro
     review --> retro

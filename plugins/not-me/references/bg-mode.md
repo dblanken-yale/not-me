@@ -15,7 +15,8 @@ also in `write-back.md`; this file owns the contract around it.
 3. Run it in place, in the current checkout. Use a worktree only when the skill
    itself says to (for example `workspace` is `worktree` for that work kind).
 4. Print the subagent's result line exactly as returned. Then stop. No summary, no
-   follow-up work, no second dispatch.
+   follow-up work, no second dispatch. The one exception is the router's prove step
+   ([The router](#the-router) item 5).
 
 ## The subagent's job
 
@@ -58,11 +59,19 @@ STOP - paused  log=<path>
 
 The `/not-me` router runs its legs in `router` order, each as its own run.
 
-1. The first leg that returns anything other than NONE wins. Print its line and
-   stop; later legs do not run.
+1. The first leg that returns anything other than NONE wins. Print its line;
+   later legs do not run. Only the prove line in item 5 may follow it.
 2. Every leg NONE is a success, and the router's result is NONE.
 3. A FAILED or STOP leg also ends the router. Do not try the next leg.
 4. One unit of work per router run.
+5. After a leg whose VERB is PR or PUSHED, run `notme prove-target <ref>`. A URL:
+   dispatch `/not-me:prove <ref> --bg` as its own foreground subagent, the way a leg is
+   dispatched, and print its line after the leg's line. No URL: no prove step, no
+   line, no error. When the router's arguments include `--dry-run`, skip this step
+   entirely: no prove-target call, no dispatch, no line. A FAILED prove line does
+   not change the leg's result. Print nothing after the two lines, then go on to
+   retro, which prints nothing. Only the router does this; `new` and `update` do not start
+   prove under `--bg`.
 
 ## Spawn depth
 
@@ -82,7 +91,8 @@ The typical schedule is a loop in a Claude Code session:
 /loop 2h /not-me --bg
 ```
 
-Each tick is one router run and prints one line. Do not start or extend a loop from
+Each tick is one router run and prints one line, or two when it proves after a PR or
+PUSHED leg (the leg's line, then the prove line). Do not start or extend a loop from
 inside a run.
 
 ## Checklist
