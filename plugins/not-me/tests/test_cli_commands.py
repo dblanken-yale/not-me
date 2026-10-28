@@ -261,6 +261,66 @@ class IssueTests(base.CliCase):
         self.ok("move-issue", "1", "--to", "in_progress", "--require-current", "todo")
         self.assertEqual(things(self.fake)["1"]["labels"], ["in progress"])
 
+    def test_sync_warning_reaches_the_output_and_the_run_log(self):
+        # queue.sync with a board named only in the repo layer: the gate refuses the board until the operator
+        # allows it globally, so the label claim stands and the board write becomes one warning.
+        self.tc.write("repo", "project", "---\nschema: 1\nqueue: {sync: true, board: {owner: acme, number: 6}}"
+                                         "\n---\n# Project\n")
+        start = self.ok("log", "start", "--skill", "new", "--ref", "1")
+        claim = self.ok("claim-issue", "1", "--log", start["path"])
+        self.assertEqual(things(self.fake)["1"]["labels"], ["in progress"])
+        self.assertEqual(self.fake.state["board"]["items"][0]["status"], "To Do")
+        sync = [w for w in claim["warnings"] if w.startswith("queue.sync:")]
+        self.assertEqual(len(sync), 1, claim["warnings"])
+        self.assertIn("/not-me:allow-repo --board acme/6", sync[0])
+        moved = self.ok("move-issue", "1", "--to", "needs_review", "--log", start["path"])
+        self.assertEqual(len([w for w in moved["warnings"] if w.startswith("queue.sync:")]), 1)
+        text = Path(start["path"]).read_text(encoding="utf-8")
+        self.assertRegex(text, r"ACTION  notme claim-issue 1")
+        self.assertEqual(len(re.findall(r"WARN  queue\.sync: .*--board acme/6", text)), 2, text)
+
+    def test_sync_warning_survives_a_later_failure(self):
+        # the mirror warned, then marking the claim released failed: the warning still reaches the error payload
+        # and the run log.
+        self.tc.write("repo", "project", "---\nschema: 1\nqueue: {sync: true, board: {owner: acme, number: 6}}"
+                                         "\n---\n# Project\n")
+        start = self.ok("log", "start", "--skill", "new", "--ref", "1")
+        self.ok("claim-issue", "1", "--log", start["path"])
+        from notme.queue.labels import LabelQueue
+        with mock.patch.object(LabelQueue, "mark_released", side_effect=gh_mod.GhError(["api"], 1, "boom")):
+            code, payload, _ = self.cli("release-issue", "1", "--log", start["path"])
+        self.assertEqual((code, payload["kind"]), (1, "gh_error"))
+        self.assertEqual(len([w for w in payload.get("warnings", []) if w.startswith("queue.sync:")]), 1, payload)
+        text = Path(start["path"]).read_text(encoding="utf-8")
+        self.assertEqual(len(re.findall(r"WARN  queue\.sync: ", text)), 2, text)  # claim's and release's
+
+    def test_board_source_label_only_move_refused_exits_blocked(self):
+        self.tc.write("repo", "project", "---\nschema: 1\nqueue: {source: board, sync: true, board: {owner: acme, "
+                                         "number: 6}}\n---\n# Project\n")
+        from notme import writes as writes_mod
+        real = writes_mod.check_write
+
+        def refuse_repos(target, ctx):
+            if target.kind == "repo":
+                return writes_mod.Decision(False, f"write to {target.slug} blocked: allowed repos are none",
+                                           f"/not-me:allow-repo {target.slug}", "other_repo")
+            return real(target, ctx)
+
+        with mock.patch.object(writes_mod, "check_write", side_effect=refuse_repos):
+            code, payload, _ = self.cli("move-issue", "1", "--to", "needs_work")
+        self.assertEqual((code, payload["kind"]), (6, "write_blocked"), payload)
+        self.assertEqual(payload["allow_cmd"], f"/not-me:allow-repo {REPO}")
+
+    def test_mirror_failed_has_its_own_kind(self):
+        from notme.queue.sync import MirrorFailed
+        from notme import cli as cli_mod
+        code, payload = cli_mod.error_response(MirrorFailed("labels on acme/app#1 not set"), mock.Mock())
+        self.assertEqual((code, payload["kind"], payload["error"]), (1, "sync_failed", "labels on acme/app#1 not set"))
+
+    def test_sync_off_has_no_sync_warning(self):
+        claim = self.ok("claim-issue", "1")
+        self.assertFalse([w for w in claim.get("warnings", []) if w.startswith("queue.sync:")])
+
     def test_transition_follows_edges(self):
         code, payload, _ = self.cli("transition", "1", "--from", "todo", "--to", "ready_to_merge")
         self.assertEqual((code, payload["kind"]), (1, "illegal_transition"))

@@ -53,6 +53,7 @@ from notme import humans, modeswitch, roles as roles_mod, writeback, writes  # n
 from notme.dryrun import LedgerError  # noqa: E402
 from notme.gh import csv, names_of, login_of  # noqa: E402
 from notme.queue import NotOpen, describe as describe_queue, make_queue, stale_claims  # noqa: E402
+from notme.queue.sync import MirrorFailed  # noqa: E402
 from notme.redact import redact, redact_obj  # noqa: E402
 
 
@@ -181,6 +182,7 @@ ERRORS: List[Tuple[Matcher, ExitCode, str, Optional[Callable[[Any], Dict[str, An
     (git_mod.GitError, ExitCode.ERROR, "git_error", None),
     (git_mod.ProtectedBranchError, ExitCode.ERROR, "protected_branch", None),
     (NotOpen, ExitCode.ERROR, "not_open", None),
+    (MirrorFailed, ExitCode.ERROR, "sync_failed", None),
     (states.StateMismatch, ExitCode.ERROR, "state_mismatch", None),
     (states.IllegalTransition, ExitCode.ERROR, "illegal_transition", None),
     ((LookupError, runlog.ActiveRunError), ExitCode.ERROR, "not_found", None),
@@ -262,6 +264,7 @@ class Context:
     def __init__(self, args: argparse.Namespace, deps: Deps):
         self.args, self.deps = args, deps
         self.warnings: List[str] = []
+        self.log_warnings: List[str] = []  # warnings that also go to the run log as WARN lines (see main)
         # Restricted is the default. A tty alone proves nothing (a pty wrapper fakes one), so a person also needs no
         # Claude Code variable and no Claude Code ancestor process; an unreadable ancestry counts as Claude Code.
         self.restricted = (any(deps.env.get(k) for k in CLAUDE_ENV) or not deps.isatty()
@@ -320,6 +323,13 @@ class Context:
     def warn(self, text: str) -> None:
         self.warnings.append(text)
         self.deps.chatter(f"notme: warning: {text}")
+
+    def sync_warnings(self, queue: Any) -> None:
+        """Report the queue.sync mirror failures of a claim, move or release: in the output's warnings, and as
+        WARN lines in the run log when --log is given."""
+        for text in getattr(queue, "sync_warnings", None) or []:
+            self.warn(text)
+            self.log_warnings.append(text)
 
     def need_work_dir(self) -> Path:
         if self.work_dir is None:
@@ -839,20 +849,30 @@ def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
 @command("claim-issue", "claim an issue", writes=True, running="error", ref="tracker", args=[number_arg])
 def cmd_claim_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
     """Claim an issue: assign, move to in progress, post the claim marker. Exit 3 when someone else holds it.
+    With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
 
-    Output: number, previous, now, marker_comment_id, run_id
+    Output: number, previous, now, marker_comment_id, run_id; warnings when a queue.sync mirror write failed
     """
-    return dataclasses.asdict(ctx.queue().claim(n))
+    queue = ctx.queue()
+    try:
+        return dataclasses.asdict(queue.claim(n))
+    finally:  # a mirror warning stands even when a later step failed
+        ctx.sync_warnings(queue)
 
 
 @command("release-issue", "give a claimed issue back", writes=True, ref="tracker", args=[
     number_arg, arg("--to", choices=("todo", "blocked"), default="todo")])
 def cmd_release_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
     """Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released.
+    With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
 
-    Output: number, to, released
+    Output: number, to, released; warnings when a queue.sync mirror write failed
     """
-    ctx.queue().release(n, args.to)
+    queue = ctx.queue()
+    try:
+        queue.release(n, args.to)
+    finally:  # a mirror warning stands even when a later step failed
+        ctx.sync_warnings(queue)
     return {"number": n, "to": args.to, "released": True}
 
 
@@ -861,10 +881,15 @@ def cmd_release_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int)
     arg("--require-current", choices=states.STATES, metavar="STATE")])
 def cmd_move_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
     """Move an issue to a state, optionally only when it is currently in another one.
+    With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
 
-    Output: number, to, require_current
+    Output: number, to, require_current; warnings when a queue.sync mirror write failed
     """
-    ctx.queue().move(n, args.to, args.require_current)
+    queue = ctx.queue()
+    try:
+        queue.move(n, args.to, args.require_current)
+    finally:  # a mirror warning stands even when a later step failed
+        ctx.sync_warnings(queue)
     return {"number": n, "to": args.to, "require_current": args.require_current}
 
 
@@ -2101,6 +2126,21 @@ def _log_line(cmd: Command, args: argparse.Namespace, dry: bool) -> str:
     return " ".join(x for x in (f"notme {cmd.name}", str(ref), "(dry run)" if dry else "") if x)
 
 
+def _keep_log_warnings(ctx: Optional[Context], log: Any, payload: Dict[str, Any]) -> None:
+    """On the error path, the warnings collected for the run log (queue.sync mirror failures) still reach the
+    run log as WARN lines and the error payload's warnings."""
+    if ctx is None or not ctx.log_warnings:
+        return
+    existing = payload.get("warnings")
+    payload["warnings"] = (existing if isinstance(existing, list) else []) + ctx.log_warnings
+    if log is not None:
+        try:
+            for text in ctx.log_warnings:
+                log.action(text, kind="WARN")
+        except (OSError, ValueError) as exc:
+            payload["warning"] = f"run log not written: {exc.__class__.__name__}"
+
+
 def main(argv: Optional[Sequence[str]] = None, *, runner: Optional[gh_mod.Runner] = None,
          env: Optional[Mapping[str, str]] = None, stdin: Optional[TextIO] = None, stdout: Optional[TextIO] = None,
          stderr: Optional[TextIO] = None, hook_cmd: Optional[List[str]] = None, cwd: Optional[str] = None,
@@ -2113,6 +2153,8 @@ def main(argv: Optional[Sequence[str]] = None, *, runner: Optional[gh_mod.Runner
     argv = list(sys.argv[1:] if argv is None else argv)
     deps = Deps(runner, env, stdin, stdout, stderr, hook_cmd, cwd, argv, sleep, clock, process_check, prompt)
     code, payload = int(ExitCode.OK), {}
+    ctx: Optional[Context] = None
+    log: Any = None
     try:
         try:
             args = build_parser().parse_args(argv)
@@ -2127,6 +2169,8 @@ def main(argv: Optional[Sequence[str]] = None, *, runner: Optional[gh_mod.Runner
         if log is not None:
             try:
                 log.action(_log_line(args.cmd, args, dry))
+                for text in ctx.log_warnings:
+                    log.action(text, kind="WARN")
             except (OSError, ValueError) as exc:
                 payload["warning"] = f"run log not written: {exc.__class__.__name__}"
         if ctx.warnings:
@@ -2137,6 +2181,7 @@ def main(argv: Optional[Sequence[str]] = None, *, runner: Optional[gh_mod.Runner
     except Exception as exc:  # noqa: BLE001 - every failure becomes one JSON object
         code, payload = error_response(exc, deps)
         deps.chatter(f"notme: {payload.get('error')}")
+        _keep_log_warnings(ctx, log, payload)
     print(json.dumps(redact_obj(json.loads(json.dumps(payload, default=str)))), file=deps.stdout)
     return code
 

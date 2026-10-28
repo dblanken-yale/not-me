@@ -123,6 +123,7 @@ class BaseQueue:
 
     def __init__(self, cfg: Any, gh: GhClient, roster: Any, operator: str, run_id: str, tracker: str,
                  claims_dir: Optional[Path] = None, clock: Optional[claims.Clock] = None):
+        self.cfg = cfg
         self.meta: Dict[str, Any] = (cfg.meta or {}).get("project", {})
         self.queue_cfg: Dict[str, Any] = self.meta.get("queue") or {}
         self.labels = Labels(self.meta.get("labels") or {})
@@ -134,6 +135,8 @@ class BaseQueue:
         self.claims_dir = Path(claims_dir) if claims_dir else None
         self._clock = clock or claims.utcnow
         self.include_unassigned = self.queue_cfg.get("include_unassigned") is True
+        self.sync = self.queue_cfg.get("sync") is True  # queue.sync: mirror each state change to the other side
+        self.sync_warnings: List[str] = []  # one per mirror write that failed (see sync.mirror)
         self.unassigned_skipped = 0  # eligible issues the last candidates() left out only because nobody is assigned
         self.held_back: List[Dict[str, int]] = []  # eligible issues the last candidates() left out for epic order
         picking = self.meta.get("picking") or {}
@@ -551,7 +554,8 @@ def describe(meta: Mapping[str, Any]) -> Dict[str, Any]:
     """Where the issue queue looks, from the project config alone (never calls GitHub).
 
     {source, ok, summary, opt_in_label, label (labels source) | board and column (board source)}. summary is one
-    plain sentence such as "picks issues labeled `to do`, assigned to you"; ok is false when the config cannot
+    plain sentence such as "picks issues labeled `to do`, assigned to you" (with queue.sync, followed by what it
+    keeps in step); ok is false when the config cannot
     work as written (no board, no to-do column, an unknown source), and summary then says why.
     """
     q = meta.get("queue") or {}
@@ -584,6 +588,8 @@ def describe(meta: Mapping[str, Any]) -> Dict[str, Any]:
             out.update(ok=True, summary=f"picks issues in the `{column}` column of board {out['board']}{suffix}")
     else:
         out.update(ok=False, summary=f"queue.source `{source}` is not supported; use labels or board")
+    if out["ok"] and q.get("sync") is True:
+        out["summary"] += "; keeps the " + ("labels" if source == "board" else "board Status") + " in step"
     out["opt_in_label"] = opt_in
     return out
 
