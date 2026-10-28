@@ -49,6 +49,13 @@ With AskUserQuestion, one call, current values first and marked as current:
    `queue.board_states.in_review` and `queue.board_states.blocked`, each picked
    from that board's status options (offer "no column" for the blocked one).
 3. An opt-in label every picked issue must also carry, or none (from the label list).
+4. Stacking. Explain the line first: an issue body may say
+   `Stack on: owner/repo#PR` (`Based on:` and `On top of:` work too, one line per issue); when that open PR (not a draft, from a trusted
+   author) is the issue's only blocker, the issue is ready now and branches from
+   the PR's branch, its PR starting with `Builds on owner/repo#PR`. Only a trusted
+   author's line counts. Then ask for the default: declared (the default: only
+   issues with the line stack) or off (never stack; such an issue waits for the
+   merge).
 
 With `--answers`, read the `queue` object of the answers file (keys shaped like
 `queue` in the shipped `project.md`) instead and ask
@@ -64,6 +71,7 @@ from the shipped default as in Step 5 of the skill, with only these keys live.
 |--------|--------------|
 | Labels | `queue.source: labels`, `queue.pick_label`, `labels.todo` (the same name), `queue.opt_in_label` |
 | Board | `queue.source: board`, `queue.board.owner`, `queue.board.number`, and `queue.board.status_field` when it is not the default, `queue.board_states`, `queue.opt_in_label` |
+| Stacking off | `queue.stacking: off` (write nothing for declared, the shipped default; the repo layer may only set off) |
 | Either | `queue.source: either`, `queue.pick_label`, `labels.todo` (the same name), `queue.board.owner`, `queue.board.number`, and `queue.board.status_field` when it is not the default, `queue.board_states`, `queue.opt_in_label` |
 | Sync on | `queue.sync: true`, plus the board keys above (`queue.board.*`, `queue.board_states` from the board's real column names) whichever source was chosen |
 

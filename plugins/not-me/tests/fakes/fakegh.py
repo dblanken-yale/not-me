@@ -159,7 +159,10 @@ class FakeGitHub:
                           "authorAssociation": c["assoc"],
                           "body": c["body"]} for c in thing["comments"]],
         }
-        if thing["kind"] == "pr":
+        if thing["kind"] == "issue":  # thing["linked_prs"]: [{"number": n, "repository": {"nameWithOwner": slug}}]
+            full["closedByPullRequestsReferences"] = thing.get("linked_prs", [])
+        if thing["kind"] == "pr":  # thing["closes"]: refs as gh prints them: {number, repository: {name, owner}}
+            full["closingIssuesReferences"] = thing.get("closes", [])
             for k in ("headRefName", "headRefOid", "baseRefName", "isDraft", "isCrossRepository",
                       "reviewDecision", "mergeable"):
                 full[k] = thing[k]
@@ -472,6 +475,13 @@ class FakeGitHub:
             reviews = [{**r, "author": author(r)} for r in pr.get("review_nodes", [])]
             return {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes},
                                                             "reviews": {"nodes": reviews}}}}}
+        if "editor{login}" in query:  # who last edited an issue body; thing["editor"] (None: never edited)
+            number = re.search(r"issue\(number:(\d+)\)", query).group(1)
+            thing = self._thing(f"{variables['owner']}/{variables['name']}", number)
+            if thing.get("editor_fail"):
+                raise KeyError("GraphQL: could not read the editor")
+            editor = thing.get("editor")
+            return {"data": {"repository": {"issue": {"editor": {"login": editor} if editor else None}}}}
         if "projectItems" in query:  # one issue's project items with the named field values
             number = re.search(r"issue\(number:(\d+)\)", query).group(1)
             thing = self._thing(f"{variables['owner']}/{variables['name']}", number)

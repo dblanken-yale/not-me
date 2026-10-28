@@ -54,10 +54,12 @@ or an assistant.
 
 ## Stacked PRs
 
-For chained sub-issues of an epic (see `branching.md`):
+For chained sub-issues of an epic, and for an issue whose `stack_on` fact has `stacks` true
+(see `branching.md`):
 
 1. Each PR targets its predecessor's branch, not the default branch.
-2. The body's first line under Summary is `Builds on acme/app#91`.
+2. The body's first line under Summary is `Builds on acme/app#91` (for an issue with a
+   `Stack on:`, `Based on:` or `On top of:` line, the `pr` field of `stack_on`).
 
 ## Example body
 

@@ -199,6 +199,7 @@ Anyone with push access can edit the repo layer, and it is committed, so not-me 
 | `mode` | set `dry-run` | set `live`. The value is ignored |
 | `enabled` | set `false` | set `true` over a lower `false` |
 | `queue.include_unassigned` | set `false` | set `true` over a lower `false` |
+| `queue.stacking` | set `off` | set `declared` over a lower `off`, or set it to `null`. The value is ignored |
 | `queue.list_limit` | lower it | raise it above the lower layer's value, or set it (or the whole `queue` map) to `null` |
 | `picking.value_max_chars` | lower it | raise it above the lower layer's value, or set `null` |
 | `picking.fields`, `picking.target_epics` and the `## Picking work` section | set anything | nothing: they only order eligible issues |
@@ -270,7 +271,7 @@ A repo file cannot turn this on, because it would widen what not-me picks. When 
 
 An issue listed in a trusted epic's task list also waits its turn: it is left out while an earlier unchecked issue in that list is still open, not blocked and not started (no state but `to do`, and nobody but you assigned). `notme pick-issue` reports these under `held_back`.
 
-With the default picking rules or rules from the repo layer, `notme pick-issue` lists up to `queue.list_limit` eligible issues (10 by default); with `## Picking work` rules in your global layer it lists every eligible issue, so the rules can reach an issue the queue's own order puts last (see [Picking work](#picking-work)). Each listed issue comes with the facts the run weighs: labels, epic and place in its task list, age, GitHub issue dependencies, board fields, and reaction counts from you and trusted roster members. Each listed issue costs about three GitHub reads, so a higher limit means a slower pick. See [workflow.md](workflow.md#how-the-next-issue-is-chosen).
+With the default picking rules or rules from the repo layer, `notme pick-issue` lists up to `queue.list_limit` eligible issues (10 by default); with `## Picking work` rules in your global layer it lists every eligible issue, so the rules can reach an issue the queue's own order puts last (see [Picking work](#picking-work)). Each listed issue comes with the facts the run weighs: labels, epic and place in its task list, age, GitHub issue dependencies, board fields, and reaction counts from you and trusted roster members. Each listed issue costs about four GitHub reads, so a higher limit means a slower pick. See [workflow.md](workflow.md#how-the-next-issue-is-chosen).
 
 ### Picking work
 
@@ -285,7 +286,7 @@ Two frontmatter keys feed the rules:
 
 Rules only order the issues the queue may pick. They never add one: a paused, blocked, held-back or unassigned issue, or one assigned to someone else, stays out whatever the rules or a target epic say. A target epic counts only when it is open and its author is a lead or authority on the roster; any other is ignored and reported by number under `picking.ignored_epics`.
 
-When the rules come from your global layer, `notme pick-issue` lists every eligible issue instead of the first `queue.list_limit`, so a rule can reach any of them; each listed issue costs about three GitHub reads. Rules from the repo layer and the plugin default rules keep the `queue.list_limit` cut, because the repo layer may only lower `queue.list_limit` and its rules must not lift it either. When `truncated` is true, the run log says the rules saw only part of the queue.
+When the rules come from your global layer, `notme pick-issue` lists every eligible issue instead of the first `queue.list_limit`, so a rule can reach any of them; each listed issue costs about four GitHub reads. Rules from the repo layer and the plugin default rules keep the `queue.list_limit` cut, because the repo layer may only lower `queue.list_limit` and its rules must not lift it either. When `truncated` is true, the run log says the rules saw only part of the queue.
 
 Layers: the section resolves like any other prose (see [Prose: replace, or extend](#prose-replace-or-extend)). The highest layer with a `project.md` supplies the body; with `extends: global`, its sections replace same-named lower ones and the rest are kept. When the resulting body has no `## Picking work` section, the default rules (impact) apply. So a repo `project.md` without `extends` and without the section turns global rules off for that repo. `picking.fields` and `picking.target_epics` merge like other keys. The repo layer may set both and the section: they only order work and grant nothing. It may lower `picking.value_max_chars`, never raise it. As always, the repo layer is read from the main checkout only. `/not-me:config` shows the rules in effect and the layer they came from, and `/not-me:status` states them in one line. Each run logs which rule decided (`rule: impact` or `rule: picking work (repo layer)`).
 
@@ -343,6 +344,27 @@ queue:
 Your token needs the `project` scope, and the board must be confirmed with `/not-me:allow-repo --board acme/7` if it was set in the repo layer. Pull request states always use labels.
 
 The `board_states` defaults (`To Do`, `In progress`, `In review`, `Blocked`) are only a guess. Map each key to the real column name on your board, spelled the way the board spells it; `/not-me:doctor` warns about a name the board does not have.
+
+### Stacking on an open PR
+
+An issue that depends on one open PR is normally not ready: it waits until that PR merges. When it needs only that one PR, its author can say so with one line in the issue body. Three phrasings mean the same thing, in any letter case, at the start of a line, followed by a colon and a full reference (`owner/repo#N` or an issue or PR URL): `Stack on:`, `Based on:` and `On top of:`.
+
+```
+Stack on: acme/app#91
+```
+
+Prose such as "Based on feedback from the team" does not match, and neither does a line inside a code block or an HTML comment. An issue has exactly one such line; two of any mix hold the issue.
+
+The reference is a PR, or an issue whose single open PR is used (a closed issue counts as done and gives a normal issue). The issue is then ready, and `/not-me:new` branches from that PR's head branch, opens its PR against that branch, and starts the Summary with `Builds on acme/app#91`. The CLI reads the line, never the model, and honours it only when:
+
+- the issue author is on the roster, and so is whoever last edited the issue body (the same rule as the rest of the issue text);
+- the PR is open, not a draft, written by a roster member, and from a branch in the same repo, not a fork;
+- the PR is in the repo of the checkout the run works in. A PR in another allowed repo (a companion) is held, because the branch is created from this checkout's origin; a PR in a repo that is not allowed is refused until a person runs `/not-me:allow-repo`;
+- no other blocker of the issue is open. GitHub dependencies link issues to issues, so the blocker that matches is the issue the PR closes (or the named issue itself).
+
+Otherwise the issue is left out of `pick-issue` and listed under `stack_held` with the reason; when that leaves nothing to pick, the `none` result carries `reason: stack_held` and the refs and reasons. An explicit `/not-me:new N` on such an issue stops with `HELD` before any claim and creates no branch. A merged PR makes the issue a normal one on the default branch; a PR closed without merging keeps it waiting. When the PR gets new commits, `/not-me:update` on the stacked PR merges that branch in (a merge, never a rebase). GitHub retargets the stacked PR to the default branch only when the predecessor's head branch is deleted on merge; otherwise the base stays on the old branch, and `/not-me:update` reports it for a person to fix. Nothing here force-pushes, deletes a branch or merges.
+
+Set `queue.stacking: off` to never stack: the line is ignored and the issue waits. The default is `declared`. The repo layer may only turn it off. `/not-me:setup` explains the line and asks for the default, and `/not-me:ticket` offers to add the line when an issue's only open blocker is an issue whose single open PR could be stacked on. Base order: `--base`, an epic's predecessor branch, the stacked PR's branch, `Base branch:`, the epic's branch, the default branch.
 
 ### Keeping labels and the board in step
 
@@ -506,6 +528,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `queue.board_states.in_progress` | `In progress` | Board column name for claimed work |
 | `queue.board_states.in_review` | `In review` | Board column name for work waiting on review |
 | `queue.board_states.blocked` | `Blocked` | Board column name for blocked work |
+| `queue.stacking` | `declared` | `declared` lets an issue with a trusted `Stack on: owner/repo#PR` (or `Based on:`, `On top of:`) line start from that open PR's branch; `off` never stacks, and such an issue waits for the merge. The repo layer may set `off`, never `declared` over a lower `off` (see [Stacking on an open PR](#stacking-on-an-open-pr)) |
 | `queue.sync` | `false` | `true` makes each claim, move and release also update the side `queue.source` does not read: the board Status for a labels source, the labels for a board source. `queue.source: either` always does this, and a `false` written next to it is a config error. Needs `queue.board` set; a board named in the repo layer must be confirmed on the global allow list; a failed mirror write is a warning (see [Keeping labels and the board in step](#keeping-labels-and-the-board-in-step)) |
 | `picking.fields` | `[]` | Board field names whose values `notme pick-issue` lists for each issue, for the rules in the `## Picking work` section to use. Any layer may set it (see [Picking work](#picking-work)) |
 | `picking.target_epics` | `[]` | Epic issue numbers to finish first, in this order. One counts only when a trusted roster member wrote it. Any layer may set it (see [Picking work](#picking-work)) |

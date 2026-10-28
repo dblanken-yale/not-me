@@ -863,8 +863,12 @@ def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     label queue only from projects the tracker's owner owns; {} when none is named), board ({status, fields} on
     a board queue, else null); a fact that cannot be read is null; never a body. truncated (more eligible issues
     than listed: the rules saw only part of the queue); held_back:
-    [{number, behind, epic}]; disagreements (only with queue.source either, and only when not empty:
-    [{number, label, status, reason}] for issues left out because the label and the board Status disagree); picking: {rules (the effective Picking work section of project.md), layer (where
+    [{number, behind, epic}]; stack_held: [{number, ref, reason}] issues left out because their
+    `Stack on:` (or `Based on:`, `On top of:`) line names a predecessor PR that is not ready to stack on (draft,
+    closed, another open blocker, queue.stacking off, a repo not allowed or not this checkout's); with none,
+    reason stack_held names them; disagreements (only with queue.source either, and only when not empty:
+    [{number, label, status, reason}] for issues left out because the label and the board Status disagree);
+    picking: {rules (the effective Picking work section of project.md), layer (where
     the rules came from), fields, target_epics (the ones honoured: open and written by a trusted roster member),
     ignored_epics ([{number, reason}])}. Or none with queue_summary (where the queue looked, in plain words) and
     held_back when not empty, with reason when paused or disabled, and with reason unassigned_only, unassigned
@@ -886,9 +890,11 @@ def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     rules = ctx.cfg.picking()
     limit = _limit_for(rules, queue)  # the run log notes `truncated`; eligibility is the same either way
     every = queue.candidates()
-    found = [c for c in every if c.number not in skip]
+    found, stack_held = queue.stack_filter([c for c in every if c.number not in skip], limit)
     if not found:
         out: Dict[str, Any] = {}
+        if stack_held:
+            out.update({"reason": "stack_held", "stack_held": stack_held})
         if not every and queue.unassigned_skipped:
             out.update({"reason": "unassigned_only", "unassigned": queue.unassigned_skipped,
                         "setting": "queue.include_unassigned", "suggest": "/not-me:suggest"})
@@ -903,7 +909,8 @@ def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     return {"number": top.number, "title": top.title, "url": top.url, "author": top.author,
             "labels": top.labels, "parent": top.parent, "candidates": len(found),
             "issues": queue.facts(listed), "truncated": len(listed) < len(found), "held_back": queue.held_back,
-            "picking": picking, **({"disagreements": queue.disagreements} if queue.disagreements else {})}
+            "stack_held": stack_held, "picking": picking,
+            **({"disagreements": queue.disagreements} if queue.disagreements else {})}
 
 
 @command("picking-signals", "board fields and labels that could rank the eligible issues", args=[
@@ -1093,9 +1100,24 @@ def cmd_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict
     """An issue's facts. The body and comments of an author the roster does not trust are withheld.
 
     Output: repo, number, title, state, url, author, author_trusted, labels, status, assignees, body, comments,
-    comments_ignored
+    comments_ignored, blocked_by ([{repo, number, state}] from GitHub issue dependencies; null when unknown),
+    stack_on. stack_on is null unless a trusted author's body has one `Stack on:`, `Based on:` or `On top of:`
+    owner/repo#N line (null too when the queue config is invalid: see warnings);
+    then {ref, pr, head, base, state, draft, author, author_trusted (of the PR), stacks (branch from head and
+    target it), ready, reason}. Read it here, never from the body: the line counts only from a trusted author, and
+    the PR must be open, not a draft, from a trusted author and in this checkout's repo. A merged PR gives ready true
+    and stacks false (a normal issue); queue.stacking off, another open blocker or a closed PR gives ready false
     """
-    return feedback_mod.issue_view(ctx.gh, repo, n, ctx.roster, ctx.operator, ctx.labels)
+    out = feedback_mod.issue_view(ctx.gh, repo, n, ctx.roster, ctx.operator, ctx.labels)
+    out["stack_on"] = out["blocked_by"] = None
+    if out["author_trusted"] and repo.lower() == ctx.tracker.lower():
+        try:  # a queue or picking config error must not stop the read of the issue itself
+            queue = ctx.queue()
+            out["stack_on"] = queue.stack_on(n, out["author"], out["body"])
+            out["blocked_by"] = queue.blocked_by(n)
+        except ValueError as exc:
+            ctx.warn(f"stack_on and blocked_by are null: {exc}")
+    return out
 
 
 # --- handlers: pull requests ---------------------------------------------------

@@ -14,11 +14,13 @@ Take the first that applies:
 1. `--base <branch>` given on the command line.
 2. The branch of the predecessor sub-issue, when the issue is a chained sub-issue
    of an epic (see Epics below).
-3. A `Base branch: <name>` line in the issue body.
-4. The epic's branch, when the issue is a sub-issue of an epic that has one.
-5. The repo's default branch.
+3. The head branch of the PR a `Stack on:`, `Based on:` or `On top of:` line names,
+   when `notme issue N` returns a `stack_on` fact with `stacks` true (see Stacking below).
+4. A `Base branch: <name>` line in the issue body.
+5. The epic's branch, when the issue is a sub-issue of an epic that has one.
+6. The repo's default branch.
 
-A base that is declared (by 1 to 4) but does not exist on the remote: STOP. Log the
+A base that is declared (by 1 to 5) but does not exist on the remote: STOP. Log the
 exact name and where it was declared, add `needs_human`, and name the issue author.
 Never fall back to the default branch silently.
 
@@ -96,6 +98,31 @@ When you must set aside local changes:
 3. The PR body says "Builds on acme/app#91" for the predecessor PR (see
    `pr-shape.md`).
 4. Never pick the epic issue itself.
+
+## Stacking on an open PR
+
+An issue may declare one line, `Stack on: <owner/repo#PR>`, `Based on: <owner/repo#PR>`
+or `On top of: <owner/repo#PR>` (a PR, or an issue whose single open PR is used).
+It counts only from a trusted author, and only the CLI reads it: `notme issue N`
+returns `stack_on`, and `notme pick-issue` leaves out an issue whose `stack_on` has
+`ready` false (it lists them in `stack_held` with the reason).
+
+1. `stacks` true: branch from `origin/<head>`, the `head` field of `stack_on`, and
+   open the PR against that branch with `Builds on <pr>`, the `pr` field (see
+   `pr-shape.md`).
+2. `stack_on` not null and `ready` false, however the issue was chosen (an explicit
+   number, or a change between the pick and `notme issue N`): never fall through to
+   `Base branch:`, the epic or the default branch. Stop before the claim, or release
+   the issue if it is already claimed. Log the reason and end with
+   `HELD <ref> stack-on - <reason>`. Create no branch.
+3. The PR is merged: `stacks` is false and `ready` is true: a normal issue on the
+   default branch (or its other declared base).
+4. `/not-me:update` on the stacked PR merges the predecessor branch in at both
+   checkpoints (its base is that branch). GitHub retargets the stacked PR only
+   when the predecessor's head branch is deleted on merge; otherwise the base
+   stays on the old branch, and `/not-me:update` reports it (no branch edits).
+   Nothing here force-pushes or deletes a branch.
+5. The PR must be in the repo of this checkout; a PR in another allowed repo is held.
 
 ## Checklist
 

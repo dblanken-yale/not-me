@@ -73,6 +73,15 @@ When `notme pick-needs-work` returns none, a PR waiting on an answer may be read
    `needs_review` and `needs_human`, and a summary whose Waiting on line names the
    operator: "no open trusted findings; say what is still needed."
 
+## Stacked PRs
+
+A PR whose body has `Builds on <ref>` is stacked: its base is the predecessor's head
+branch, and Checkpoint A merges that branch in. Read the predecessor with
+`notme bundle <ref>`. When it is merged and this PR's base is still that branch
+(GitHub retargets only when the predecessor's head branch is deleted on merge), say
+so in the summary comment so a person can retarget the PR or delete the branch.
+Report only: edit no branch, change no base, delete nothing.
+
 ## Park labels
 
 When nothing is implemented (every finding deferred or refused, or no findings),

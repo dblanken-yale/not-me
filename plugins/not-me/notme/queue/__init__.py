@@ -19,6 +19,7 @@ from .. import claims, paths
 from ..gh import GhClient, GhError, _login, login_of, names_of, tmp_text_file
 from ..layers import is_field_name, is_positive_int
 from ..states import LabelCollision, Labels
+from ..stacking import stack_fact
 from ..writes import WriteTarget, valid_slug
 
 
@@ -169,6 +170,8 @@ class BaseQueue:
             if not is_positive_int(cap):
                 raise ValueError(f"picking.value_max_chars must be a whole number of at least 1, got {cap!r}")
             self.value_max_chars = cap
+        self._stack_facts: Dict[int, Optional[Dict[str, Any]]] = {}  # stack_on() by issue number
+        self._blockers: Dict[int, Optional[List[Dict[str, Any]]]] = {}  # blocked_by() by issue number
         self.target_epics_used: List[int] = []  # target epics the last candidates() honoured
         self.target_epics_ignored: List[Dict[str, Any]] = []  # [{number, reason}]: not found, closed, untrusted
 
@@ -364,8 +367,9 @@ class BaseQueue:
                         "age_days": (now - created).days if created else None,
                         "parent": c.parent, "position": c.position,
                         "target_epic": c.target_epic, "target_position": c.target[1] if c.target else None,
-                        "blocked_by": self._dependencies(c.number, "blocked_by"),
+                        "blocked_by": self.blocked_by(c.number),
                         "blocking": self._dependencies(c.number, "blocking"),
+                        "stack_on": self.stack_on(c.number, c.author),
                         "reactions": self._reactions(c.number), "fields": self._fields_of(c), "board": c.board})
         return out
 
@@ -414,6 +418,50 @@ class BaseQueue:
                 repo = "/".join(url.rstrip("/").split("/")[-2:]) if "/repos/" in url else None
                 out.append({"repo": repo, "number": item["number"], "state": item.get("state")})
         return out
+
+    # --- stacking (`Stack on:`) ---
+
+    def stacking(self) -> str:
+        """queue.stacking: declared | off. Not set (a config without the default layer) counts as off."""
+        value = self.queue_cfg.get("stacking")
+        if value not in (None, "declared", "off"):
+            raise ValueError(f"queue.stacking must be declared or off, got {value!r}")
+        return value or "off"
+
+    def blocked_by(self, n: int) -> Optional[List[Dict[str, Any]]]:
+        """Issues GitHub records as blocking n: repo, number, state; None when the read fails. Read once per issue."""
+        if n not in self._blockers:
+            self._blockers[n] = self._dependencies(n, "blocked_by")
+        return self._blockers[n]
+
+    def stack_on(self, n: int, author: Optional[str], body: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """The `Stack on:` fact of issue n (see stacking.stack_fact), or None: no honoured line, or the body
+        cannot be read. The line counts only when the roster trusts the author. body: already read, else read here."""
+        if n not in self._stack_facts:
+            if body is None:
+                issue = self._read_issue(n, "body")
+                body = issue.get("body") if issue else None
+            self._stack_facts[n] = stack_fact(
+                self.gh, number=n, body=body, author_trusted=self.trusted(author), tracker=self.tracker,
+                stacking=self.stacking(), trusted=self.trusted,
+                blocked_by=lambda: self.blocked_by(n))
+        return self._stack_facts[n]
+
+    def stack_filter(self, found: List[Candidate], limit: Optional[int]) -> Tuple[List[Candidate], List[Dict[str, Any]]]:
+        """(found without the issues a `Stack on:` line holds back, [{number, reason}] of those held back).
+        Issues are read in order until `limit` ready ones are known; the rest are passed through unread."""
+        kept: List[Candidate] = []
+        held: List[Dict[str, Any]] = []
+        for i, c in enumerate(found):
+            if limit is not None and len(kept) >= limit:
+                kept.extend(found[i:])
+                break
+            fact = self.stack_on(c.number, c.author)
+            if fact is not None and not fact["ready"]:
+                held.append({"number": c.number, "ref": fact["ref"], "reason": fact["reason"]})
+            else:
+                kept.append(c)
+        return kept, held
 
     def _reactions(self, n: int) -> Optional[Dict[str, int]]:
         """Reaction counts by kind, counting only reactions by the operator or a login the roster trusts."""

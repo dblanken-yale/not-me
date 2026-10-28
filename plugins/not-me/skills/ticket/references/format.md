@@ -61,6 +61,17 @@ Ask only for readiness items you cannot fill. Good questions name the gap:
 milestone, size, priority or labels. Size and priority are suggestions in the
 report when the board has those fields, never questions and never writes.
 
+## Stacking
+
+`notme issue N` returns `blocked_by` and `stack_on`. GitHub dependencies link
+issues, not PRs, so the case to offer is: the only open blocker is an issue whose
+single open PR is X (open, not a draft; check it with `notme bundle <X>`) and
+`stack_on` is null. Offer to add one line, `Stack on: <owner/repo#X>` (or `Based on:`,
+`On top of:`; the blocker issue's own ref works too), to the body: the issue may then
+start now, branched from X's branch. Say it still waits on any other open blocker, a
+draft or closed PR, or `queue.stacking: off`. Apply it only after a yes, through the
+body edit in Step 3 of the skill. A `stack_on` already there: report `ready` and `reason`.
+
 ## Checklist
 
 - [ ] Used the project's format first, then the template, then this default.
