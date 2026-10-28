@@ -7,8 +7,8 @@ other line of that file stays as it is.
 
 The queue keys are repo-only, like the rest of the queue: with `--global`, refuse
 in one line ("the queue belongs in a repo layer") and stop. The one exception,
-`queue.include_unassigned`, is never written by setup: only the operator turns it
-on, by hand, in the global layer.
+`queue.include_unassigned`, is not asked here: the picking step (`--picking`, see
+`picking.md`) asks it and writes `true` only to the global layer.
 
 ## 1. Show what it picks today
 

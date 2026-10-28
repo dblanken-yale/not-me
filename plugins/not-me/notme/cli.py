@@ -53,6 +53,7 @@ from notme import humans, modeswitch, roles as roles_mod, writeback, writes  # n
 from notme.dryrun import LedgerError  # noqa: E402
 from notme.gh import csv, names_of, login_of  # noqa: E402
 from notme.queue import NotOpen, describe as describe_queue, make_queue, stale_claims  # noqa: E402
+from notme.queue.signals import picking_signals  # noqa: E402
 from notme.queue.sync import MirrorFailed  # noqa: E402
 from notme.redact import redact, redact_obj  # noqa: E402
 
@@ -844,6 +845,29 @@ def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
             "labels": top.labels, "parent": top.parent, "candidates": len(found),
             "issues": queue.facts(listed), "truncated": len(listed) < len(found), "held_back": queue.held_back,
             "picking": picking}
+
+
+@command("picking-signals", "board fields and labels that could rank the eligible issues", args=[
+    arg("--include-unassigned", action="store_true",
+        help="count unassigned issues as eligible too, as queue.include_unassigned: true would (changes no setting)")])
+def cmd_picking_signals(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """The board fields and labels on the eligible issues (the issues pick-issue would choose from), with the values
+    in use and how many issues carry each, for the picking step of /not-me:setup. A read: nothing is claimed or
+    written, and it runs while not-me is paused. Field values come only from projects owned by the tracker's owner
+    (on a board queue, only the configured board). Never an issue title or body, and never a text field's value.
+
+    Output: tracker, source (labels or board), board ({owner, number} or null), eligible (count), include_unassigned,
+    unassigned (eligible but left out for having no assignee), held_back (count left out for epic order); fields:
+    [{name, type (single_select, number, text, date or iteration), usable (the name is valid in picking.fields),
+    projects (numbers), issues (how many carry a value), values ([{value, issues}], most used first, option and
+    iteration names cut to picking.value_max_chars; null for text), more_values}]; labels: [{name, issues,
+    ranking_like (priority, severity, size, P0-P4 and similar)}]; other_owner_items (project items in projects of
+    other owners, ignored); fields_unread (issues whose project items could not be read)
+    """
+    queue = ctx.queue()
+    if args.include_unassigned:
+        queue.include_unassigned = True
+    return picking_signals(queue)
 
 
 @command("claim-issue", "claim an issue", writes=True, running="error", ref="tracker", args=[number_arg])

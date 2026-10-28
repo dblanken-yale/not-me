@@ -276,6 +276,8 @@ With the default picking rules or rules from the repo layer, `notme pick-issue` 
 
 Which eligible issue `/not-me:new` takes is up to you. Write your rules in plain words in a `## Picking work` section of `project.md`, in your global layer (`~/.claude/not-me/project.md`) or the repo layer (`.claude/not-me/project.md`). With no such section the shipped default applies: pick by impact (what unblocks other work, what people asked for, what is next in an epic already under way, what has waited longest).
 
+The easy path is `/not-me:setup project --picking` (or `/not-me:setup --global --picking`). It lists the board fields and labels it finds, asks how to rank, and writes the keys and this section for you.
+
 Two frontmatter keys feed the rules:
 
 - `picking.fields` names the board fields the rules use. `notme pick-issue` then lists each issue's value for them under `fields` (on a board queue from the board item; on a label queue from the issue's project items in projects owned by the tracker repository's owner, the first one with a value). Items in anyone else's project are ignored, because any GitHub user can add a public issue to a project of their own and fill in its fields. Text values are cut to `picking.value_max_chars` characters (80 by default). Only named fields are read, so a rule cannot trigger reads by itself. The fields are only reported: how they weigh is up to your rules, so "prefer the smallest `Size`" works as written.

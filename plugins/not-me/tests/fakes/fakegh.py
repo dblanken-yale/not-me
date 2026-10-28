@@ -477,6 +477,10 @@ class FakeGitHub:
             thing = self._thing(f"{variables['owner']}/{variables['name']}", number)
             if thing.get("project_fields_fail"):
                 raise KeyError("GraphQL: could not read the project items")
+            if "fieldValues(" in query:  # every field value of each project item (picking-signals)
+                return {"data": {"repository": {"issue": {"projectItems": {"nodes": [
+                    _all_values_item(values, variables["owner"], thing)
+                    for values in thing.get("project_fields", [])]}}}}}
             # thing["project_fields"]: one {field name: value} map per project item; "__owner__" names the
             # project's owner (the tracker's owner when absent)
             nodes = [{**{alias: _field_value(values.get(name))
@@ -537,6 +541,26 @@ def _field_value(value: Any) -> Optional[Dict[str, Any]]:
     if value is None or value == "":
         return None
     return {"number": value} if isinstance(value, (int, float)) else {"name": value}
+
+
+_VALUE_KEY = {"SINGLE_SELECT": "name", "TEXT": "text", "TITLE": "text", "NUMBER": "number", "DATE": "date",
+              "ITERATION": "title"}
+
+
+def _all_values_item(values: Dict[str, Any], owner: str, thing: Dict[str, Any]) -> Dict[str, Any]:
+    """One project item with every field value and its project's field list, as GitHub sends it. `__owner__` and
+    `__number__` name the project (the tracker's owner and 6 by default); `__types__` gives field data types (and
+    names fields with no value here); a number value is NUMBER, any other SINGLE_SELECT. Like GitHub, the item
+    always carries the built-in Title field, whose value is the issue title."""
+    types = {"Title": "TITLE", **{k: ("NUMBER" if isinstance(v, (int, float)) else "SINGLE_SELECT")
+                                  for k, v in values.items() if not k.startswith("__")},
+             **values.get("__types__", {})}
+    filled = {"Title": thing.get("title", ""), **{k: v for k, v in values.items() if not k.startswith("__")}}
+    nodes = [{_VALUE_KEY[types[k]]: v, "field": {"name": k, "dataType": types[k]}}
+             for k, v in filled.items() if v not in (None, "")]
+    return {"project": {"number": values.get("__number__", 6), "owner": {"login": values.get("__owner__", owner)},
+                        "fields": {"nodes": [{"name": k, "dataType": t} for k, t in types.items()]}},
+            "fieldValues": {"nodes": nodes}}
 
 
 class FakeRunner(FakeGitHub):
