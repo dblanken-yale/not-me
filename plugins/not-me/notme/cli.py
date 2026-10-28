@@ -1222,7 +1222,7 @@ def cmd_labels_sync(ctx: Context, args: argparse.Namespace, repo: str, n: int) -
                                 add=csv(args.add), remove=csv(args.remove), check=args.check)
 
 
-@command("queue-resync", "fix issues whose label and board Status disagree", writes=True)
+@command("queue-resync", "fix issues whose label and board Status disagree", writes=True, running="error")
 def cmd_queue_resync(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """Set the side queue.source does not read to match the side it does, for each open issue on queue.board whose
     state label and board Status disagree (the issues `doctor` and `status` list): the board Status for a labels
@@ -1232,7 +1232,9 @@ def cmd_queue_resync(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     touched; neither are issues whose state has no column.
 
     Output: board, changes ([{number, url, side, from, to, result (changed, planned or failed), reason}]),
-    skipped ([{number, url, reason}]); dry_run when the writes were only recorded
+    skipped ([{number, url, reason}]), truncated (the board has more items than the `read` count read; issues past
+    them are reported as not among the items read, never as off the board), issues_truncated; dry_run when the
+    writes were only recorded. Exits 1 when paused or disabled.
     """
     try:
         return resync_mod.resync(ctx.queue())
@@ -1966,8 +1968,9 @@ def cmd_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, queue (where the issue
     queue looks, as in config --explain), items, stale_claims, interrupted_runs (skill, run_id, ref, file), last_runs,
     picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and "; target epics:
-    #N, ..." when set), queue_drift (when queue.board is set: [{number, url, label, status}] of open issues whose
-    state label and board Status disagree, [] when they agree; see queue-resync), warnings
+    #N, ..." when set), queue_drift (when queue.board is set: [{number, url, label, status, skip}] of open issues
+    whose state label and board Status disagree, [] when they agree; skip is why queue-resync cannot fix one, else
+    null), queue_drift_truncated (the board has more items than were read), warnings
     """
     ctx.require_valid()
     pauses = {scope: path.exists() for scope, path in ctx.pause_files().items()}
@@ -1979,7 +1982,7 @@ def cmd_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
         "interrupted_runs": [], "last_runs": {}, "picking": config_mod.picking_summary(ctx.cfg.picking()),
         "warnings": list(ctx.guard.warnings)}
     if board_ref(ctx.meta.get("queue") or {}) is not None:
-        out["queue_drift"] = []
+        out["queue_drift"], out["queue_drift_truncated"] = [], False
     try:
         root = ctx.log_root()
         active_id = (out["active_run"] or {}).get("run_id")
@@ -2008,8 +2011,13 @@ def cmd_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
         out["warnings"].append(f"GitHub items not read: {reason}")
     if "queue_drift" in out:
         try:
-            out["queue_drift"] = [{k: d[k] for k in ("number", "url", "label", "status")}
-                                  for d in _queue_drift(ctx)["drift"]]
+            found = _queue_drift(ctx)
+            out["queue_drift"] = [{k: d[k] for k in ("number", "url", "label", "status", "skip")}
+                                  for d in found["drift"]]
+            out["queue_drift_truncated"] = found["truncated"]
+            if found["truncated"]:
+                out["warnings"].append(f"queue drift: only the first {found['read']} board items were read; "
+                                       "drift beyond them is not listed")
         except (MirrorFailed, gh_mod.GhError, LookupError, ValueError, CliExit) as exc:
             reason = exc.payload.get("error") if isinstance(exc, CliExit) else str(exc)
             out["warnings"].append(f"queue drift not read: {reason}")
@@ -2204,7 +2212,7 @@ def _doctor_drift(ctx: Context) -> Optional[Dict[str, Any]]:
         found = _queue_drift(ctx)
     except (MirrorFailed, gh_mod.GhError, LookupError, ValueError, CliExit) as exc:
         return doctor_mod.drift_not_run(str(exc.payload.get("error")) if isinstance(exc, CliExit) else str(exc))
-    return doctor_mod.drift_check(found["drift"], found["board"])
+    return doctor_mod.drift_check(found["drift"], found["board"], found["truncated"], found["read"])
 
 
 def _queue_drift(ctx: Context) -> Dict[str, Any]:

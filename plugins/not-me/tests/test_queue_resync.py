@@ -7,7 +7,7 @@ from unittest import mock
 from notme import doctor
 from notme.dryrun import Ledger
 from notme.gh import GhClient, GhError
-from notme.queue import resync
+from notme.queue import board as board_mod, resync
 from notme.queue.sync import MirrorFailed
 from notme.writes import GuardContext
 from tests.test_queue_board import BOARD, BoardTestCase
@@ -242,6 +242,57 @@ class BoardSourceResyncTests(BoardTestCase):
         self.assertEqual(self.fake.writes_made(), [])
 
 
+class PagingTests(LabelsSourceCase):
+    """The board is read a page at a time up to a cap; a cut-short read is reported, never taken for "not on board"."""
+
+    def small(self, page, pages):
+        for name, value in (("BOARD_PAGE", page), ("BOARD_MAX_PAGES", pages)):
+            patcher = mock.patch.object(board_mod, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_drift_past_the_first_page_is_found(self):
+        self.small(2, 5)
+        for n in (1, 2, 3, 4, 5):
+            self.put(n, "To Do", ["needs review"] if n == 5 else ["to do"])
+        found = resync.read(self.q)
+        self.assertEqual([e["number"] for e in found["drift"]], [5])
+        self.assertFalse(found["truncated"])
+        self.assertEqual(found["read"], 5)
+
+    def test_a_board_past_the_cap_is_reported_truncated(self):
+        self.small(2, 2)
+        for n in (1, 2, 3, 4, 5):
+            self.put(n, "To Do", ["needs review"] if n == 5 else ["to do"])
+        found = resync.read(self.q)
+        self.assertEqual((found["truncated"], found["read"], found["drift"]), (True, 4, []))
+        c = doctor.drift_check(found["drift"], found["board"], found["truncated"], found["read"])
+        self.assertFalse(c["ok"])
+        self.assertIn("first 4 items", c["detail"])
+
+    def test_issues_that_may_be_past_the_read_are_not_called_off_the_board(self):
+        self.small(2, 2)
+        for n in (1, 2, 3, 4, 5):
+            self.put(n, "To Do", ["to do"])
+        out = resync.resync(self.q)
+        self.assertTrue(out["truncated"])
+        self.assertEqual(out["changes"], [])
+        self.assertEqual([s["number"] for s in out["skipped"]], [5])
+        self.assertIn("not among the first 4 board items", out["skipped"][0]["reason"])
+        self.assertNotIn("add the issue", out["skipped"][0]["reason"])
+
+    def test_the_open_issue_list_being_cut_short_is_reported(self):
+        for n in (5, 6, 7):
+            add_issue(self.fake, n, labels=["in progress"])  # open, labelled, not on the board
+        with mock.patch.object(resync, "ISSUE_LIST_LIMIT", 2):
+            out = resync.resync(self.q)
+        self.assertTrue(out["issues_truncated"])
+        self.assertEqual(len(out["skipped"]), 2)
+        out = resync.resync(self.q)
+        self.assertFalse(out["issues_truncated"])
+        self.assertEqual(len(out["skipped"]), 3)
+
+
 class DriftCheckTests(unittest.TestCase):
     def entry(self, n):
         return {"number": n, "url": f"https://github.com/acme/app/issues/{n}", "label": "needs review",
@@ -254,6 +305,16 @@ class DriftCheckTests(unittest.TestCase):
         self.assertIn("https://github.com/acme/app/issues/5 has label `needs review` but Status `Todo`", c["detail"])
         self.assertIn("2 open issue(s)", c["detail"])
         self.assertIn("queue-resync", c["fix"])
+
+    def test_a_skipped_entry_carries_its_reason_and_the_real_fix(self):
+        skipped = {**self.entry(5), "skip": "queue.board_states.in_review is not set; map it to a real column"}
+        c = doctor.drift_check([skipped], "acme/6")
+        self.assertIn("resync would skip it: queue.board_states.in_review is not set", c["detail"])
+        self.assertNotIn("queue-resync", c["fix"])
+        self.assertIn("board_states", c["fix"])
+        mixed = doctor.drift_check([skipped, self.entry(6)], "acme/6")
+        self.assertIn("queue-resync", mixed["fix"])
+        self.assertIn("board_states", mixed["fix"])
 
     def test_a_long_list_is_cut(self):
         c = doctor.drift_check([self.entry(n) for n in range(1, 15)], "acme/6")

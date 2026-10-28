@@ -195,6 +195,7 @@ def _board_problems(q: Mapping[str, Any], gh: GhClient, confirmed_board: Optiona
     if not confirmed_board or str(confirmed_board[0]).lower() != owner.lower() or int(confirmed_board[1]) != number:
         problems.append(f"board {label} is not confirmed in your allow list, so not-me cannot move its "
                         f"cards; run /not-me:allow-repo {origin + ' ' if origin else ''}--board {label}")
+        return problems  # an unconfirmed board is not read
     status_field = (q.get("board") or {}).get("status_field") or ""
     options = status_options(gh, owner, number, status_field)
     if options is None:
@@ -241,18 +242,33 @@ def queue_check(meta: Mapping[str, Any], gh: GhClient, tracker: str, confirmed_b
 
 
 DRIFT_FIX = "run `notme queue-resync` (a dry run records what it would change; in live mode it sets each one)"
+DRIFT_SKIPPED_FIX = "fix what each skipped issue names (the `queue.board_states` or `labels` key to set)"
 DRIFT_SHOWN = 10
 
 
-def drift_check(drift: Sequence[Mapping[str, Any]], board: str) -> Check:
+def drift_check(drift: Sequence[Mapping[str, Any]], board: str, truncated: bool = False, read: int = 0) -> Check:
     """A warning listing each open issue whose state label and board Status disagree (entries from
-    queue.resync.read), the first few in full. Read-only; the fix names queue-resync."""
+    queue.resync.read), the first few in full. An entry resync would skip carries its reason and the key to set
+    instead of the resync advice. When the board read hit its cap (truncated), it says drift beyond the first
+    `read` items is not listed. Read-only."""
+    note = (f"; only the first {read} board items were read, so drift beyond them is not listed"
+            if truncated else "")
     if not drift:
+        if truncated:
+            return check("queue drift", False, f"no drift among the first {read} items of board {board}, but the "
+                         "board has more items, which were not read", required=False)
         return check("queue drift", True, f"labels and the Status of board {board} agree", required=False)
-    lines = [f"{d['url']} has label `{d['label']}` but Status `{d['status']}`" for d in drift[:DRIFT_SHOWN]]
+    lines = []
+    for d in drift[:DRIFT_SHOWN]:
+        line = f"{d['url']} has label `{d['label']}` but Status `{d['status']}`"
+        if d.get("skip"):
+            line += f" (resync would skip it: {d['skip']})"
+        lines.append(line)
     more = f"; and {len(drift) - DRIFT_SHOWN} more" if len(drift) > DRIFT_SHOWN else ""
+    skipped = sum(1 for d in drift if d.get("skip"))
+    fix = DRIFT_SKIPPED_FIX if skipped == len(drift) else DRIFT_FIX + (f"; then {DRIFT_SKIPPED_FIX}" if skipped else "")
     return check("queue drift", False, f"{len(drift)} open issue(s) out of step on board {board}: "
-                 + "; ".join(lines) + more, required=False, fix=DRIFT_FIX)
+                 + "; ".join(lines) + more + note, required=False, fix=fix)
 
 
 def drift_not_run(why: str) -> Check:

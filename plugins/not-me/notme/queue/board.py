@@ -5,7 +5,8 @@ can change when a column is renamed. Claiming is read-then-write and is NOT atom
 compare-and-set for a board field, so claim() re-reads the Status after writing and reports ClaimLost if it
 is not what it set.
 
-Limits: the first 100 board items are read (no paging yet), and only issues from the tracker repo count.
+Limits: board items are read BOARD_PAGE at a time, up to BOARD_MAX_PAGES pages (so BOARD_PAGE * BOARD_MAX_PAGES
+items); a board with more reports `truncated` and the rest are not seen. Only issues from the tracker repo count.
 """
 from __future__ import annotations
 
@@ -26,12 +27,15 @@ _PROJECT_STATUS = (
     "id field(name:\"{status}\"){... on ProjectV2SingleSelectField{id options{id name}}}"
 )
 _CLOSE = "}}}}"
+BOARD_PAGE = 100  # items per request
+BOARD_MAX_PAGES = 5  # pages read per board: a bound, not a default; a bigger board is reported as truncated
+_CURSOR_RE = re.compile(r"[A-Za-z0-9_=+/-]+")
 _QUERY = (
     _PROJECT_STATUS
-    + "items(first:100){nodes{id fieldValueByName(name:\"{status}\"){... on ProjectV2ItemFieldSingleSelectValue{name}}"
+    + "items(first:{first}{after}){nodes{id fieldValueByName(name:\"{status}\"){... on ProjectV2ItemFieldSingleSelectValue{name}}"
     "{fields}"
     "content{... on Issue{number title url state createdAt author{login __typename} labels(first:50){nodes{name}} "
-    "assignees(first:20){nodes{login}} repository{nameWithOwner}}}}}"
+    "assignees(first:20){nodes{login}} repository{nameWithOwner}}}} pageInfo{hasNextPage endCursor}}"
     + _CLOSE
 )
 _OPTIONS_QUERY = _PROJECT_STATUS + _CLOSE
@@ -78,16 +82,33 @@ class BoardQueue(BaseQueue):
 
     # --- reading the board ---
 
+    def _pages(self) -> Tuple[Dict[str, Any], List[Dict[str, Any]], bool]:
+        """(project, item nodes, truncated): every page up to BOARD_MAX_PAGES; truncated when more remain."""
+        nodes: List[Dict[str, Any]] = []
+        after, project = "", {}
+        for _ in range(BOARD_MAX_PAGES):
+            query = (_QUERY.replace("{n}", str(self.number)).replace("{status}", self.status_field)
+                     .replace("{fields}", field_selection(self.read_fields)).replace("{first}", str(BOARD_PAGE))
+                     .replace("{after}", f',after:"{after}"' if after else ""))
+            data = self.gh.read(["api", "graphql", "-f", f"query={query}", "-f", f"owner={self.owner}"])
+            project = (((data or {}).get("data") or {}).get("repositoryOwner") or {}).get("projectV2")
+            if not project:
+                raise LookupError(f"board {self.owner}/{self.number} not found")
+            page = project.get("items") or {}
+            nodes += page.get("nodes") or []
+            info = page.get("pageInfo") or {}
+            after = str(info.get("endCursor") or "")
+            if not info.get("hasNextPage"):
+                return project, nodes, False
+            if not _CURSOR_RE.fullmatch(after):
+                break  # a cursor that cannot go into the query: stop and say so
+        return project, nodes, True
+
     def _fetch(self) -> Dict[str, Any]:
-        query = (_QUERY.replace("{n}", str(self.number)).replace("{status}", self.status_field)
-                 .replace("{fields}", field_selection(self.read_fields)))
-        data = self.gh.read(["api", "graphql", "-f", f"query={query}", "-f", f"owner={self.owner}"])
-        project = (((data or {}).get("data") or {}).get("repositoryOwner") or {}).get("projectV2")
-        if not project:
-            raise LookupError(f"board {self.owner}/{self.number} not found")
+        project, nodes, truncated = self._pages()
         field = project.get("field") or {}
         items = []
-        for node in (project.get("items") or {}).get("nodes") or []:
+        for node in nodes:
             content = node.get("content") or {}
             if content.get("number") is None:
                 continue
@@ -103,7 +124,8 @@ class BoardQueue(BaseQueue):
                                  for i in range(len(self.read_fields))],
             })
         return {"project_id": project.get("id"), "field_id": field.get("id"),
-                "options": {o["name"]: o["id"] for o in field.get("options") or []}, "items": items}
+                "options": {o["name"]: o["id"] for o in field.get("options") or []}, "items": items,
+                "truncated": truncated, "read": len(nodes)}
 
     def _item(self, board: Dict[str, Any], n: int) -> Dict[str, Any]:
         for item in board["items"]:

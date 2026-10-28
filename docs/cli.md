@@ -414,7 +414,7 @@ notme queue-resync
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: board, changes ([{number, url, side, from, to, result (changed, planned or failed), reason}]), skipped ([{number, url, reason}]); dry_run when the writes were only recorded
+Output: board, changes ([{number, url, side, from, to, result (changed, planned or failed), reason}]), skipped ([{number, url, reason}]), truncated (the board has more items than the `read` count read; issues past them are reported as not among the items read, never as off the board), issues_truncated; dry_run when the writes were only recorded. Exits 1 when paused or disabled.
 
 ### `notme labels-ensure`
 
@@ -984,7 +984,7 @@ A read-only summary: enabled and paused state, the active run, items needing a p
 notme status
 ```
 
-Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, queue (where the issue queue looks, as in config --explain), items, stale_claims, interrupted_runs (skill, run_id, ref, file), last_runs, picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and "; target epics: #N, ..." when set), queue_drift (when queue.board is set: [{number, url, label, status}] of open issues whose state label and board Status disagree, [] when they agree; see queue-resync), warnings
+Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, queue (where the issue queue looks, as in config --explain), items, stale_claims, interrupted_runs (skill, run_id, ref, file), last_runs, picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and "; target epics: #N, ..." when set), queue_drift (when queue.board is set: [{number, url, label, status, skip}] of open issues whose state label and board Status disagree, [] when they agree; skip is why queue-resync cannot fix one, else null), queue_drift_truncated (the board has more items than were read), warnings
 
 ### `notme pause`
 

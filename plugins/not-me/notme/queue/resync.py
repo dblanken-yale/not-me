@@ -13,7 +13,9 @@ source the Status should show the state label, with a board source the labels sh
 The report only reads. The fix goes through the same gated writes the queue.sync mirror uses (sync.set_labels and
 sync._set_board_status), so it follows the effective mode (dry-run reaches only the ledger), refuses a board the
 operator has not allowed before any board read, never adds an item to a board and never touches a closed issue.
-Limits: the first 100 board items are read (see board.py), so a board with more items reports and fixes only those.
+Limits: board items are read up to board.BOARD_PAGE * board.BOARD_MAX_PAGES, and open issues up to ISSUE_LIST_LIMIT.
+When either read is cut short the result says so (`truncated`, `issues_truncated`), drift beyond it is not listed, and
+an issue that may be past the board read is never called "not on the board".
 """
 from __future__ import annotations
 
@@ -23,6 +25,7 @@ from ..gh import GhError
 from .board import ABSTRACT_TO_BOARD, UnmappedState
 from .sync import MirrorFailed, _set_board_status, open_board, set_labels
 
+ISSUE_LIST_LIMIT = 200  # open issues read for the not-on-board report; more is reported as issues_truncated
 NO_LABEL = "(no state label)"
 NO_STATUS = "(no Status)"
 
@@ -70,8 +73,11 @@ def _entry(q: Any, board_q: Any, board: Dict[str, Any], item: Dict[str, Any], ma
 
 def read(q: Any, include_missing: bool = False) -> Dict[str, Any]:
     """The drift of q's tracker against queue.board. {"board": "owner/number", "drift": [entry], "not_on_board":
-    [{number, title, url, label}]}; not_on_board (open issues whose state label has a column but that are not on
-    the board; labels source only) is filled only when include_missing is true, as it costs one more read.
+    [{number, title, url, label, beyond_read}], "truncated", "read", "issues_truncated"}. not_on_board (open issues
+    whose state label has a column but that are not among the board items read; labels source only) is filled only
+    when include_missing is true, as it costs one more read. truncated: the board has more items than were read
+    (`read` of them were), so drift past them is not listed and each not_on_board entry has beyond_read true: it
+    may be on the board. issues_truncated: more open issues than ISSUE_LIST_LIMIT, so not_on_board is partial.
 
     MirrorFailed when the board is not set, cannot be used or is not on the allow list (checked before any board
     read). LookupError when the board cannot be found; GhError when GitHub cannot be read. Only reads."""
@@ -95,17 +101,21 @@ def read(q: Any, include_missing: bool = False) -> Dict[str, Any]:
             continue
         drift.append(_entry(q, board_q, board, item, main, status_state))
     missing: List[Dict[str, Any]] = []
+    issues_truncated = False
     if include_missing and q.source != "board":
         rows = q.gh.read(["issue", "list", "-R", q.tracker, "--state", "open", "--json", "number,title,url,labels",
-                          "--limit", "200"]) or []
+                          "--limit", str(ISSUE_LIST_LIMIT + 1)]) or []
+        issues_truncated, rows = len(rows) > ISSUE_LIST_LIMIT, rows[:ISSUE_LIST_LIMIT]
         for row in rows:
             names = [x.get("name") if isinstance(x, dict) else str(x) for x in row.get("labels") or []]
             current = q.labels.current(names)
             if row["number"] not in on_board and current and current[0] in ABSTRACT_TO_BOARD:
                 missing.append({"number": row["number"], "title": row.get("title", ""), "url": row.get("url", ""),
-                                "label": _label_name(q, current[0])})
+                                "label": _label_name(q, current[0]),
+                                "beyond_read": board["truncated"]})
     return {"board": label, "drift": sorted(drift, key=lambda e: e["number"]),
-            "not_on_board": sorted(missing, key=lambda e: e["number"])}
+            "not_on_board": sorted(missing, key=lambda e: e["number"]), "truncated": board["truncated"],
+            "read": board["read"], "issues_truncated": issues_truncated}
 
 
 def describe(entry: Dict[str, Any]) -> str:
@@ -119,13 +129,16 @@ def resync(q: Any) -> Dict[str, Any]:
     where result is "changed" (live, and read back), "planned" (dry-run: the write reached only the ledger) or
     "failed" (reason says why and how to fix it). skipped lists drifted issues that cannot be fixed (no column,
     no label mapped) and open issues with a column state label that are not on the board (labels source), each
-    with a reason. Never adds a board item. Raises what read() raises."""
+    with a reason. Never adds a board item. Also truncated, read and issues_truncated as read() gives them: a
+    cut-short read is never reported as an issue being off the board. Raises what read() raises."""
     found = read(q, include_missing=True)
     dry = bool(q.gh.dry_run)
     changes: List[Dict[str, Any]] = []
+    beyond = f"not among the first {found['read']} board items read; it may be on board {found['board']}"
     skipped: List[Dict[str, Any]] = [
-        {"number": m["number"], "url": m["url"], "reason": f"not on board {found['board']}; add the issue to the "
-                                                           "board (not-me never adds items)"}
+        {"number": m["number"], "url": m["url"],
+         "reason": beyond if m["beyond_read"] else f"not on board {found['board']}; add the issue to the board "
+                                                   "(not-me never adds items)"}
         for m in found["not_on_board"]]
     for e in found["drift"]:
         if e["skip"]:
@@ -147,7 +160,8 @@ def resync(q: Any) -> Dict[str, Any]:
         changes.append(change)
     if not dry:
         _verify(q, changes)
-    return {"board": found["board"], "dry_run": dry, "changes": changes, "skipped": skipped}
+    return {"board": found["board"], "dry_run": dry, "changes": changes, "skipped": skipped,
+            "truncated": found["truncated"], "read": found["read"], "issues_truncated": found["issues_truncated"]}
 
 
 def _verify(q: Any, changes: List[Dict[str, Any]]) -> None:

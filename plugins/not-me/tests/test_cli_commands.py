@@ -1257,6 +1257,21 @@ class QueueDriftCliTests(base.CliCase):
         self.assertEqual([c for c in self.fake.calls if "graphql" in c], [])
         self.assertEqual(self.fake.writes_made(), [])
 
+    def test_queue_resync_when_paused_exits_with_the_paused_kind_and_writes_nothing(self):
+        self.ok("pause", "on")
+        code, payload, _ = self.cli("queue-resync")
+        self.assertEqual((code, payload["kind"]), (1, "paused"), payload)
+        self.assertEqual(self.fake.writes_made(), [])
+        self.assertEqual([c for c in self.fake.calls if "graphql" in c], [])
+
+    def test_status_says_when_the_board_read_was_cut_short(self):
+        from notme.queue import board as board_mod
+        self.fake.state["board"]["items"].append({"id": "PVTI_2", "repo": REPO, "number": 2, "status": "To Do"})
+        with mock.patch.object(board_mod, "BOARD_PAGE", 1), mock.patch.object(board_mod, "BOARD_MAX_PAGES", 1):
+            payload = self.ok("status")
+        self.assertTrue(payload["queue_drift_truncated"])
+        self.assertTrue(any("first 1 board items" in w for w in payload["warnings"]), payload["warnings"])
+
     def test_queue_resync_without_a_board_is_an_error_that_names_the_setting(self):
         self.tc.write("repo", "project", "---\nschema: 1\n---\n# Project\n")
         code, payload, _ = self.cli("queue-resync")
