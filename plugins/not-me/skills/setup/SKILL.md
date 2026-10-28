@@ -75,7 +75,8 @@ starting with `notme preflight` for the repo, tracker and default branch. With
 recommended answer to a question.
 
 When the repo has the state labels (or will after Step 3) and a project board
-linked to it, the team likely uses both. Offer `queue.sync: true` in the
+linked to it, the team likely uses both. Offer `queue.source: either` (picks an
+issue with the label or in the board's To Do column) or `queue.sync: true` in the
 interview so claims, moves and releases keep the labels and the board Status in
 step, and fill `queue.board_states` from that board's real Status column names
 (the Board columns probe), never the shipped defaults. Say that the board must
@@ -89,7 +90,7 @@ at most four questions per call, several calls allowed, detected values offered
 first, each key explained with its comment from the shipped defaults. With
 `--answers`, read the file instead and ask nothing.
 
-In a full or `project` run, Step 2a follows the interview. Cover: tracker vs code repo; queue source (labels or a board, and which board),
+In a full or `project` run, Step 2a follows the interview. Cover: tracker vs code repo; queue source (labels, a board, or either, and which board),
 and `queue.sync` when both labels and a board were detected;
 roster rows and tiers; reviewers; whether every reviewer must approve, and
 each reviewer's role and pass label; companion set and push order; label mapping;

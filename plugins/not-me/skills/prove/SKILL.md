@@ -135,7 +135,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/write-back.md`. Follow
    the existing proof comment instead of adding a second one.
 5. Pass: change no labels.
 6. Fail: `notme transition <repo>#<pr> --from needs_review --to <prove.fail_label>
-   --kind pr --log <path>`. When the failure count (proof-comment.md) reaches
+   --kind pr --reason-file <reason> --log <path>` (the reason file holds the failed step in one line). When the failure count (proof-comment.md) reaches
    `prove.give_up_after`, also add the repo label for `needs_help`:
    `notme labels-sync <repo>#<pr> --add <name> --log <path>`.
 

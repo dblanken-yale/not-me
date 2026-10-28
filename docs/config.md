@@ -254,7 +254,7 @@ Every value in `labels` must be a string, and the config check rejects anything 
 
 `/not-me:new` picks an open issue only when all of these hold:
 
-- It carries the `labels.todo` label (`to do` by default), or sits in the `queue.board_states.todo` column when `queue.source` is `board`.
+- It carries the `labels.todo` label (`to do` by default), or sits in the `queue.board_states.todo` column when `queue.source` is `board`. With `queue.source: either` it may do either, unless the other side shows a later state (see [Picking from labels or the board](#picking-from-labels-or-the-board)).
 - It carries `queue.opt_in_label`, when one is set.
 - It does not carry `paused`, `blocked` or `epic`.
 - Its author is a lead or authority on the roster (with no roster, only you).
@@ -325,11 +325,11 @@ Finish the target epic first, in its task-list order. After that, pick by impact
 
 ### Board queues
 
-not-me finds work in one of two places: issues carrying a label (`queue.source: labels`, the default), or a column of a Projects v2 board (`queue.source: board`).
+not-me finds work in one of three ways: issues carrying a label (`queue.source: labels`, the default), a column of a Projects v2 board (`queue.source: board`), or either of those at once (`queue.source: either`).
 
 The easy way to see or change it is `/not-me:setup project --queue`. It shows what the queue picks today, lists the repo's labels and the owner's boards and columns so you pick instead of typing, writes only the queue keys of the repo layer's `project.md`, and for a board prints the `/not-me:allow-repo owner/name --board owner/number` command you run to confirm it. The labels source picks by the `labels.todo` label, so for labels setup writes that name to both `labels.todo` and `queue.pick_label`.
 
-To see where the queue looks without changing anything, `/not-me:status` and `/not-me:config` print it in plain words, for example "picks issues labeled `to do`, assigned to you" or "picks issues in the `To Do` column of board acme/7, assigned to you". In JSON this is the `queue` object of `notme status` and `notme config --explain`, and `notme pick-issue` adds the same sentence as `queue_summary` whenever it finds nothing. `/not-me:doctor` warns when the source cannot work: the pick label does not exist, the board is not confirmed in your allow list or cannot be found, or a `queue.board_states` column is not one of the board's Status options.
+To see where the queue looks without changing anything, `/not-me:status` and `/not-me:config` print it in plain words, for example "picks issues labeled `to do`, assigned to you" or "picks issues in the `To Do` column of board acme/7, assigned to you". In JSON this is the `queue` object of `notme status` and `notme config --explain`, and `notme pick-issue` adds the same sentence as `queue_summary` whenever it finds nothing. `/not-me:doctor` warns when the source cannot work: the pick label does not exist (labels and either), the board is not confirmed in your allow list or cannot be found, or a `queue.board_states` column is not one of the board's Status options.
 
 To set it by hand, with `queue.source: board` set the board and its column names:
 
@@ -363,7 +363,32 @@ queue:
 - Any other mirror write that fails never fails or undoes the claim, move or release. It becomes one warning that names the cause and the fix (allow the board, add the issue to the board, map `queue.board_states.<key>` to a real column), in the command's `warnings` and as a WARN line in the run log.
 - In a dry run both writes go to the ledger.
 
-Picking from labels and a board at once (a `queue.source: either`) is not supported. Any other `queue.source` value is reported as not supported by `notme status`, `notme config --explain` and `notme doctor`, and a run refuses it. Use `queue.sync` to keep the side you do not pick from up to date.
+Any `queue.source` value other than `labels`, `board` or `either` is reported as not supported by `notme status`, `notme config --explain` and `notme doctor`, and a run refuses it.
+
+### Picking from labels or the board
+
+A team whose issues sit in a board's To Do column and also carry labels can set `queue.source: either`, so neither kind of issue is missed:
+
+```yaml
+queue:
+  source: either
+  board: {owner: acme, number: 7, status_field: Status}
+  board_states: {todo: Todo, in_progress: In Progress, in_review: In Review, blocked: Blocked}
+```
+
+`notme status` and `notme config --explain` then say "picks issues labeled `to do` or in the `Todo` column of board acme/7, assigned to you; keeps both in step".
+
+- **Picking.** An issue is eligible when it carries the `labels.todo` label (`queue.pick_label`) or its board Status is `queue.board_states.todo`. Every other rule is unchanged (assignee, `queue.opt_in_label`, `paused`, `blocked` and `epic`, trusted author, epic order, `picking`). A label-only issue with no board item and a column-only issue with no label are both picked.
+- **Disagreement.** An issue labeled `to do` whose Status is any other column (In review, Done, ...) is not picked, and neither is one in the To Do column that carries a later state label (`in progress`, `needs review`, ...). `notme pick-issue` lists each in `disagreements` with a reason naming both values, for example "acme/app#5 is labeled `to do` but its board Status is `In review`". Fix one side by hand and the issue is picked again. A claim of such an issue is refused the same way.
+- **Writes.** Every claim, move and release writes both sides: the labels and the board Status. `either` always syncs, so `queue.sync` need not be set. Left at its default (`false`, never written in a layer) it counts as on; a `queue.sync: false` written in any layer next to `source: either` is a config error that `notme config --check` reports with the file and line, and the fix is to remove that line or set it to `true`.
+- **Claims stay safe.** The claim's compare-and-set and its read-back through the issue timeline run on the label side, as for a labels queue. A board-only issue gets its state label when claimed. The board write follows as a mirror, so a failed board write is one warning and never undoes the claim (see the list above). An issue that is not on the board warns that it must be added; not-me never adds items.
+- **Trust.** The board must be on your global allow list when the repo layer names it. The gate runs before the board is read, so an unconfirmed board makes picking and claiming stop with the `/not-me:allow-repo --board owner/number` command to run.
+- **Doctor.** `notme doctor` checks the label and the board together: the label exists, the board is confirmed and found, and each `queue.board_states` column is a Status option.
+- **Setup.** `/not-me:setup project --queue` offers "labels or board column (either)" and asks for the label, the board and the column mapping in one pass.
+
+### Saying why on every state change
+
+`notme move-issue`, `notme release-issue` and `notme transition` take a required `--reason-file` (the text goes through a file, never a shell argument). After the state change succeeds they post one comment on the item: "Moved from `in progress` to `needs review` (board column `In review`): <reason>", with the run marker. When labels and the board are both written, the one comment names both; the mirror posts none of its own. A claim already leaves its marker comment, so `claim-issue` posts no second one. A comment that fails to post is a warning in the command's output and the run log; the state change stands.
 
 ## Companion sets
 
@@ -454,19 +479,19 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `repos` | `[]` | Companion set, in push order. `[]` means just the tracker. Items are `{name, path: auto, default_branch: auto, role: primary or companion}` |
 | `protected_branches` | `[main, master, develop]` | Never committed to directly. Union across layers, `"!name"` removes. The repo layer may add, and its removals are ignored |
 | `operator` | `auto` | Your GitHub login. `auto` asks `gh` who is signed in |
-| `queue.source` | `labels` | `labels` or `board`. Where work is picked from |
+| `queue.source` | `labels` | `labels`, `board` or `either`. Where work is picked from; `either` picks an issue with the pick label or in the board's To Do column (see [Picking from labels or the board](#picking-from-labels-or-the-board)) |
 | `queue.pick_label` | `to do` | Label that marks an issue as ready to pick up |
 | `queue.opt_in_label` | `null` | An extra label an issue must also carry. `null` means none required |
 | `queue.include_unassigned` | `false` | `false` picks only issues assigned to you. `true` also picks issues with no assignee. Issues assigned to someone else are never picked. The repo layer may set `false`, never `true` over a lower `false` (see [Which issues the queue picks](#which-issues-the-queue-picks)) |
 | `queue.list_limit` | `10` | Most eligible issues `notme pick-issue` lists with facts for the run to choose from. A whole number of at least 1. The repo layer may lower it, never raise it or set it to `null` (see [Which issues the queue picks](#which-issues-the-queue-picks)) |
-| `queue.board.owner` | `null` | Board owner, used when `queue.source` is `board` |
-| `queue.board.number` | `null` | Board number, used when `queue.source` is `board` |
+| `queue.board.owner` | `null` | Board owner, used when `queue.source` is `board` or `either` |
+| `queue.board.number` | `null` | Board number, used when `queue.source` is `board` or `either` |
 | `queue.board.status_field` | `Status` | Name of the board column field |
 | `queue.board_states.todo` | `To Do` | Board column name for ready work |
 | `queue.board_states.in_progress` | `In progress` | Board column name for claimed work |
 | `queue.board_states.in_review` | `In review` | Board column name for work waiting on review |
 | `queue.board_states.blocked` | `Blocked` | Board column name for blocked work |
-| `queue.sync` | `false` | `true` makes each claim, move and release also update the side `queue.source` does not read: the board Status for a labels source, the labels for a board source. Needs `queue.board` set; a board named in the repo layer must be confirmed on the global allow list; a failed mirror write is a warning (see [Keeping labels and the board in step](#keeping-labels-and-the-board-in-step)) |
+| `queue.sync` | `false` | `true` makes each claim, move and release also update the side `queue.source` does not read: the board Status for a labels source, the labels for a board source. `queue.source: either` always does this, and a `false` written next to it is a config error. Needs `queue.board` set; a board named in the repo layer must be confirmed on the global allow list; a failed mirror write is a warning (see [Keeping labels and the board in step](#keeping-labels-and-the-board-in-step)) |
 | `picking.fields` | `[]` | Board field names whose values `notme pick-issue` lists for each issue, for the rules in the `## Picking work` section to use. Any layer may set it (see [Picking work](#picking-work)) |
 | `picking.target_epics` | `[]` | Epic issue numbers to finish first, in this order. One counts only when a trusted roster member wrote it. Any layer may set it (see [Picking work](#picking-work)) |
 | `picking.value_max_chars` | `80` | Longest text field value `notme pick-issue` reports under `fields`; longer ones are cut. A whole number of at least 1. The repo layer may lower it, never raise it or set it to `null` (see [Picking work](#picking-work)) |

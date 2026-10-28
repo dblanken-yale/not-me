@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .. import claims, states
 from ..gh import _num, login_of
@@ -83,11 +83,12 @@ class LabelQueue(BaseQueue):
             argv += ["--label", name]
         return self.gh.read(argv) or []
 
-    def _eligible(self, issue: Dict[str, Any]) -> bool:
+    def _eligible(self, issue: Dict[str, Any], need_todo_label: bool = True) -> bool:
+        """need_todo_label false is for a source that also reads a board: there the To Do column stands in for it."""
         names = _names(issue)
         opt_in = self.queue_cfg.get("opt_in_label")
         return (str(issue.get("state", "OPEN")).upper() == "OPEN"
-                and self._has(names, "todo")
+                and (self._has(names, "todo") or not need_todo_label)
                 and (not opt_in or opt_in.lower() in {n.lower() for n in names})
                 and not any(self._has(names, x) for x in _EXCLUDED)
                 and self.trusted(_author(issue))
@@ -98,9 +99,7 @@ class LabelQueue(BaseQueue):
         task-list order), then the rest oldest first. An issue behind an earlier open, unstarted issue in a trusted
         epic is left out (see held_back)."""
         self.unassigned_skipped, self.held_back = 0, []
-        opt_in = self.queue_cfg.get("opt_in_label")
-        listed = self._list("todo", extra=[opt_in] if opt_in else [])
-        eligible = {i["number"]: i for i in listed if self._eligible(i)}
+        eligible, known = self._pool()
         placed: Dict[int, Candidate] = {}
         epics = self._list("epic")
         for epic, numbers in self.trusted_epics(epics):  # an untrusted epic body must not steer the queue
@@ -110,8 +109,15 @@ class LabelQueue(BaseQueue):
         for number, issue in eligible.items():
             if number not in placed:
                 placed[number] = self._candidate(issue, (1, 0, 0), None, None)
-        known = {int(i["number"]): sibling_info(i) for i in listed}  # open issues already read: no second read
         return self.order(list(placed.values()), epics, known)
+
+    def _pool(self) -> Tuple[Dict[int, Dict[str, Any]], Dict[int, Optional[Dict[str, Any]]]]:
+        """The eligible issues by number, and what epic order already knows of every open issue read (no second
+        read). A source that reads more than the label list overrides this."""
+        opt_in = self.queue_cfg.get("opt_in_label")
+        listed = self._list("todo", extra=[opt_in] if opt_in else [])
+        return ({i["number"]: i for i in listed if self._eligible(i)},
+                {int(i["number"]): sibling_info(i) for i in listed})
 
     @staticmethod
     def _candidate(issue: Dict[str, Any], priority: tuple, parent: Optional[int],
@@ -156,7 +162,7 @@ class LabelQueue(BaseQueue):
         others = [a for a in assignees if not self._is_me(a)]
         if others:
             raise claims.ClaimLost(f"{self.tracker}#{n} is assigned to {others[0]}")
-        new_labels = states.transition(names, "todo", "in_progress", self.labels)  # IllegalTransition if not to do
+        new_labels = self._claim_labels(n, names)
 
         added = self.assign(n, assignees)
         self.gh.labels_set(self.tracker, n, new_labels)
@@ -165,6 +171,10 @@ class LabelQueue(BaseQueue):
             self._check_timeline(n, added)
         mirror(self, n, "in_progress")
         return Claim(number=n, previous="todo", now="in_progress", marker_comment_id=marker_id, run_id=self.run_id)
+
+    def _claim_labels(self, n: int, names: List[str]) -> List[str]:
+        """The label set that claims issue n, from its current `names`; IllegalTransition if it is not to do."""
+        return states.transition(names, "todo", "in_progress", self.labels)
 
     def _check_timeline(self, n: int, added: bool) -> None:
         events = self._timeline(n)
@@ -250,6 +260,7 @@ class LabelQueue(BaseQueue):
         n = _num(n)
         self.unassign_if_claimed(n)
         if self._relabel(n, to):
+            self.change = {"from": "in_progress", "to": to}
             mirror(self, n, to)
         self.mark_released(n)
         self.unlock(n)
@@ -264,4 +275,5 @@ class LabelQueue(BaseQueue):
         if frm is None:
             raise states.IllegalTransition(f"{self.tracker}#{n} carries no state label to move from")
         states.apply(self.gh, self.tracker, n, frm, state, self.labels)
+        self.change = {"from": frm, "to": state}
         mirror(self, n, state)

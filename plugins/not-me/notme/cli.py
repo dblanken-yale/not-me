@@ -332,6 +332,36 @@ class Context:
             self.warn(text)
             self.log_warnings.append(text)
 
+    def read_reason(self, path: str) -> str:
+        """The text of a --reason-file, read before anything is written so a bad file changes nothing."""
+        text = self.read_input(path).strip()
+        if not text:
+            raise fail(ExitCode.USAGE, "usage", "--reason-file is empty: write one line saying why")
+        return text
+
+    def say_why(self, repo: str, n: int, change: Dict[str, Any], reason: str) -> bool:
+        """After a state change succeeded: one comment naming the old state, the new state (with the label and
+        board column written alongside, when there are any) and the reason, with the run marker. A comment that
+        fails is a warning, also in the run log, and never undoes the change. True when it was posted."""
+        def shown(state: Any) -> str:
+            try:
+                return self.labels.name(state)
+            except (KeyError, TypeError):
+                return str(state)
+        sides = [f"{what} `{change[key]}`" for key, what in (("label", "label"), ("column", "board column"))
+                 if change.get(key)]
+        text = (f"Moved from `{shown(change.get('from'))}` to `{shown(change.get('to'))}`"
+                + (f" ({', '.join(sides)})" if sides else "") + f": {reason}")
+        try:
+            writeback.state_change_comment(self.gh, repo, n, text, self.run_id)
+            return True
+        except (gh_mod.GhError, gh_mod.WriteBlocked, gh_mod.ReadbackMismatch, ValueError, OSError) as exc:
+            warning = (f"the reason comment on {repo}#{n} was not posted ({exc}); the state change stands, "
+                       "say why by hand")
+            self.warn(warning)
+            self.log_warnings.append(warning)
+            return False
+
     def need_work_dir(self) -> Path:
         if self.work_dir is None:
             raise fail(ExitCode.USAGE, "usage", "no project directory: run inside a clone (or pass --project-dir)")
@@ -600,6 +630,8 @@ class OneOf:
 ref_arg = arg("ref", metavar="REF")
 number_arg = arg("number", metavar="N")
 body_file_arg = arg("--body-file", required=True, metavar="F")
+reason_file_arg = arg("--reason-file", required=True, metavar="F",
+                      help="file holding one line that says why; posted as one comment on the item")
 title_file_arg = arg("--title-file", required=True, metavar="F")
 labels_arg = arg("--labels", metavar="a,b")
 
@@ -803,7 +835,8 @@ def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     label queue only from projects the tracker's owner owns; {} when none is named), board ({status, fields} on
     a board queue, else null); a fact that cannot be read is null; never a body. truncated (more eligible issues
     than listed: the rules saw only part of the queue); held_back:
-    [{number, behind, epic}]; picking: {rules (the effective Picking work section of project.md), layer (where
+    [{number, behind, epic}]; disagreements (only with queue.source either, and only when not empty:
+    [{number, label, status, reason}] for issues left out because the label and the board Status disagree); picking: {rules (the effective Picking work section of project.md), layer (where
     the rules came from), fields, target_epics (the ones honoured: open and written by a trusted roster member),
     ignored_epics ([{number, reason}])}. Or none with queue_summary (where the queue looked, in plain words) and
     held_back when not empty, with reason when paused or disabled, and with reason unassigned_only, unassigned (count) and setting when the queue found no issue and
@@ -837,6 +870,8 @@ def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
                         "setting": "queue.include_unassigned"})
         if queue.held_back:
             out["held_back"] = queue.held_back
+        if queue.disagreements:
+            out["disagreements"] = queue.disagreements
         return none(**out)
     top, listed = found[0], found[:limit]
     picking = {**rules, "target_epics": list(queue.target_epics_used),
@@ -844,7 +879,7 @@ def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     return {"number": top.number, "title": top.title, "url": top.url, "author": top.author,
             "labels": top.labels, "parent": top.parent, "candidates": len(found),
             "issues": queue.facts(listed), "truncated": len(listed) < len(found), "held_back": queue.held_back,
-            "picking": picking}
+            "picking": picking, **({"disagreements": queue.disagreements} if queue.disagreements else {})}
 
 
 @command("picking-signals", "board fields and labels that could rank the eligible issues", args=[
@@ -885,36 +920,44 @@ def cmd_claim_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -
 
 
 @command("release-issue", "give a claimed issue back", writes=True, ref="tracker", args=[
-    number_arg, arg("--to", choices=("todo", "blocked"), default="todo")])
+    number_arg, arg("--to", choices=("todo", "blocked"), default="todo"), reason_file_arg])
 def cmd_release_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
-    """Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released.
-    With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
+    """Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released, then post
+    one comment with the old state, the new state (and the board column when the board follows) and the text of
+    --reason-file. A comment that fails is a warning; the release stands. With queue.sync, the side queue.source
+    does not read follows; a failed mirror write is a warning.
 
-    Output: number, to, released; warnings when a queue.sync mirror write failed
+    Output: number, to, released, commented; warnings when a queue.sync mirror write or the comment failed
     """
+    reason = ctx.read_reason(args.reason_file)
     queue = ctx.queue()
     try:
         queue.release(n, args.to)
     finally:  # a mirror warning stands even when a later step failed
         ctx.sync_warnings(queue)
-    return {"number": n, "to": args.to, "released": True}
+    commented = ctx.say_why(repo, n, queue.change, reason) if queue.change else False
+    return {"number": n, "to": args.to, "released": True, "commented": commented}
 
 
 @command("move-issue", "move an issue to a state", writes=True, ref="tracker", args=[
     number_arg, arg("--to", required=True, choices=states.STATES, metavar="STATE"),
-    arg("--require-current", choices=states.STATES, metavar="STATE")])
+    arg("--require-current", choices=states.STATES, metavar="STATE"), reason_file_arg])
 def cmd_move_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
-    """Move an issue to a state, optionally only when it is currently in another one.
-    With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
+    """Move an issue to a state, optionally only when it is currently in another one, then post one comment with
+    the old state, the new state (and the label and board column the move also wrote) and the text of
+    --reason-file. A comment that fails is a warning; the move stands. With queue.sync, the side queue.source does
+    not read follows; a failed mirror write is a warning.
 
-    Output: number, to, require_current; warnings when a queue.sync mirror write failed
+    Output: number, to, require_current, commented; warnings when a queue.sync mirror write or the comment failed
     """
+    reason = ctx.read_reason(args.reason_file)
     queue = ctx.queue()
     try:
         queue.move(n, args.to, args.require_current)
     finally:  # a mirror warning stands even when a later step failed
         ctx.sync_warnings(queue)
-    return {"number": n, "to": args.to, "require_current": args.require_current}
+    commented = ctx.say_why(repo, n, queue.change, reason) if queue.change else False
+    return {"number": n, "to": args.to, "require_current": args.require_current, "commented": commented}
 
 
 @command("issue", "an issue's facts", ref="tracker", args=[number_arg])
@@ -1091,15 +1134,20 @@ def cmd_prove_target(ctx: Context, args: argparse.Namespace, repo: str, n: int) 
 @command("transition", "change an item's state label along a legal edge", writes=True, args=[
     number_arg, arg("--from", dest="from_state", required=True, choices=states.STATES, metavar="STATE"),
     arg("--to", required=True, choices=states.STATES, metavar="STATE"),
-    arg("--kind", choices=("issue", "pr"), default="issue")])
+    arg("--kind", choices=("issue", "pr"), default="issue"), reason_file_arg])
 def cmd_transition(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Change an item's state label along a legal edge (reads the labels, replaces the set, reads it back).
+    """Change an item's state label along a legal edge (reads the labels, replaces the set, reads it back), then
+    post one comment with the old state, the new state and the text of --reason-file. A comment that fails is a
+    warning; the change stands.
 
-    Output: repo, number, kind, from, to, labels
+    Output: repo, number, kind, from, to, labels, commented
     """
     repo, n = ctx.ref(args.number, ctx.tracker if args.kind == "issue" else ctx.repo)
+    reason = ctx.read_reason(args.reason_file)
     new = states.apply(ctx.gh, repo, n, args.from_state, args.to, ctx.labels, args.kind)
-    return {"repo": repo, "number": n, "kind": args.kind, "from": args.from_state, "to": args.to, "labels": new}
+    commented = ctx.say_why(repo, n, {"from": args.from_state, "to": args.to}, reason)
+    return {"repo": repo, "number": n, "kind": args.kind, "from": args.from_state, "to": args.to, "labels": new,
+            "commented": commented}
 
 
 @command("labels-sync", "make an item's labels match", writes=True, ref="tracker", args=[

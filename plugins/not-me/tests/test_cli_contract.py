@@ -80,6 +80,11 @@ class CliCase(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         return str(path)
 
+    @property
+    def reason(self) -> str:
+        """A --reason-file for the commands that change a state."""
+        return self.write_file("reason.txt", "Because the test says so\n")
+
     def cli(self, *argv, stdin="", runner=None, hook_cmd=None, env=None, repo=True, project=True, prompt=None):
         """(exit code, parsed stdout object, stderr text). Fails the test unless stdout is exactly one object.
         prompt stands in for the hidden operator-token prompt (none by default)."""
@@ -331,11 +336,13 @@ class DryRunTests(CliCase):
         self.write_file("companions.json", json.dumps([{"repo": "acme/app-ui", "number": 9}]))
         self.write_file("steps.txt", "Open the page\nClick the button\n")
         self.write_file("ids.json", json.dumps(["PRRT_1"]))
+        reason = self.write_file("reason.txt", "Because the test says so\n")
         self.cases = {
             "claim-issue": ["claim-issue", "4"],
-            "release-issue": ["release-issue", "1"],
-            "move-issue": ["move-issue", "1", "--to", "needs_review"],
-            "transition": ["transition", "1", "--from", "in_progress", "--to", "needs_review"],
+            "release-issue": ["release-issue", "1", "--reason-file", reason],
+            "move-issue": ["move-issue", "1", "--to", "needs_review", "--reason-file", reason],
+            "transition": ["transition", "1", "--from", "in_progress", "--to", "needs_review",
+                           "--reason-file", reason],
             "labels-sync": ["labels-sync", "1", "--set", "in progress,extra"],
             "labels-ensure": ["labels-ensure"],
             "reply-thread": ["reply-thread", "3", "--to", "501", "--body-file", body],

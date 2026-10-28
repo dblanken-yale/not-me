@@ -108,7 +108,7 @@ PR body under a `## Not done` line, and name the person who can do it by hand.
    `gh pr list --head <branch> --state open --json number,url`. Its ref goes in the
    PR body as `Builds on <owner>/<repo>#<n>` (see `pr-assembly.md`).
 6. A predecessor with no branch and no merged PR: the chain is not ready. Release
-   the issue (`notme release-issue N --to blocked --log <path>`) and stop with
+   the issue (`notme release-issue N --to blocked --reason-file <reason> --log <path>`, the reason file saying which predecessor is not started) and stop with
    `STOP <ref> blocked - predecessor <ref> not started`.
 
 ## Checklist

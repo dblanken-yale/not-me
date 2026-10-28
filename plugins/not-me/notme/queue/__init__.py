@@ -1,7 +1,7 @@
 """Work queues: where not-me finds the next issue and how it claims it.
 
 Two sources share one interface: issues carrying a pick-up label (labels.LabelQueue) and a GitHub
-Projects v2 board (board.BoardQueue).
+Projects v2 board (board.BoardQueue). A third, either.EitherQueue, picks from both and claims on the label side.
 """
 from __future__ import annotations
 
@@ -135,10 +135,16 @@ class BaseQueue:
         self.claims_dir = Path(claims_dir) if claims_dir else None
         self._clock = clock or claims.utcnow
         self.include_unassigned = self.queue_cfg.get("include_unassigned") is True
-        self.sync = self.queue_cfg.get("sync") is True  # queue.sync: mirror each state change to the other side
+        # queue.sync: mirror each state change to the other side. source: either reads both sides, so it writes both
+        self.sync = self.queue_cfg.get("sync") is True or self.queue_cfg.get("source") == "either"
+        # the state change the last move or release made: {from, to, label?, column?}; label and column are the
+        # label and board column written alongside (see sync), so one comment can name both sides
+        self.change: Dict[str, Any] = {}
         self.sync_warnings: List[str] = []  # one per mirror write that failed (see sync.mirror)
         self.unassigned_skipped = 0  # eligible issues the last candidates() left out only because nobody is assigned
         self.held_back: List[Dict[str, int]] = []  # eligible issues the last candidates() left out for epic order
+        # issues the last candidates() left out because the label and the board Status disagree (source: either)
+        self.disagreements: List[Dict[str, Any]] = []
         picking = self.meta.get("picking") or {}
         if not isinstance(picking, dict):
             raise ValueError("picking must be a map")
@@ -553,7 +559,8 @@ def board_ref(queue_cfg: Mapping[str, Any]) -> Optional[Tuple[str, int]]:
 def describe(meta: Mapping[str, Any]) -> Dict[str, Any]:
     """Where the issue queue looks, from the project config alone (never calls GitHub).
 
-    {source, ok, summary, opt_in_label, label (labels source) | board and column (board source)}. summary is one
+    {source, ok, summary, opt_in_label, label (labels source) | board and column (board source) | all three
+    (either source)}. summary is one
     plain sentence such as "picks issues labeled `to do`, assigned to you" (with queue.sync, followed by what it
     keeps in step); ok is false when the config cannot
     work as written (no board, no to-do column, an unknown source), and summary then says why.
@@ -586,9 +593,27 @@ def describe(meta: Mapping[str, Any]) -> Dict[str, Any]:
                                          f"{out['board']}")
         else:
             out.update(ok=True, summary=f"picks issues in the `{column}` column of board {out['board']}{suffix}")
+    elif source == "either":
+        try:
+            label = Labels(meta.get("labels") or {}).name("todo")
+        except (KeyError, LabelCollision):
+            label = None
+        ref = board_ref(q)
+        column = (q.get("board_states") or {}).get("todo")
+        out.update(label=label, board=f"{ref[0]}/{ref[1]}" if ref else None, column=column)
+        if not label:
+            out.update(ok=False, summary="either source, but `labels.todo` names no label")
+        elif not ref:
+            out.update(ok=False, summary="either source, but queue.board.owner and queue.board.number are not set")
+        elif not column:
+            out.update(ok=False, summary=f"either source, but queue.board_states.todo names no column of board "
+                                         f"{out['board']}")
+        else:
+            out.update(ok=True, summary=f"picks issues labeled `{label}` or in the `{column}` column of board "
+                                        f"{out['board']}{suffix}; keeps both in step")
     else:
-        out.update(ok=False, summary=f"queue.source `{source}` is not supported; use labels or board")
-    if out["ok"] and q.get("sync") is True:
+        out.update(ok=False, summary=f"queue.source `{source}` is not supported; use labels, board or either")
+    if out["ok"] and source != "either" and q.get("sync") is True:
         out["summary"] += "; keeps the " + ("labels" if source == "board" else "board Status") + " in step"
     out["opt_in_label"] = opt_in
     return out
@@ -597,7 +622,7 @@ def describe(meta: Mapping[str, Any]) -> Dict[str, Any]:
 def make_queue(cfg: Any, gh: GhClient, roster: Any, operator: str, run_id: str, *, kind: str = "issue",
                repo: Optional[str] = None, tracker: Optional[str] = None, project_dir: Any = None,
                clock: Optional[claims.Clock] = None) -> Any:
-    """The queue for `queue.source` (labels or board); kind="pr" gives the BaseQueue that claims pull requests
+    """The queue for `queue.source` (labels, board or either); kind="pr" gives the BaseQueue that claims pull requests
     of `repo`. Claim locks live in <git-common-dir>/not-me/claims of project_dir."""
     meta = (cfg.meta or {}).get("project", {})
     slug = repo or tracker or meta.get("tracker")
@@ -619,4 +644,7 @@ def make_queue(cfg: Any, gh: GhClient, roster: Any, operator: str, run_id: str, 
     if source == "board":
         from .board import BoardQueue
         return BoardQueue(cfg, gh, roster, operator, run_id, slug, **kwargs)
-    raise ValueError(f"queue.source must be labels or board, got {source!r}")
+    if source == "either":
+        from .either import EitherQueue
+        return EitherQueue(cfg, gh, roster, operator, run_id, slug, **kwargs)
+    raise ValueError(f"queue.source must be labels, board or either, got {source!r}")

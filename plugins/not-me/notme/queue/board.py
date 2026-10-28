@@ -213,7 +213,9 @@ class BoardQueue(BaseQueue):
     def release(self, n: int, to: str = "todo") -> None:
         n = _num(n)
         board = self._fetch()
-        self._set_status(board, self._item(board, n), to)
+        item = self._item(board, n)
+        self._set_status(board, item, to)
+        self.change = {"from": self.abstract(item["status"]) or item["status"], "to": to, "column": self.column(to)}
         mirror(self, n, to)
         self.unassign_if_claimed(n)  # only when the claim assigned us, per its marker
         self.mark_released(n)
@@ -247,6 +249,10 @@ class BoardQueue(BaseQueue):
                         f"{self.tracker}#{n} is in {item['status']!r}, not {self.column(require_current)!r}")
         if labelled:
             write_labels(self, n, state)  # the only record of the move: its errors are the move's errors
+            self.change = {"from": self.abstract(item["status"]) or item["status"], "to": state,
+                           "label": self.labels.name(state)}
             return
         self._set_status(board, item, state)
+        self.change = {"from": self.abstract(item["status"]) or item["status"], "to": state,
+                       "column": self.column(state)}
         mirror(self, n, state)

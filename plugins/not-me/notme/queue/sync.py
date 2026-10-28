@@ -67,6 +67,7 @@ def set_labels(q: Any, n: int, state: str) -> None:
                            f"map labels.{state} in project.md") from None
     try:
         write_labels(q, n, state)
+        q.change["label"] = name
     except WriteBlocked as exc:
         raise MirrorFailed(f"labels on {where} not set to `{name}`: "
                            + _refused(exc.decision, f"allow the repo with /not-me:allow-repo {q.tracker}")) from None
@@ -135,9 +136,11 @@ def _set_board_status(q: Any, n: int, state: str) -> None:
                            f"{', '.join(sorted(board['options']))}); map queue.board_states.{key} to a real "
                            "column") from None
     if item["status"] == column and not q.gh.dry_run:  # a dry run records it: see write_labels
+        q.change["column"] = column
         return
     try:
         board_q._set_status(board, item, state)
+        q.change["column"] = column
     except WriteBlocked as exc:
         raise MirrorFailed(_board_refused(where, label, exc.decision, allow_board)) from None
     except (GhError, LookupError) as exc:

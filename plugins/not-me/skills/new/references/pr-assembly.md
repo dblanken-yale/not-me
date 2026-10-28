@@ -66,7 +66,8 @@ notme pr-open --head <branch> --base <base> --title-file title.txt \
 
 ## Move the issue
 
-`notme move-issue N --to needs_review --require-current in_progress --log <path>`.
+`notme move-issue N --to needs_review --require-current in_progress --reason-file <reason> --log <path>`,
+after writing a one-line reason (such as `Opened <repo>#<pr>`) to the reason file.
 This replaces `in_progress` with `needs_review` on a label queue and moves the
 card on a board queue. A state mismatch (exit 1) means someone moved the issue
 during the run: log a `WARN`, leave it, and say so in the result note.

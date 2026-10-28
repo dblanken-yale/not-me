@@ -54,9 +54,9 @@ class DescribeTests(unittest.TestCase):
         self.assertIn("queue.board_states.todo", out["summary"])
 
     def test_unknown_source_is_named(self):
-        out = describe(meta(source="either"))
+        out = describe(meta(source="feeds"))
         self.assertFalse(out["ok"])
-        self.assertEqual(out["summary"], "queue.source `either` is not supported; use labels or board")
+        self.assertEqual(out["summary"], "queue.source `feeds` is not supported; use labels, board or either")
 
     def test_describe_never_calls_github(self):
         describe(meta(source="board", board=BOARD))  # takes no client at all
@@ -143,7 +143,7 @@ class DoctorQueueTests(unittest.TestCase):
         self.assertIn("not found", c["detail"])
 
     def test_unsupported_source(self):
-        c = self.run_check(meta(source="either"))
+        c = self.run_check(meta(source="feeds"))
         self.assertFalse(c["ok"])
         self.assertIn("not supported", c["detail"])
 

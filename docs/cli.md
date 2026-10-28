@@ -114,7 +114,7 @@ notme pick-issue [--exclude N]
 |----------|----------|---------|
 | `--exclude N` | optional | skip this issue (repeatable) |
 
-Output: number, title, url, author, labels, parent, candidates (count): the suggested top issue by the queue's order; issues: the eligible issues in that order, all of them when the Picking work rules come from the global layer (the rules must see the whole queue), else up to queue.list_limit; each with number, title, url, author, labels, created, age_days, parent (epic number), position (1-based in the epic's open task list), blocked_by and blocking ([{repo, number, state}] from GitHub issue dependencies), reactions (counts by kind, from the operator and trusted logins only), target_epic and target_position (the picking.target_epics epic whose task list holds it, and its 1-based place there; issues in a target epic come first), fields ({name: value} for each picking.fields name, text cut to picking.value_max_chars; on a label queue only from projects the tracker's owner owns; {} when none is named), board ({status, fields} on a board queue, else null); a fact that cannot be read is null; never a body. truncated (more eligible issues than listed: the rules saw only part of the queue); held_back: [{number, behind, epic}]; picking: {rules (the effective Picking work section of project.md), layer (where the rules came from), fields, target_epics (the ones honoured: open and written by a trusted roster member), ignored_epics ([{number, reason}])}. Or none with queue_summary (where the queue looked, in plain words) and held_back when not empty, with reason when paused or disabled, and with reason unassigned_only, unassigned (count) and setting when the queue found no issue and the only eligible issues have no assignee (only issues assigned to the operator are picked unless queue.include_unassigned is true)
+Output: number, title, url, author, labels, parent, candidates (count): the suggested top issue by the queue's order; issues: the eligible issues in that order, all of them when the Picking work rules come from the global layer (the rules must see the whole queue), else up to queue.list_limit; each with number, title, url, author, labels, created, age_days, parent (epic number), position (1-based in the epic's open task list), blocked_by and blocking ([{repo, number, state}] from GitHub issue dependencies), reactions (counts by kind, from the operator and trusted logins only), target_epic and target_position (the picking.target_epics epic whose task list holds it, and its 1-based place there; issues in a target epic come first), fields ({name: value} for each picking.fields name, text cut to picking.value_max_chars; on a label queue only from projects the tracker's owner owns; {} when none is named), board ({status, fields} on a board queue, else null); a fact that cannot be read is null; never a body. truncated (more eligible issues than listed: the rules saw only part of the queue); held_back: [{number, behind, epic}]; disagreements (only with queue.source either, and only when not empty: [{number, label, status, reason}] for issues left out because the label and the board Status disagree); picking: {rules (the effective Picking work section of project.md), layer (where the rules came from), fields, target_epics (the ones honoured: open and written by a trusted roster member), ignored_epics ([{number, reason}])}. Or none with queue_summary (where the queue looked, in plain words) and held_back when not empty, with reason when paused or disabled, and with reason unassigned_only, unassigned (count) and setting when the queue found no issue and the only eligible issues have no assignee (only issues assigned to the operator are picked unless queue.include_unassigned is true)
 
 ### `notme picking-signals`
 
@@ -148,27 +148,28 @@ Output: number, previous, now, marker_comment_id, run_id; warnings when a queue.
 
 ### `notme release-issue`
 
-Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released. With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
+Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released, then post one comment with the old state, the new state (and the board column when the board follows) and the text of --reason-file. A comment that fails is a warning; the release stands. With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
 
 ```
-notme release-issue N [--to TO]
+notme release-issue N [--to TO] --reason-file F
 ```
 
 | Argument | Required | Meaning |
 |----------|----------|---------|
 | `N` | required |  |
 | `--to TO {todo|blocked}` | optional | (default todo) |
+| `--reason-file F` | required | file holding one line that says why; posted as one comment on the item |
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: number, to, released; warnings when a queue.sync mirror write failed
+Output: number, to, released, commented; warnings when a queue.sync mirror write or the comment failed
 
 ### `notme move-issue`
 
-Move an issue to a state, optionally only when it is currently in another one. With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
+Move an issue to a state, optionally only when it is currently in another one, then post one comment with the old state, the new state (and the label and board column the move also wrote) and the text of --reason-file. A comment that fails is a warning; the move stands. With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
 
 ```
-notme move-issue N --to STATE [--require-current STATE]
+notme move-issue N --to STATE [--require-current STATE] --reason-file F
 ```
 
 | Argument | Required | Meaning |
@@ -176,10 +177,11 @@ notme move-issue N --to STATE [--require-current STATE]
 | `N` | required |  |
 | `--to STATE` | required |  |
 | `--require-current STATE` | optional |  |
+| `--reason-file F` | required | file holding one line that says why; posted as one comment on the item |
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: number, to, require_current; warnings when a queue.sync mirror write failed
+Output: number, to, require_current, commented; warnings when a queue.sync mirror write or the comment failed
 
 ### `notme issue`
 
@@ -341,10 +343,10 @@ Output: url, strategy, head_sha, tried, skipped (when any); or none (with tried,
 
 ### `notme transition`
 
-Change an item's state label along a legal edge (reads the labels, replaces the set, reads it back).
+Change an item's state label along a legal edge (reads the labels, replaces the set, reads it back), then post one comment with the old state, the new state and the text of --reason-file. A comment that fails is a warning; the change stands.
 
 ```
-notme transition N --from STATE --to STATE [--kind KIND]
+notme transition N --from STATE --to STATE [--kind KIND] --reason-file F
 ```
 
 | Argument | Required | Meaning |
@@ -353,10 +355,11 @@ notme transition N --from STATE --to STATE [--kind KIND]
 | `--from STATE` | required |  |
 | `--to STATE` | required |  |
 | `--kind KIND {issue|pr}` | optional | (default issue) |
+| `--reason-file F` | required | file holding one line that says why; posted as one comment on the item |
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: repo, number, kind, from, to, labels
+Output: repo, number, kind, from, to, labels, commented
 
 ### `notme labels-sync`
 
