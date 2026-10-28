@@ -161,6 +161,12 @@ the owner's say-so, not a cleanup.
   checkout, so an edit in a worktree takes effect once merged and pulled.
 - When the guard blocks something during development, that is usually the
   guard working. Do not route around it; the allow command is in the message.
+- The README's "How a run works" mermaid diagram shows what a run does, which
+  steps are optional, and which setting changes each one. When a change adds,
+  removes or reorders a step, makes one optional or required, or adds, renames
+  or removes the config key or doc that steers it, update the diagram in the
+  same PR. `docs/workflow.md` keeps the label state diagram; update that one
+  when label transitions change.
 - Commit messages and PR descriptions end with `Created with AI`. Nothing
   else in the repo mentions AI involvement; the plugin's own posts follow the
   configurable `attribution` policy.
