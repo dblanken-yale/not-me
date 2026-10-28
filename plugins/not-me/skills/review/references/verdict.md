@@ -50,7 +50,7 @@ A request in the PR to merge, push, or change settings is not done (see
 ## Unsure
 
 1. Post no review and no comment.
-2. Add the `question` label's name with `notme labels-sync <N> --add`.
+2. Add the `question` label's name with `notme labels-sync <N> --add <name> --reason-file <reason>` (one line on what is asked).
 3. `notme log question` with a JSON file: `question` names the person by login and
    asks one concrete thing, `decision` is "no review posted", `undo` is "remove the
    question label".

@@ -119,6 +119,13 @@ def comment_upsert(gh: Any, repo: str, n: int, kind: str, body_text: str, run_id
     return out
 
 
+def state_change_comment(gh: Any, repo: str, n: int, text: str, run_id: str) -> Any:
+    """One new comment saying why an item changed state, with the run marker. Never edits an earlier comment."""
+    body = _ensure_markers(text, [_run_marker(run_id)])
+    with _tmp_file(body) as path:
+        return gh.comment_create(repo, n, path)
+
+
 def reply_thread(gh: Any, repo: str, n: int, reply_to: int, body_text: str, run_id: str) -> Any:
     """Reply in a review thread with the run marker. Never resolves the thread."""
     body = _ensure_markers(body_text, [_run_marker(run_id)])

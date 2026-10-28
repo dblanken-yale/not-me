@@ -94,7 +94,7 @@ notme followup --title-file "$d/title.txt" --body-file "$d/body.md" \
    readiness item. Report each item as present or missing, with the line that
    satisfies it.
 3. Nothing missing: offer to add `todo` (and the opt-in label) when absent. On a
-   yes: `notme labels-sync N --add "<todo>,<opt-in>"`. Change no other label.
+   yes: `notme labels-sync N --add "<todo>,<opt-in>" --reason-file <reason>`. Change no other label.
 4. Something missing: draft the edits, ask the operator for the missing facts in
    the same single question batch, and offer to apply them. On a yes, write the
    full proposed body to `body.md` in the temp dir, run

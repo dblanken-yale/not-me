@@ -146,7 +146,18 @@ class Config:
             for layer in LAYER_ORDER:
                 if layer in docs:
                     _check_map(docs[layer], docs[layer].meta, reference, (), SCHEMA.get(name, {}), errors)
-        return errors + self._review_label_errors() + self.role_errors()
+        return errors + self._either_sync_errors() + self._review_label_errors() + self.role_errors()
+
+    def _either_sync_errors(self) -> List[str]:
+        """queue.source either writes both sides, so a `queue.sync: false` somebody wrote is a contradiction. Left at
+        the shipped default it is not: either implies sync."""
+        queue = self.meta.get("project", {}).get("queue") or {}
+        src = self.sources.get("project.queue.sync") or {}
+        if queue.get("source") != "either" or queue.get("sync") is not False or src.get("layer") in (None, "default"):
+            return []
+        return [f"{src.get('layer')} {src.get('path')}:{src.get('line') or 1}: queue.sync is false but "
+                "queue.source is either, which writes both labels and the board; remove the queue.sync line "
+                "or set queue.sync: true, or choose queue.source labels or board"]
 
     def _review_label_errors(self) -> List[str]:
         """review.changes_label may not name ready_to_merge: a request for changes must never mark a PR ready."""

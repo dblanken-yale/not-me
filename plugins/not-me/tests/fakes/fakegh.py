@@ -503,9 +503,12 @@ class FakeGitHub:
             if variables.get("owner") != board["owner"] or number != board["number"]:
                 return {"data": {"repositoryOwner": {"projectV2": None}}}
             project: Dict[str, Any] = {"id": board["id"]}
+            start = int(variables.get("after") or 0)  # the cursor is the index of the next item
+            page = board["items"][start:start + 100]
+            info = {"hasNextPage": start + 100 < len(board["items"]), "endCursor": str(start + 100)}
             if "createdAt" in query:  # the rich board query: item content and priority fields
                 project["field"] = board["status_field"]
-                project["items"] = {"nodes": [self._rich_item(i, query) for i in board["items"]]}
+                project["items"] = {"nodes": [self._rich_item(i, query) for i in page], "pageInfo": info}
             elif "items(" not in query and "field(" in query:  # only the status field's options
                 project["field"] = board["status_field"]
             elif "items(" in query:

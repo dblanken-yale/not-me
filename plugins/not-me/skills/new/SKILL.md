@@ -95,8 +95,8 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/branching.md`.
 2. Choose the base by the precedence in branching.md: `--base`, predecessor branch,
    `Base branch:` line, epic branch, default branch.
 3. A declared base must exist on the remote. Check with a read:
-   `git ls-remote --exit-code --heads origin <base>`. Missing: `notme release-issue N --log <path>`,
-   add `needs_human` with `notme labels-sync N --add <name>`, log the base and where
+   `git ls-remote --exit-code --heads origin <base>`. Missing: `notme release-issue N --reason-file <reason> --log <path>` (write the one-line reason first),
+   add `needs_human` with `notme labels-sync N --add <name> --reason-file <reason>`, log the base and where
    it was declared, name the issue author, and stop:
    `STOP <ref> blocked - base <base> not found`. No branch is created.
 4. Questions: interactive runs (no `--bg`) get one AskUserQuestion batch now and
@@ -201,8 +201,8 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/pr-shape.md` and
    --assignee <operator> --log <path>`, adding `--labels` and `--reviewers` only
    on the PR that completes the set. Never `--draft`.
 4. Companion set: `notme companion-prs` on every PR once all exist.
-5. Move the issue: `notme move-issue N --to needs_review --require-current
-   in_progress --log <path>`. This works for a label queue and a board queue.
+5. Move the issue with a one-line reason file (for example `Opened <repo>#<pr>`): `notme move-issue N
+   --to needs_review --require-current in_progress --reason-file <reason> --log <path>`.
 6. One comment on the issue, so a person reading it sees the run without opening
    the PR: write `Opened <repo>#<pr> for this issue.` plus the testing steps'
    one-line status to a file and run `notme comment-upsert <tracker>#N --marker
@@ -236,7 +236,7 @@ The short form:
 | Declared base missing | Release, `needs_human` | `STOP <ref> blocked` |
 | Cannot reproduce, already fixed | Keep `in_progress`, add `needs_human`, comment | `HELD <ref> ...` |
 | Guard block mid-run | QUESTION naming the operator, `needs_human` | `FAILED <ref> blocked` |
-| Mechanical failure before a push | `notme release-issue N --log <path>`, `needs_human` | `FAILED <ref> ...` |
+| Mechanical failure before a push | `notme release-issue N --reason-file <reason> --log <path>`, `needs_human` | `FAILED <ref> ...` |
 | CI red at `limits.fix_loop` | Park the PR with `needs_human` | `FAILED <ref> ci-red` |
 
 Every comment this skill owns is upserted with

@@ -35,9 +35,36 @@ RULES = {
     "R12": "CLAUDE_PLUGIN_ROOT usage",
     "R13": "--bg verb list",
     "R14": "no em dashes",
+    "R15": "state changes say why",
 }
 
 ALLOW_MARKER = "<!-- allowed-raw-write -->"
+# A notme call as skill prose writes it: notme, "${CLAUDE_PLUGIN_ROOT}/bin/notme" or "$NOTME", then the command.
+_CALL = r"(?:\bnotme\b\"?|\$\{?NOTME\}?\"?)\s+(?P<cmd>[a-z][a-z-]*)"
+CALL_RE = re.compile(_CALL)
+# Commands whose every call must say why. labels-sync is exempt with --check, which writes nothing.
+REASON_COMMANDS = {"move-issue", "release-issue", "transition", "labels-sync"}
+
+
+def reason_violations(text: str) -> List[Tuple[int, str]]:
+    """(line, call) for each REASON_COMMANDS call in text with no --reason-file. A call runs from its command to the
+    closing backtick, the next blank line or the next notme call, so a later call's flag never covers an earlier
+    one."""
+    out: List[Tuple[int, str]] = []
+    for m in CALL_RE.finditer(text):
+        if m.group("cmd") not in REASON_COMMANDS:
+            continue
+        rest = text[m.end():]
+        ends = [i for i in (rest.find("`"), rest.find("\n\n")) if i != -1]
+        nxt = CALL_RE.search(rest)
+        if nxt:
+            ends.append(nxt.start())
+        span = rest[:min(ends)] if ends else rest
+        if "--reason-file" in span or (m.group("cmd") == "labels-sync" and "--check" in span):
+            continue
+        out.append((text[:m.start()].count("\n") + 1, text[m.start():m.end()]))
+    return out
+
 VERBS = "NONE | PR | PUSHED | PARKED | HELD | REVIEWED | PROVED | FAILED | STOP"
 BASH_TAGS = {"bash", "sh", "shell", "zsh", "console"}
 # The repo slug covers the URL and the "marketplace add" install command.
@@ -340,6 +367,13 @@ class Linter:
                 if EM_DASH in line:
                     self.add(path, no, "R14", "em dash (U+2014)")
 
+    # R15 --------------------------------------------------------------
+    def r15(self) -> None:
+        """Every call that changes a state passes --reason-file (see reason_violations)."""
+        for path in self.skill_docs + self.ref_docs:
+            for no, found in reason_violations(self.text(path)):
+                self.add(path, no, "R15", f"'{found}' without --reason-file: every state change says why")
+
     def run(self, only: Set[str]) -> None:
         if "R1" in only:
             self.r1()
@@ -357,6 +391,8 @@ class Linter:
             self.r9_to_r13_skills()
         if "R14" in only:
             self.r14()
+        if "R15" in only:
+            self.r15()
         self.violations = sorted({v for v in self.violations if v[2] in only},
                                  key=lambda v: (v[0], v[1], int(v[2][1:]), v[3]))
 
