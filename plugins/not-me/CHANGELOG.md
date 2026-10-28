@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.6.0](https://github.com/dblanken-yale/not-me/compare/not-me-v0.5.0...not-me-v0.6.0) (2026-10-28)
+
+
+### Features
+
+* /not-me:suggest recommends unassigned issues for the operator to take ([#106](https://github.com/dblanken-yale/not-me/issues/106)) ([409df0e](https://github.com/dblanken-yale/not-me/commit/409df0e8440a350511b4fd53f4ea010231ee8006))
+* **102:** keep labels and board status in step with queue.sync ([#107](https://github.com/dblanken-yale/not-me/issues/107)) ([d4d7438](https://github.com/dblanken-yale/not-me/commit/d4d7438d541712d9433874d956542ff025a7daff))
+* **110:** pick from a to-do label or a board To Do column ([#114](https://github.com/dblanken-yale/not-me/issues/114)) ([cc7ba4f](https://github.com/dblanken-yale/not-me/commit/cc7ba4f04278623bf152c551fc769eb79bb25758))
+* **113:** let an issue declare it may stack on an open PR ([#116](https://github.com/dblanken-yale/not-me/issues/116)) ([28933e3](https://github.com/dblanken-yale/not-me/commit/28933e317b5302795e93db039005cbe7c8b3b807))
+* **72:** add a picking step to setup that finds ranking fields and labels ([#104](https://github.com/dblanken-yale/not-me/issues/104)) ([46a9235](https://github.com/dblanken-yale/not-me/commit/46a9235d54770a441ed2b76302273119702e7778))
+* let the operator choose and switch the queue source ([#101](https://github.com/dblanken-yale/not-me/issues/101)) ([fb74926](https://github.com/dblanken-yale/not-me/commit/fb7492629495fa8f897f99e23817ab3503f867dc))
+* report and fix label and board Status drift ([#115](https://github.com/dblanken-yale/not-me/issues/115)) ([364ca2d](https://github.com/dblanken-yale/not-me/commit/364ca2dddac6d4f01904613ada54495ba2f0d331))
+* start pr bodies with a linked issue heading ([#100](https://github.com/dblanken-yale/not-me/issues/100)) ([c82d427](https://github.com/dblanken-yale/not-me/commit/c82d42765878b7a7d30ed7b837a1ee78f05729df))
+
+
+### Bug Fixes
+
+* **76:** keep the blocked input in the guard log, redacted ([#109](https://github.com/dblanken-yale/not-me/issues/109)) ([a4c5a22](https://github.com/dblanken-yale/not-me/commit/a4c5a2265e1ea59a4cfa875ed3bf5dfd758ab9d4))
+* **77:** let grep, rg and sed patterns mention protected names ([#112](https://github.com/dblanken-yale/not-me/issues/112)) ([115b4f8](https://github.com/dblanken-yale/not-me/commit/115b4f8b8ac932962c00a9d91fb63c4d36f4b405))
+* guard says 'no github origin' when a git -C path is a variable ([#108](https://github.com/dblanken-yale/not-me/issues/108)) ([030a740](https://github.com/dblanken-yale/not-me/commit/030a740c4ff4c0add549db1c40d69cb94453bc3b))
+* report runs that died before log finish in notme status ([#99](https://github.com/dblanken-yale/not-me/issues/99)) ([d01fe74](https://github.com/dblanken-yale/not-me/commit/d01fe74911bd953df2bca0161b3d7a6a2f84f836))
+
 ## [0.5.0](https://github.com/dblanken-yale/not-me/compare/not-me-v0.4.0...not-me-v0.5.0) (2026-10-26)
 
 
