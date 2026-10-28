@@ -203,6 +203,18 @@ Relax this rule (not recommended): set guard.protected_branches: off and confirm
 See effective config: /not-me:config
 ```
 
+A git write whose `-C`, `--git-dir` or `--work-tree` path is a shell variable (`git -C "$W" commit ...`) is blocked, because the guard does not expand variables. Rewriting the command is the fix, so that message leaves out the "relax this rule" line:
+
+```
+not-me guard [other_repo]: blocked `git -C $W commit -m x`.
+Why: the guard does not expand shell variables in a `git -C` path.
+Instead: write the path out in full (`git -C /abs/path <sub> ...`); a rewritten command is checked afresh, so this is not a retry.
+Autonomous runs: do not retry; log a QUESTION naming the operator and continue.
+See effective config: /not-me:config
+```
+
+For `--git-dir` or `--work-tree` the Instead line says to drop that option and use `git -C /abs/path` with the path written out, since a literal `--git-dir` is blocked too. A git alias next to a variable path is blocked the same way, because the guard cannot look the alias up in a repo it cannot name; if the path resolves to the current checkout (`git -C "$W/.." fp`) and the alias is defined there, the alias's own rules (force push, protected branch) block first. Blocks that do not come from the unknown path, such as `git -C "$W" remote set-url ...` or a `GIT_DIR=` assignment, keep their own message.
+
 One detail in the message is misleading. It names `.claude/not-me/project.md` for "relax this rule", but the repo layer ignores that (see below), so use your global layer, `~/.claude/not-me/project.md`.
 
 ## Allow a repo

@@ -63,6 +63,8 @@ REPOS: Dict[str, Tuple[str, str, Optional[str], str]] = {
     "off": (GH + "acme/app.git", "feature/x", "", ""),
     "offnoconfirm": (GH + "acme/app.git", "feature/x", "", ""),
     "alloff": (GH + "acme/app.git", "main", "", ""),
+    # other_repo off on a protected branch, with aliases whose own rules must still fire behind a variable -C path
+    "offalias": (GH + "acme/app.git", "main", "", "offalias"),
     "repooff": (GH + "acme/app.git", "feature/x", "guard: {other_repo: off}\nconfirm_guard_off: [other_repo]", ""),
     "repoallow": (GH + "acme/app.git", "feature/x", "allow_repos: [acme/friend]", ""),
     "live": (GH + "acme/app.git", "feature/x", "mode: live", ""),
@@ -93,6 +95,7 @@ GLOBAL_LAYER: Dict[str, str] = {
     "cfgallow": "allow_repos: [acme/friend]",
     "off": "guard: {other_repo: off}\nconfirm_guard_off: [other_repo]",
     "offnoconfirm": "guard: {other_repo: off}",
+    "offalias": "guard: {other_repo: off}\nconfirm_guard_off: [other_repo]",
     "alloff": "guard: {other_repo: off, protected_branches: off, force_push: off, destructive_git: off}\n"
               "confirm_guard_off: [other_repo, protected_branches, force_push, destructive_git]",
     # a global layer in dry-run, for the live-mode cases (outside and inside a run)
@@ -162,6 +165,9 @@ def build_fixtures(root: Path) -> Dict[str, str]:
             for script, text in SCRIPTS.items():
                 (scripts / script).write_text(text, encoding="utf-8")
                 os.chmod(str(scripts / script), 0o755)
+        elif extra == "offalias":
+            _git(["config", "alias.fp", "push --force origin feature/x"], repo, env)
+            _git(["config", "alias.ci", "commit -m x"], repo, env)
         elif extra == "pushurl":
             _git(["remote", "set-url", "--push", "origin", "git@github.com:acme/lib.git"], repo, env)
         elif extra == "recurse":
@@ -1806,6 +1812,38 @@ for cmd in ("python3 -c 'print(1)'", "shellcheck $(git ls-files '*.sh')", "cd su
             "FOO=1 git push origin feature/x", "git log --ext-diff -p", "git frobnicate", "python3 scripts/tool.py",
             "bash scripts/validate-plugins.sh", "python3 -m pytest -k push", "echo 'it''s'", "sed -i 's/a/b/' README.md"):
     bash(A, None, cmd)
+# a git write whose -C, --git-dir or --work-tree path is a shell variable: blocked, with a message that says to spell
+# the path out (the guard does not expand variables, even ones set earlier in the same command)
+_VAR_C_ID = f"G{len(CASES) + 1:03d}"
+bash(B, OR, "git -C $W commit -m x")
+_VAR_C_PUSH_ID = f"G{len(CASES) + 1:03d}"
+bash(B, OR, 'git -C "$W" push origin HEAD:refs/heads/x')
+_VAR_GIT_DIR_ID = f"G{len(CASES) + 1:03d}"
+bash(B, OR, "git --git-dir=$G commit -m x")
+_VAR_WORK_TREE_ID = f"G{len(CASES) + 1:03d}"
+bash(B, OR, "git --work-tree $W commit -m x")
+bash(B, OR, "W={F}/live; git -C $W commit -m x")
+_VAR_C_NAMED_ID = f"G{len(CASES) + 1:03d}"
+bash(B, OR, "git -C $W push https://github.com/acme/other HEAD:refs/heads/x")  # a named repo keeps its message
+_VAR_C_REMOTE_ID = f"G{len(CASES) + 1:03d}"  # blocks that do not come from the path keep their own message
+bash(B, OR, "git -C $W remote set-url origin x")
+_VAR_C_CONFIG_ID = f"G{len(CASES) + 1:03d}"
+bash(B, OR, "git -C $W config remote.origin.pushurl x")
+_VAR_C_ENV_ID = f"G{len(CASES) + 1:03d}"
+bash(B, OR, "GIT_DIR=/x git -C $W commit -m x")
+_VAR_C_ALIAS_ID = f"G{len(CASES) + 1:03d}"  # an alias cannot be looked up in a directory the guard cannot name
+bash(B, OR, "git -C $W pp")
+# $W/.. resolves to the checkout, where the alias is found: its own rules fire first, even with other_repo off
+_VAR_C_ALIAS_HERE_ID = f"G{len(CASES) + 1:03d}"
+bash(B, OR, 'git -C "$W/.." pp')
+bash(B, FP, 'git -C "$W/.." fp', "offalias")
+bash(B, PB, 'git -C "$W/.." ci', "offalias")
+bash(B, FP, "git fp", "offalias")
+bash(B, PB, "git ci", "offalias")
+bash(A, None, "git -C '{F}'/live commit -m x")  # spelled out: an allowed checkout passes
+for cmd in ("git -C $W status", 'git -C "$W" log --oneline', "git -C $W diff", "git --git-dir=$G status"):
+    bash(A, None, cmd)  # reads with a variable path stay allowed
+bash(A, None, "git -C $W commit -m x", "alloff")
 KEEP_END = len(CASES)
 
 # Substrings a block message must contain, by case id.
@@ -1819,4 +1857,17 @@ MESSAGE_CHECKS: Dict[str, List[str]] = {
     _marker_id: ["live-mode marker", "/not-me:mode live"],
     _epoch_id: ["live-mode epoch", "/not-me:mode live"],
     _OPAQUE_ID: ["python3 runs code the guard does not parse", "holds `push`", "not-me guard [protected_branches]"],
+    _VAR_C_ID: ["Why: the guard does not expand shell variables in a `git -C` path",
+                "Instead: write the path out in full (`git -C /abs/path <sub> ...`); a rewritten command is "
+                "checked afresh, so this is not a retry."],
+    _VAR_C_PUSH_ID: ["shell variables in a `git -C` path", "write the path out in full"],
+    _VAR_GIT_DIR_ID: ["shell variables in a `git --git-dir` path",
+                      "Instead: drop --git-dir and run `git -C /abs/path <sub> ...` with the path written out in full"],
+    _VAR_WORK_TREE_ID: ["shell variables in a `git --work-tree` path", "Instead: drop --work-tree and run"],
+    _VAR_C_NAMED_ID: ["/not-me:allow-repo acme/other"],
+    _VAR_C_REMOTE_ID: ["git remote set-url can redirect pushes"],
+    _VAR_C_CONFIG_ID: ["git config remote.origin.pushurl can change where or what git pushes"],
+    _VAR_C_ENV_ID: ["GIT_DIR=", "changes which repository or config git uses"],
+    _VAR_C_ALIAS_ID: ["shell variables in a `git -C` path"],
+    _VAR_C_ALIAS_HERE_ID: ["/not-me:allow-repo acme/other"],
 }

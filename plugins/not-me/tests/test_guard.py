@@ -459,6 +459,30 @@ class MessageTests(unittest.TestCase):
         msg = guard.render(Block("self_protect", "x", command="y"), self.ctx())
         self.assertNotIn("Relax this rule", msg)
 
+    def test_variable_git_path_says_spell_it_out(self):
+        ctx = self.ctx()
+        ctx.git = lambda args, cwd: None
+        for cmd, opt in (("git -C $W commit -m x", "-C"), ('git -C "$W" push origin HEAD:refs/heads/x', "-C"),
+                         ("git --git-dir=$G commit -m x", "--git-dir"), ("git --work-tree `pwd` commit", "--work-tree")):
+            with self.subTest(cmd=cmd):
+                r = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": "."}, ctx)
+                self.assertIsInstance(r, Block)
+                self.assertEqual(r.rule, "other_repo")
+                self.assertIn(f"Why: the guard does not expand shell variables in a `git {opt}` path.", r.message)
+                if opt == "-C":
+                    self.assertIn("Instead: write the path out in full (`git -C /abs/path <sub> ...`); a rewritten "
+                                  "command is checked afresh, so this is not a retry.", r.message)
+                else:
+                    self.assertIn(f"Instead: drop {opt} and run `git -C /abs/path <sub> ...` with the path written "
+                                  "out in full; a rewritten command is checked afresh, so this is not a retry.",
+                                  r.message)
+                self.assertNotIn("Relax this rule", r.message)
+                self.assertNotIn("no github origin", r.message)
+        r = guard.decide({"tool_name": "Bash", "tool_input": {"command": "git -C /nowhere commit -m x"}, "cwd": "."},
+                         ctx)
+        self.assertIn("no github origin", r.message)
+        self.assertIn("Relax this rule (not recommended): set guard.other_repo: off", r.message)
+
     def test_decide_fills_message_and_tool(self):
         ctx = self.ctx()
         ctx.git = lambda args, cwd: None
