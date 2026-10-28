@@ -90,6 +90,31 @@ class IssueTests(base.CliCase):
         super().setUp()
         self.fake.add_assignee(REPO, 1, "octocat")  # the default queue picks only issues assigned to me
 
+    def test_pick_names_the_stack_held_issues_when_that_is_why_nothing_is_ready(self):
+        things(self.fake)["1"]["body"] = "Goal.\n\nStack on: acme/app#3\n"
+        things(self.fake)["3"]["isDraft"] = True
+        out = self.ok("pick-issue")
+        self.assertEqual((out["none"], out["reason"]), (True, "stack_held"))
+        self.assertEqual([(h["number"], h["ref"]) for h in out["stack_held"]], [(1, "acme/app#3")])
+        self.assertIn("draft", out["stack_held"][0]["reason"])
+        self.assertNotIn("Goal.", json.dumps(out))
+        things(self.fake)["3"]["isDraft"] = False  # ready now: picked, with the fact
+        out = self.ok("pick-issue")
+        self.assertEqual((out["number"], out["stack_held"]), (1, []))
+        self.assertEqual(out["issues"][0]["stack_on"]["head"], "feat/widget")
+
+    def test_issue_returns_the_stack_fact_and_survives_a_queue_config_error(self):
+        things(self.fake)["1"]["body"] = "Goal.\n\nOn top of: acme/app#3\n"
+        payload = self.ok("issue", "1")
+        self.assertEqual((payload["stack_on"]["ready"], payload["stack_on"]["stacks"]), (True, True))
+        self.assertEqual(payload["blocked_by"], [])
+        with mock.patch("notme.queue.BaseQueue.stacking", side_effect=ValueError("queue.stacking is broken")):
+            code, payload, _ = self.cli("issue", "1")
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["body"], things(self.fake)["1"]["body"])
+        self.assertEqual((payload["stack_on"], payload["blocked_by"]), (None, None))
+        self.assertTrue(any("stacking" in w for w in payload.get("warnings", [])))
+
     def test_pick_says_when_only_unassigned_issues_are_ready(self):
         things(self.fake)["1"]["assignees"] = []
         things(self.fake)["2"]["labels"] = ["to do"]

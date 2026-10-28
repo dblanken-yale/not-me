@@ -165,6 +165,7 @@ class BaseQueue:
                 raise ValueError(f"picking.value_max_chars must be a whole number of at least 1, got {cap!r}")
             self.value_max_chars = cap
         self._stack_facts: Dict[int, Optional[Dict[str, Any]]] = {}  # stack_on() by issue number
+        self._blockers: Dict[int, Optional[List[Dict[str, Any]]]] = {}  # blocked_by() by issue number
         self.target_epics_used: List[int] = []  # target epics the last candidates() honoured
         self.target_epics_ignored: List[Dict[str, Any]] = []  # [{number, reason}]: not found, closed, untrusted
 
@@ -360,7 +361,7 @@ class BaseQueue:
                         "age_days": (now - created).days if created else None,
                         "parent": c.parent, "position": c.position,
                         "target_epic": c.target_epic, "target_position": c.target[1] if c.target else None,
-                        "blocked_by": self._dependencies(c.number, "blocked_by"),
+                        "blocked_by": self.blocked_by(c.number),
                         "blocking": self._dependencies(c.number, "blocking"),
                         "stack_on": self.stack_on(c.number, c.author),
                         "reactions": self._reactions(c.number), "fields": self._fields_of(c), "board": c.board})
@@ -422,8 +423,10 @@ class BaseQueue:
         return value or "off"
 
     def blocked_by(self, n: int) -> Optional[List[Dict[str, Any]]]:
-        """Issues GitHub records as blocking n: repo, number, state; None when the read fails."""
-        return self._dependencies(n, "blocked_by")
+        """Issues GitHub records as blocking n: repo, number, state; None when the read fails. Read once per issue."""
+        if n not in self._blockers:
+            self._blockers[n] = self._dependencies(n, "blocked_by")
+        return self._blockers[n]
 
     def stack_on(self, n: int, author: Optional[str], body: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """The `Stack on:` fact of issue n (see stacking.stack_fact), or None: no honoured line, or the body
@@ -433,7 +436,7 @@ class BaseQueue:
                 issue = self._read_issue(n, "body")
                 body = issue.get("body") if issue else None
             self._stack_facts[n] = stack_fact(
-                self.gh, body=body, author_trusted=self.trusted(author), tracker=self.tracker,
+                self.gh, number=n, body=body, author_trusted=self.trusted(author), tracker=self.tracker,
                 stacking=self.stacking(), trusted=self.trusted,
                 blocked_by=lambda: self.blocked_by(n))
         return self._stack_facts[n]

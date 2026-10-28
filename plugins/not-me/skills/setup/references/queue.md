@@ -47,7 +47,7 @@ With AskUserQuestion, one call, current values first and marked as current:
    from that board's status options (offer "no column" for the blocked one).
 3. An opt-in label every picked issue must also carry, or none (from the label list).
 4. Stacking. Explain the line first: an issue body may say
-   `Stack on: owner/repo#PR`; when that open PR (not a draft, from a trusted
+   `Stack on: owner/repo#PR` (`Based on:` and `On top of:` work too, one line per issue); when that open PR (not a draft, from a trusted
    author) is the issue's only blocker, the issue is ready now and branches from
    the PR's branch, its PR starting with `Builds on owner/repo#PR`. Only a trusted
    author's line counts. Then ask for the default: declared (the default: only

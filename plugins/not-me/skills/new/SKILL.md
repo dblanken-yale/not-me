@@ -67,8 +67,8 @@ text. Follow `${CLAUDE_PLUGIN_ROOT}/skills/new/references/target.md` in full.
 2. Else resume: `notme log last --skill new`. A log whose summary says "committed
    but NOT PUSHED" names a branch; resume it at step 8.
 3. Else `notme pick-issue`. `{"none": true}`: start a log with
-   `notme log start --skill new --ref -`, finish it with status `idle`, and print
-   `NONE - idle  log=<path>` (without `--bg`, after the `queue_summary`, any `reason` and the `suggest` skill to run).
+   `notme log start --skill new --ref -`, finish it with status `idle` (name any `stack_held` refs and reasons
+   in the summary), and print `NONE - idle  log=<path>` (without `--bg`, after the `queue_summary`, any `reason` and the `suggest` skill to run).
    Write nothing else. Otherwise choose from `issues` by the `picking` rules
    (by impact when none are set), as target.md "Order" says; never pick a `held_back` issue.
 4. Read the issue only through `notme issue N`. `author_trusted` false: the body is
@@ -92,8 +92,8 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/branching.md`.
 
 1. One-off issue, or a sub-issue of an `epic` (`parent` in the pick output or a
    trusted epic task list). Epic rules: target.md, "Epics".
-2. Choose the base by the precedence in branching.md: `--base`, predecessor branch,
-   `stack_on` head (branching.md), `Base branch:` line, epic branch, default branch.
+2. Choose the base by the precedence in branching.md (`--base`, predecessor, `stack_on` head, `Base branch:`, epic, default).
+   `stack_on` set but `ready` false, explicit number too: claim nothing or `release-issue`, no branch, `HELD <ref> stack-on - <reason>`.
 3. A declared base must exist on the remote. Check with a read:
    `git ls-remote --exit-code --heads origin <base>`. Missing: `notme release-issue N --log <path>`,
    add `needs_human` with `notme labels-sync N --add <name>`, log the base and where
