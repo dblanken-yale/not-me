@@ -132,7 +132,7 @@ Output: tracker, source (labels or board), board ({owner, number} or null), elig
 
 ### `notme claim-issue`
 
-Claim an issue: assign, move to in progress, post the claim marker. Exit 3 when someone else holds it.
+Claim an issue: assign, move to in progress, post the claim marker. Exit 3 when someone else holds it. With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
 
 ```
 notme claim-issue N
@@ -144,11 +144,11 @@ notme claim-issue N
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: number, previous, now, marker_comment_id, run_id
+Output: number, previous, now, marker_comment_id, run_id; warnings when a queue.sync mirror write failed
 
 ### `notme release-issue`
 
-Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released.
+Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released. With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
 
 ```
 notme release-issue N [--to TO]
@@ -161,11 +161,11 @@ notme release-issue N [--to TO]
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: number, to, released
+Output: number, to, released; warnings when a queue.sync mirror write failed
 
 ### `notme move-issue`
 
-Move an issue to a state, optionally only when it is currently in another one.
+Move an issue to a state, optionally only when it is currently in another one. With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
 
 ```
 notme move-issue N --to STATE [--require-current STATE]
@@ -179,7 +179,7 @@ notme move-issue N --to STATE [--require-current STATE]
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: number, to, require_current
+Output: number, to, require_current; warnings when a queue.sync mirror write failed
 
 ### `notme issue`
 
