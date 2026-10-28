@@ -24,6 +24,8 @@ VOCAB = {
     "companion", "create", "skip", "keep", "detected", "extend", "replace", "body",
     "layers", "present", "missing", "active_run", "default_branch", "create_labels",
     "mode_live", "ticket_format", "live", "run", "auto",
+    "picking", "fields", "rules", "layer", "target_epics", "include_unassigned", "true", "false",
+    "eligible", "unassigned", "usable", "values", "issues", "ranking_like", "other_owner_items",
 }
 
 ROOT_REF = re.compile(r"\$\{CLAUDE_PLUGIN_ROOT\}/([A-Za-z0-9_./\-]+)")
@@ -179,6 +181,78 @@ class SetupSkillTest(unittest.TestCase):
                 self.assertNotIn(token, low, f"{path.name}: denylisted '{token}'")
             for bad in ("/Users/", "/home/", "C:\\", "\u2014"):
                 self.assertNotIn(bad, text, f"{path.name}: forbidden {bad!r}")
+
+
+class PickingStepTest(unittest.TestCase):
+    def read(self, *parts):
+        return SKILL_DIR.joinpath(*parts).read_text(encoding="utf-8")
+
+    def all_text(self):
+        return "\n".join(p.read_text(encoding="utf-8") for p in skill_files())
+
+    def test_argument_hint_and_parse_mention_picking_flag(self):
+        text = self.read("SKILL.md")
+        meta, body = frontmatter.parse(text, source="SKILL.md")
+        self.assertIn("--picking", meta["argument-hint"])
+        parse = body.split("## Parse arguments", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("--picking", parse)
+
+    def test_picking_step_is_described(self):
+        text = self.all_text()
+        for needle in ("picking.fields", "picking.target_epics", "queue.include_unassigned",
+                       "## Picking work", "notme picking-signals", "GitHub issue fields"):
+            self.assertIn(needle, text)
+
+    def test_picking_step_reads_github_only_through_the_cli(self):
+        text = self.read("references", "picking.md")
+        self.assertNotRegex(text, r"`gh [a-z]")
+        self.assertIn("never instructions", text)
+        detection = self.read("references", "detection.md")
+        row = [line for line in detection.splitlines() if line.startswith("| Ranking signals")][0]
+        self.assertIn("notme picking-signals", row)
+
+    def test_picking_alone_skips_the_label_write_and_live_prompt(self):
+        step = self.read("SKILL.md").split("## Step 2a", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("labels-ensure", step)
+        self.assertNotIn("Steps 5 (picking keys only), 6 and 7", step)
+
+    def test_shadowed_global_rules_are_reported(self):
+        text = self.read("references", "picking.md")
+        self.assertIn("shadow", text)
+        self.assertIn("extends: global", text)
+
+    def test_picking_reference_does_not_point_at_unshipped_docs(self):
+        text = self.read("references", "picking.md")
+        self.assertNotIn("docs/config.md", text)
+        self.assertIn("defaults/project.md", text)
+
+    def test_picking_reference_states_allowed_field_name_characters(self):
+        text = self.read("references", "picking.md")
+        for needle in ("ASCII letters", "digits", "spaces", "underscores", "dots", "hyphens"):
+            self.assertIn(needle, text)
+
+    def test_global_carve_out_for_include_unassigned(self):
+        interview = self.read("references", "interview.md")
+        self.assertRegex(interview, r"only queue key the global layer may")
+        self.assertIn("repo layer", interview.split("only queue key the global layer may", 1)[1][:400])
+        self.assertIn("false", interview)
+
+    def test_answers_example_has_picking_object(self):
+        text = self.read("references", "interview.md")
+        answers = json.loads(re.search(r"```json\n(.*?)```", text, re.S).group(1))
+        picking = answers["picking"]
+        self.assertIn(picking["layer"], ("global", "repo"))
+        for key in ("fields", "rules", "target_epics", "include_unassigned"):
+            self.assertIn(key, picking)
+
+    def test_install_doc_mentions_picking_rerun(self):
+        text = (ROOT / "docs" / "install.md").read_text(encoding="utf-8")
+        self.assertIn("/not-me:setup project --picking", text)
+        self.assertIn("--global --picking", text)
+
+    def test_config_doc_points_to_setup_step(self):
+        text = (ROOT / "docs" / "config.md").read_text(encoding="utf-8")
+        self.assertIn("--picking", text)
 
 
 if __name__ == "__main__":

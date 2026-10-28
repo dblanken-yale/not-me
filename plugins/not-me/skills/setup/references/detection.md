@@ -18,6 +18,7 @@ user what was found next to each question so most answers are a confirmation.
 | Environment start | README sections on running locally, `docker-compose*.yml`, a Makefile target named up or start | `## Environment start` |
 | Issue format | `.github/ISSUE_TEMPLATE/*`, then the ten most recent issues that have a goal and a checklist (`gh issue list --state all --limit 30 --json number,title,body`, read only) | `## Ticket format`, `## Issue readiness` |
 | PR template | `.github/pull_request_template.md` | `pr_template` (leave `auto` when found) |
+| Ranking signals (picking step) | `notme picking-signals` (a read): board fields and labels with counts over the eligible issues; no raw gh read; see `picking.md` | `picking.fields`, `## Picking work` |
 | Existing not-me docs | the `layers` part of `notme config --explain` | which layer wins per doc |
 
 ## Rules

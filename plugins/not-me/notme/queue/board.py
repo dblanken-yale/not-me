@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .. import claims
 from ..gh import _node, _num, _owner, login_of
 from . import UNMAPPED_COLUMN, BaseQueue, Candidate, Claim, field_name, field_selection, field_value, sibling_info
+from .sync import mirror, write_labels
 
 # abstract state -> key in queue.board_states. Other states (needs_work, question, ...) have no column.
 ABSTRACT_TO_BOARD = {"todo": "todo", "in_progress": "in_progress", "needs_review": "in_review", "blocked": "blocked"}
@@ -62,6 +63,7 @@ def status_options(gh: Any, owner: str, number: int, status_field: str) -> Optio
 
 
 class BoardQueue(BaseQueue):
+    source = "board"
 
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
@@ -205,21 +207,46 @@ class BoardQueue(BaseQueue):
                 self.unassign_if_claimed(n, added)
                 self.mark_released(n)
                 raise claims.ClaimLost(f"{self.tracker}#{n} moved to {now['status']!r} while claiming")
+        mirror(self, n, "in_progress")
         return Claim(number=n, previous="todo", now="in_progress", marker_comment_id=marker_id, run_id=self.run_id)
 
     def release(self, n: int, to: str = "todo") -> None:
         n = _num(n)
         board = self._fetch()
         self._set_status(board, self._item(board, n), to)
+        mirror(self, n, to)
         self.unassign_if_claimed(n)  # only when the claim assigned us, per its marker
         self.mark_released(n)
         self.unlock(n)
 
     def move(self, n: int, state: str, require_current: Optional[str] = None) -> None:
+        """Set the Status column for `state`. With queue.sync, the labels follow, and a state with no column
+        (needs_work, question, ...) is recorded by its label alone: the Status stays, and a label write that
+        fails is an error, since nothing else records the move. With queue.sync, a require_current that names a
+        column state also fails while the labels carry a state with no column and not the Status's own state: the
+        Status then predates them."""
         n = _num(n)
         board = self._fetch()
         item = self._item(board, n)
-        if require_current is not None and self.abstract(item["status"]) != require_current \
-                and not self.gh.dry_run:  # a dry run's earlier moves reached only the ledger
-            raise claims.ClaimLost(f"{self.tracker}#{n} is in {item['status']!r}, not {self.column(require_current)!r}")
+        labelled = self.sync and state not in ABSTRACT_TO_BOARD
+        if require_current is not None and not self.gh.dry_run:  # a dry run's earlier moves reached only the ledger
+            current = self.labels.current(self.gh.labels(self.tracker, n)) if self.sync else []
+            if self.sync and require_current not in ABSTRACT_TO_BOARD:
+                if require_current not in current:
+                    raise claims.ClaimLost(f"{self.tracker}#{n} is {', '.join(current) or 'in no state'}, "
+                                           f"not {require_current}")
+            else:
+                # The Status predates the labels only when they carry a state with no column and no longer carry
+                # the Status's own state; a label added next to it (needs_human via labels-sync --add) is not a move
+                newer = [s for s in current if s not in ABSTRACT_TO_BOARD]
+                if newer and self.abstract(item["status"]) not in current:
+                    raise claims.ClaimLost(f"{self.tracker}#{n} is labeled {', '.join(newer)}, so its Status "
+                                           f"{item['status']!r} is out of date; not {require_current}")
+                if self.abstract(item["status"]) != require_current:
+                    raise claims.ClaimLost(
+                        f"{self.tracker}#{n} is in {item['status']!r}, not {self.column(require_current)!r}")
+        if labelled:
+            write_labels(self, n, state)  # the only record of the move: its errors are the move's errors
+            return
         self._set_status(board, item, state)
+        mirror(self, n, state)

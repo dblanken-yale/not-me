@@ -9,7 +9,7 @@ The guard is a small safety net for an agent that is trying to follow the rules.
 - Claude Code calls the hook before every `Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and read tool call, and before GitHub MCP tools. Other MCP tools are not judged.
 - The hook looks at the call and either lets it through (exit code 0) or blocks it (exit code 2, with a message that goes back to Claude).
 - A blocked call does not run. Claude reads the message, does not retry, and records a question for you.
-- Every block in a not-me project is also appended to `<git-common-dir>/not-me/logs/guard.jsonl` with the time, tool, rule, reason, and target.
+- Every block in a not-me project is also appended to `<git-common-dir>/not-me/logs/guard.jsonl` with the time, tool, rule, reason, target, and `input`: what was blocked (the Bash command, the file path for file tools, else the tool's arguments without any content body at any depth). `input` is redacted before it is written (the operator token, the live-mode marker and epoch, values of variables, flags and argument keys named like a token, key, secret or password, the `--body`/`-b` or `<<<` value of `gh secret set` (not a value piped in), `Authorization` header values, passwords in URLs and in `curl -u user:pass`, and GitHub token shapes) and cut to 2000 characters. The file stays on your machine; nothing posts it to GitHub.
 
 ## Activation
 
@@ -202,6 +202,18 @@ Autonomous runs: do not retry; log a QUESTION naming the operator and continue.
 Relax this rule (not recommended): set guard.protected_branches: off and confirm_guard_off: [protected_branches] in .claude/not-me/project.md
 See effective config: /not-me:config
 ```
+
+A git write whose `-C`, `--git-dir` or `--work-tree` path is a shell variable (`git -C "$W" commit ...`) is blocked, because the guard does not expand variables. That covers every write the guard checks (commit, push, merge, rebase, cherry-pick, am, reset, branch changes, config writes, submodule and subtree commands, clean, checkout and switch), even when the path looks like the current checkout (`"$W/.."`). Checkout and switch count because the guard could not tell which checkout's branch changed, so a later commit in the same command would be judged on the wrong branch. Reads stay allowed: status, log and diff, `config --get`, `remote -v`, `remote show`, a plain branch list, `submodule status`, `clean -n`. A rule the command breaks on its own, such as force_push, is still named first. The block counts under other_repo, or under protected_branches when other_repo is off, since the unknown checkout may be on a protected branch; it passes only when both are off. Rewriting the command is the fix, so that message leaves out the "relax this rule" line:
+
+```
+not-me guard [other_repo]: blocked `git -C $W commit -m x`.
+Why: the guard does not expand shell variables in a `git -C` path.
+Instead: write the path out in full (`git -C /abs/path <sub> ...`); a rewritten command is checked afresh, so this is not a retry.
+Autonomous runs: do not retry; log a QUESTION naming the operator and continue.
+See effective config: /not-me:config
+```
+
+For `--git-dir` or `--work-tree` the Instead line says to drop that option and use `git -C /abs/path` with the path written out, since a literal `--git-dir` is blocked too. A git alias next to a variable path is blocked the same way, because the guard cannot look the alias up in a repo it cannot name; if the path resolves to the current checkout (`git -C "$W/.." fp`) and the alias is defined there, the alias's own rules (force push, protected branch) block first. Blocks that do not come from the unknown path, such as `git -C "$W" remote set-url ...` or a `GIT_DIR=` assignment, keep their own message.
 
 One detail in the message is misleading. It names `.claude/not-me/project.md` for "relax this rule", but the repo layer ignores that (see below), so use your global layer, `~/.claude/not-me/project.md`.
 

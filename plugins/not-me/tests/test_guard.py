@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -527,6 +528,45 @@ class MessageTests(unittest.TestCase):
         msg = guard.render(Block("self_protect", "x", command="y"), self.ctx())
         self.assertNotIn("Relax this rule", msg)
 
+    def test_variable_git_path_says_spell_it_out(self):
+        ctx = self.ctx()
+        ctx.git = lambda args, cwd: None
+        for cmd, opt in (("git -C $W commit -m x", "-C"), ('git -C "$W" push origin HEAD:refs/heads/x', "-C"),
+                         ("git --git-dir=$G commit -m x", "--git-dir"), ("git --work-tree `pwd` commit", "--work-tree"),
+                         ("git -C $W merge feature/y", "-C"), ("git -C $W reset --hard", "-C")):
+            with self.subTest(cmd=cmd):
+                r = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": "."}, ctx)
+                self.assertIsInstance(r, Block)
+                self.assertEqual(r.rule, "other_repo")
+                self.assertIn(f"Why: the guard does not expand shell variables in a `git {opt}` path.", r.message)
+                if opt == "-C":
+                    self.assertIn("Instead: write the path out in full (`git -C /abs/path <sub> ...`); a rewritten "
+                                  "command is checked afresh, so this is not a retry.", r.message)
+                else:
+                    self.assertIn(f"Instead: drop {opt} and run `git -C /abs/path <sub> ...` with the path written "
+                                  "out in full; a rewritten command is checked afresh, so this is not a retry.",
+                                  r.message)
+                self.assertNotIn("Relax this rule", r.message)
+                self.assertNotIn("no github origin", r.message)
+        r = guard.decide({"tool_name": "Bash", "tool_input": {"command": "git -C /nowhere commit -m x"}, "cwd": "."},
+                         ctx)
+        self.assertIn("no github origin", r.message)
+        self.assertIn("Relax this rule (not recommended): set guard.other_repo: off", r.message)
+        # with other_repo off the unknown path is still a possible protected branch; with both off it passes
+        def off(*names: str) -> GuardContext:
+            c = GuardContext(write_ctx=writes.GuardContext(
+                origin_repo="acme/app", allowed_repos=("acme/app",), protected_branches=("main",),
+                rules={r: r not in names for r in guard.RULES}))
+            c.git = lambda args, cwd: None
+            return c
+        ev = {"tool_name": "Bash", "tool_input": {"command": "git -C $W merge x"}, "cwd": "."}
+        r = guard.decide(ev, off("other_repo"))
+        self.assertIsInstance(r, Block)
+        self.assertEqual(r.rule, "protected_branches")
+        self.assertIn("shell variables in a `git -C` path", r.message)
+        self.assertNotIn("Relax this rule", r.message)
+        self.assertIsNone(guard.decide(ev, off("other_repo", "protected_branches")))
+
     def test_decide_fills_message_and_tool(self):
         ctx = self.ctx()
         ctx.git = lambda args, cwd: None
@@ -551,12 +591,286 @@ class BlocklogTests(unittest.TestCase):
         self.assertEqual(runlog.guard_log_path(guard.log_root(d)), p)
         rows = [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines()]
         self.assertEqual([r["rule"] for r in rows], ["force_push", "other_repo"])
-        self.assertEqual(set(rows[1]), {"ts", "tool", "rule", "reason", "target"})
+        self.assertEqual(set(rows[1]), {"ts", "tool", "rule", "reason", "target", "input"})
         self.assertEqual((rows[1]["tool"], rows[1]["target"]), ("Write", "acme/x"))
+        self.assertIsNone(rows[1]["input"])
         self.assertTrue(rows[0]["ts"].endswith("Z"))
         blocker = d / "file"
         blocker.write_text("x")
         runlog.guard_log_append(blocker / "guard.jsonl", {"rule": "force_push"})  # unwritable: no exception
+
+
+class BlocklogInputTests(unittest.TestCase):
+    """The guard log keeps what was blocked, redacted and capped, so a false positive can be reproduced."""
+
+    def setUp(self):
+        d = Path(tempfile.mkdtemp(prefix="notme-log-"))
+        self.addCleanup(shutil.rmtree, d, True)
+        self.home = d / "home"
+        self.home.mkdir()
+        self.ctx = GuardContext(common_dir=d / "git", home=self.home, env={})
+        self.log = d / "git" / "not-me" / "logs" / "guard.jsonl"
+
+    def secret_file(self, name, value):
+        (self.home / name).write_text(value + "\n", encoding="utf-8")
+
+    def logged(self, tool, tin):
+        guard.log_block(self.ctx, Block("force_push", "r", tool=tool), tin)
+        return json.loads(self.log.read_text(encoding="utf-8").splitlines()[-1])["input"]
+
+    def test_bash_logs_the_command(self):
+        self.assertEqual(self.logged("Bash", {"command": "git push --force origin main"}),
+                         "git push --force origin main")
+
+    def test_file_tools_log_the_path_never_the_body(self):
+        for tool, tin in (("Write", {"file_path": "/x/a.py", "content": "BODY"}),
+                          ("Edit", {"file_path": "/x/a.py", "old_string": "BODY", "new_string": "BODY"}),
+                          ("MultiEdit", {"file_path": "/x/a.py", "edits": [{"old_string": "BODY"}]}),
+                          ("Read", {"file_path": "/x/a.py"})):
+            with self.subTest(tool=tool):
+                self.assertEqual(self.logged(tool, tin), "/x/a.py")
+        self.assertEqual(self.logged("NotebookEdit", {"notebook_path": "/x/n.ipynb", "new_source": "BODY"}),
+                         "/x/n.ipynb")
+        self.assertNotIn("BODY", self.log.read_text(encoding="utf-8"))
+
+    def test_other_tools_log_compact_json_without_bodies(self):
+        got = self.logged("mcp__github__add_comment", {"owner": "acme", "repo": "x", "body": "BODY"})
+        self.assertEqual(json.loads(got), {"owner": "acme", "repo": "x"})
+        self.assertEqual(self.logged("Write", {"content": "BODY"}), "{}")
+
+    def test_missing_input_falls_back_to_block_command(self):
+        guard.log_block(self.ctx, Block("force_push", "r", tool="Bash", command="git push -f"))
+        self.assertEqual(json.loads(self.log.read_text(encoding="utf-8"))["input"], "git push -f")
+
+    def test_operator_token_and_live_files_are_redacted(self):
+        self.secret_file(guard.OPERATOR_TOKEN, "tok3n-abcdef123456")
+        self.secret_file(guard.LIVE_MARKER_NAME, "s1gnature-0011223344")
+        self.secret_file(guard.LIVE_EPOCH_NAME, "ep0ch-99887766")
+        got = self.logged("Bash", {"command": "echo tok3n-abcdef123456 s1gnature-0011223344 ep0ch-99887766 x"})
+        self.assertEqual(got, "echo [redacted] [redacted] [redacted] x")
+
+    def test_short_secret_file_values_are_not_used(self):
+        self.secret_file(guard.OPERATOR_TOKEN, "a")
+        self.assertEqual(self.logged("Bash", {"command": "cat a.txt"}), "cat a.txt")
+
+    def test_missing_secret_files_are_skipped(self):
+        self.assertEqual(self.logged("Bash", {"command": "git status"}), "git status")
+
+    def test_confirm_and_secret_named_assignments_keep_only_the_name(self):
+        cases = {
+            "NOT_ME_OPERATOR_CONFIRM=abc notme x": "NOT_ME_OPERATOR_CONFIRM=[redacted] notme x",
+            "GH_TOKEN=x gh pr list": "GH_TOKEN=[redacted] gh pr list",
+            "export GITHUB_TOKEN='a b c'; gh api": "export GITHUB_TOKEN=[redacted]; gh api",
+            'env api_key="q w" cmd': "env api_key=[redacted] cmd",
+            "AWS_SECRET_ACCESS_KEY=zz aws s3 ls": "AWS_SECRET_ACCESS_KEY=[redacted] aws s3 ls",
+            "DB_PASSWORD=hunter2 run": "DB_PASSWORD=[redacted] run",
+            "MY_SECRET=1&&x": "MY_SECRET=[redacted]&&x",
+            "tool --token=abc": "tool --token=[redacted]",
+            "FOO=bar BRANCH=main x": "FOO=bar BRANCH=main x",
+            "export GH_TOKEN+=more x": "export GH_TOKEN+=[redacted] x",
+            "TOKENS[0]=abc x": "TOKENS[0]=[redacted] x",
+            'TOKENS[$i]+="a b" x': "TOKENS[$i]+=[redacted] x",
+            "FOO[1]=bar BAR+=baz x": "FOO[1]=bar BAR+=baz x",
+            "NOT_ME_OPERATOR_CONFIRM=$(cat f) notme x": "NOT_ME_OPERATOR_CONFIRM=[redacted] notme x",
+            "GH_TOKEN=`cat f` gh x": "GH_TOKEN=[redacted] gh x",
+            "GH_TOKEN=a$(cat f)b gh x": "GH_TOKEN=[redacted] gh x",
+        }
+        for cmd, want in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.logged("Bash", {"command": cmd}), want)
+
+    def test_unclosed_quoted_secret_values_are_redacted(self):
+        cases = {
+            'TOKEN="abc def': "TOKEN=[redacted]",
+            "TOKEN='abc def": "TOKEN=[redacted]",
+            "TOKEN=$'abc def": "TOKEN=[redacted]",
+            "TOKEN=$(cat f": "TOKEN=[redacted]",
+            'TOKEN="multi\nline" x': "TOKEN=[redacted] x",
+        }
+        for cmd, want in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.logged("Bash", {"command": cmd}), want)
+
+    def test_quoted_secret_longer_than_both_cuts_is_redacted(self):
+        for quote in ('"', "'"):
+            with self.subTest(quote=quote):
+                cmd = "TOKEN=" + quote + "S" * (guard._LOG_SCAN + guard._LOG_SCAN_MARGIN + 100) + quote + " ; echo"
+                got = self.logged("Bash", {"command": cmd})
+                self.assertNotIn("SSSS", got)
+                self.assertTrue(got.startswith("TOKEN=[redacted]"))
+
+    def test_space_separated_secret_flags_are_redacted(self):
+        cases = {
+            "mysql --password hunter2hunter2 db": "mysql --password [redacted] db",
+            "tool --api-token 'a b' x": "tool --api-token [redacted] x",
+            "gh secret set FOO --body s3cr3tVALUE123": "gh secret set FOO --body [redacted]",
+            "gh secret set FOO -b s3cr3t -R acme/app": "gh secret set FOO -b [redacted] -R acme/app",
+            "gh secret set FOO --body=s3cr3t": "gh secret set FOO --body=[redacted]",
+            "curl -u user:hunter2hunter2 https://x": "curl -u user:[redacted] https://x",
+            "curl --user 'user:pw x' https://x": "curl --user 'user:[redacted] https://x",
+            "gh pr comment 1 -b hello": "gh pr comment 1 -b hello",
+            "curl -u user https://x": "curl -u user https://x",
+            "git commit --author me -m msg": "git commit --author me -m msg",
+            # a flag with no value before the secret one must not swallow it
+            "curl -sS -u alice:hunter2pw https://x": "curl -sS -u alice:[redacted] https://x",
+            "curl -k --password hunter2pw https://x": "curl -k --password [redacted] https://x",
+            "tool --verbose --api-token abcdef123 x": "tool --verbose --api-token [redacted] x",
+            "gh secret set NAME --no-x -b VALUESECRET": "gh secret set NAME --no-x -b [redacted]",
+            # hyphenated key flags, values glued to the short flag, here-strings
+            "tool --api-key abcdef123 x": "tool --api-key [redacted] x",
+            "tool --private-key abcdef123 x": "tool --private-key [redacted] x",
+            "gh secret set NAME -bVALUESECRET": "gh secret set NAME -b[redacted]",
+            "curl -ualice:hunter2pw https://x": "curl -ualice:[redacted] https://x",
+            "gh secret set NAME <<< VALUESECRET": "gh secret set NAME <<< [redacted]",
+            "gh secret set NAME<<<VALUESECRET": "gh secret set NAME<<<[redacted]",
+            # a secret inside the quoted value of a harmless flag or assignment
+            'bash -c "curl --password hunter2 https://x"': 'bash -c "curl --password [redacted] https://x"',
+            "sh -c 'curl -u alice:hunter2 https://x'": "sh -c 'curl -u alice:[redacted] https://x'",
+            'X="a GH_TOKEN=hunter2 b"': 'X="a GH_TOKEN=[redacted] b"',
+            # repo flag before the subcommand, combined short flags, a -u value without a colon
+            "gh secret -R o/r set X -b VALUESECRET": "gh secret -R o/r set X -b [redacted]",
+            "gh secret --repo o/r set X --body VALUESECRET": "gh secret --repo o/r set X --body [redacted]",
+            "curl -sSu alice:hunter2pw https://x": "curl -sSu alice:[redacted] https://x",
+            'curl -u "alice --password hunter2pw': 'curl -u "alice --password [redacted]',
+        }
+        for cmd, want in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.logged("Bash", {"command": cmd}), want)
+
+    def test_hyphenated_secret_json_keys_are_redacted(self):
+        got = json.loads(self.logged("mcp__x__call", {"api-key": "abcdef123", "private-key": "x", "name": "n"}))
+        self.assertEqual(got, {"api-key": "[redacted]", "private-key": "[redacted]", "name": "n"})
+
+    def test_auth_headers_and_github_token_shapes(self):
+        tok = "ghp_" + "A1" * 18
+        cases = {
+            'curl -H "Authorization: Bearer abc.def" u': 'curl -H "Authorization: Bearer [redacted]" u',
+            "curl -H 'authorization: token xyz' u": "curl -H 'authorization: token [redacted]' u",
+            f"echo {tok} done": "echo [redacted] done",
+            "echo github_pat_" + "x" * 30 + " done": "echo [redacted] done",
+        }
+        for cmd, want in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.logged("Bash", {"command": cmd}), want)
+
+    def test_long_input_is_capped_with_a_marker(self):
+        got = self.logged("Bash", {"command": "x" * (guard.LOG_INPUT_MAX + 50)})
+        self.assertEqual(len(got), guard.LOG_INPUT_MAX + len(guard.LOG_TRUNCATED))
+        self.assertTrue(got.endswith(guard.LOG_TRUNCATED))
+        self.assertEqual(self.logged("Bash", {"command": "x" * guard.LOG_INPUT_MAX}), "x" * guard.LOG_INPUT_MAX)
+
+    def test_no_secret_survives_the_cut(self):
+        secret = "tok3n-abcdef123456"
+        self.secret_file(guard.OPERATOR_TOKEN, secret)
+        cmd = "x" * (guard.LOG_INPUT_MAX - 6) + secret + " GH_TOKEN=supersecretvalue"
+        got = self.logged("Bash", {"command": cmd})
+        self.assertTrue(got.endswith(guard.LOG_TRUNCATED))
+        for part in (secret[:6], "supersecret"):
+            self.assertNotIn(part, got)
+
+    def test_nested_bodies_are_dropped_at_every_depth(self):
+        got = self.logged("mcp__github__push_files", {
+            "owner": "acme", "repo": "x", "files": [{"path": "a.py", "content": "BODY"}],
+            "review": {"comments": [{"path": "b.py", "line": 3, "body": "BODY"}]}})
+        self.assertEqual(json.loads(got), {"owner": "acme", "repo": "x", "files": [{"path": "a.py"}],
+                                           "review": {"comments": [{"line": 3, "path": "b.py"}]}})
+        got = self.logged("mcp__github__create_pull_request_review",
+                          {"pullNumber": 5, "comments": [{"path": "b.py", "body": "BODY"}]})
+        self.assertEqual(json.loads(got), {"pullNumber": 5, "comments": [{"path": "b.py"}]})
+
+    def test_secret_named_json_keys_are_redacted(self):
+        got = self.logged("mcp__x__call", {"token": "abc", "nested": [{"api_key": "def", "name": "n"}],
+                                           "password": {"inner": "v"}})
+        self.assertEqual(json.loads(got), {"token": guard.REDACTED, "password": guard.REDACTED,
+                                           "nested": [{"api_key": guard.REDACTED, "name": "n"}]})
+
+    def test_url_credentials_are_redacted(self):
+        long_tok = "x" * 20
+        cases = {
+            "git clone https://user:s3cret@gitlab.example/x": "git clone https://user:[redacted]@gitlab.example/x",
+            "curl ftp://u:p@h/f": "curl ftp://u:[redacted]@h/f",
+            f"git clone https://{long_tok}@github.com/a/b": "git clone https://[redacted]@github.com/a/b",
+            "git clone ssh://git@github.com/a/b": "git clone ssh://git@github.com/a/b",
+            "curl https://example.com/a@b": "curl https://example.com/a@b",
+        }
+        for cmd, want in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.logged("Bash", {"command": cmd}), want)
+
+    def test_mixed_quote_assignment_values_are_redacted_whole(self):
+        cases = {
+            'TOKEN=abc"def ghi" run': "TOKEN=[redacted] run",
+            "TOKEN=$'a b' run": "TOKEN=[redacted] run",
+            "TOKEN='a b'\"c d\"e run": "TOKEN=[redacted] run",
+            'X=1 GH_TOKEN="a"b\'c d\' cmd': "X=1 GH_TOKEN=[redacted] cmd",
+        }
+        for cmd, want in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.logged("Bash", {"command": cmd}), want)
+
+    def test_long_padded_command_is_logged_fast(self):
+        # a run like a.a.a. once made the URL scheme patterns quadratic: 100k chars took minutes, past the hook
+        # timeout, and a hook that times out does not block
+        for pad in ("a.", "a-", "a+"):
+            with self.subTest(pad=pad):
+                cmd = "git push --force origin main # " + pad * 50000
+                start = time.monotonic()
+                got = self.logged("Bash", {"command": cmd})
+                self.assertLess(time.monotonic() - start, 2.0)
+                self.assertTrue(got.startswith("git push --force origin main # "))
+                self.assertTrue(got.endswith(guard.LOG_TRUNCATED))
+                self.assertEqual(len(got), guard.LOG_INPUT_MAX + len(guard.LOG_TRUNCATED))
+
+    def test_redact_is_linear_on_scheme_like_runs(self):
+        for pad in ("a.", "a-", "a+", "a1", "a[", "a=$(", "a=`", "a='", 'a="'):
+            with self.subTest(pad=pad):
+                text = pad * 20000 + "://u:p"
+                start = time.monotonic()
+                guard._redact(text, [])
+                self.assertLess(time.monotonic() - start, 2.0)
+
+    def test_secret_straddling_the_scan_cut_never_shows_in_part(self):
+        # redacting shrinks the text, so the kept part can reach the place where the input was cut before redacting
+        secret = "tok3n-abcdef123456"
+        self.secret_file(guard.OPERATOR_TOKEN, secret)
+        for cut in (guard._LOG_SCAN, guard._LOG_SCAN + guard._LOG_SCAN_MARGIN):
+            for split in (1, 5, len(secret) - 1):
+                with self.subTest(cut=cut, split=split):
+                    head = "TOKEN=" + "v" * (cut - split - 7) + " "
+                    got = self.logged("Bash", {"command": head + secret + " tail"})
+                    self.assertIn(got, ("TOKEN=[redacted]" + guard.LOG_TRUNCATED,
+                                        "TOKEN=[redacted] " + guard.LOG_TRUNCATED))
+        tok = "ghp_" + "A1" * 18
+        head = "TOKEN=" + "v" * (guard._LOG_SCAN - 10 - 7) + " "
+        got = self.logged("Bash", {"command": head + tok + " tail"})
+        self.assertNotIn("ghp_", got)
+
+    def test_extraction_failure_never_raises(self):
+        with mock.patch.object(guard, "_redact", side_effect=RuntimeError("boom")):
+            self.assertIsNone(self.logged("Bash", {"command": "git push -f"}))
+
+
+class ModuleNamesTests(unittest.TestCase):
+    """A second module-level binding of a name silently replaces the first for every caller (a log regex once
+    shadowed the parser's assignment regex), so guard.py binds each top-level name once."""
+
+    def test_no_top_level_name_is_bound_twice(self):
+        import ast
+        tree = ast.parse(Path(guard.__file__).read_text(encoding="utf-8"))
+        seen, dupes = set(), []
+        for node in tree.body:
+            names = []
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names = [node.name]
+            elif isinstance(node, ast.Assign):
+                names = [n.id for t in node.targets for n in ast.walk(t) if isinstance(n, ast.Name)]
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                names = [node.target.id]
+            for name in names:
+                if name in seen:
+                    dupes.append(name)
+                seen.add(name)
+        self.assertEqual(dupes, [])
 
 
 class DoctorFixBoundaryTests(_Fixtures):
@@ -600,7 +914,9 @@ class HookTests(_Fixtures):
         self.assertEqual(proc.returncode, 2)
         self.assertIn(b"/not-me:allow-repo acme/other", proc.stderr)
         log = self.root / "app" / ".git" / "not-me" / "logs" / "guard.jsonl"
-        self.assertIn('"target": "acme/other"', log.read_text(encoding="utf-8"))
+        row = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(row["target"], "acme/other")
+        self.assertEqual(row["input"], "gh pr comment 1 -R acme/other -b x")
 
     def test_allow_and_inactive(self):
         self.assertEqual(self.hook(self.event("Bash", {"command": "git status"})).returncode, 0)

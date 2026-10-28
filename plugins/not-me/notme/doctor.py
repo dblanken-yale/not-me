@@ -213,7 +213,8 @@ def queue_check(meta: Mapping[str, Any], gh: GhClient, tracker: str, confirmed_b
     """A warning when the chosen queue source cannot work. Labels: the pick label (or the opt-in label) does not
     exist in the tracker, or queue.pick_label differs from labels.todo. Board: the write gate does not trust the
     board (confirmed_board is the guard's board, None when unconfirmed), it cannot be found, or a queue.board_states
-    column is not an option of its status field. Only reads; a GitHub error reports the check as not run."""
+    column is not an option of its status field. Labels with queue.sync on: the board checks as well, and a board
+    that is not set at all. Only reads; a GitHub error reports the check as not run."""
     where = describe(meta)
     if not where["ok"]:
         return _queue_failed(f"{where['summary']}; fix it with {QUEUE_FIX}")
@@ -221,6 +222,13 @@ def queue_check(meta: Mapping[str, Any], gh: GhClient, tracker: str, confirmed_b
     try:
         if where["source"] == "labels":
             problems = _label_problems(q, where, gh, tracker)
+            if q.get("sync") is True:
+                if board_ref(q) is None:
+                    problems.append("queue.sync is on and queue.board is not set, so the board Status cannot "
+                                    "follow; set queue.board.owner and queue.board.number in project.md or turn "
+                                    "queue.sync off")
+                else:
+                    problems += _board_problems(q, gh, confirmed_board, origin)
         else:
             problems = _board_problems(q, gh, confirmed_board, origin)
     except GhError as exc:

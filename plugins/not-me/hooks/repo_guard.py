@@ -51,7 +51,7 @@ def main(raw: "str | None" = None) -> int:
         if block is None:
             return 0
         if active:  # never write a log into a repo that is not a not-me project
-            guard.log_block(ctx, block)
+            guard.log_block(ctx, block, event.get("tool_input"))
         print(block.message, file=sys.stderr)
         return 2
     except Exception as exc:  # noqa: BLE001 - any failure must still produce a decision

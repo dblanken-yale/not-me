@@ -60,7 +60,7 @@ from functools import cached_property, lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, Iterator, List, Mapping, Optional, Set, Tuple
 
-from . import paths, runlog, writes
+from . import paths, redact, runlog, writes
 from .frontmatter import parse as parse_frontmatter  # stdlib only: no config stack
 from .writes import parse_origin, valid_slug
 
@@ -307,6 +307,8 @@ class Block:
     tool: str = ""
     message: str = ""
     rules: Tuple[str, ...] = ()  # for OPAQUE: the rules it may be reported under, in order
+    no_relax: bool = False  # the fix is to rewrite the command, so the message leaves out how to relax the rule
+    no_checkout: bool = False  # raised because the checkout (or its push URL) could not be resolved
 
 
 Decision = Optional[Block]  # None = allow
@@ -1063,7 +1065,7 @@ def render(block: Block, ctx: GuardContext) -> str:
         if block.hint:
             lines.append(f"Instead: {block.hint}.")
     lines.append("Autonomous runs: do not retry; log a QUESTION naming the operator and continue.")
-    if block.rule in RULES:
+    if block.rule in RULES and not block.no_relax:
         lines.append(f"Relax this rule (not recommended): set guard.{block.rule}: off and "
                      f"confirm_guard_off: [{block.rule}] in {CONFIG_HINT}")
     lines.append("See effective config: /not-me:config")
@@ -1136,7 +1138,9 @@ def _check_target(ctx: GuardContext, target: str, blk: Blk) -> Iterator[Block]:
 
 
 def _unknown_target(blk: Blk, why: str, fix: str) -> Block:
-    return blk("other_repo", f"could not tell which repo it targets ({why})", fix)
+    b = blk("other_repo", f"could not tell which repo it targets ({why})", fix)
+    b.no_checkout = True
+    return b
 
 
 _READ_TOOLS = ("Read", "NotebookRead", "LS", "Grep", "Glob")
@@ -2217,11 +2221,17 @@ def _cmd_git(t, c, st, ctx, blk, depth: int = 0):
     d = st.dir
     c_keys: List[str] = []
     redirect: Optional[str] = None
+    var_opt: Optional[str] = None  # the first -C, --git-dir or --work-tree whose path the shell fills in
+    var_redirect: Optional[str] = None  # the first --git-dir or --work-tree whose path the shell fills in
     i = 1
     while i < len(t) and t[i].startswith("-"):
         a = t[i]
         name, eq, val = a.partition("=")
         nxt = t[i + 1] if i + 1 < len(t) else ""
+        if (a == "-C" or name in ("--git-dir", "--work-tree")) and _unresolved(val if eq else nxt):
+            var_opt = var_opt or name
+            if name != "-C":
+                var_redirect = var_redirect or name
         if a == "-C":  # as typed: with unquoted backslashes bash would hand git a path that does not exist
             d = _norm(getattr(nxt, "raw", "") or nxt or ".", d)
             i += 2
@@ -2252,16 +2262,79 @@ def _cmd_git(t, c, st, ctx, blk, depth: int = 0):
         alias = st.once(("alias", d, sub), lambda: ctx.git(["config", "--get", f"alias.{sub}"], d))
         if alias:
             yield from _git_alias(alias, sub, args, t[:i], c, st, ctx, blk, depth)
+        if var_opt is not None:
+            # the alias that runs lives in the repo the shell names, which may not be the one looked up here: after
+            # any rules the alias found here raises (decide takes the first enabled one), fail closed
+            yield _var_path(blk, var_opt)
         return  # an external git-<name> program is outside the guard's view
     redirect = redirect or st.once(("git-env",), lambda: (lambda m: _short(m.group(0), 40) if m else None)(
         _GIT_ENV.search(st.plain_text)))
     if redirect and sub in _GIT_RULES and sub not in ("checkout", "switch"):
-        yield blk("other_repo", f"{redirect} changes which repository or config git uses",
-                  "run git without it, in the checkout it should change")
+        if var_redirect is not None:
+            yield _var_path(blk, var_redirect)
+        else:
+            yield blk("other_repo", f"{redirect} changes which repository or config git uses",
+                      "run git without it, in the checkout it should change")
         return
     handler = _GIT_RULES.get(sub)
     if handler is not None:
-        yield from handler(_GitCall(ctx, st, blk, d, sub, args))
+        for b in handler(_GitCall(ctx, st, blk, d, sub, args)):
+            # the guard looked for a checkout literally named $W: say so rather than blame the repo (blocks that do
+            # not come from the unresolved checkout keep their own message)
+            if var_opt is not None and b.no_checkout:
+                b = _var_path(blk, var_opt)
+            yield b
+        if var_opt is not None and not _git_reads(sub, args):
+            # the handler judged the checkout _norm made of the path ("$W" names nothing, "$W/.." names this one),
+            # not the one the shell will pick: after its own rules, fail closed on any write
+            yield _var_path(blk, var_opt)
+
+
+# git branch options that only list; git accepts abbreviated long options, so anything not spelled out here is a write
+_BRANCH_READ_SHORT = set("arvliq")
+_BRANCH_READ_LONG = {"--list", "--all", "--remotes", "--verbose", "--show-current", "--color", "--no-color", "--format",
+                     "--sort", "--ignore-case", "--column", "--no-column", "--abbrev", "--no-abbrev", "--quiet",
+                     "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--omit-empty"}
+
+
+def _branch_lists(args: List[str]) -> bool:
+    opts = [a for a in args if a.startswith("-")]
+    if not set(_short_flags(opts)) <= _BRANCH_READ_SHORT or \
+            any(a.startswith("--") and a.split("=", 1)[0] not in _BRANCH_READ_LONG for a in opts):
+        return False
+    return not _positionals(args) or "--list" in args or "l" in _short_flags(opts)
+
+
+def _git_reads(sub: str, args: List[str]) -> bool:
+    """A subcommand with a _GIT_RULES handler, used in a form that changes nothing git would push or keep."""
+    # checkout and switch are not reads here: the guard would track the branch of the wrong checkout, and a later
+    # commit or push in the same command would be judged on that drifted branch
+    if sub == "config":
+        return _config_reads(args)
+    if sub == "remote":
+        return _remote_verb(args) in ("", "show", "get-url")
+    if sub == "submodule":
+        return next((a for a in args if not a.startswith("-")), "") in ("", "status", "summary")
+    if sub == "clean":  # -e (or any abbreviation of --exclude) takes a value and -- starts pathspecs: no -n after them
+        opts = args[:args.index("--")] if "--" in args else args
+        flags = _short_flags(opts)
+        if "e" in flags or any(len(n) > 2 and "--exclude".startswith(n) for n in (a.split("=", 1)[0] for a in opts)):
+            return False
+        return "n" in flags or "--dry-run" in opts
+    if sub == "branch":
+        return _branch_lists(args)
+    return False
+
+
+def _var_path(blk: Blk, opt: str) -> Block:
+    fix = "write the path out in full (`git -C /abs/path <sub> ...`)" if opt == "-C" else \
+        f"drop {opt} and run `git -C /abs/path <sub> ...` with the path written out in full"
+    # the unknown checkout may be another repo or on a protected branch: reported under the first of those rules on
+    b = blk(OPAQUE, f"the guard does not expand shell variables in a `git {opt}` path",
+            fix + "; a rewritten command is checked afresh, so this is not a retry",
+            rules=("other_repo", "protected_branches"))
+    b.no_relax = True
+    return b
 
 
 def _git_alias(alias: str, sub: str, args: List[str], prefix: List[str], c: SimpleCommand, st: _State,
@@ -2340,9 +2413,16 @@ def _git_commit(c: _GitCall) -> Iterator[Block]:
         yield _unknown_target(c.blk, "the checkout has no github origin", "commit in a checkout of an allowed repo")
 
 
+def _remote_verb(args: List[str]) -> str:
+    """The git remote subcommand after every leading option ("" for a plain listing): git takes -vv, -v -v and
+    abbreviations such as --verb, so no option spelling may hide the verb."""
+    return next((a for a in args if not a.startswith("-")), "")
+
+
 def _git_remote(c: _GitCall) -> Iterator[Block]:
-    if c.args and c.args[0] in ("add", "set-url", "rename"):
-        yield c.blk("other_repo", f"git remote {c.args[0]} can redirect pushes", "ask the operator to change remotes")
+    verb = _remote_verb(c.args)
+    if verb in ("add", "set-url", "rename"):
+        yield c.blk("other_repo", f"git remote {verb} can redirect pushes", "ask the operator to change remotes")
 
 
 _CONFIG_READ_OPTS = {"--get", "--get-all", "--get-regexp", "--list", "-l", "--show-origin", "--show-scope", "--global",
@@ -2568,8 +2648,10 @@ def _git_push(c: _GitCall) -> Iterator[Block]:
     out = st.once(("push-urls", d, remote), lambda: ctx.git(["remote", "get-url", "--push", "--all", remote], d))
     urls = [u.strip() for u in (out or "").splitlines() if u.strip()]
     if not urls:
-        yield blk("other_repo", f"remote '{remote}' has no push URL here",
-                  "push to a remote that exists and points at an allowed repo")
+        b = blk("other_repo", f"remote '{remote}' has no push URL here",
+                "push to a remote that exists and points at an allowed repo")
+        b.no_checkout = True
+        yield b
     for url in urls:
         slug = parse_origin(url)
         if slug:
@@ -2742,12 +2824,175 @@ _COMMANDS: Dict[str, Callable[..., Iterator[Block]]] = {
 # --- log and self-test -----------------------------------------------------
 
 
-def log_block(ctx: GuardContext, block: Block) -> None:
-    """Append the block to the guard log in the default run-log root (none outside git)."""
+LOG_INPUT_MAX = 2000  # characters of the blocked input kept in a guard log line
+LOG_TRUNCATED = "...[truncated]"
+REDACTED = "[redacted]"
+_SECRET_FILE_MAX = 4096  # bytes read from a secret file; the token, marker and epoch are far shorter
+_SECRET_MIN = 8  # a secret file value shorter than this is not searched for (it would redact ordinary text)
+# the one field that says what a tool call touched; Write and Edit bodies are never logged
+_LOG_FIELD = {"Bash": "command", "Write": "file_path", "Edit": "file_path", "MultiEdit": "file_path",
+              "Read": "file_path", "NotebookEdit": "notebook_path", "NotebookRead": "notebook_path"}
+_LOG_BODY_KEYS = frozenset({"content", "old_string", "new_string", "edits", "new_source", "body"})
+# The log patterns run on what the model sent, inside the hook's timeout (a hook that times out does not block), so
+# each one must be linear: a match may only start where a run of its leading characters starts (the lookbehinds),
+# and every repeated part stops at a character that ends it.
+# A redacted value (after NAME=, NAME+=, NAME[index]=, a secret flag) is one shell word: a run of adjacent
+# double-quoted, $'...', single-quoted, $(...) without nesting, backquoted and unquoted (backslash-escaped) chunks.
+# A quoted chunk also ends at the end of the text, so a value whose closing quote is missing or past a cut is still
+# redacted. _LOG_ASSIGN is not the parser's _ASSIGN: that one decides what a command word is.
+_LOG_WORD = (r"""(?:"(?:[^"\\]|\\.)*(?:"|\\?\Z)|\$'(?:[^'\\]|\\.)*(?:'|\\?\Z)|'[^']*(?:'|\Z)|\$\([^()]*(?:\)|\Z)"""
+             r"""|`[^`]*(?:`|\Z)|\\.|[^\s;&|()<>`"'\\])+""")
+_LOG_WORD_RE = re.compile(_LOG_WORD, re.DOTALL)
+# What may come before a value: an assignment name, a flag (--password X, --token=X, -b X, glued -bX and -uX) or a
+# here-string. Only the name is matched, never the value, so a harmless flag or assignment does not swallow a secret
+# one after it or inside its quoted value; _redact_values reads the value.
+_LOG_ASSIGN = re.compile(r"(?<![A-Za-z0-9_$])([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\[\]\s]*\])?\+?=")
+_LOG_FLAG = re.compile(r"(?<![A-Za-z0-9_-])(?:(-[bu])(?=[^\s=-])|(--?[A-Za-z][A-Za-z0-9_-]*)(?:\s+|=))|<<<\s*")
+_LOG_BODY_FLAGS = frozenset({"-b", "--body"})
+_LOG_USER_FLAGS = frozenset({"-u", "--user"})
+_GH_SECRET = re.compile(r"\bsecret\b")  # gh secret [-R o/r] set: set may follow a repo flag
+_GH_SET = re.compile(r"\bset\b")
+_USER_SHORT = re.compile(r"-[A-Za-z]*u")  # -u, or combined short flags ending in it (curl -sSu user:pass)
+_SECRET_NAME = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|APIKEY|(?:^|_)KEY$|^NOT_ME_OPERATOR_CONFIRM$",
+                          re.IGNORECASE)
+_AUTH_HEADER = re.compile(r"(authorization:\s*(?:bearer|token|basic)\s+)[^\s\"']+", re.IGNORECASE)
+# scheme://user:password@ keeps the user; a lone user part of 16 or more characters is taken for a token
+_URL_PASSWORD = re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://[^@\s/:]+:)[^@\s/]+@")
+_URL_TOKEN_USER = re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://)[^@\s/:]{16,}@")
+# The input is cut before redacting so the work stays bounded: to _LOG_SCAN characters, and again to _LOG_SCAN plus
+# _LOG_SCAN_MARGIN. Only what both redacted cuts agree on is kept, so a secret no longer than the margin that one cut
+# splits (and so does not redact) never shows in part.
+_LOG_SCAN_MARGIN = _SECRET_FILE_MAX + 256
+_LOG_SCAN = LOG_INPUT_MAX + _LOG_SCAN_MARGIN
+
+
+def _secret_values(ctx: GuardContext) -> List[str]:
+    """The operator token, live-mode marker and epoch file values; read only when a block is logged."""
+    homes = {ctx.home, ctx.allowlist_path.parent}
+    found = []
+    for home in homes:
+        for name, _why, _hint in _HOME_GUARDED:
+            try:
+                with open(home / name, "rb") as fh:
+                    value = fh.read(_SECRET_FILE_MAX).decode("utf-8", "replace").strip()
+            except OSError:
+                continue
+            if len(value) >= _SECRET_MIN:
+                found.append(value)
+    return sorted(set(found), key=len, reverse=True)
+
+
+def _secret_name(name: str) -> bool:
+    """A variable, flag or argument key named like a token, key, secret or password (--api-key reads as API_KEY)."""
+    return bool(_SECRET_NAME.search(name.lstrip("-").replace("-", "_")))
+
+
+def _redact_values(text: str, names: "re.Pattern[str]", how: Callable[["re.Match[str]"], Optional[str]]) -> str:
+    """Redact the shell word after each match of names that how marks "all" (the whole word) or "colon" (after its
+    first colon, as in user:pass). A redacted value is consumed; a "colon" value with no colon is not, so a secret
+    flag inside it is still judged, but later "colon" matches inside it are skipped. So no span is scanned twice for
+    the same mode: linear."""
+    out: List[str] = []
+    pos = 0
+    colon_seen = 0  # end of the last "colon" value that held no colon
+    for m in names.finditer(text):
+        if m.start() < pos:
+            continue
+        mode = how(m)
+        if mode == "colon" and m.start() < colon_seen:
+            continue
+        word = _LOG_WORD_RE.match(text, m.end()) if mode else None
+        if word is None:
+            continue
+        value = word.group(0)
+        if mode == "colon" and ":" not in value:
+            colon_seen = word.end()
+            continue
+        if mode == "all":
+            out.append(text[pos:m.end()] + REDACTED)
+        else:
+            out.append(text[pos:m.end()] + value.split(":", 1)[0] + ":" + REDACTED)
+        pos = word.end()
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _redact(text: str, secrets: List[str]) -> str:
+    """Replace known secrets, secret-named assignment values, auth header values, URL credentials and GitHub
+    token shapes."""
+    for value in secrets:
+        text = text.replace(value, REDACTED)
+    text = _redact_values(text, _LOG_ASSIGN, lambda m: "all" if _secret_name(m.group(1)) else None)
+    secret = _GH_SECRET.search(text)
+    secret_set = bool(secret and _GH_SET.search(text, secret.end()))
+
+    def flag(m: "re.Match[str]") -> Optional[str]:
+        name = m.group(1) or m.group(2)
+        if name is None:  # a here-string: the body of gh secret set
+            return "all" if secret_set else None
+        if _secret_name(name) or (secret_set and name in _LOG_BODY_FLAGS):
+            return "all"
+        return "colon" if name in _LOG_USER_FLAGS or _USER_SHORT.fullmatch(name) else None
+
+    text = _redact_values(text, _LOG_FLAG, flag)
+    text = _AUTH_HEADER.sub(lambda m: m.group(1) + REDACTED, text)
+    text = _URL_PASSWORD.sub(lambda m: m.group(1) + REDACTED + "@", text)
+    text = _URL_TOKEN_USER.sub(lambda m: m.group(1) + REDACTED + "@", text)
+    for pattern in redact.TOKEN_PATTERNS:
+        text = pattern.sub(REDACTED, text)
+    return text
+
+
+def _loggable(value: Any) -> Any:
+    """A copy of a JSON-shaped tool input with body keys dropped and secret-named keys' values redacted, at every
+    depth (push_files carries files[].content, a review comments[].body)."""
+    if isinstance(value, dict):
+        return {k: REDACTED if isinstance(k, str) and _secret_name(k) else _loggable(v)
+                for k, v in value.items() if k not in _LOG_BODY_KEYS}
+    if isinstance(value, (list, tuple)):
+        return [_loggable(v) for v in value]
+    return value
+
+
+def _logged_input(ctx: GuardContext, block: Block, tool_input: Any) -> Optional[str]:
+    """What was blocked, redacted then capped (redacting first means the cut cannot expose part of a secret). Long
+    input is cut twice before redacting, to bound the work, and only the redacted text both cuts agree on is kept."""
+    text: Optional[str] = None
+    if isinstance(tool_input, dict):
+        field = tool_input.get(_LOG_FIELD.get(block.tool, ""))
+        if isinstance(field, str) and field:
+            text = field
+        else:
+            text = json.dumps(_loggable(tool_input), sort_keys=True, separators=(",", ":"), default=str)
+    elif isinstance(tool_input, str) and tool_input:
+        text = tool_input
+    elif block.command:
+        text = block.command
+    if text is None:
+        return None
+    secrets = _secret_values(ctx)
+    if len(text) <= _LOG_SCAN:
+        text = _redact(text, secrets)
+        return text if len(text) <= LOG_INPUT_MAX else text[:LOG_INPUT_MAX] + LOG_TRUNCATED
+    # a secret the shorter cut splits ends inside the longer one and is redacted there, so the two differ from where
+    # it starts; one the longer cut splits starts past the shorter one, so the agreed prefix stops before it
+    text = os.path.commonprefix([_redact(text[:_LOG_SCAN], secrets),
+                                 _redact(text[:_LOG_SCAN + _LOG_SCAN_MARGIN], secrets)])
+    return text[:LOG_INPUT_MAX] + LOG_TRUNCATED
+
+
+def log_block(ctx: GuardContext, block: Block, tool_input: Any = None) -> None:
+    """Append the block to the guard log in the default run-log root (none outside git), with the blocked input
+    (the Bash command or the tool's path, else its arguments without bodies) redacted and capped."""
     root = log_root(ctx.common_dir)
-    if root is not None:
-        runlog.guard_log_append(runlog.guard_log_path(root), {
-            "tool": block.tool, "rule": block.rule, "reason": block.reason, "target": block.target})
+    if root is None:
+        return
+    try:
+        shown = _logged_input(ctx, block, tool_input)
+    except Exception:  # noqa: BLE001 - logging never changes the decision
+        shown = None
+    runlog.guard_log_append(runlog.guard_log_path(root), {
+        "tool": block.tool, "rule": block.rule, "reason": block.reason, "target": block.target, "input": shown})
 
 
 # Variables a Windows child process needs to start at all: Python before 3.11 cannot seed its hash randomisation
