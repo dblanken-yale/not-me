@@ -245,40 +245,39 @@ class BoardSourceResyncTests(BoardTestCase):
 class PagingTests(LabelsSourceCase):
     """The board is read a page at a time up to a cap; a cut-short read is reported, never taken for "not on board"."""
 
-    def small(self, page, pages):
-        for name, value in (("BOARD_PAGE", page), ("BOARD_MAX_PAGES", pages)):
-            patcher = mock.patch.object(board_mod, name, value)
-            patcher.start()
-            self.addCleanup(patcher.stop)
+    def small(self, pages):
+        patcher = mock.patch.object(board_mod, "MAX_BOARD_PAGES", pages)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def fill(self, count, drifted):
+        for n in range(1, count + 1):
+            self.put(n, "To Do", ["needs review"] if n == drifted else ["to do"])
 
     def test_drift_past_the_first_page_is_found(self):
-        self.small(2, 5)
-        for n in (1, 2, 3, 4, 5):
-            self.put(n, "To Do", ["needs review"] if n == 5 else ["to do"])
+        self.fill(150, drifted=150)
         found = resync.read(self.q)
-        self.assertEqual([e["number"] for e in found["drift"]], [5])
+        self.assertEqual([e["number"] for e in found["drift"]], [150])
         self.assertFalse(found["truncated"])
-        self.assertEqual(found["read"], 5)
+        self.assertEqual(found["read"], 150)
 
     def test_a_board_past_the_cap_is_reported_truncated(self):
-        self.small(2, 2)
-        for n in (1, 2, 3, 4, 5):
-            self.put(n, "To Do", ["needs review"] if n == 5 else ["to do"])
+        self.small(1)
+        self.fill(150, drifted=150)
         found = resync.read(self.q)
-        self.assertEqual((found["truncated"], found["read"], found["drift"]), (True, 4, []))
+        self.assertEqual((found["truncated"], found["read"], found["drift"]), (True, 100, []))
         c = doctor.drift_check(found["drift"], found["board"], found["truncated"], found["read"])
         self.assertFalse(c["ok"])
-        self.assertIn("first 4 items", c["detail"])
+        self.assertIn("first 100 items", c["detail"])
 
     def test_issues_that_may_be_past_the_read_are_not_called_off_the_board(self):
-        self.small(2, 2)
-        for n in (1, 2, 3, 4, 5):
-            self.put(n, "To Do", ["to do"])
+        self.small(1)
+        self.fill(105, drifted=None)
         out = resync.resync(self.q)
         self.assertTrue(out["truncated"])
         self.assertEqual(out["changes"], [])
-        self.assertEqual([s["number"] for s in out["skipped"]], [5])
-        self.assertIn("not among the first 4 board items", out["skipped"][0]["reason"])
+        self.assertEqual([s["number"] for s in out["skipped"]], [101, 102, 103, 104, 105])
+        self.assertIn("not among the first 100 board items", out["skipped"][0]["reason"])
         self.assertNotIn("add the issue", out["skipped"][0]["reason"])
 
     def test_the_open_issue_list_being_cut_short_is_reported(self):

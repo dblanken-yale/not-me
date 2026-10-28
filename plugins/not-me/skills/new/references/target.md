@@ -85,7 +85,7 @@ Screen the trusted title, body and comments against the ten rules in
 3. Write a refusal comment file: the rule, the requester by login, what they can do
    by hand. Run `notme check-text --file <f>`, then
    `notme comment-upsert <tracker>#N --marker new --body-file <f> --log <path>`.
-4. Add `needs_human` with `notme labels-sync N --add <name> --log <path>`. The
+4. Add `needs_human` with `notme labels-sync N --add <name> --reason-file <reason> --log <path>`. The
    pick label stays.
 5. Log `REFUSED <what> requested by <login>` (`notme log action --kind REFUSED`).
 6. Result `STOP <ref> refused - <rule>`.
@@ -109,7 +109,7 @@ PR body under a `## Not done` line, and name the person who can do it by hand.
    `gh pr list --head <branch> --state open --json number,url`. Its ref goes in the
    PR body as `Builds on <owner>/<repo>#<n>` (see `pr-assembly.md`).
 6. A predecessor with no branch and no merged PR: the chain is not ready. Release
-   the issue (`notme release-issue N --to blocked --log <path>`) and stop with
+   the issue (`notme release-issue N --to blocked --reason-file <reason> --log <path>`, the reason file saying which predecessor is not started) and stop with
    `STOP <ref> blocked - predecessor <ref> not started`.
 
 ## Checklist

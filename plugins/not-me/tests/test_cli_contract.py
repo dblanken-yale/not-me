@@ -80,6 +80,11 @@ class CliCase(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         return str(path)
 
+    @property
+    def reason(self) -> str:
+        """A --reason-file for the commands that change a state."""
+        return self.write_file("reason.txt", "Because the test says so\n")
+
     def cli(self, *argv, stdin="", runner=None, hook_cmd=None, env=None, repo=True, project=True, prompt=None):
         """(exit code, parsed stdout object, stderr text). Fails the test unless stdout is exactly one object.
         prompt stands in for the hidden operator-token prompt (none by default)."""
@@ -334,13 +339,15 @@ class DryRunTests(CliCase):
         # queue-resync needs a confirmed board; issue 1 (labeled in progress, Status To Do) is out of step on it
         self.tc.write("repo", "project", "---\nschema: 1\nqueue: {board: {owner: acme, number: 6}}\n---\n# Project\n")
         self.ok("allow-repo", "add", "--board", "acme/6", "--everywhere")
+        reason = self.write_file("reason.txt", "Because the test says so\n")
         self.cases = {
             "claim-issue": ["claim-issue", "4"],
             "assign-issue": ["assign-issue", "4"],
-            "release-issue": ["release-issue", "1"],
-            "move-issue": ["move-issue", "1", "--to", "needs_review"],
-            "transition": ["transition", "1", "--from", "in_progress", "--to", "needs_review"],
-            "labels-sync": ["labels-sync", "1", "--set", "in progress,extra"],
+            "release-issue": ["release-issue", "1", "--reason-file", reason],
+            "move-issue": ["move-issue", "1", "--to", "needs_review", "--reason-file", reason],
+            "transition": ["transition", "1", "--from", "in_progress", "--to", "needs_review",
+                           "--reason-file", reason],
+            "labels-sync": ["labels-sync", "1", "--set", "in progress,extra", "--reason-file", reason],
             "labels-ensure": ["labels-ensure"],
             "queue-resync": ["queue-resync"],
             "reply-thread": ["reply-thread", "3", "--to", "501", "--body-file", body],

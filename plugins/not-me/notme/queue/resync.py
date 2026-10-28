@@ -13,7 +13,7 @@ source the Status should show the state label, with a board source the labels sh
 The report only reads. The fix goes through the same gated writes the queue.sync mirror uses (sync.set_labels and
 sync._set_board_status), so it follows the effective mode (dry-run reaches only the ledger), refuses a board the
 operator has not allowed before any board read, never adds an item to a board and never touches a closed issue.
-Limits: board items are read up to board.BOARD_PAGE * board.BOARD_MAX_PAGES, and open issues up to ISSUE_LIST_LIMIT.
+Limits: board items are read 100 at a time up to board.MAX_BOARD_PAGES pages, and open issues up to ISSUE_LIST_LIMIT.
 When either read is cut short the result says so (`truncated`, `issues_truncated`), drift beyond it is not listed, and
 an issue that may be past the board read is never called "not on the board".
 """
@@ -115,7 +115,7 @@ def read(q: Any, include_missing: bool = False) -> Dict[str, Any]:
                                 "beyond_read": board["truncated"]})
     return {"board": label, "drift": sorted(drift, key=lambda e: e["number"]),
             "not_on_board": sorted(missing, key=lambda e: e["number"]), "truncated": board["truncated"],
-            "read": board["read"], "issues_truncated": issues_truncated}
+            "read": len(board["items"]), "issues_truncated": issues_truncated}
 
 
 def describe(entry: Dict[str, Any]) -> str:

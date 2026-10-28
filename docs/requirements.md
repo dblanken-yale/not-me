@@ -76,7 +76,7 @@ not-me uses the login that `gh` already has. It never asks for a token and never
 | --- | --- |
 | `repo` | Issues, pull requests, labels, comments, reviews, and pushing branches |
 | `read:org` | Organisation and team lookups, such as asking a team to review. `gh` asks for it by default |
-| `project` | Only when `queue.source` is `board` (a Projects v2 board). Add it with `gh auth refresh -s project` |
+| `project` | Only when `queue.source` is `board` or `either` (a Projects v2 board). Add it with `gh auth refresh -s project` |
 
 `gh auth login` grants `repo` and `read:org` by default. If your organisation uses SAML single sign-on, authorise the token for that organisation too.
 

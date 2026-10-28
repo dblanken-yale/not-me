@@ -34,14 +34,17 @@ Run each read below; a failed read is not an error, just ask without that list.
 
 With AskUserQuestion, one call, current values first and marked as current:
 
-1. Source: labels, or a board. "Pick from both at once" is not offered: the
-   source owns an issue's state (see the Board queues section of the config guide).
-   When the tracker has the state labels and its owner has a board linked to the
-   repo, also offer `queue.sync: true` (keep the other side in step on every claim,
-   move and release); for it, ask for the board and its columns as for a board
-   source, even when the source is labels.
-2. Labels: which label marks an issue as ready, picked from the label list.
-   Board: which board, picked from the board list; then, in a second call, the
+1. Source: labels, a board, or "labels or board column (either)". `queue.source: either` picks an
+   issue with the label or in the board's To Do column and writes both sides on every
+   claim, move and release (see "Picking from labels or the board" in the config
+   guide); offer it when the tracker has the state labels and its owner has a board
+   linked to the repo, and ask in one pass for the label, the board and the column
+   mapping. Otherwise, when both exist, offer `queue.sync: true` (keep the other
+   side in step on every claim, move and release); for it, ask for the board and its
+   columns as for a board source, even when the source is labels. Never write
+   `queue.sync: false` next to `queue.source: either`: it is a config error.
+2. Labels (and either): which label marks an issue as ready, picked from the label list.
+   Board (and either): which board, picked from the board list; then, in a second call, the
    column for each of `queue.board_states.todo`, `queue.board_states.in_progress`,
    `queue.board_states.in_review` and `queue.board_states.blocked`, each picked
    from that board's status options (offer "no column" for the blocked one).
@@ -61,6 +64,7 @@ from the shipped default as in Step 5 of the skill, with only these keys live.
 |--------|--------------|
 | Labels | `queue.source: labels`, `queue.pick_label`, `labels.todo` (the same name), `queue.opt_in_label` |
 | Board | `queue.source: board`, `queue.board.owner`, `queue.board.number`, and `queue.board.status_field` when it is not the default, `queue.board_states`, `queue.opt_in_label` |
+| Either | `queue.source: either`, `queue.pick_label`, `labels.todo` (the same name), `queue.board.owner`, `queue.board.number`, and `queue.board.status_field` when it is not the default, `queue.board_states`, `queue.opt_in_label` |
 | Sync on | `queue.sync: true`, plus the board keys above (`queue.board.*`, `queue.board_states` from the board's real column names) whichever source was chosen |
 
 The labels source picks issues by the `labels.todo` label, so setup writes that
@@ -75,7 +79,7 @@ Then, as in Step 6 of the skill: show the diff, ask once, write, run
 
 - Labels: when the chosen label is missing from the tracker, run
   `notme labels-ensure --check` and ask before `notme labels-ensure`.
-- Board: a board in the repo layer is trusted for writes only once a person
+- Board and either: a board in the repo layer is trusted for writes only once a person
   confirms it. Print the exact command with this repo's origin and the board, for
   the user to run:
 

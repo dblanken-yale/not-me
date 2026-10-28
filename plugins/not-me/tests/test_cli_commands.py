@@ -245,7 +245,7 @@ class IssueTests(base.CliCase):
         issue = things(self.fake)["1"]
         self.assertEqual(issue["labels"], ["in progress"])
         self.assertEqual(issue["assignees"], ["octocat"])
-        self.assertEqual(self.ok("release-issue", "1", "--to", "blocked")["to"], "blocked")
+        self.assertEqual(self.ok("release-issue", "--reason-file", self.reason, "1", "--to", "blocked")["to"], "blocked")
         self.assertEqual(things(self.fake)["1"]["labels"], ["blocked"])
         self.assertEqual(things(self.fake)["1"]["assignees"], ["octocat"])  # assigned before the claim: kept
 
@@ -253,13 +253,13 @@ class IssueTests(base.CliCase):
         things(self.fake)["1"]["assignees"] = []
         self.ok("claim-issue", "1")
         self.assertEqual(things(self.fake)["1"]["assignees"], ["octocat"])
-        self.ok("release-issue", "1")
+        self.ok("release-issue", "--reason-file", self.reason, "1")
         self.assertEqual(things(self.fake)["1"]["assignees"], [])
 
     def test_move_issue_checks_the_required_state(self):
-        code, payload, _ = self.cli("move-issue", "1", "--to", "in_progress", "--require-current", "blocked")
+        code, payload, _ = self.cli("move-issue", "--reason-file", self.reason, "1", "--to", "in_progress", "--require-current", "blocked")
         self.assertEqual((code, payload["kind"]), (1, "state_mismatch"))
-        self.ok("move-issue", "1", "--to", "in_progress", "--require-current", "todo")
+        self.ok("move-issue", "--reason-file", self.reason, "1", "--to", "in_progress", "--require-current", "todo")
         self.assertEqual(things(self.fake)["1"]["labels"], ["in progress"])
 
     def test_sync_warning_reaches_the_output_and_the_run_log(self):
@@ -274,7 +274,7 @@ class IssueTests(base.CliCase):
         sync = [w for w in claim["warnings"] if w.startswith("queue.sync:")]
         self.assertEqual(len(sync), 1, claim["warnings"])
         self.assertIn("/not-me:allow-repo --board acme/6", sync[0])
-        moved = self.ok("move-issue", "1", "--to", "needs_review", "--log", start["path"])
+        moved = self.ok("move-issue", "--reason-file", self.reason, "1", "--to", "needs_review", "--log", start["path"])
         self.assertEqual(len([w for w in moved["warnings"] if w.startswith("queue.sync:")]), 1)
         text = Path(start["path"]).read_text(encoding="utf-8")
         self.assertRegex(text, r"ACTION  notme claim-issue 1")
@@ -289,7 +289,7 @@ class IssueTests(base.CliCase):
         self.ok("claim-issue", "1", "--log", start["path"])
         from notme.queue.labels import LabelQueue
         with mock.patch.object(LabelQueue, "mark_released", side_effect=gh_mod.GhError(["api"], 1, "boom")):
-            code, payload, _ = self.cli("release-issue", "1", "--log", start["path"])
+            code, payload, _ = self.cli("release-issue", "--reason-file", self.reason, "1", "--log", start["path"])
         self.assertEqual((code, payload["kind"]), (1, "gh_error"))
         self.assertEqual(len([w for w in payload.get("warnings", []) if w.startswith("queue.sync:")]), 1, payload)
         text = Path(start["path"]).read_text(encoding="utf-8")
@@ -308,7 +308,7 @@ class IssueTests(base.CliCase):
             return real(target, ctx)
 
         with mock.patch.object(writes_mod, "check_write", side_effect=refuse_repos):
-            code, payload, _ = self.cli("move-issue", "1", "--to", "needs_work")
+            code, payload, _ = self.cli("move-issue", "--reason-file", self.reason, "1", "--to", "needs_work")
         self.assertEqual((code, payload["kind"]), (6, "write_blocked"), payload)
         self.assertEqual(payload["allow_cmd"], f"/not-me:allow-repo {REPO}")
 
@@ -323,23 +323,23 @@ class IssueTests(base.CliCase):
         self.assertFalse([w for w in claim.get("warnings", []) if w.startswith("queue.sync:")])
 
     def test_transition_follows_edges(self):
-        code, payload, _ = self.cli("transition", "1", "--from", "todo", "--to", "ready_to_merge")
+        code, payload, _ = self.cli("transition", "--reason-file", self.reason, "1", "--from", "todo", "--to", "ready_to_merge")
         self.assertEqual((code, payload["kind"]), (1, "illegal_transition"))
-        payload = self.ok("transition", "1", "--from", "todo", "--to", "in_progress")
+        payload = self.ok("transition", "--reason-file", self.reason, "1", "--from", "todo", "--to", "in_progress")
         self.assertEqual(payload["labels"], ["in progress"])
-        pr = self.ok("transition", "3", "--kind", "pr", "--from", "needs_review", "--to", "needs_work")
+        pr = self.ok("transition", "--reason-file", self.reason, "3", "--kind", "pr", "--from", "needs_review", "--to", "needs_work")
         self.assertEqual(pr["labels"], ["needs work"])
 
     def test_dry_run_assumes_the_state_earlier_dry_run_steps_set(self):
-        moved = self.ok("move-issue", "1", "--to", "needs_review", "--require-current", "in_progress", "--dry-run")
+        moved = self.ok("move-issue", "--reason-file", self.reason, "1", "--to", "needs_review", "--require-current", "in_progress", "--dry-run")
         self.assertEqual(moved["to"], "needs_review")
-        payload = self.ok("transition", "1", "--from", "in_progress", "--to", "needs_review", "--dry-run")
+        payload = self.ok("transition", "--reason-file", self.reason, "1", "--from", "in_progress", "--to", "needs_review", "--dry-run")
         self.assertEqual(payload["labels"], ["needs review"])
         self.assertEqual(self.fake.writes_made(), [])
         self.assertEqual(things(self.fake)["1"]["labels"], ["to do"])
-        code, payload, _ = self.cli("transition", "1", "--from", "in_progress", "--to", "needs_review")
+        code, payload, _ = self.cli("transition", "--reason-file", self.reason, "1", "--from", "in_progress", "--to", "needs_review")
         self.assertEqual((code, payload["kind"]), (1, "illegal_transition"))
-        code, payload, _ = self.cli("transition", "1", "--from", "todo", "--to", "ready_to_merge", "--dry-run")
+        code, payload, _ = self.cli("transition", "--reason-file", self.reason, "1", "--from", "todo", "--to", "ready_to_merge", "--dry-run")
         self.assertEqual((code, payload["kind"]), (1, "illegal_transition"))
 
     def test_issue_withholds_text_from_untrusted_authors(self):
@@ -397,7 +397,7 @@ class IssueTests(base.CliCase):
         payload = self.ok("labels-sync", "1", "--add", "extra", "--remove", "to do", "--check")
         self.assertFalse(payload["in_sync"])
         self.assertEqual(things(self.fake)["1"]["labels"], ["to do"])
-        payload = self.ok("labels-sync", "1", "--add", "extra", "--remove", "to do")
+        payload = self.ok("labels-sync", "1", "--add", "extra", "--remove", "to do", "--reason-file", self.reason)
         self.assertEqual(things(self.fake)["1"]["labels"], ["extra"])
         self.assertTrue(payload["changed"])
         self.assertTrue(self.ok("labels-sync", "1", "--set", "extra")["in_sync"])
@@ -1257,6 +1257,22 @@ class QueueDriftCliTests(base.CliCase):
         self.assertEqual([c for c in self.fake.calls if "graphql" in c], [])
         self.assertEqual(self.fake.writes_made(), [])
 
+    def test_queue_resync_of_a_label_says_why_on_the_issue(self):
+        self.tc.write("repo", "project", "---\nschema: 1\nqueue: {source: board, board: {owner: acme, number: 6}}"
+                                         "\n---\n# Project\n")
+        things(self.fake)["1"]["labels"] = ["to do"]
+        self.fake.state["board"]["items"][0]["status"] = "In progress"
+        out = self.ok("queue-resync")
+        self.assertEqual([(c["side"], c["result"], c["commented"]) for c in out["changes"]],
+                         [("labels", "changed", True)])
+        self.assertEqual(things(self.fake)["1"]["labels"], ["in progress"])
+        bodies = [c["body"] for c in things(self.fake)["1"]["comments"]]
+        self.assertTrue(any("State label changed from `to do` to `in progress`" in b for b in bodies), bodies)
+
+    def test_queue_resync_of_a_status_posts_no_comment(self):
+        self.ok("queue-resync")
+        self.assertEqual(things(self.fake)["1"]["comments"], [])
+
     def test_queue_resync_when_paused_exits_with_the_paused_kind_and_writes_nothing(self):
         self.ok("pause", "on")
         code, payload, _ = self.cli("queue-resync")
@@ -1266,11 +1282,12 @@ class QueueDriftCliTests(base.CliCase):
 
     def test_status_says_when_the_board_read_was_cut_short(self):
         from notme.queue import board as board_mod
-        self.fake.state["board"]["items"].append({"id": "PVTI_2", "repo": REPO, "number": 2, "status": "To Do"})
-        with mock.patch.object(board_mod, "BOARD_PAGE", 1), mock.patch.object(board_mod, "BOARD_MAX_PAGES", 1):
+        for n in range(2, 102):
+            self.fake.state["board"]["items"].append({"id": f"PVTI_{n}", "repo": REPO, "number": n, "status": "To Do"})
+        with mock.patch.object(board_mod, "MAX_BOARD_PAGES", 1):
             payload = self.ok("status")
         self.assertTrue(payload["queue_drift_truncated"])
-        self.assertTrue(any("first 1 board items" in w for w in payload["warnings"]), payload["warnings"])
+        self.assertTrue(any("board items were read" in w for w in payload["warnings"]), payload["warnings"])
 
     def test_queue_resync_without_a_board_is_an_error_that_names_the_setting(self):
         self.tc.write("repo", "project", "---\nschema: 1\n---\n# Project\n")

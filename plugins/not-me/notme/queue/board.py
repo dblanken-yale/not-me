@@ -5,8 +5,8 @@ can change when a column is renamed. Claiming is read-then-write and is NOT atom
 compare-and-set for a board field, so claim() re-reads the Status after writing and reports ClaimLost if it
 is not what it set.
 
-Limits: board items are read BOARD_PAGE at a time, up to BOARD_MAX_PAGES pages (so BOARD_PAGE * BOARD_MAX_PAGES
-items); a board with more reports `truncated` and the rest are not seen. Only issues from the tracker repo count.
+Limits: board items are read 100 at a time, up to MAX_BOARD_PAGES pages (the board dict then says truncated), and
+only issues from the tracker repo count.
 """
 from __future__ import annotations
 
@@ -27,15 +27,13 @@ _PROJECT_STATUS = (
     "id field(name:\"{status}\"){... on ProjectV2SingleSelectField{id options{id name}}}"
 )
 _CLOSE = "}}}}"
-BOARD_PAGE = 100  # items per request
-BOARD_MAX_PAGES = 5  # pages read per board: a bound, not a default; a bigger board is reported as truncated
-_CURSOR_RE = re.compile(r"[A-Za-z0-9_=+/-]+")
+MAX_BOARD_PAGES = 10  # 1000 items; a longer board is read as far as this and reported as truncated
 _QUERY = (
     _PROJECT_STATUS
-    + "items(first:{first}{after}){nodes{id fieldValueByName(name:\"{status}\"){... on ProjectV2ItemFieldSingleSelectValue{name}}"
+    + "items(first:100{after}){pageInfo{hasNextPage endCursor} nodes{id fieldValueByName(name:\"{status}\"){... on ProjectV2ItemFieldSingleSelectValue{name}}"
     "{fields}"
     "content{... on Issue{number title url state createdAt author{login __typename} labels(first:50){nodes{name}} "
-    "assignees(first:20){nodes{login}} repository{nameWithOwner}}}} pageInfo{hasNextPage endCursor}}"
+    "assignees(first:20){nodes{login}} repository{nameWithOwner}}}}}"
     + _CLOSE
 )
 _OPTIONS_QUERY = _PROJECT_STATUS + _CLOSE
@@ -82,30 +80,33 @@ class BoardQueue(BaseQueue):
 
     # --- reading the board ---
 
-    def _pages(self) -> Tuple[Dict[str, Any], List[Dict[str, Any]], bool]:
-        """(project, item nodes, truncated): every page up to BOARD_MAX_PAGES; truncated when more remain."""
-        nodes: List[Dict[str, Any]] = []
-        after, project = "", {}
-        for _ in range(BOARD_MAX_PAGES):
-            query = (_QUERY.replace("{n}", str(self.number)).replace("{status}", self.status_field)
-                     .replace("{fields}", field_selection(self.read_fields)).replace("{first}", str(BOARD_PAGE))
-                     .replace("{after}", f',after:"{after}"' if after else ""))
-            data = self.gh.read(["api", "graphql", "-f", f"query={query}", "-f", f"owner={self.owner}"])
+    def _fetch(self) -> Dict[str, Any]:
+        """The board, its Status options and its items, page by page. truncated is true when the board has more
+        items than MAX_BOARD_PAGES pages hold: an issue not among the items may still be on the board."""
+        base = (_QUERY.replace("{n}", str(self.number)).replace("{status}", self.status_field)
+                .replace("{fields}", field_selection(self.read_fields)))
+        project: Dict[str, Any] = {}
+        nodes: List[Any] = []
+        cursor, truncated = None, False
+        for page in range(MAX_BOARD_PAGES):
+            extra: List[str] = []
+            if cursor is None:
+                query = base.replace("{after}", "")
+            else:  # a cursor from GitHub, passed as a variable and never put in the query text
+                query = base.replace("{after}", ",after:$after").replace("query($owner:String!)",
+                                                                         "query($owner:String!,$after:String)")
+                extra = ["-f", f"after={cursor}"]
+            data = self.gh.read(["api", "graphql", "-f", f"query={query}", "-f", f"owner={self.owner}", *extra])
             project = (((data or {}).get("data") or {}).get("repositoryOwner") or {}).get("projectV2")
             if not project:
                 raise LookupError(f"board {self.owner}/{self.number} not found")
-            page = project.get("items") or {}
-            nodes += page.get("nodes") or []
-            info = page.get("pageInfo") or {}
-            after = str(info.get("endCursor") or "")
-            if not info.get("hasNextPage"):
-                return project, nodes, False
-            if not _CURSOR_RE.fullmatch(after):
-                break  # a cursor that cannot go into the query: stop and say so
-        return project, nodes, True
-
-    def _fetch(self) -> Dict[str, Any]:
-        project, nodes, truncated = self._pages()
+            found = project.get("items") or {}
+            nodes += found.get("nodes") or []
+            info = found.get("pageInfo") or {}
+            if not info.get("hasNextPage") or not info.get("endCursor"):
+                break
+            cursor = info["endCursor"]
+            truncated = page == MAX_BOARD_PAGES - 1
         field = project.get("field") or {}
         items = []
         for node in nodes:
@@ -123,9 +124,8 @@ class BoardQueue(BaseQueue):
                 "field_values": [field_value(node.get(f"p{i}"), self.value_max_chars)
                                  for i in range(len(self.read_fields))],
             })
-        return {"project_id": project.get("id"), "field_id": field.get("id"),
-                "options": {o["name"]: o["id"] for o in field.get("options") or []}, "items": items,
-                "truncated": truncated, "read": len(nodes)}
+        return {"project_id": project.get("id"), "field_id": field.get("id"), "truncated": truncated,
+                "options": {o["name"]: o["id"] for o in field.get("options") or []}, "items": items}
 
     def _item(self, board: Dict[str, Any], n: int) -> Dict[str, Any]:
         for item in board["items"]:
@@ -235,7 +235,9 @@ class BoardQueue(BaseQueue):
     def release(self, n: int, to: str = "todo") -> None:
         n = _num(n)
         board = self._fetch()
-        self._set_status(board, self._item(board, n), to)
+        item = self._item(board, n)
+        self._set_status(board, item, to)
+        self.change = {"from": self.abstract(item["status"]) or item["status"], "to": to, "column": self.column(to)}
         mirror(self, n, to)
         self.unassign_if_claimed(n)  # only when the claim assigned us, per its marker
         self.mark_released(n)
@@ -269,6 +271,10 @@ class BoardQueue(BaseQueue):
                         f"{self.tracker}#{n} is in {item['status']!r}, not {self.column(require_current)!r}")
         if labelled:
             write_labels(self, n, state)  # the only record of the move: its errors are the move's errors
+            self.change = {"from": self.abstract(item["status"]) or item["status"], "to": state,
+                           "label": self.labels.name(state)}
             return
         self._set_status(board, item, state)
+        self.change = {"from": self.abstract(item["status"]) or item["status"], "to": state,
+                       "column": self.column(state)}
         mirror(self, n, state)
