@@ -110,6 +110,7 @@ class CheckTests(unittest.TestCase):
             ("protected_branches: main\n", "protected_branches"),
             ("schema: 7\n", "schema"),
             ("guard: {force_push: maybe}\n", "guard.force_push"),
+            ("queue: {sync: yes please}\n", "queue.sync"),
         ]
         for text, key in cases:
             with self.subTest(key):

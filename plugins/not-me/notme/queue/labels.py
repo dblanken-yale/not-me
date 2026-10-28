@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 from .. import claims, states
 from ..gh import _num, login_of
 from . import BaseQueue, Candidate, Claim, sibling_info
+from .sync import mirror
 
 _LIST_FIELDS = "number,title,body,state,labels,assignees,author,createdAt,url"
 _TASK_RE = re.compile(r"^\s*[-*]\s*\[ \]\s*(?:([A-Za-z0-9][\w.-]*/[\w.-]+))?#(\d+)\b", re.M)
@@ -72,6 +73,7 @@ def is_stale(issue: Dict[str, Any], claim_stale_hours: float, branches: Sequence
 
 
 class LabelQueue(BaseQueue):
+    source = "labels"
 
     # --- reading ---
 
@@ -161,6 +163,7 @@ class LabelQueue(BaseQueue):
         marker_id = self.upsert_marker(n, assigned="claim" if added else None)
         if not self.gh.dry_run:
             self._check_timeline(n, added)
+        mirror(self, n, "in_progress")
         return Claim(number=n, previous="todo", now="in_progress", marker_comment_id=marker_id, run_id=self.run_id)
 
     def _check_timeline(self, n: int, added: bool) -> None:
@@ -231,19 +234,23 @@ class LabelQueue(BaseQueue):
         if not remaining:
             self._relabel(n, "todo")
 
-    def _relabel(self, n: int, to: str) -> None:
+    def _relabel(self, n: int, to: str) -> bool:
+        """Move in_progress to `to`; True when it wrote, False when the issue was not in progress."""
         names = self.gh.labels(self.tracker, n)
         if self.gh.dry_run and self._has(names, "todo"):  # a dry-run claim set in_progress only in the ledger
             names = states.as_if(names, "in_progress", self.labels)
-        if self._has(names, "in_progress"):
-            self.gh.labels_set(self.tracker, n, states.transition(names, "in_progress", to, self.labels))
+        if not self._has(names, "in_progress"):
+            return False
+        self.gh.labels_set(self.tracker, n, states.transition(names, "in_progress", to, self.labels))
+        return True
 
     def release(self, n: int, to: str = "todo") -> None:
         """Give the issue back: unassign us (only if the claim assigned us, per its marker), move in_progress to
         `to`, mark our comment released, drop the lock."""
         n = _num(n)
         self.unassign_if_claimed(n)
-        self._relabel(n, to)
+        if self._relabel(n, to):
+            mirror(self, n, to)
         self.mark_released(n)
         self.unlock(n)
 
@@ -257,3 +264,4 @@ class LabelQueue(BaseQueue):
         if frm is None:
             raise states.IllegalTransition(f"{self.tracker}#{n} carries no state label to move from")
         states.apply(self.gh, self.tracker, n, frm, state, self.labels)
+        mirror(self, n, state)

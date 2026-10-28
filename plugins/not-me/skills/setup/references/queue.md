@@ -34,8 +34,12 @@ Run each read below; a failed read is not an error, just ask without that list.
 
 With AskUserQuestion, one call, current values first and marked as current:
 
-1. Source: labels, or a board. "Both at once" is not offered: an issue queue has
-   one owner of its state today (see the Board queues section of the config guide).
+1. Source: labels, or a board. "Pick from both at once" is not offered: the
+   source owns an issue's state (see the Board queues section of the config guide).
+   When the tracker has the state labels and its owner has a board linked to the
+   repo, also offer `queue.sync: true` (keep the other side in step on every claim,
+   move and release); for it, ask for the board and its columns as for a board
+   source, even when the source is labels.
 2. Labels: which label marks an issue as ready, picked from the label list.
    Board: which board, picked from the board list; then, in a second call, the
    column for each of `queue.board_states.todo`, `queue.board_states.in_progress`,
@@ -57,6 +61,7 @@ from the shipped default as in Step 5 of the skill, with only these keys live.
 |--------|--------------|
 | Labels | `queue.source: labels`, `queue.pick_label`, `labels.todo` (the same name), `queue.opt_in_label` |
 | Board | `queue.source: board`, `queue.board.owner`, `queue.board.number`, and `queue.board.status_field` when it is not the default, `queue.board_states`, `queue.opt_in_label` |
+| Sync on | `queue.sync: true`, plus the board keys above (`queue.board.*`, `queue.board_states` from the board's real column names) whichever source was chosen |
 
 The labels source picks issues by the `labels.todo` label, so setup writes that
 name to `labels.todo` and to `queue.pick_label` together; say so to the user, since

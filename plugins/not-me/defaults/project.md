@@ -13,7 +13,8 @@ queue:                           # where work is picked from
   include_unassigned: false      # false = only issues assigned to the operator; true also picks unassigned ones; the repo layer may set false, never true over a global false
   list_limit: 10                 # most eligible issues pick-issue lists with facts (about three reads each); the run chooses among them
   board: {owner: null, number: null, status_field: Status}  # project board used when source = board
-  board_states: {todo: To Do, in_progress: In progress, in_review: In review, blocked: Blocked}  # board column names
+  board_states: {todo: To Do, in_progress: In progress, in_review: In review, blocked: Blocked}  # board column names; map them to the board's real columns
+  sync: false                    # true = each claim, move and release also updates the side source does not read (labels or board Status); a board named in the repo layer must be confirmed on the global allow list
 picking:                         # how /not-me:new chooses among eligible issues; the rules are the Picking work section below; any layer may set these
   fields: []                     # board field names whose values pick-issue lists for each issue, e.g. [Priority]
   target_epics: []               # epic issue numbers to finish first, in this order; one counts only when a trusted roster member wrote it
