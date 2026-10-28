@@ -1806,6 +1806,12 @@ for cmd in ("python3 -c 'print(1)'", "shellcheck $(git ls-files '*.sh')", "cd su
             "FOO=1 git push origin feature/x", "git log --ext-diff -p", "git frobnicate", "python3 scripts/tool.py",
             "bash scripts/validate-plugins.sh", "python3 -m pytest -k push", "echo 'it''s'", "sed -i 's/a/b/' README.md"):
     bash(A, None, cmd)
+# an array-element or append assignment prefix (a[0]=1, X+=1) is an assignment, not the command word
+bash(B, DG, "a[0]=1 gh repo delete acme/app --yes")
+bash(B, OR, "a[0]=1 gh pr comment 1 --repo acme/other -b x")
+bash(B, OR, "X+=1 gh pr comment 1 --repo acme/other -b x")
+for cmd in ("a[0]=1 git push origin feature/x", "a[0]=1 git reset --hard HEAD~1"):
+    bash(A, None, cmd)
 KEEP_END = len(CASES)
 
 # Substrings a block message must contain, by case id.
