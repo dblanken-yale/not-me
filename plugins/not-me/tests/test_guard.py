@@ -463,7 +463,8 @@ class MessageTests(unittest.TestCase):
         ctx = self.ctx()
         ctx.git = lambda args, cwd: None
         for cmd, opt in (("git -C $W commit -m x", "-C"), ('git -C "$W" push origin HEAD:refs/heads/x', "-C"),
-                         ("git --git-dir=$G commit -m x", "--git-dir"), ("git --work-tree `pwd` commit", "--work-tree")):
+                         ("git --git-dir=$G commit -m x", "--git-dir"), ("git --work-tree `pwd` commit", "--work-tree"),
+                         ("git -C $W merge feature/y", "-C"), ("git -C $W reset --hard", "-C")):
             with self.subTest(cmd=cmd):
                 r = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": "."}, ctx)
                 self.assertIsInstance(r, Block)

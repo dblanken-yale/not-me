@@ -203,7 +203,7 @@ Relax this rule (not recommended): set guard.protected_branches: off and confirm
 See effective config: /not-me:config
 ```
 
-A git write whose `-C`, `--git-dir` or `--work-tree` path is a shell variable (`git -C "$W" commit ...`) is blocked, because the guard does not expand variables. Rewriting the command is the fix, so that message leaves out the "relax this rule" line:
+A git write whose `-C`, `--git-dir` or `--work-tree` path is a shell variable (`git -C "$W" commit ...`) is blocked, because the guard does not expand variables. That covers every write the guard checks (commit, push, merge, rebase, cherry-pick, am, reset, branch changes, config writes, submodule and subtree commands, clean), even when the path looks like the current checkout (`"$W/.."`). Reads stay allowed: status, log and diff, `config --get`, `remote -v`, a plain branch list, checkout and switch. A rule the command breaks on its own, such as protected_branches, is still named first. Rewriting the command is the fix, so that message leaves out the "relax this rule" line:
 
 ```
 not-me guard [other_repo]: blocked `git -C $W commit -m x`.

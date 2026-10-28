@@ -2033,6 +2033,35 @@ def _cmd_git(t, c, st, ctx, blk, depth: int = 0):
             if var_opt is not None and b.no_checkout:
                 b = _var_path(blk, var_opt)
             yield b
+        if var_opt is not None and not _git_reads(sub, args):
+            # the handler judged the checkout _norm made of the path ("$W" names nothing, "$W/.." names this one),
+            # not the one the shell will pick: after its own rules, fail closed on any write
+            yield _var_path(blk, var_opt)
+
+
+_BRANCH_WRITE_SHORT = set("dDmMcCfu")
+_BRANCH_WRITE_LONG = ("--delete", "--move", "--copy", "--force", "--set-upstream-to", "--unset-upstream",
+                      "--edit-description", "--track", "--no-track", "--create-reflog")
+
+
+def _git_reads(sub: str, args: List[str]) -> bool:
+    """A subcommand with a _GIT_RULES handler, used in a form that changes nothing git would push or keep."""
+    if sub in ("checkout", "switch"):  # moves HEAD only, as for --git-dir and GIT_DIR=
+        return True
+    if sub == "config":
+        return _config_reads(args)
+    if sub == "remote":
+        return not args or args[0] in ("-v", "--verbose", "show", "get-url")
+    if sub == "submodule":
+        return args[:1] in ([], ["status"], ["summary"])
+    if sub == "clean":
+        return "n" in _short_flags(args) or "--dry-run" in args
+    if sub == "branch":
+        if _BRANCH_WRITE_SHORT & set(_short_flags(args)) or any(a.split("=", 1)[0].startswith(_BRANCH_WRITE_LONG)
+                                                                  for a in args):
+            return False
+        return not _positionals(args) or "--list" in args or "l" in _short_flags(args)
+    return False
 
 
 def _var_path(blk: Blk, opt: str) -> Block:

@@ -1844,6 +1844,29 @@ bash(A, None, "git -C '{F}'/live commit -m x")  # spelled out: an allowed checko
 for cmd in ("git -C $W status", 'git -C "$W" log --oneline', "git -C $W diff", "git --git-dir=$G status"):
     bash(A, None, cmd)  # reads with a variable path stay allowed
 bash(A, None, "git -C $W commit -m x", "alloff")
+# writes whose handler never looks the checkout up ($W may be a checkout of main) or whose path resolves to this
+# checkout ($W/.. may name another repo): fail closed on the unknown path
+_VAR_C_MERGE_ID = f"G{len(CASES) + 1:03d}"
+bash(B, OR, "git -C $W merge feature/y")
+_VAR_C_UP_ID = f"G{len(CASES) + 1:03d}"
+bash(B, OR, 'git -C "$W/.." commit -m x')
+for cmd in ("git -C $W reset --hard", "git -C $W reset HEAD~1", "git -C $W rebase feature/y", "git -C $W am x.patch",
+            "git -C $W cherry-pick abc", "git -C $W branch -D feature/y", "git -C $W clean -fd",
+            "git -C $W subtree add --prefix=x y", 'git -C "$W/.." push origin HEAD:refs/heads/x',
+            "git -C $W/.. merge feature/y", "git -C $W branch feature/y", "git -C $W config user.name x",
+            "git -C $W submodule update", "git -C $W -C sub commit -m x"):
+    bash(B, OR, cmd)
+# a real rule still fires under its own name first, and a rule switched off stays off
+bash(B, PB, 'git -C "$W/.." commit -m x', "offalias")
+bash(B, PB, "git -C $W/.. merge feature/y", "offalias")
+bash(A, None, 'git -C "$W/.." commit -m x', "off")
+bash(A, None, "git -C $W merge feature/y", "off")
+bash(A, None, "git -C $W merge feature/y", "alloff")
+for cmd in ("git -C $W config --get user.name", "git -C $W remote -v", "git -C $W remote", "git -C $W branch",
+            "git -C $W branch --show-current", "git -C $W branch -a", "git -C $W checkout feature/y",
+            "git -C $W switch feature/y", "git -C $W submodule status", "git -C $W clean -n",
+            'git -C "$W/.." status'):
+    bash(A, None, cmd)  # reads through a subcommand the guard checks stay allowed
 KEEP_END = len(CASES)
 
 # Substrings a block message must contain, by case id.
@@ -1870,4 +1893,6 @@ MESSAGE_CHECKS: Dict[str, List[str]] = {
     _VAR_C_ENV_ID: ["GIT_DIR=", "changes which repository or config git uses"],
     _VAR_C_ALIAS_ID: ["shell variables in a `git -C` path"],
     _VAR_C_ALIAS_HERE_ID: ["/not-me:allow-repo acme/other"],
+    _VAR_C_MERGE_ID: ["shell variables in a `git -C` path", "write the path out in full"],
+    _VAR_C_UP_ID: ["shell variables in a `git -C` path", "write the path out in full"],
 }
