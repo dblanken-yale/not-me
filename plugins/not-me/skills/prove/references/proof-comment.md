@@ -86,7 +86,7 @@ Head: <full head sha>
 |---------|--------------|
 | Pass | none |
 | Fail | `notme transition <repo>#<pr> --from needs_review --to <prove.fail_label> --kind pr --reason-file <reason> --log <path>` |
-| Fail at the give-up point | the transition above, then `notme labels-sync <repo>#<pr> --add <needs_help name> --log <path>` |
+| Fail at the give-up point | the transition above, then `notme labels-sync <repo>#<pr> --add <needs_help name> --reason-file <reason> --log <path>` |
 
 1. `prove.fail_label` is a `labels` key (default `needs_work`); the transition
    takes the key. `labels-sync` takes the repo label name the `labels` map gives

@@ -363,10 +363,10 @@ Output: repo, number, kind, from, to, labels, commented
 
 ### `notme labels-sync`
 
-Make an item's labels match: --set replaces the whole set, --add and --remove edit it. --check only reports. A bare number is an item in the tracker; owner/name#N or a URL names an item in another allowed repository (a companion PR).
+Make an item's labels match: --set replaces the whole set, --add and --remove edit it. --check only reports. A bare number is an item in the tracker; owner/name#N or a URL names an item in another allowed repository (a companion PR). A change that adds or removes a state label (needs human, blocked, question, paused, ...) needs --reason-file and posts one comment naming the labels and the reason; a failed comment is a warning and the change stands. Pass labels and other labels need no reason.
 
 ```
-notme labels-sync N|REF [--set a,b] [--add a,b] [--remove a,b] [--check]
+notme labels-sync N|REF [--set a,b] [--add a,b] [--remove a,b] [--check] [--reason-file F]
 ```
 
 | Argument | Required | Meaning |
@@ -376,10 +376,11 @@ notme labels-sync N|REF [--set a,b] [--add a,b] [--remove a,b] [--check]
 | `--add a,b` | optional | labels to add |
 | `--remove a,b` | optional | labels to remove (not with --set) |
 | `--check` | optional | only report whether the labels match |
+| `--reason-file F` | optional | file holding one line that says why; required when the change adds or removes a state label (labels.* in project.md) |
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: repo, number, in_sync, changed, labels (current, or the new set)
+Output: repo, number, in_sync, changed, labels (current, or the new set); commented when a reason was posted
 
 ### `notme labels-ensure`
 
@@ -469,10 +470,10 @@ Output: repo, number, updated
 
 ### `notme pr-open`
 
-Open a PR, set its labels, request review. The head branch may not be a protected branch.
+Open a PR, set its labels, request review. The head branch may not be a protected branch. When --labels names a state label (needs review, ...), one comment on the new PR names it and the reason (the first line of --reason-file, else "pull request opened"); a failed comment is a warning and the PR stands. No comment in a dry run, which has no PR number.
 
 ```
-notme pr-open --head H --base B --title-file F --body-file F [--labels a,b] [--reviewers a,b] [--assignee L] [--draft]
+notme pr-open --head H --base B --title-file F --body-file F [--labels a,b] [--reviewers a,b] [--assignee L] [--draft] [--reason-file F]
 ```
 
 | Argument | Required | Meaning |
@@ -485,10 +486,11 @@ notme pr-open --head H --base B --title-file F --body-file F [--labels a,b] [--r
 | `--reviewers a,b` | optional |  |
 | `--assignee L` | optional |  |
 | `--draft` | optional |  |
+| `--reason-file F` | optional | one line saying why the state labels are set; default: "pull request opened" |
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: repo, number, url (both null in a dry run), head, base
+Output: repo, number, url (both null in a dry run), head, base; commented when a state label was set
 
 ### `notme companion-prs`
 
@@ -526,10 +528,10 @@ Output: repo, number, updated or unchanged
 
 ### `notme review-post`
 
-Post a review, optionally set labels, and read both back. APPROVE is refused unless review.auto_approve is true in the global (or default) layer; the repo layer cannot turn it on. --labels-auto reads the PR's reviews after posting and sets the full label set itself. With no rows in role.md, APPROVE moves the PR to review.approve_label and REQUEST_CHANGES to review.changes_label, as one approval did before. With rows, every roster reviewer except the author must approve (latest review that is not a comment; a dismissed review is not an approval): until then APPROVE keeps needs_review. Each role with an approving reviewer gets its pass label and a role with none loses it; REQUEST_CHANGES moves the PR to review.changes_label. COMMENT only updates the pass labels. A pass label missing from the repo is skipped with one warning.
+Post a review, optionally set labels, and read both back. APPROVE is refused unless review.auto_approve is true in the global (or default) layer; the repo layer cannot turn it on. --labels-auto reads the PR's reviews after posting and sets the full label set itself. With no rows in role.md, APPROVE moves the PR to review.approve_label and REQUEST_CHANGES to review.changes_label, as one approval did before. With rows, every roster reviewer except the author must approve (latest review that is not a comment; a dismissed review is not an approval): until then APPROVE keeps needs_review. Each role with an approving reviewer gets its pass label and a role with none loses it; REQUEST_CHANGES moves the PR to review.changes_label. COMMENT only updates the pass labels. A pass label missing from the repo is skipped with one warning. When the labels set change a state label (needs review, needs work, ready to merge, ...), one comment follows the review naming what was added and removed and the reason: the first line of --reason-file, else "a <EVENT> review was posted". A failed comment is a warning and the review and labels stand.
 
 ```
-notme review-post REF --event EVENT --body-file F [--comments-file J] [--labels-set a,b] [--labels-auto]
+notme review-post REF --event EVENT --body-file F [--comments-file J] [--reason-file F] [--labels-set a,b] [--labels-auto]
 ```
 
 | Argument | Required | Meaning |
@@ -538,12 +540,13 @@ notme review-post REF --event EVENT --body-file F [--comments-file J] [--labels-
 | `--event EVENT {APPROVE|REQUEST_CHANGES|COMMENT}` | required |  |
 | `--body-file F` | required |  |
 | `--comments-file J` | optional |  |
+| `--reason-file F` | optional | one line saying why the state labels changed; default: the review's own verdict |
 | `--labels-set a,b` | optional | set the full label set after posting |
 | `--labels-auto` | optional | work out the label set from the PR's reviews, role.md and the roster, then set it |
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: repo, number, event, state (event only in a dry run); with --labels-auto labels and approval (null with no roles; else required, approved, waiting, all_approved, pass_labels)
+Output: repo, number, event, state (event only in a dry run); with --labels-auto labels and approval (null with no roles; else required, approved, waiting, all_approved, pass_labels); commented when a state label changed
 
 ### `notme resolve-threads`
 

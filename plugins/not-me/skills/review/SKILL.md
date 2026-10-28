@@ -151,7 +151,7 @@ The orchestrator decides; a subagent never does. Follow
    answered earlier thread, or a red check caused by the change.
 3. **Unsure**: a product or UX call, two leads who disagree, or a check that
    cannot run for a reason outside the PR. Post nothing.
-   `notme labels-sync <N> --add <question name> --log <path>`, log a QUESTION
+   `notme labels-sync <N> --add <question name> --reason-file <reason> --log <path>`, log a QUESTION
    naming the person who owes the answer with `notme log question`, count it as
    asked, and go to step 7.
 

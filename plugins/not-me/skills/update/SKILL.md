@@ -212,7 +212,7 @@ Every body passes `notme check-text --file <f>` before it is posted.
    leaving out the PR author.
 5. Labels: `notme transition <N> --from needs_work --to needs_review --kind pr
    --reason-file <reason> --log <path>` (write a one-line reason first) (`--from question` for an answered question), then
-   `notme labels-sync <ref> --add <names> --log <path>` per the outcome table in
+   `notme labels-sync <ref> --add <names> --reason-file <reason> --log <path>` per the outcome table in
    write-back-assembly.md; every park adds `needs_human`.
 
 ## Step 9: Finish

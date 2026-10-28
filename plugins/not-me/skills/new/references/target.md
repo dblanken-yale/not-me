@@ -84,7 +84,7 @@ Screen the trusted title, body and comments against the ten rules in
 3. Write a refusal comment file: the rule, the requester by login, what they can do
    by hand. Run `notme check-text --file <f>`, then
    `notme comment-upsert <tracker>#N --marker new --body-file <f> --log <path>`.
-4. Add `needs_human` with `notme labels-sync N --add <name> --log <path>`. The
+4. Add `needs_human` with `notme labels-sync N --add <name> --reason-file <reason> --log <path>`. The
    pick label stays.
 5. Log `REFUSED <what> requested by <login>` (`notme log action --kind REFUSED`).
 6. Result `STOP <ref> refused - <rule>`.

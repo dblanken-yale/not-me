@@ -129,6 +129,9 @@ def _set_board_status(q: Any, n: int, state: str) -> None:
     try:
         item = board_q._item(board, n)
     except LookupError:
+        if board.get("truncated"):
+            raise MirrorFailed(f"board Status of {where} not set: board {label} has more items than not-me reads "
+                               "and this one was not among them; move its Status by hand") from None
         raise MirrorFailed(f"board Status of {where} not set: it is not on board {label}; add the issue to the "
                            "board (not-me never adds items)") from None
     if column not in board["options"]:

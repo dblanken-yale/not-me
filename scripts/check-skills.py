@@ -39,6 +39,32 @@ RULES = {
 }
 
 ALLOW_MARKER = "<!-- allowed-raw-write -->"
+# A notme call as skill prose writes it: notme, "${CLAUDE_PLUGIN_ROOT}/bin/notme" or "$NOTME", then the command.
+_CALL = r"(?:\bnotme\b\"?|\$\{?NOTME\}?\"?)\s+(?P<cmd>[a-z][a-z-]*)"
+CALL_RE = re.compile(_CALL)
+# Commands whose every call must say why. labels-sync is exempt with --check, which writes nothing.
+REASON_COMMANDS = {"move-issue", "release-issue", "transition", "labels-sync"}
+
+
+def reason_violations(text: str) -> List[Tuple[int, str]]:
+    """(line, call) for each REASON_COMMANDS call in text with no --reason-file. A call runs from its command to the
+    closing backtick, the next blank line or the next notme call, so a later call's flag never covers an earlier
+    one."""
+    out: List[Tuple[int, str]] = []
+    for m in CALL_RE.finditer(text):
+        if m.group("cmd") not in REASON_COMMANDS:
+            continue
+        rest = text[m.end():]
+        ends = [i for i in (rest.find("`"), rest.find("\n\n")) if i != -1]
+        nxt = CALL_RE.search(rest)
+        if nxt:
+            ends.append(nxt.start())
+        span = rest[:min(ends)] if ends else rest
+        if "--reason-file" in span or (m.group("cmd") == "labels-sync" and "--check" in span):
+            continue
+        out.append((text[:m.start()].count("\n") + 1, text[m.start():m.end()]))
+    return out
+
 VERBS = "NONE | PR | PUSHED | PARKED | HELD | REVIEWED | PROVED | FAILED | STOP"
 BASH_TAGS = {"bash", "sh", "shell", "zsh", "console"}
 # The repo slug covers the URL and the "marketplace add" install command.
@@ -343,17 +369,10 @@ class Linter:
 
     # R15 --------------------------------------------------------------
     def r15(self) -> None:
-        """Every `notme move-issue`, `release-issue` or `transition` call passes --reason-file. A call runs from
-        the command to the closing backtick, the end of the fence or the next blank line."""
-        call = re.compile(r"\bnotme\s+(?:move-issue|release-issue|transition)\b")
+        """Every call that changes a state passes --reason-file (see reason_violations)."""
         for path in self.skill_docs + self.ref_docs:
-            text = self.text(path)
-            for m in call.finditer(text):
-                rest = text[m.start():]
-                end = min([i for i in (rest.find("`"), rest.find("\n\n")) if i != -1] or [len(rest)])
-                if "--reason-file" not in rest[:end]:
-                    no = text[:m.start()].count("\n") + 1
-                    self.add(path, no, "R15", f"'{m.group(0)}' without --reason-file: every state change says why")
+            for no, found in reason_violations(self.text(path)):
+                self.add(path, no, "R15", f"'{found}' without --reason-file: every state change says why")
 
     def run(self, only: Set[str]) -> None:
         if "R1" in only:

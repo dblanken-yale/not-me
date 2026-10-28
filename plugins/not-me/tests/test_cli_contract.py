@@ -343,7 +343,7 @@ class DryRunTests(CliCase):
             "move-issue": ["move-issue", "1", "--to", "needs_review", "--reason-file", reason],
             "transition": ["transition", "1", "--from", "in_progress", "--to", "needs_review",
                            "--reason-file", reason],
-            "labels-sync": ["labels-sync", "1", "--set", "in progress,extra"],
+            "labels-sync": ["labels-sync", "1", "--set", "in progress,extra", "--reason-file", reason],
             "labels-ensure": ["labels-ensure"],
             "reply-thread": ["reply-thread", "3", "--to", "501", "--body-file", body],
             "comment-upsert": ["comment-upsert", "3", "--marker", "status", "--body-file", body],

@@ -20,3 +20,5 @@ Please leave a comment on the PR.
 ```bash
 echo $CLAUDE_PLUGIN_ROOT/bin/notme
 ```
+
+Move it with `notme move-issue 4 --to blocked` and be done.

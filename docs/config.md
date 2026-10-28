@@ -384,11 +384,22 @@ queue:
 - **Claims stay safe.** The claim's compare-and-set and its read-back through the issue timeline run on the label side, as for a labels queue. A board-only issue gets its state label when claimed. The board write follows as a mirror, so a failed board write is one warning and never undoes the claim (see the list above). An issue that is not on the board warns that it must be added; not-me never adds items.
 - **Trust.** The board must be on your global allow list when the repo layer names it. The gate runs before the board is read, so an unconfirmed board makes picking and claiming stop with the `/not-me:allow-repo --board owner/number` command to run.
 - **Doctor.** `notme doctor` checks the label and the board together: the label exists, the board is confirmed and found, and each `queue.board_states` column is a Status option.
+- **Long boards.** Board items are read 100 at a time, up to 10 pages (1000 items). A label-listed issue that is not among the items read on a longer board has an unknown Status, so it is not picked or claimed and `disagreements` says why; a board-only issue past the cap is not seen. Keep the To Do column near the top of long boards or archive done items.
 - **Setup.** `/not-me:setup project --queue` offers "labels or board column (either)" and asks for the label, the board and the column mapping in one pass.
 
 ### Saying why on every state change
 
 `notme move-issue`, `notme release-issue` and `notme transition` take a required `--reason-file` (the text goes through a file, never a shell argument). After the state change succeeds they post one comment on the item: "Moved from `in progress` to `needs review` (board column `In review`): <reason>", with the run marker. When labels and the board are both written, the one comment names both; the mirror posts none of its own. A claim already leaves its marker comment, so `claim-issue` posts no second one. A comment that fails to post is a warning in the command's output and the run log; the state change stands.
+
+The reason is one line (at most 500 characters), it may not contain an HTML comment, so it can never carry a not-me marker, and it must pass the same text check as any other post.
+
+Other changes to a state label are explained too, so none is silent:
+
+- `notme labels-sync` needs `--reason-file` whenever the change adds or removes a state label (any label in `labels`: `needs human`, `blocked`, `question`, `paused`, ...) and then posts one comment: "State labels changed (added `needs human`): <reason>". Pass labels and other labels need no reason and post nothing; `--check` needs none.
+- `notme review-post` posts that comment after the review when its labels change a state label (for example `needs review` to `needs work`). The reason is the first line of its optional `--reason-file`, else "a <EVENT> review was posted": the review just posted is the explanation.
+- `notme pr-open` posts it on the new PR when `--labels` names a state label, with the reason from its optional `--reason-file`, else "pull request opened". A dry run posts none, since there is no PR number.
+
+`scripts/check-skills.py` rule R15 flags a skill or reference call to `move-issue`, `release-issue`, `transition` or `labels-sync` without `--reason-file`.
 
 ## Companion sets
 

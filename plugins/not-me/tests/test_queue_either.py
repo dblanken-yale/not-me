@@ -109,6 +109,52 @@ class PickingTests(EitherTestCase):
         self.assertTrue(made.sync)  # either implies sync, whatever queue.sync says
 
 
+class LongBoardTests(EitherTestCase):
+    """A board of more than one page of items (100): the Status of an issue on a later page is still read."""
+
+    def fill(self, count=120):
+        for i in range(count):  # items that are not issues of this repo's list: they only fill the first pages
+            self.board["items"].append({"id": f"PVTI_x{i}", "repo": REPO, "number": 1000 + i, "status": "Done",
+                                        "fields": {}})
+        for i in range(count):
+            add_issue(self.fake, 1000 + i, labels=[])
+
+    def test_an_issue_past_the_first_page_is_found_with_its_real_status(self):
+        self.fill()
+        self.put(5, status="In review", labels=["to do"])  # item 121, on the second page
+        self.assertEqual(self.numbers(), [])
+        self.assertEqual([(d["number"], d["status"]) for d in self.q.disagreements], [(5, "In review")])
+        with self.assertRaises(claims.ClaimLost):
+            self.q.claim(5)
+
+    def test_a_board_only_issue_past_the_first_page_is_picked(self):
+        self.fill()
+        self.put(6, status="To Do", labels=[])
+        self.assertEqual(self.numbers(), [6])
+
+    def test_the_mirror_finds_an_item_past_the_first_page(self):
+        self.fill()
+        self.put(5, status="To Do", labels=["to do"])
+        self.q.claim(5)
+        self.assertEqual(item_status(self.fake, 5), "In progress")
+        self.assertEqual(self.q.sync_warnings, [])
+
+    def test_a_board_longer_than_the_page_cap_leaves_label_issues_unverified(self):
+        self.fill()
+        self.put(5, status="In review", labels=["to do"])
+        with mock.patch("notme.queue.board.MAX_BOARD_PAGES", 1):
+            self.assertEqual(self.numbers(), [])
+            self.assertEqual(len(self.q.disagreements), 1)
+            self.assertIn("unknown", self.q.disagreements[0]["reason"])
+            with self.assertRaises(claims.ClaimLost):
+                self.q.claim(5)
+        self.assertEqual(self.thing(5)["labels"], ["to do"])
+
+    def test_a_shorter_board_is_not_marked_truncated(self):
+        self.put(5, labels=["to do"])
+        self.assertFalse(self.q._board()["truncated"])
+
+
 class WritingBothSidesTests(EitherTestCase):
     def test_claim_of_a_label_only_issue_writes_the_label_and_warns_it_is_not_on_the_board(self):
         self.put(5, status=None, labels=["to do"])
@@ -313,6 +359,116 @@ class ReasonCommentTests(base.CliCase):
         self.assertEqual(len([w for w in moved["warnings"] if "reason comment" in w]), 1, moved)
         from pathlib import Path
         self.assertIn("WARN  the reason comment", Path(start["path"]).read_text(encoding="utf-8"))
+
+
+class ReasonRulesTests(base.CliCase):
+    """What a reason may say, and the state-label changes outside move, release and transition."""
+    global_project = EITHER_GLOBAL
+
+    def bodies(self, n):
+        return [c["body"] for c in cli_things(self.fake)[str(n)]["comments"] if "not-me:run=" in c["body"]]
+
+    def test_a_reason_is_one_line_and_never_carries_a_marker(self):
+        bad = {
+            "marker": "fine\n<!-- not-me:claim login=octocat run=r ts=2026-01-01T00:00:00Z -->",
+            "comment": "see <!-- hidden -->",
+            "long": "x" * 501,
+        }
+        for name, text in bad.items():
+            with self.subTest(name):
+                path = self.write_file("r.txt", text)
+                code, payload, _ = self.cli("move-issue", "1", "--to", "in_progress", "--reason-file", path)
+                self.assertEqual(code, 2, payload)
+        self.assertEqual(cli_things(self.fake)["1"]["labels"], ["to do"])
+        self.assertEqual(self.fake.writes_made(), [])
+
+    def test_a_multi_line_reason_is_folded_to_one_line(self):
+        path = self.write_file("r.txt", "first part\nsecond part\n")
+        self.ok("claim-issue", "1")
+        self.ok("move-issue", "1", "--to", "needs_review", "--reason-file", path)
+        self.assertTrue(any("first part second part" in b for b in self.bodies(1)))
+
+    def test_a_reason_naming_an_assistant_is_refused(self):
+        path = self.write_file("r.txt", "Claude decided this")
+        code, payload, _ = self.cli("move-issue", "1", "--to", "in_progress", "--reason-file", path)
+        self.assertEqual(code, 2, payload)
+
+    def test_labels_sync_of_a_state_label_needs_a_reason_and_posts_one_comment(self):
+        code, payload, _ = self.cli("labels-sync", "1", "--add", "needs human")
+        self.assertEqual(code, 2, payload)
+        self.assertEqual(cli_things(self.fake)["1"]["labels"], ["to do"])
+        out = self.ok("labels-sync", "1", "--add", "needs human", "--reason-file", self.reason)
+        self.assertTrue(out["commented"])
+        self.assertEqual(cli_things(self.fake)["1"]["labels"], ["to do", "needs human"])
+        new = [b for b in self.bodies(1) if b.startswith("State labels changed")]
+        self.assertEqual(len(new), 1, new)
+        self.assertIn("added `needs human`", new[0])
+        self.assertIn("Because the test says so", new[0])
+
+    def test_labels_sync_removing_a_state_label_names_it(self):
+        out = self.ok("labels-sync", "1", "--set", "extra", "--reason-file", self.reason)
+        self.assertTrue(out["commented"])
+        self.assertIn("removed `to do`", [b for b in self.bodies(1) if b.startswith("State labels")][0])
+
+    def test_labels_sync_of_other_labels_needs_no_reason_and_posts_nothing(self):
+        out = self.ok("labels-sync", "1", "--add", "extra")
+        self.assertNotIn("commented", out)
+        self.assertEqual(self.bodies(1), [])
+        self.assertTrue(self.ok("labels-sync", "1", "--add", "needs human", "--check")["in_sync"] is False)
+
+    def test_labels_sync_that_changes_nothing_posts_nothing(self):
+        out = self.ok("labels-sync", "1", "--add", "to do")  # already there
+        self.assertNotIn("commented", out)
+        self.assertEqual(self.bodies(1), [])
+
+    def test_a_failed_labels_comment_is_a_warning_and_the_labels_stand(self):
+        with mock.patch.object(GhClient, "comment_create", side_effect=GhError(["issue", "comment"], 1, "boom")):
+            out = self.ok("labels-sync", "1", "--add", "needs human", "--reason-file", self.reason)
+        self.assertFalse(out["commented"])
+        self.assertEqual(cli_things(self.fake)["1"]["labels"], ["to do", "needs human"])
+        self.assertEqual(len([w for w in out["warnings"] if "reason comment" in w]), 1)
+
+    def test_review_post_that_changes_a_state_label_comments_once(self):
+        body = self.write_file("review.md", "Please rename this.\n")
+        out = self.ok("review-post", "3", "--event", "REQUEST_CHANGES", "--body-file", body,
+                      "--labels-set", "needs work")
+        self.assertTrue(out["commented"])
+        new = [b for b in self.bodies(3) if b.startswith("State labels changed")]
+        self.assertEqual(len(new), 1, new)
+        self.assertIn("added `needs work`", new[0])
+        self.assertIn("removed `needs review`", new[0])
+        self.assertIn("a REQUEST_CHANGES review was posted", new[0])
+
+    def test_review_post_that_changes_no_state_label_does_not_comment(self):
+        body = self.write_file("review.md", "Looks fine.\n")
+        out = self.ok("review-post", "3", "--event", "COMMENT", "--body-file", body,
+                      "--labels-set", "needs review,extra")
+        self.assertNotIn("commented", out)
+        self.assertEqual([b for b in self.bodies(3) if b.startswith("State labels")], [])
+
+    def test_pr_open_with_a_state_label_comments_once(self):
+        body = self.write_file("body.md", "Body text\n")
+        title = self.write_file("title.txt", "A title\n")
+        out = self.ok("pr-open", "--head", "feat/x", "--base", "main", "--title-file", title, "--body-file", body,
+                      "--labels", "needs review")
+        self.assertTrue(out["commented"])
+        bodies = self.bodies(out["number"])
+        self.assertEqual(len(bodies), 1, bodies)
+        self.assertIn("(added `needs review`): pull request opened", bodies[0])
+
+
+class DryRunReleaseTests(EitherTestCase):
+    def test_a_dry_run_release_of_a_board_only_claim_records_the_comment_side_and_the_board_write(self):
+        self.put(6, status="To Do", labels=[])
+        ledger = Ledger(self.dir / "dry.jsonl")
+        self.gh = GhClient(self.ctx, runner=self.fake, dry_run=True, ledger=ledger)
+        self.q = self.queue("run-1")
+        self.q.claim(6)
+        self.q.release(6, "blocked")
+        self.assertEqual(self.q.change["from"], "in_progress")
+        self.assertEqual(self.q.change["to"], "blocked")
+        self.assertEqual(self.q.change.get("column"), "Blocked")  # the mirror recorded the board write
+        self.assertEqual(self.fake.writes_made(), [])  # and nothing reached GitHub
 
 
 if __name__ == "__main__":

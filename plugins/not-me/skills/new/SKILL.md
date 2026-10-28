@@ -96,7 +96,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/branching.md`.
    `Base branch:` line, epic branch, default branch.
 3. A declared base must exist on the remote. Check with a read:
    `git ls-remote --exit-code --heads origin <base>`. Missing: `notme release-issue N --reason-file <reason> --log <path>` (write the one-line reason first),
-   add `needs_human` with `notme labels-sync N --add <name>`, log the base and where
+   add `needs_human` with `notme labels-sync N --add <name> --reason-file <reason>`, log the base and where
    it was declared, name the issue author, and stop:
    `STOP <ref> blocked - base <base> not found`. No branch is created.
 4. Questions: interactive runs (no `--bg`) get one AskUserQuestion batch now and

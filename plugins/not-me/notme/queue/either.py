@@ -47,6 +47,16 @@ class EitherQueue(LabelQueue):
         return {i["number"]: i["status"] for i in board["items"]
                 if (i["repo"] or "").lower() == self.tracker.lower()}
 
+    def _unread(self, n: int, board: Dict[str, Any], statuses: Dict[int, Optional[str]]) -> Optional[Dict[str, Any]]:
+        """When the board was cut short and issue n is not among the items read, its Status could not be told, so
+        it is not eligible: it may be in a later column. None when it is known or the board was read whole."""
+        if not board.get("truncated") or n in statuses:
+            return None
+        return {"number": n, "label": self.labels.name("todo"), "status": None,
+                "reason": f"{self.tracker}#{n} is labeled `{self.labels.name('todo')}` but board "
+                          f"{self.board_q.owner}/{self.board_q.number} has more items than not-me reads and this "
+                          "one was not among them, so its board Status is unknown and it is not picked"}
+
     def _disagreement(self, n: int, names: List[str], status: Optional[str]) -> Optional[Dict[str, Any]]:
         """Both sides of issue n when the labels and the board Status disagree on anything past To Do, else None.
         An issue with no Status (not on the board) never disagrees."""
@@ -77,7 +87,7 @@ class EitherQueue(LabelQueue):
         for issue in listed:
             n = int(issue["number"])
             known[n] = sibling_info(issue, self.board_q._sibling_column(statuses.get(n)))
-            bad = self._disagreement(n, _names(issue), statuses.get(n))
+            bad = self._unread(n, board, statuses) or self._disagreement(n, _names(issue), statuses.get(n))
             if bad:
                 self.disagreements.append(bad)
             elif self._eligible(issue):
@@ -98,6 +108,14 @@ class EitherQueue(LabelQueue):
                 eligible[n] = issue
         return eligible, known
 
+    def _dry_claimed(self, n: int, names: List[str]) -> bool:
+        """A to-do label, or a board item in the To Do column that carries no state label (a board-only issue)."""
+        if super()._dry_claimed(n, names):
+            return True
+        status = self._statuses(self._board()).get(n)
+        return status is not None and status == self.board_q.board_states.get("todo") \
+            and not self.labels.current(names)
+
     def state(self, n: int) -> Optional[str]:
         """The state label, else the abstract state of the board column."""
         labelled = super().state(n)
@@ -108,8 +126,10 @@ class EitherQueue(LabelQueue):
     # --- claiming: the label side's compare-and-set, with the board checked first ---
 
     def _claim_labels(self, n: int, names: List[str]) -> List[str]:
-        status = self._statuses(self._board()).get(n)
-        bad = self._disagreement(n, names, status)
+        board = self._board()
+        statuses = self._statuses(board)
+        status = statuses.get(n)
+        bad = self._unread(n, board, statuses) or self._disagreement(n, names, status)
         if bad:
             raise claims.ClaimLost(bad["reason"])
         if self._has(names, "todo"):

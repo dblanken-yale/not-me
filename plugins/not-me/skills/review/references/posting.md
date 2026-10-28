@@ -45,6 +45,10 @@ notme review-post <ref> --event <APPROVE|REQUEST_CHANGES|COMMENT> \
   --labels-auto --log <path>
 ```
 
+When the labels change a state label, the CLI posts one comment after the review naming
+   what was added and removed and why ("a <EVENT> review was posted"); add `--reason-file <f>`
+   to give a more specific one-line reason.
+
 1. APPROVE only when `review.auto_approve` is true; otherwise COMMENT with no
    `--labels-auto` (see `verdict.md`).
 2. Leave out `--comments-file` when the list is empty.

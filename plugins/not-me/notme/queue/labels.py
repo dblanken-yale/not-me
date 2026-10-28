@@ -244,10 +244,14 @@ class LabelQueue(BaseQueue):
         if not remaining:
             self._relabel(n, "todo")
 
+    def _dry_claimed(self, n: int, names: List[str]) -> bool:
+        """Whether issue n, as it reads now, is one a dry-run claim would have moved to in progress."""
+        return self._has(names, "todo")
+
     def _relabel(self, n: int, to: str) -> bool:
         """Move in_progress to `to`; True when it wrote, False when the issue was not in progress."""
         names = self.gh.labels(self.tracker, n)
-        if self.gh.dry_run and self._has(names, "todo"):  # a dry-run claim set in_progress only in the ledger
+        if self.gh.dry_run and self._dry_claimed(n, names):  # a dry-run claim set in_progress only in the ledger
             names = states.as_if(names, "in_progress", self.labels)
         if not self._has(names, "in_progress"):
             return False

@@ -10,7 +10,7 @@ the result line. Parking rules are in `parking.md`; logging rules in
 ## Rules for every row
 
 1. Write labels with `notme transition ... --reason-file <reason>` (one line on why) or `notme labels-sync <ref> --add <names>
-   --log <path>`. Never add and remove the same label in one call.
+   --reason-file <reason> --log <path>`. Never add and remove the same label in one call.
 2. Comments go through `notme check-text --file <f>`, then
    `notme comment-upsert <ref> --marker update --body-file <f> --log <path>`. The
    body leads with `**Waiting on:**` and a login, never "you".

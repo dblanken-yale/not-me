@@ -396,7 +396,7 @@ class IssueTests(base.CliCase):
         payload = self.ok("labels-sync", "1", "--add", "extra", "--remove", "to do", "--check")
         self.assertFalse(payload["in_sync"])
         self.assertEqual(things(self.fake)["1"]["labels"], ["to do"])
-        payload = self.ok("labels-sync", "1", "--add", "extra", "--remove", "to do")
+        payload = self.ok("labels-sync", "1", "--add", "extra", "--remove", "to do", "--reason-file", self.reason)
         self.assertEqual(things(self.fake)["1"]["labels"], ["extra"])
         self.assertTrue(payload["changed"])
         self.assertTrue(self.ok("labels-sync", "1", "--set", "extra")["in_sync"])
