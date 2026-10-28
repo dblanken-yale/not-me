@@ -340,7 +340,28 @@ queue:
 
 Your token needs the `project` scope, and the board must be confirmed with `/not-me:allow-repo --board acme/7` if it was set in the repo layer. Pull request states always use labels.
 
-Picking from labels and a board at once (a `queue.source: either`) is not supported for now. Claims and state moves are owned separately by the label queue (`notme/queue/labels.py`) and the board queue (`notme/queue/board.py`): one moves labels, the other moves the Status column. A source that reads both needs a design for which side owns an issue's state, so a claim on one side cannot leave the other stale. A follow-up issue can propose that design. Until then, any other `queue.source` value is reported as not supported by `notme status`, `notme config --explain` and `notme doctor`, and a run refuses it.
+The `board_states` defaults (`To Do`, `In progress`, `In review`, `Blocked`) are only a guess. Map each key to the real column name on your board, spelled the way the board spells it; `/not-me:doctor` warns about a name the board does not have.
+
+### Keeping labels and the board in step
+
+A team that uses both labels and a board can set `queue.sync: true` (default `false`). Each claim, move and release then updates both sides, whichever `queue.source` is set:
+
+```yaml
+queue:
+  source: labels
+  sync: true
+  board: {owner: acme, number: 7, status_field: Status}
+  board_states: {todo: Todo, in_progress: Doing, in_review: Review, blocked: Blocked}
+```
+
+- `queue.source` stays the source of truth. It alone decides what can be picked, and the claim's checks run against it only. The other side is a mirror, written after the source write succeeds.
+- With `source: labels`, the board Status follows for the states that have a column: `todo`, `in_progress`, `needs_review` (the `in_review` column) and `blocked`. Other states (`needs_work`, `question`, ...) leave the Status as it is.
+- With `source: board`, the labels follow for every state, with the same full-set label write the label queue uses. A claim swaps the `todo` label for `in_progress` and keeps every other label. A move to a state with no column (`needs_work`, `question`, ...) sets only the label and leaves the Status as it is; since nothing else records that move, a failed label write there is an error, not a warning.
+- The board must be on your global allow list when the repo layer names it, the same confirmation a board queue needs (above). The mirror never adds an issue to the board.
+- Any other mirror write that fails never fails or undoes the claim, move or release. It becomes one warning that names the cause and the fix (allow the board, add the issue to the board, map `queue.board_states.<key>` to a real column), in the command's `warnings` and as a WARN line in the run log.
+- In a dry run both writes go to the ledger.
+
+Picking from labels and a board at once (a `queue.source: either`) is not supported. Any other `queue.source` value is reported as not supported by `notme status`, `notme config --explain` and `notme doctor`, and a run refuses it. Use `queue.sync` to keep the side you do not pick from up to date.
 
 ## Companion sets
 
@@ -443,6 +464,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `queue.board_states.in_progress` | `In progress` | Board column name for claimed work |
 | `queue.board_states.in_review` | `In review` | Board column name for work waiting on review |
 | `queue.board_states.blocked` | `Blocked` | Board column name for blocked work |
+| `queue.sync` | `false` | `true` makes each claim, move and release also update the side `queue.source` does not read: the board Status for a labels source, the labels for a board source. Needs `queue.board` set; a board named in the repo layer must be confirmed on the global allow list; a failed mirror write is a warning (see [Keeping labels and the board in step](#keeping-labels-and-the-board-in-step)) |
 | `picking.fields` | `[]` | Board field names whose values `notme pick-issue` lists for each issue, for the rules in the `## Picking work` section to use. Any layer may set it (see [Picking work](#picking-work)) |
 | `picking.target_epics` | `[]` | Epic issue numbers to finish first, in this order. One counts only when a trusted roster member wrote it. Any layer may set it (see [Picking work](#picking-work)) |
 | `picking.value_max_chars` | `80` | Longest text field value `notme pick-issue` reports under `fields`; longer ones are cut. A whole number of at least 1. The repo layer may lower it, never raise it or set it to `null` (see [Picking work](#picking-work)) |

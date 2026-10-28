@@ -35,6 +35,90 @@ Update with:
 /plugin update not-me@not-me
 ```
 
+## How a run works
+
+Solid boxes always run. Dashed boxes are optional: they run only when you call them, configure them, or a condition holds. A `⚙` names the setting or config doc that changes the step (`project.md` keys unless another doc is named; see [Configuration](docs/config.md)). Rounded orange boxes are a person's job and nothing in not-me does them. Labels are shown by their default names. For the label state machine see [Workflow](docs/workflow.md).
+
+```mermaid
+flowchart TD
+    trigger(["/not-me, a single leg, or /loop 2h /not-me --bg"])
+    gate["Gate: enabled, not paused, no active run, guard self-test passes"]
+    stopped["STOP, nothing written"]
+    router["Router runs the legs in order, stops at the first that does work
+    ⚙ router (default: update, then new)"]
+
+    trigger --> gate
+    gate -- fails --> stopped
+    gate -- passes --> router
+
+    subgraph update ["update leg: rework a PR"]
+        u1["Pick a 'needs work' PR assigned to you, claim it"]
+        u2["Read trusted findings only, decide each:
+        refuse, defer, implement, or disagree"]
+        u3["Implement through a delegated subagent
+        ⚙ models, standards.md Delegation"]
+        u4["Verify and gate
+        ⚙ verify.md"]
+        u5["Merge base in, push, reply on every thread,
+        swap to 'needs review'"]
+        u1 --> u2 --> u3 --> u4 --> u5
+    end
+
+    subgraph new ["new leg: implement an issue"]
+        n1["Pick a ready issue and claim it
+        ⚙ queue, picking, Picking work rules"]
+        n2["Branch from the base
+        ⚙ standards.md branch, protected_branches"]
+        n3["Implement through a delegated subagent, failing test first
+        ⚙ models, standards.md Delegation"]
+        n4["Verify and gate: baseline, tests, simplify, code review,
+        security review, CI-parity lint
+        ⚙ verify.md, limits.fix_loop"]
+        n4b["Gate additions and cross-model check
+        ⚙ verify.md Gate additions, models.verifier"]
+        n5["Commit and push through the CLI
+        ⚙ standards.md commit, attribution"]
+        n6["Open PR, move issue to 'needs review'
+        ⚙ standards.md pr_title, pr_template, reviewers"]
+        n1 --> n2 --> n3 --> n4 --> n4b --> n5 --> n6
+    end
+
+    router -- "first" --> update
+    router -- "no 'needs work' PR" --> new
+
+    review["review leg: review PRs you are asked to review,
+    approve, request changes, or ask a person
+    ⚙ review.md, role.md, add review to router"]
+    prove["prove: run testing steps on the preview,
+    post a proof comment, fail sends PR to 'needs work'
+    ⚙ prove.md"]
+    retro["retro, after a router leg that did work:
+    up to three edits to .claude/not-me/ docs, never commits"]
+    notify["notify.command"]
+    writes["Every GitHub write goes through the CLI write gate and the guard hook.
+    Dry-run records it in the ledger; live posts it
+    ⚙ mode (default dry-run), guard, allow_repos"]
+    live(["A person turns on live mode
+    in their own terminal"])
+    merge(["A person approves, if review did not, and merges"])
+
+    router -.-> review
+    n6 -. "preview URL found" .-> prove
+    u5 --> retro
+    n6 --> retro
+    review --> retro
+    retro -.-> notify
+    update --> writes
+    new --> writes
+    live -.-> writes
+    review -- "'ready to merge', only with review.auto_approve" --> merge
+
+    classDef optional stroke-dasharray: 5 5
+    classDef person fill:#fde7c8,stroke:#c77700,color:#000
+    class review,prove,notify,n4b optional
+    class live,merge person
+```
+
 ## Commands
 
 | Command | What it does |

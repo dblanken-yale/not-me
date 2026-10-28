@@ -189,5 +189,57 @@ class FixTests(unittest.TestCase):
         self.assertIsNone(doctor.exit_kind(checks))
 
 
+class SyncQueueCheckTests(unittest.TestCase):
+    """queue.sync with source labels also needs a usable board: the doctor checks it like a board source."""
+
+    def setUp(self):
+        from notme.gh import GhClient
+        from notme.writes import GuardContext
+        from tests.fakes.fakegh import FakeRunner
+        from tests.test_queue_labels import REPO
+        self.repo = REPO
+        self.fake = FakeRunner()
+        self.fake.state["repos"][REPO]["label_defs"] = {"to do": {}, "in progress": {}}
+        ctx = GuardContext(origin_repo=REPO, allowed_repos=(REPO,), board=("acme", 6), mode="live")
+        self.gh = GhClient(ctx, runner=self.fake, dry_run=False)
+
+    def run_check(self, confirmed=("acme", 6), **queue):
+        from tests.test_queue_source import meta
+        return doctor.queue_check(meta(**queue), self.gh, self.repo, confirmed, origin=self.repo)
+
+    def test_sync_with_a_good_board_is_ok(self):
+        c = self.run_check(sync=True, board={"owner": "acme", "number": 6, "status_field": "Status"},
+                           board_states={"todo": "To Do", "in_progress": "In progress", "in_review": "In review"})
+        self.assertTrue(c["ok"], c)
+        self.assertEqual(self.fake.writes_made(), [])
+
+    def test_sync_checks_the_board_columns(self):
+        c = self.run_check(sync=True, board={"owner": "acme", "number": 6, "status_field": "Status"})
+        self.assertFalse(c["ok"])
+        self.assertIn("no `Blocked` option", c["detail"])
+
+    def test_sync_checks_the_board_is_confirmed(self):
+        c = self.run_check(confirmed=None, sync=True, board={"owner": "acme", "number": 6, "status_field": "Status"},
+                           board_states={"todo": "To Do"})
+        self.assertFalse(c["ok"])
+        self.assertIn("--board acme/6", c["detail"])
+
+    def test_sync_checks_the_board_exists(self):
+        c = self.run_check(confirmed=("acme", 99), sync=True,
+                           board={"owner": "acme", "number": 99, "status_field": "Status"})
+        self.assertFalse(c["ok"])
+        self.assertIn("not found", c["detail"])
+
+    def test_sync_without_a_board_names_the_fix(self):
+        c = self.run_check(sync=True)
+        self.assertFalse(c["ok"])
+        self.assertIn("queue.sync", c["detail"])
+        self.assertIn("queue.board.owner", c["detail"])
+
+    def test_sync_off_does_not_check_the_board(self):
+        c = self.run_check(board={"owner": "acme", "number": 99, "status_field": "Status"})
+        self.assertTrue(c["ok"], c)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1910,6 +1910,12 @@ for cmd in ("git -C $W config --get user.name", "git -C $W remote -v", "git -C $
             "git -C $W remote --verbose get-url origin", "git -C $W submodule status", "git -C $W submodule -q status",
             "git -C $W submodule --quiet", "git -C $W clean -n", 'git -C "$W/.." status', "git remote -v show origin"):
     bash(A, None, cmd)  # reads through a subcommand the guard checks stay allowed
+# an array-element or append assignment prefix (a[0]=1, X+=1) is an assignment, not the command word
+bash(B, DG, "a[0]=1 gh repo delete acme/app --yes")
+bash(B, OR, "a[0]=1 gh pr comment 1 --repo acme/other -b x")
+bash(B, OR, "X+=1 gh pr comment 1 --repo acme/other -b x")
+for cmd in ("a[0]=1 git push origin feature/x", "a[0]=1 git reset --hard HEAD~1"):
+    bash(A, None, cmd)
 KEEP_END = len(CASES)
 
 # Substrings a block message must contain, by case id.

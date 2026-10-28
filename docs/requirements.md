@@ -142,7 +142,7 @@ Ordinary commands that mention neither `git` nor `gh` cost tens of milliseconds.
 | `<git-common-dir>/not-me/active-run` | read and write | `notme`, a small JSON marker while a run is going | No |
 | `<git-common-dir>/not-me/logs/<skill>/<timestamp>-<ref>-<id>.md` | write | `notme`, one run log per run | No |
 | `<git-common-dir>/not-me/logs/intended-writes.jsonl` and `logs/payloads/<sha>.md` | write | `notme`, the dry-run ledger | No |
-| `<git-common-dir>/not-me/logs/guard.jsonl` | write | the hook, one line per block | No |
+| `<git-common-dir>/not-me/logs/guard.jsonl` | write | the hook, one line per block with the blocked input, redacted and capped | No |
 | `not-me-<uid>/` under `$XDG_RUNTIME_DIR` or the system temp directory (mode 0700) | write | `notme`, body files and JSON payloads | No |
 | `${CLAUDE_PLUGIN_ROOT}` (the installed plugin) | read | Claude Code, on install and update | No |
 | `${CLAUDE_PLUGIN_DATA}` | none today | reserved | No |
