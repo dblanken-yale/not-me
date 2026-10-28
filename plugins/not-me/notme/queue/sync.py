@@ -15,7 +15,7 @@ before the board is read).
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Tuple
 
 from .. import states, writes
 from ..gh import GhError, ReadbackMismatch, WriteBlocked
@@ -87,31 +87,43 @@ def _refused(decision: Decision, allow_fix: str) -> str:
     return f"the write was refused ({decision.reason}); {fix}"
 
 
-def _set_board_status(q: Any, n: int, state: str) -> None:
-    """Set issue n's board Status to the column for `state`, reusing BoardQueue's board reads and write. States
-    with no column are skipped. MirrorFailed when it cannot be done; an item is never added to the board."""
+def open_board(q: Any, where: str, what: str = "board Status of",
+               or_off: str = " or turn queue.sync off") -> Tuple[Any, str, str]:
+    """The BoardQueue for q's queue.board, set up to read only the Status, the board's label and the advice for an
+    unallowed board. The write gate is checked first, so a board the operator has not allowed is never read.
+    MirrorFailed (naming the cause and the fix) when the board is not set, cannot be used or is refused. `where`
+    names the issue or repository in the message, `what` starts it, `or_off` ends the advice for a bad board."""
     from . import board_ref
-    from .board import ABSTRACT_TO_BOARD, BoardQueue, UnmappedState
+    from .board import BoardQueue
 
-    key = ABSTRACT_TO_BOARD.get(state)
-    if key is None:
-        return
-    where = f"{q.tracker}#{n}"
     if board_ref(q.queue_cfg) is None:
-        raise MirrorFailed(f"board Status of {where} not set: queue.board.owner and queue.board.number are not "
-                           "set; set them in project.md or turn queue.sync off")
+        raise MirrorFailed(f"{what} {where} not set: queue.board.owner and queue.board.number are not "
+                           f"set; set them in project.md{or_off}")
     try:
         board_q = BoardQueue(q.cfg, q.gh, q.roster, q.operator, q.run_id, q.tracker, clock=q._clock)
     except ValueError as exc:
-        raise MirrorFailed(f"board Status of {where} not set: queue.board cannot be used ({exc}); fix queue.board "
-                           "in project.md or turn queue.sync off") from None
-    board_q.read_fields = []  # the mirror needs the Status only
+        raise MirrorFailed(f"{what} {where} not set: queue.board cannot be used ({exc}); fix queue.board "
+                           f"in project.md{or_off}") from None
+    board_q.read_fields = []  # the Status only
     label = f"{board_q.owner}/{board_q.number}"
     allow_board = f"allow the board with /not-me:allow-repo --board {label}"
     # the gate first, so a board the operator has not allowed is never read
     decision = writes.check_write(WriteTarget.board(board_q.owner, board_q.number), q.gh.ctx)
     if not decision.ok:
-        raise MirrorFailed(_board_refused(where, label, decision, allow_board))
+        raise MirrorFailed(_board_refused(where, label, decision, allow_board, what))
+    return board_q, label, allow_board
+
+
+def _set_board_status(q: Any, n: int, state: str) -> None:
+    """Set issue n's board Status to the column for `state`, reusing BoardQueue's board reads and write. States
+    with no column are skipped. MirrorFailed when it cannot be done; an item is never added to the board."""
+    from .board import ABSTRACT_TO_BOARD, UnmappedState
+
+    key = ABSTRACT_TO_BOARD.get(state)
+    if key is None:
+        return
+    where = f"{q.tracker}#{n}"
+    board_q, label, allow_board = open_board(q, where)
     try:
         column = board_q.column(state)
     except UnmappedState:
@@ -145,8 +157,9 @@ def _set_board_status(q: Any, n: int, state: str) -> None:
                            "the project scope") from None
 
 
-def _board_refused(where: str, label: str, decision: Decision, allow_board: str) -> str:
+def _board_refused(where: str, label: str, decision: Decision, allow_board: str,
+                   what: str = "board Status of") -> str:
     if decision.rule == "other_repo" and not decision.allow_cmd:  # the gate's own board refusal
-        return (f"board Status of {where} not set: board {label} is not on the global allow list "
+        return (f"{what} {where} not set: board {label} is not on the global allow list "
                 f"({decision.reason}); {allow_board}")
-    return f"board Status of {where} not set: " + _refused(decision, allow_board)
+    return f"{what} {where} not set: " + _refused(decision, allow_board)

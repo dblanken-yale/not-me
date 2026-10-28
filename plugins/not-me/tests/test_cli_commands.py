@@ -1192,6 +1192,78 @@ class DoctorAndPreflightTests(base.CliCase):
         self.assertIn("push check failed", payload["blockers"])
 
 
+class QueueDriftCliTests(base.CliCase):
+    """Issue 1 is on board acme/6 with Status To Do; its label says needs review."""
+
+    def setUp(self):
+        super().setUp()
+        self.tc.write("repo", "project", "---\nschema: 1\nqueue: {board: {owner: acme, number: 6}}\n---\n# Project\n")
+        self.ok("allow-repo", "add", "--board", "acme/6", "--everywhere")
+        things(self.fake)["1"]["labels"] = ["needs review"]
+
+    def test_doctor_lists_the_drifted_issue_and_writes_nothing(self):
+        check = next(c for c in self.ok("doctor")["checks"] if c["name"] == "queue drift")
+        self.assertEqual((check["ok"], check["required"]), (False, False))
+        self.assertIn("/issues/1 has label `needs review` but Status `To Do`", check["detail"])
+        self.assertIn("queue-resync", check["fix"])
+        self.assertEqual([c for c in self.fake.writes_made() if c != ["--version"]], [])
+
+    def test_doctor_lists_none_when_they_agree(self):
+        things(self.fake)["1"]["labels"] = ["to do"]
+        check = next(c for c in self.ok("doctor")["checks"] if c["name"] == "queue drift")
+        self.assertTrue(check["ok"], check)
+
+    def test_doctor_has_no_drift_check_without_a_board(self):
+        self.tc.write("repo", "project", "---\nschema: 1\n---\n# Project\n")
+        self.assertNotIn("queue drift", [c["name"] for c in self.ok("doctor")["checks"]])
+
+    def test_doctor_says_not_run_for_a_board_the_operator_has_not_allowed(self):
+        self.tc.write("global", "project", base.GLOBAL_PROJECT)
+        self.ok("allow-repo", "remove", "--board", "acme/6", "--everywhere")
+        check = next(c for c in self.ok("doctor")["checks"] if c["name"] == "queue drift")
+        self.assertEqual(check["ok"], True)
+        self.assertIn("not run", check["detail"])
+        self.assertEqual([c for c in self.fake.calls if "graphql" in c], [])
+
+    def test_status_lists_the_drift(self):
+        drift = self.ok("status")["queue_drift"]
+        self.assertEqual([(d["number"], d["label"], d["status"]) for d in drift], [(1, "needs review", "To Do")])
+        things(self.fake)["1"]["labels"] = ["to do"]
+        self.assertEqual(self.ok("status")["queue_drift"], [])
+
+    def test_status_has_no_drift_key_without_a_board(self):
+        self.tc.write("repo", "project", "---\nschema: 1\n---\n# Project\n")
+        self.assertNotIn("queue_drift", self.ok("status"))
+
+    def test_queue_resync_in_live_mode_sets_the_status(self):
+        out = self.ok("queue-resync")
+        self.assertEqual([(c["number"], c["result"]) for c in out["changes"]], [(1, "changed")])
+        self.assertEqual(self.fake.state["board"]["items"][0]["status"], "In review")
+        self.assertFalse(out["dry_run"])
+
+    def test_queue_resync_dry_run_reaches_only_the_ledger(self):
+        out = self.ok("--dry-run", "queue-resync")
+        self.assertTrue(out["dry_run"])
+        self.assertEqual([c["result"] for c in out["changes"]], ["planned"])
+        self.assertEqual(self.fake.state["board"]["items"][0]["status"], "To Do")
+        self.assertEqual([c for c in self.fake.writes_made() if c != ["--version"]], [])
+        self.assertTrue(any(e["description"].startswith("set board status") for e in self.ledger()))
+
+    def test_queue_resync_refuses_a_board_that_is_not_allowed_before_any_read(self):
+        self.ok("allow-repo", "remove", "--board", "acme/6", "--everywhere")
+        code, payload, _ = self.cli("queue-resync")
+        self.assertEqual((code, payload["kind"]), (1, "sync_failed"), payload)
+        self.assertIn("/not-me:allow-repo --board acme/6", payload["error"])
+        self.assertEqual([c for c in self.fake.calls if "graphql" in c], [])
+        self.assertEqual(self.fake.writes_made(), [])
+
+    def test_queue_resync_without_a_board_is_an_error_that_names_the_setting(self):
+        self.tc.write("repo", "project", "---\nschema: 1\n---\n# Project\n")
+        code, payload, _ = self.cli("queue-resync")
+        self.assertEqual(code, 1, payload)
+        self.assertIn("queue.board.owner", payload["error"])
+
+
 class WaitChecksTests(base.CliCase):
     """wait-checks over a fake clock: sleep advances the clock and may change the checks."""
 

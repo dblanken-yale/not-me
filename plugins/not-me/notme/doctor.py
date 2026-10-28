@@ -240,13 +240,34 @@ def queue_check(meta: Mapping[str, Any], gh: GhClient, tracker: str, confirmed_b
     return check("queue", True, where["summary"], required=False)
 
 
+DRIFT_FIX = "run `notme queue-resync` (a dry run records what it would change; in live mode it sets each one)"
+DRIFT_SHOWN = 10
+
+
+def drift_check(drift: Sequence[Mapping[str, Any]], board: str) -> Check:
+    """A warning listing each open issue whose state label and board Status disagree (entries from
+    queue.resync.read), the first few in full. Read-only; the fix names queue-resync."""
+    if not drift:
+        return check("queue drift", True, f"labels and the Status of board {board} agree", required=False)
+    lines = [f"{d['url']} has label `{d['label']}` but Status `{d['status']}`" for d in drift[:DRIFT_SHOWN]]
+    more = f"; and {len(drift) - DRIFT_SHOWN} more" if len(drift) > DRIFT_SHOWN else ""
+    return check("queue drift", False, f"{len(drift)} open issue(s) out of step on board {board}: "
+                 + "; ".join(lines) + more, required=False, fix=DRIFT_FIX)
+
+
+def drift_not_run(why: str) -> Check:
+    return check("queue drift", True, f"not run: {why}", required=False)
+
+
 def run(runner: Callable[[Sequence[str]], Any], config_errors: List[str], gh: Callable[[], GhClient],
         guard_state: Callable[[], Mapping[str, Any]], env: Mapping[str, str],
         mode: Optional[Check] = None, config_files: Optional[Mapping[str, Sequence[str]]] = None,
         pass_labels: Optional[Callable[[], Optional[Check]]] = None,
-        queue: Optional[Callable[[], Check]] = None) -> List[Check]:
-    """Every probe in order. gh, guard_state, pass_labels and queue are called only when needed (gh needs a valid
-    config; pass_labels and queue also a logged-in gh, and the queue check is reported as not run otherwise).
+        queue: Optional[Callable[[], Check]] = None,
+        drift: Optional[Callable[[], Optional[Check]]] = None) -> List[Check]:
+    """Every probe in order. gh, guard_state, pass_labels, queue and drift are called only when needed (gh needs a
+    valid config; pass_labels, queue and drift also a logged-in gh, and the queue check is reported as not run
+    otherwise; drift returns None when queue.board is not set and adds no check then).
     config_files maps a layer to the config docs found in it; the "config files" probe runs only when it is
     given."""
     checks = [python_check(), git_check(), gh_check(runner)]
@@ -268,6 +289,10 @@ def run(runner: Callable[[Sequence[str]], Any], config_errors: List[str], gh: Ca
     if queue is not None:
         checks.append(queue() if signed_in else
                       queue_not_run("needs gh installed and signed in, and a valid config"))
+    if drift is not None and signed_in:
+        found = drift()
+        if found is not None:
+            checks.append(found)
     checks += [guard_check(guard_state()), depth_check(env)]
     return checks
 

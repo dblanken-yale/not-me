@@ -404,6 +404,18 @@ Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
 Output: repo, number, in_sync, changed, labels (current, or the new set)
 
+### `notme queue-resync`
+
+Set the side queue.source does not read to match the side it does, for each open issue on queue.board whose state label and board Status disagree (the issues `doctor` and `status` list): the board Status for a labels source, the labels (one full-set write, read back) for a board source. It follows the effective mode: in dry-run the writes reach only the ledger. A board the global allow list does not confirm is refused before anything is read. Issues not on the board are skipped and reported, never added; closed issues are never touched; neither are issues whose state has no column.
+
+```
+notme queue-resync
+```
+
+Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
+
+Output: board, changes ([{number, url, side, from, to, result (changed, planned or failed), reason}]), skipped ([{number, url, reason}]); dry_run when the writes were only recorded
+
 ### `notme labels-ensure`
 
 Create the configured state labels that the tracker lacks (all eleven by default), and the pass labels role.md names on the code repository, where pull requests live. --check only reports.
@@ -972,7 +984,7 @@ A read-only summary: enabled and paused state, the active run, items needing a p
 notme status
 ```
 
-Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, queue (where the issue queue looks, as in config --explain), items, stale_claims, interrupted_runs (skill, run_id, ref, file), last_runs, picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and "; target epics: #N, ..." when set), warnings
+Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, queue (where the issue queue looks, as in config --explain), items, stale_claims, interrupted_runs (skill, run_id, ref, file), last_runs, picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and "; target epics: #N, ..." when set), queue_drift (when queue.board is set: [{number, url, label, status}] of open issues whose state label and board Status disagree, [] when they agree; see queue-resync), warnings
 
 ### `notme pause`
 
