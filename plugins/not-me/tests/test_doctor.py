@@ -223,6 +223,7 @@ class SyncQueueCheckTests(unittest.TestCase):
                            board_states={"todo": "To Do"})
         self.assertFalse(c["ok"])
         self.assertIn("--board acme/6", c["detail"])
+        self.assertEqual([x for x in self.fake.calls if "graphql" in x], [])  # an unconfirmed board is not read
 
     def test_sync_checks_the_board_exists(self):
         c = self.run_check(confirmed=("acme", 99), sync=True,

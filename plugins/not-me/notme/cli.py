@@ -52,7 +52,8 @@ from notme import gh as gh_mod, git as git_mod, guard as guard_mod, paths, prove
 from notme import humans, modeswitch, roles as roles_mod, writeback, writes  # noqa: E402
 from notme.dryrun import LedgerError  # noqa: E402
 from notme.gh import csv, names_of, login_of  # noqa: E402
-from notme.queue import NotOpen, describe as describe_queue, make_queue, stale_claims  # noqa: E402
+from notme.queue import NotOpen, board_ref, describe as describe_queue, make_queue, stale_claims  # noqa: E402
+from notme.queue import resync as resync_mod  # noqa: E402
 from notme.queue.signals import picking_signals  # noqa: E402
 from notme.queue.sync import MirrorFailed  # noqa: E402
 from notme.redact import redact, redact_obj  # noqa: E402
@@ -1324,6 +1325,37 @@ def cmd_labels_sync(ctx: Context, args: argparse.Namespace, repo: str, n: int) -
     return out
 
 
+@command("queue-resync", "fix issues whose label and board Status disagree", writes=True, running="error")
+def cmd_queue_resync(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """Set the side queue.source does not read to match the side it does, for each open issue on queue.board whose
+    state label and board Status disagree (the issues `doctor` and `status` list): the board Status for a labels
+    source, the labels (one full-set write, read back) for a board source. It follows the effective mode: in
+    dry-run the writes reach only the ledger. A board the global allow list does not confirm is refused before
+    anything is read. Issues not on the board are skipped and reported, never added; closed issues are never
+    touched; neither are issues whose state has no column.
+
+    A changed state label gets one comment saying why, as every other state-label change does (commented). The
+    board Status change is not commented on.
+
+    Output: board, changes ([{number, url, side, from, to, result (changed, planned or failed), reason,
+    commented (label changes only)}]),
+    skipped ([{number, url, reason}]), truncated (the board has more items than the `read` count read; issues past
+    them are reported as not among the items read, never as off the board), issues_truncated; dry_run when the
+    writes were only recorded. Exits 1 when paused or disabled.
+    """
+    try:
+        out = resync_mod.resync(ctx.queue())
+    except LookupError as exc:  # a MirrorFailed (board not set or not allowed) has its own kind, sync_failed
+        raise fail(ExitCode.ERROR, "board_not_found", f"{exc}; check queue.board and that the token has the "
+                                                      "project scope") from None
+    for change in out["changes"]:  # a state label that changed is explained, as for every other state-label change
+        if change["side"] == "labels" and change["result"] in ("changed", "planned"):
+            change["commented"] = ctx.post_reason(ctx.tracker, change["number"],
+                                                  f"State label changed from `{change['from']}` to `{change['to']}`: "
+                                                  "set to match the board Status by notme queue-resync")
+    return out
+
+
 @command("labels-ensure", "create the state and pass labels the repo lacks", writes=True, args=[
     arg("--check", action="store_true", help="only report what is missing")])
 def cmd_labels_ensure(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
@@ -2074,7 +2106,9 @@ def cmd_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, queue (where the issue
     queue looks, as in config --explain), items, stale_claims, interrupted_runs (skill, run_id, ref, file), last_runs,
     picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and "; target epics:
-    #N, ..." when set), warnings
+    #N, ..." when set), queue_drift (when queue.board is set: [{number, url, label, status, skip}] of open issues
+    whose state label and board Status disagree, [] when they agree; skip is why queue-resync cannot fix one, else
+    null), queue_drift_truncated (the board has more items than were read), warnings
     """
     ctx.require_valid()
     pauses = {scope: path.exists() for scope, path in ctx.pause_files().items()}
@@ -2085,6 +2119,8 @@ def cmd_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
         "active_run": ctx.active_run(), "queue": describe_queue(ctx.meta), "items": [], "stale_claims": [],
         "interrupted_runs": [], "last_runs": {}, "picking": config_mod.picking_summary(ctx.cfg.picking()),
         "warnings": list(ctx.guard.warnings)}
+    if board_ref(ctx.meta.get("queue") or {}) is not None:
+        out["queue_drift"], out["queue_drift_truncated"] = [], False
     try:
         root = ctx.log_root()
         active_id = (out["active_run"] or {}).get("run_id")
@@ -2111,6 +2147,18 @@ def cmd_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     except (gh_mod.GhError, CliExit) as exc:
         reason = exc.payload.get("error") if isinstance(exc, CliExit) else str(exc)
         out["warnings"].append(f"GitHub items not read: {reason}")
+    if "queue_drift" in out:
+        try:
+            found = _queue_drift(ctx)
+            out["queue_drift"] = [{k: d[k] for k in ("number", "url", "label", "status", "skip")}
+                                  for d in found["drift"]]
+            out["queue_drift_truncated"] = found["truncated"]
+            if found["truncated"]:
+                out["warnings"].append(f"queue drift: only the first {found['read']} board items were read; "
+                                       "drift beyond them is not listed")
+        except (MirrorFailed, gh_mod.GhError, LookupError, ValueError, CliExit) as exc:
+            reason = exc.payload.get("error") if isinstance(exc, CliExit) else str(exc)
+            out["warnings"].append(f"queue drift not read: {reason}")
     return out
 
 
@@ -2265,7 +2313,7 @@ def cmd_doctor(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
                             ctx.guard_state, ctx.env,
                             doctor_mod.mode_check(ctx.meta.get("mode"), ctx.cfg.live_unconfirmed),
                             config_files=ctx.cfg.layers.files, pass_labels=lambda: _pass_label_check(ctx),
-                            queue=lambda: _doctor_queue(ctx))
+                            queue=lambda: _doctor_queue(ctx), drift=lambda: _doctor_drift(ctx))
     verdict = doctor_mod.exit_kind(checks)
     if verdict:
         code = ExitCode.DEPENDENCY if verdict == "dependency" else ExitCode.ERROR
@@ -2292,6 +2340,24 @@ def _doctor_queue(ctx: Context) -> Dict[str, Any]:
     except CliExit as exc:
         return doctor_mod.queue_not_run(str(exc.payload.get("error")))
     return doctor_mod.queue_check(ctx.meta, ctx.gh, tracker, ctx.guard.board, origin=ctx.guard.origin_repo or tracker)
+
+
+def _doctor_drift(ctx: Context) -> Optional[Dict[str, Any]]:
+    """The queue drift check: None when queue.board is not set, else what _queue_drift finds (read-only)."""
+    if board_ref(ctx.meta.get("queue") or {}) is None:
+        return None
+    try:
+        found = _queue_drift(ctx)
+    except (MirrorFailed, gh_mod.GhError, LookupError, ValueError, CliExit) as exc:
+        return doctor_mod.drift_not_run(str(exc.payload.get("error")) if isinstance(exc, CliExit) else str(exc))
+    return doctor_mod.drift_check(found["drift"], found["board"], found["truncated"], found["read"])
+
+
+def _queue_drift(ctx: Context) -> Dict[str, Any]:
+    """queue.resync.read for this project's queue: open issues whose state label and board Status disagree.
+    MirrorFailed (board not set, or not allowed: checked before any board read), LookupError (board not found),
+    GhError or ValueError (the queue cannot be built) are left to the caller. Only reads."""
+    return resync_mod.read(ctx.queue())
 
 
 def _init_token(ctx: Context) -> Dict[str, Any]:

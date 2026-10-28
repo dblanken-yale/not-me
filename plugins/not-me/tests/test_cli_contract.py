@@ -336,6 +336,9 @@ class DryRunTests(CliCase):
         self.write_file("companions.json", json.dumps([{"repo": "acme/app-ui", "number": 9}]))
         self.write_file("steps.txt", "Open the page\nClick the button\n")
         self.write_file("ids.json", json.dumps(["PRRT_1"]))
+        # queue-resync needs a confirmed board; issue 1 (labeled in progress, Status To Do) is out of step on it
+        self.tc.write("repo", "project", "---\nschema: 1\nqueue: {board: {owner: acme, number: 6}}\n---\n# Project\n")
+        self.ok("allow-repo", "add", "--board", "acme/6", "--everywhere")
         reason = self.write_file("reason.txt", "Because the test says so\n")
         self.cases = {
             "claim-issue": ["claim-issue", "4"],
@@ -346,6 +349,7 @@ class DryRunTests(CliCase):
                            "--reason-file", reason],
             "labels-sync": ["labels-sync", "1", "--set", "in progress,extra", "--reason-file", reason],
             "labels-ensure": ["labels-ensure"],
+            "queue-resync": ["queue-resync"],
             "reply-thread": ["reply-thread", "3", "--to", "501", "--body-file", body],
             "comment-upsert": ["comment-upsert", "3", "--marker", "status", "--body-file", body],
             "request-review": ["request-review", "3", "--reviewers", "hubot"],

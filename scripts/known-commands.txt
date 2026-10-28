@@ -22,6 +22,7 @@ pick-reviews
 prove-target
 transition
 labels-sync
+queue-resync
 labels-ensure
 reply-thread
 comment-upsert
