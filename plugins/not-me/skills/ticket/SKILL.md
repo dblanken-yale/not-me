@@ -93,8 +93,8 @@ notme followup --title-file "$d/title.txt" --body-file "$d/body.md" \
    readiness item. Report each item as present or missing, with the line that
    satisfies it.
 3. Nothing missing: offer to add `todo` (and the opt-in label) when absent (yes:
-   `notme labels-sync N --add "<todo>,<opt-in>"`; no other label), and a `Stack on:`
-   line when the only blocker is an open PR (format.md, "Stacking").
+   `notme labels-sync N --add "<todo>,<opt-in>" --reason-file <reason>`; no other label), and a
+   `Stack on:` line when the only blocker is an open PR (format.md, "Stacking").
 4. Something missing: draft the edits, ask the operator for the missing facts in
    the same single question batch, and offer to apply them. On a yes, write the
    full proposed body to `body.md` in the temp dir, run

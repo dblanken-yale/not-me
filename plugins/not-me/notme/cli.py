@@ -332,6 +332,62 @@ class Context:
             self.warn(text)
             self.log_warnings.append(text)
 
+    def read_reason(self, path: str, repo: Optional[str] = None) -> str:
+        """The text of a --reason-file, read before anything is written so a bad file changes nothing. One line of
+        at most REASON_MAX_CHARS characters, with no HTML comment (so never a not-me marker that a later read would
+        honour), and clean under check_text like any other posted text."""
+        text = self.read_line(path)
+        if not text:
+            raise fail(ExitCode.USAGE, "usage", "--reason-file is empty: write one line saying why")
+        if len(text) > REASON_MAX_CHARS:
+            raise fail(ExitCode.USAGE, "usage", f"--reason-file is {len(text)} characters; keep the reason to one "
+                                                f"line of at most {REASON_MAX_CHARS}")
+        if "<!--" in text or "-->" in text:
+            raise fail(ExitCode.USAGE, "usage", "--reason-file may not contain an HTML comment or a not-me marker")
+        problems = writeback.check_text(text, self.tracker, repo or self.tracker, writeback.attribution(self.cfg),
+                                        False)
+        if problems:
+            raise fail(ExitCode.USAGE, "usage", "--reason-file text is not clean: " + "; ".join(problems))
+        return text
+
+    def say_why(self, repo: str, n: int, change: Dict[str, Any], reason: str) -> bool:
+        """After a state change succeeded: one comment naming the old state, the new state (with the label and
+        board column written alongside, when there are any) and the reason, with the run marker. A comment that
+        fails is a warning, also in the run log, and never undoes the change. True when it was posted."""
+        def shown(state: Any) -> str:
+            try:
+                return self.labels.name(state)
+            except (KeyError, TypeError):
+                return str(state)
+        sides = [f"{what} `{change[key]}`" for key, what in (("label", "label"), ("column", "board column"))
+                 if change.get(key)]
+        text = (f"Moved from `{shown(change.get('from'))}` to `{shown(change.get('to'))}`"
+                + (f" ({', '.join(sides)})" if sides else "") + f": {reason}")
+        return self.post_reason(repo, n, text)
+
+    def post_reason(self, repo: str, n: int, text: str) -> bool:
+        """Post a reason comment (with the run marker). A failure is a warning, also in the run log; it never
+        undoes the state change it explains. True when it was posted."""
+        try:
+            writeback.state_change_comment(self.gh, repo, n, text, self.run_id)
+            return True
+        except (gh_mod.GhError, gh_mod.WriteBlocked, gh_mod.ReadbackMismatch, ValueError, OSError) as exc:
+            warning = (f"the reason comment on {repo}#{n} was not posted ({exc}); the state change stands, "
+                       "say why by hand")
+            self.warn(warning)
+            self.log_warnings.append(warning)
+            return False
+
+    def state_labels(self, names: Sequence[str]) -> List[str]:
+        """The names among `names` that are state labels (labels.* in project.md); pass labels and others are not."""
+        return [x for x in names if self.labels.knows(x)]
+
+    def say_labels(self, repo: str, n: int, added: Sequence[str], removed: Sequence[str], reason: str) -> bool:
+        """One comment for a change of state labels made outside a move: which were added, which removed, why."""
+        parts = [f"{verb} " + ", ".join(f"`{x}`" for x in names)
+                 for verb, names in (("added", added), ("removed", removed)) if names]
+        return self.post_reason(repo, n, f"State labels changed ({'; '.join(parts)}): {reason}")
+
     def need_work_dir(self) -> Path:
         if self.work_dir is None:
             raise fail(ExitCode.USAGE, "usage", "no project directory: run inside a clone (or pass --project-dir)")
@@ -600,6 +656,9 @@ class OneOf:
 ref_arg = arg("ref", metavar="REF")
 number_arg = arg("number", metavar="N")
 body_file_arg = arg("--body-file", required=True, metavar="F")
+REASON_MAX_CHARS = 500  # the longest reason a state-change comment carries
+reason_file_arg = arg("--reason-file", required=True, metavar="F",
+                      help="file holding one line that says why; posted as one comment on the item")
 title_file_arg = arg("--title-file", required=True, metavar="F")
 labels_arg = arg("--labels", metavar="a,b")
 
@@ -806,7 +865,9 @@ def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     [{number, behind, epic}]; stack_held: [{number, ref, reason}] issues left out because their
     `Stack on:` (or `Based on:`, `On top of:`) line names a predecessor PR that is not ready to stack on (draft,
     closed, another open blocker, queue.stacking off, a repo not allowed or not this checkout's); with none,
-    reason stack_held names them; picking: {rules (the effective Picking work section of project.md), layer (where
+    reason stack_held names them; disagreements (only with queue.source either, and only when not empty:
+    [{number, label, status, reason}] for issues left out because the label and the board Status disagree);
+    picking: {rules (the effective Picking work section of project.md), layer (where
     the rules came from), fields, target_epics (the ones honoured: open and written by a trusted roster member),
     ignored_epics ([{number, reason}])}. Or none with queue_summary (where the queue looked, in plain words) and
     held_back when not empty, with reason when paused or disabled, and with reason unassigned_only, unassigned
@@ -838,6 +899,8 @@ def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
                         "setting": "queue.include_unassigned", "suggest": "/not-me:suggest"})
         if queue.held_back:
             out["held_back"] = queue.held_back
+        if queue.disagreements:
+            out["disagreements"] = queue.disagreements
         return none(**out)
     top, listed = found[0], found[:limit]
     picking = {**rules, "target_epics": list(queue.target_epics_used),
@@ -845,7 +908,8 @@ def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     return {"number": top.number, "title": top.title, "url": top.url, "author": top.author,
             "labels": top.labels, "parent": top.parent, "candidates": len(found),
             "issues": queue.facts(listed), "truncated": len(listed) < len(found), "held_back": queue.held_back,
-            "stack_held": stack_held, "picking": picking}
+            "stack_held": stack_held, "picking": picking,
+            **({"disagreements": queue.disagreements} if queue.disagreements else {})}
 
 
 @command("picking-signals", "board fields and labels that could rank the eligible issues", args=[
@@ -990,36 +1054,44 @@ def cmd_claim_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -
 
 
 @command("release-issue", "give a claimed issue back", writes=True, ref="tracker", args=[
-    number_arg, arg("--to", choices=("todo", "blocked"), default="todo")])
+    number_arg, arg("--to", choices=("todo", "blocked"), default="todo"), reason_file_arg])
 def cmd_release_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
-    """Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released.
-    With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
+    """Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released, then post
+    one comment with the old state, the new state (and the board column when the board follows) and the text of
+    --reason-file. A comment that fails is a warning; the release stands. With queue.sync, the side queue.source
+    does not read follows; a failed mirror write is a warning.
 
-    Output: number, to, released; warnings when a queue.sync mirror write failed
+    Output: number, to, released, commented; warnings when a queue.sync mirror write or the comment failed
     """
+    reason = ctx.read_reason(args.reason_file, repo)
     queue = ctx.queue()
     try:
         queue.release(n, args.to)
     finally:  # a mirror warning stands even when a later step failed
         ctx.sync_warnings(queue)
-    return {"number": n, "to": args.to, "released": True}
+    commented = ctx.say_why(repo, n, queue.change, reason) if queue.change else False
+    return {"number": n, "to": args.to, "released": True, "commented": commented}
 
 
 @command("move-issue", "move an issue to a state", writes=True, ref="tracker", args=[
     number_arg, arg("--to", required=True, choices=states.STATES, metavar="STATE"),
-    arg("--require-current", choices=states.STATES, metavar="STATE")])
+    arg("--require-current", choices=states.STATES, metavar="STATE"), reason_file_arg])
 def cmd_move_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
-    """Move an issue to a state, optionally only when it is currently in another one.
-    With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
+    """Move an issue to a state, optionally only when it is currently in another one, then post one comment with
+    the old state, the new state (and the label and board column the move also wrote) and the text of
+    --reason-file. A comment that fails is a warning; the move stands. With queue.sync, the side queue.source does
+    not read follows; a failed mirror write is a warning.
 
-    Output: number, to, require_current; warnings when a queue.sync mirror write failed
+    Output: number, to, require_current, commented; warnings when a queue.sync mirror write or the comment failed
     """
+    reason = ctx.read_reason(args.reason_file, repo)
     queue = ctx.queue()
     try:
         queue.move(n, args.to, args.require_current)
     finally:  # a mirror warning stands even when a later step failed
         ctx.sync_warnings(queue)
-    return {"number": n, "to": args.to, "require_current": args.require_current}
+    commented = ctx.say_why(repo, n, queue.change, reason) if queue.change else False
+    return {"number": n, "to": args.to, "require_current": args.require_current, "commented": commented}
 
 
 @command("issue", "an issue's facts", ref="tracker", args=[number_arg])
@@ -1211,15 +1283,20 @@ def cmd_prove_target(ctx: Context, args: argparse.Namespace, repo: str, n: int) 
 @command("transition", "change an item's state label along a legal edge", writes=True, args=[
     number_arg, arg("--from", dest="from_state", required=True, choices=states.STATES, metavar="STATE"),
     arg("--to", required=True, choices=states.STATES, metavar="STATE"),
-    arg("--kind", choices=("issue", "pr"), default="issue")])
+    arg("--kind", choices=("issue", "pr"), default="issue"), reason_file_arg])
 def cmd_transition(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Change an item's state label along a legal edge (reads the labels, replaces the set, reads it back).
+    """Change an item's state label along a legal edge (reads the labels, replaces the set, reads it back), then
+    post one comment with the old state, the new state and the text of --reason-file. A comment that fails is a
+    warning; the change stands.
 
-    Output: repo, number, kind, from, to, labels
+    Output: repo, number, kind, from, to, labels, commented
     """
     repo, n = ctx.ref(args.number, ctx.tracker if args.kind == "issue" else ctx.repo)
+    reason = ctx.read_reason(args.reason_file, repo)
     new = states.apply(ctx.gh, repo, n, args.from_state, args.to, ctx.labels, args.kind)
-    return {"repo": repo, "number": n, "kind": args.kind, "from": args.from_state, "to": args.to, "labels": new}
+    commented = ctx.say_why(repo, n, {"from": args.from_state, "to": args.to}, reason)
+    return {"repo": repo, "number": n, "kind": args.kind, "from": args.from_state, "to": args.to, "labels": new,
+            "commented": commented}
 
 
 @command("labels-sync", "make an item's labels match", writes=True, ref="tracker", args=[
@@ -1227,18 +1304,46 @@ def cmd_transition(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     OneOf(arg("--set", metavar="a,b", help="replace the whole label set"),
           arg("--add", metavar="a,b", help="labels to add")),
     arg("--remove", metavar="a,b", help="labels to remove (not with --set)"),
-    arg("--check", action="store_true", help="only report whether the labels match")])
+    arg("--check", action="store_true", help="only report whether the labels match"),
+    arg("--reason-file", metavar="F", help="file holding one line that says why; required when the change adds or "
+                                           "removes a state label (labels.* in project.md)")])
 def cmd_labels_sync(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
     """Make an item's labels match: --set replaces the whole set, --add and --remove edit it. --check only reports. A bare number
     is an item in the tracker; owner/name#N or a URL names an item in another allowed repository (a companion PR).
+    A change that adds or removes a state label (needs human, blocked, question, paused, ...) needs --reason-file
+    and posts one comment naming the labels and the reason; a failed comment is a warning and the change stands.
+    Pass labels and other labels need no reason.
 
-    Output: repo, number, in_sync, changed, labels (current, or the new set)
+    Output: repo, number, in_sync, changed, labels (current, or the new set); commented when a reason was posted
     """
     if (args.set is None) == (args.add is None and args.remove is None) or \
             (args.set is not None and args.remove is not None):
         raise fail(ExitCode.USAGE, "usage", "give --set, or --add and/or --remove")
-    return writeback.label_sync(ctx.gh, repo, n, set_to=csv(args.set) if args.set is not None else None,
-                                add=csv(args.add), remove=csv(args.remove), check=args.check)
+    added: List[str] = []
+    removed: List[str] = []
+    reason = None
+    if not args.check:
+        have = ctx.gh.labels(repo, n)
+        held = {x.lower() for x in have}
+        if args.set is not None:
+            wanted = csv(args.set)
+            kept = {x.lower() for x in wanted}
+            added = [x for x in ctx.state_labels(wanted) if x.lower() not in held]
+            removed = [x for x in ctx.state_labels(have) if x.lower() not in kept]
+        else:
+            added = [x for x in ctx.state_labels(csv(args.add)) if x.lower() not in held]
+            removed = [x for x in ctx.state_labels(csv(args.remove)) if x.lower() in held]
+        if added or removed:
+            if not args.reason_file:
+                raise fail(ExitCode.USAGE, "usage", "this change touches the state label(s) "
+                           + ", ".join(f"`{x}`" for x in added + removed) + ": pass --reason-file with one line "
+                                                                           "saying why")
+            reason = ctx.read_reason(args.reason_file, repo)
+    out = writeback.label_sync(ctx.gh, repo, n, set_to=csv(args.set) if args.set is not None else None,
+                               add=csv(args.add), remove=csv(args.remove), check=args.check)
+    if reason is not None:
+        out["commented"] = ctx.say_labels(repo, n, added, removed, reason)
+    return out
 
 
 @command("labels-ensure", "create the state and pass labels the repo lacks", writes=True, args=[
@@ -1330,19 +1435,29 @@ def cmd_pr_body(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Di
 @command("pr-open", "open a PR", writes=True, args=[
     arg("--head", required=True, metavar="H"), arg("--base", required=True, metavar="B"), title_file_arg,
     body_file_arg, labels_arg, arg("--reviewers", metavar="a,b"), arg("--assignee", metavar="L"),
-    arg("--draft", action="store_true")])
+    arg("--draft", action="store_true"),
+    arg("--reason-file", metavar="F", help="one line saying why the state labels are set; default: \"pull request "
+                                           "opened\"")])
 def cmd_pr_open(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Open a PR, set its labels, request review. The head branch may not be a protected branch.
+    """Open a PR, set its labels, request review. The head branch may not be a protected branch. When --labels
+    names a state label (needs review, ...), one comment on the new PR names it and the reason (the first line of
+    --reason-file, else "pull request opened"); a failed comment is a warning and the PR stands. No comment in a
+    dry run, which has no PR number.
 
-    Output: repo, number, url (both null in a dry run), head, base
+    Output: repo, number, url (both null in a dry run), head, base; commented when a state label was set
     """
     repo = ctx.repo
     if ctx.protected(args.head):
         raise fail(ExitCode.ERROR, "protected_branch", f"refusing to open a PR from protected branch {args.head!r}")
     body = with_attribution(ctx, ctx.read_input(args.body_file))
+    reason = ctx.read_reason(args.reason_file, repo) if args.reason_file else "pull request opened"
     out = writeback.open_pr(ctx.gh, ctx.cfg, repo, args.head, args.base, ctx.read_line(args.title_file), body,
                             csv(args.labels), csv(args.reviewers), args.assignee, args.draft)
-    return {"repo": repo, "number": out.get("number"), "url": out.get("url"), "head": args.head, "base": args.base}
+    result = {"repo": repo, "number": out.get("number"), "url": out.get("url"), "head": args.head, "base": args.base}
+    state = ctx.state_labels(csv(args.labels))
+    if state and out.get("number") is not None:
+        result["commented"] = ctx.say_labels(repo, out["number"], state, [], reason)
+    return result
 
 
 @command("companion-prs", "rewrite a PR's Companion PRs section", writes=True, ref="repo", args=[
@@ -1380,6 +1495,8 @@ def cmd_testing_steps(ctx: Context, args: argparse.Namespace, repo: str, n: int)
 @command("review-post", "post a review", writes=True, ref="repo", args=[
     ref_arg, arg("--event", required=True, choices=("APPROVE", "REQUEST_CHANGES", "COMMENT")), body_file_arg,
     arg("--comments-file", metavar="J"),
+    arg("--reason-file", metavar="F", help="one line saying why the state labels changed; default: the review's "
+                                           "own verdict"),
     OneOf(arg("--labels-set", metavar="a,b", help="set the full label set after posting"),
           arg("--labels-auto", action="store_true",
               help="work out the label set from the PR's reviews, role.md and the roster, then set it"))])
@@ -1395,8 +1512,12 @@ def cmd_review_post(ctx: Context, args: argparse.Namespace, repo: str, n: int) -
     review.changes_label. COMMENT only updates the pass labels. A pass label missing from the repo is skipped with
     one warning.
 
+    When the labels set change a state label (needs review, needs work, ready to merge, ...), one comment follows
+    the review naming what was added and removed and the reason: the first line of --reason-file, else "a <EVENT>
+    review was posted". A failed comment is a warning and the review and labels stand.
+
     Output: repo, number, event, state (event only in a dry run); with --labels-auto labels and approval (null with
-    no roles; else required, approved, waiting, all_approved, pass_labels)
+    no roles; else required, approved, waiting, all_approved, pass_labels); commented when a state label changed
     """
     if args.event == "APPROVE" and ctx.trusted_meta("review").get("auto_approve") is not True:
         raise fail(ExitCode.ERROR, "approve_refused", "APPROVE needs review.auto_approve: true in the global layer")
@@ -1407,10 +1528,19 @@ def cmd_review_post(ctx: Context, args: argparse.Namespace, repo: str, n: int) -
                                                     for c in inline):
             raise fail(ExitCode.USAGE, "usage", "comments file must be a JSON list of {path, line, body}")
     report: Dict[str, Any] = {}
+    reason = ctx.read_reason(args.reason_file, repo) if args.reason_file else f"a {args.event} review was posted"
+    before = ctx.gh.labels(repo, n) if args.labels_auto or args.labels_set is not None else []
     auto = _labels_after_review(ctx, repo, n, args.event, report) if args.labels_auto else None
     out = writeback.review_post(ctx.gh, repo, n, args.event.lower(), ctx.read_input(args.body_file), inline,
                                 csv(args.labels_set) if args.labels_set is not None else None, ctx.run_id,
                                 labels_from_reviews=auto)
+    after = out.get("labels") if args.labels_auto else csv(args.labels_set) if args.labels_set is not None else None
+    if after is not None:
+        held, kept = {x.lower() for x in before}, {x.lower() for x in after}
+        added = [x for x in ctx.state_labels(after) if x.lower() not in held]
+        removed = [x for x in ctx.state_labels(before) if x.lower() not in kept]
+        if added or removed:
+            out["commented"] = ctx.say_labels(repo, n, added, removed, reason)
     return {"repo": repo, "number": n, **out, **report}
 
 

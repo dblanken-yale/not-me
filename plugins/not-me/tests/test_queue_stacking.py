@@ -6,6 +6,7 @@ import unittest
 
 from notme.stacking import parse_refs
 from notme.writes import GuardContext
+from tests.test_queue_either import EitherTestCase
 from tests.test_queue_labels import REPO, QueueTestCase, add_issue
 
 
@@ -215,6 +216,26 @@ class StackTests(QueueTestCase):
         self.assertEqual(parse_refs("<!--\nStack on: a/b#3\n-->\nOn top of: a/b#9"),
                          {"refs": [("a/b", 9)], "lines": 1})
         self.assertEqual(parse_refs("```\nunclosed\nStack on: a/b#3"), {"refs": [], "lines": 0})
+
+
+class EitherStackTests(EitherTestCase):
+    """The either queue shares the stack_on, stack_filter and blocked_by logic of the base queue."""
+
+    cfg_overrides = {**EitherTestCase.cfg_overrides, "stacking": "declared"}
+
+    def test_stack_applies_to_the_either_queue(self):
+        add_issue(self.fake, 40, labels=[], title="The earlier work")
+        add_pr(self.fake, 20, closes=(40,))
+        add_pr(self.fake, 21, draft=True, closes=(40,))
+        self.put(5, status=None, labels=["to do"], body=f"Stack on: {REPO}#20\n")
+        self.put(6, status="To Do", labels=[], body=f"Based on: {REPO}#21\n")
+        for n in (5, 6):
+            self.thing(n)["blocked_by"] = [40]
+        kept, held = self.q.stack_filter(self.q.candidates(), None)
+        self.assertEqual([c.number for c in kept], [5])
+        self.assertEqual([(h["number"], h["ref"]) for h in held], [(6, f"{REPO}#21")])
+        facts = self.q.facts(kept)
+        self.assertEqual((facts[0]["stack_on"]["head"], facts[0]["blocked_by"][0]["number"]), ("feat/first", 40))
 
 
 if __name__ == "__main__":

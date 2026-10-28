@@ -82,7 +82,7 @@ Choose GitHub.com, HTTPS, and the browser flow. The default scopes include `repo
 gh auth status
 ```
 
-If your queue is a Projects v2 board (`queue.source: board`), add the `project` scope:
+If your queue is a Projects v2 board (`queue.source: board` or `either`), add the `project` scope:
 
 ```bash
 gh auth refresh -s project

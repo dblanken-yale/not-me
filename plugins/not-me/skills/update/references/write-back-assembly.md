@@ -63,10 +63,10 @@ skip it. Parked runs request no review.
 | Parked (see `findings.md`, "Park labels") | `needs_work` to `needs_review` | `needs_human`, plus `question` when a named person owes an answer | `PARKED <ref> needs_review - waiting on @<login>` |
 
 1. The transition is `notme transition <N> --from needs_work --to needs_review
-   --kind pr --log <path>`. A PR picked as an answered question uses
+   --kind pr --reason-file <reason> --log <path>`; the reason file holds one line such as `Findings addressed in <sha>`. A PR picked as an answered question uses
    `--from question`.
-2. Extra labels: `notme labels-sync <ref> --add <names> --log <path>`, with the repo
-   names from `labels`. Never add and remove in one call.
+2. Extra labels: `notme labels-sync <ref> --add <names> --reason-file <reason> --log <path>`, with the
+   repo names from `labels`; the reason file holds one line on why (the park reason). Never add and remove in one call.
 3. Every PARKED result adds `needs_human` (`parking.md`).
 4. A read-back mismatch (exit 5) is a failure: log it and stop the write-back.
 

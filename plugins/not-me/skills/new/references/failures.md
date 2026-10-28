@@ -9,8 +9,8 @@ result line. Parking rules are in `parking.md`; logging rules in
 
 ## Rules for every row
 
-1. Write labels with `notme labels-sync N --add <names> --log <path>` or the state
-   commands. Never add and remove the same label in one call.
+1. Write labels with `notme labels-sync N --add <names> --reason-file <reason> --log <path>` (a reason file is
+   required when a state label changes, `needs_human` included) or the state commands. Never add and remove the same label in one call.
 2. Comments go through `notme check-text --file <f>`, then
    `notme comment-upsert <tracker>#N --marker new --body-file <f> --log <path>`.
    The body leads with `**Waiting on:**` and a login, never "you".
@@ -42,7 +42,7 @@ result line. Parking rules are in `parking.md`; logging rules in
 | CI red at `limits.fix_loop` | issue `needs_review`; PR adds `needs_human` | names the failing job and test | `FAILED <ref> ci-red - <test>` |
 | CI wait times out | issue `needs_review` | none | `PR <ref> opened - ci pending` with a `WARN` |
 
-"Release" means `notme release-issue N --log <path>`, then the `needs_human` add.
+"Release" means `notme release-issue N --reason-file <reason> --log <path>` (the reason file holds one line on why the run gave up), then the `needs_human` add.
 For HELD, the issue keeps `in_progress` so loops skip it; add the extra labels
 with `labels-sync` and do not call `release-issue`.
 

@@ -134,6 +134,74 @@ class WindowsTypedPathTableTests(_Fixtures):
 
 
 
+@unittest.skipIf(os.name == "nt", "the pattern exemption is never given on Windows")
+class PatternProgramTests(_Fixtures):
+    """The grep, rg or sed pattern exemption holds only when the program resolves on PATH to a file the user cannot
+    change. A program planted in a writable PATH directory (in this call or an earlier one) loses it."""
+
+    def decide(self, cmd: str, path: str):
+        cwd, home = gc.variant_paths(self.root, "app")
+        ctx = GuardContext.from_project(cwd, home=home, env=dict(self.env, NOT_ME_HOME=str(home), PATH=path))
+        if not guard.is_active(ctx):
+            ctx.self_only()
+        return guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd.format(H=home)}, "cwd": str(cwd),
+                             "session_id": gc.SESSION}, ctx)
+
+    def planted(self, name: str) -> str:
+        d = Path(tempfile.mkdtemp(prefix="notme-path-")).resolve()
+        self.addCleanup(shutil.rmtree, str(d), True)
+        (d / name).write_text("#!/bin/sh\ncat \"$1\"\n", encoding="utf-8")
+        os.chmod(str(d / name), 0o755)
+        return str(d)
+
+    def system_dir(self, name: str) -> str:
+        found = shutil.which(name, path="/usr/bin" + os.pathsep + "/bin")
+        if not found or guard._host_writable(found) or guard._host_writable(os.path.realpath(found)):
+            self.skipTest(f"no {name} the user cannot write")
+        return os.path.dirname(found)
+
+    def test_writable_program_on_path_blocks(self):
+        for name in ("grep", "rg", "sed"):
+            with self.subTest(name=name):
+                cmd = "sed -n '/{H}/operator-token/p' README.md" if name == "sed" else name + " '{H}/operator-token'"
+                self.assertEqual(self.decide(cmd, self.planted(name)).rule, "self_protect")
+
+    def test_system_program_allows(self):
+        sysdir = self.system_dir("grep")
+        self.assertIsNone(self.decide("grep -n 'x/operator-token' README.md", sysdir))
+        self.assertIsNone(self.decide("sed -n '/operator-token/p' README.md", self.system_dir("sed")))
+
+    def test_planted_program_before_system_dir_blocks(self):
+        sysdir = self.system_dir("grep")
+        self.assertEqual(self.decide("grep '{H}/operator-token'", self.planted("grep") + os.pathsep + sysdir).rule,
+                         "self_protect")
+
+    def test_link_in_writable_dir_to_system_program_blocks(self):
+        sysdir = self.system_dir("grep")
+        d = self.planted("other")
+        os.symlink(os.path.join(sysdir, "grep"), os.path.join(d, "grep"))
+        self.assertEqual(self.decide("grep '{H}/operator-token'", d).rule, "self_protect")
+
+    def test_relative_or_empty_entry_before_program_blocks(self):
+        sysdir = self.system_dir("grep")
+        for path in ("bin" + os.pathsep + sysdir, os.pathsep + sysdir, sysdir + os.pathsep):
+            with self.subTest(path=path):
+                result = self.decide("grep 'x/operator-token' README.md", path)
+                if path.endswith(os.pathsep):  # an empty entry after the program's directory is never reached
+                    self.assertIsNone(result)
+                else:
+                    self.assertEqual(result.rule, "self_protect")
+
+    def test_program_not_on_path_blocks(self):
+        self.assertEqual(self.decide("grep 'x/operator-token' README.md", self.planted("other")).rule,
+                         "self_protect")
+
+    def test_system_rg_allows(self):
+        sysdir = self.system_dir("rg")  # a system package (Linux); Homebrew and cargo installs are user-writable
+        self.assertIsNone(self.decide("rg '~/.claude/not-me/operator-token' README.md", sysdir))
+        self.assertIsNone(self.decide("rg -g '*.py' -t py -- ~/.claude/not-me/operator-token scripts", sysdir))
+
+
 class CrlfEditTests(unittest.TestCase):
     """A file with CRLF line endings (Path.write_text on Windows): Claude Code matches old_string against LF text,
     so the global-mode check applies the edit that way too. Other edits are not read at all."""

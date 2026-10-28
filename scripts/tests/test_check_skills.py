@@ -28,7 +28,7 @@ class CheckSkillsTest(unittest.TestCase):
         self.assertEqual(code, 1)
         data = json.loads(out)
         rules = {v["rule"] for v in data["violations"]}
-        self.assertEqual(rules, {f"R{i}" for i in range(1, 15)})
+        self.assertEqual(rules, {f"R{i}" for i in range(1, 16)})
         for v in data["violations"]:
             self.assertGreaterEqual(v["line"], 1)
 
@@ -71,6 +71,42 @@ class CheckSkillsTest(unittest.TestCase):
     def test_allowed_raw_write_block_is_exempt(self):
         _, out, _ = run("clean", "--only", "R6", "--json")
         self.assertEqual(json.loads(out)["count"], 0)
+
+
+class ReasonRuleTest(unittest.TestCase):
+    """R15: a call that changes a state names --reason-file, and only its own call counts."""
+
+    @staticmethod
+    def found(text):
+        sys.path.insert(0, str(SCRIPTS))
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("check_skills", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules.setdefault("check_skills", mod)
+        spec.loader.exec_module(mod)
+        return [cmd for _, cmd in mod.reason_violations(text)]
+
+    def test_a_call_with_a_reason_file_passes(self):
+        self.assertEqual(self.found("`notme move-issue 5 --to blocked --reason-file <r> --log <p>`"), [])
+
+    def test_a_call_without_one_is_flagged(self):
+        self.assertEqual(self.found("Run `notme release-issue 5 --log <p>` now."), ["notme release-issue"])
+
+    def test_a_later_call_in_the_same_block_does_not_cover_an_earlier_one(self):
+        block = "```bash\nnotme move-issue 5 --to blocked\nnotme release-issue 5 --reason-file r\n```\n"
+        self.assertEqual(self.found(block), ["notme move-issue"])
+
+    def test_the_flag_on_a_continuation_line_counts(self):
+        self.assertEqual(self.found("notme transition 3 --from a --to b \\\n  --reason-file r\n"), [])
+
+    def test_the_wrapper_and_variable_forms_are_caught(self):
+        text = ('"${CLAUDE_PLUGIN_ROOT}/bin/notme" move-issue 5 --to blocked\n\n'
+                '"$NOTME" transition 5 --from a --to b\n\n'
+                'notme labels-sync 5 --add "needs human"\n')
+        self.assertEqual(self.found(text), ["notme\" move-issue", "$NOTME\" transition", "notme labels-sync"])
+
+    def test_labels_sync_check_needs_no_reason(self):
+        self.assertEqual(self.found("`notme labels-sync 5 --set a --check`"), [])
 
 
 if __name__ == "__main__":
