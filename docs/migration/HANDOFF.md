@@ -26,7 +26,7 @@ dev loop in any GitHub repository: `/not-me:new` picks a ready issue and opens a
 PR, `/not-me:update` reworks a PR labeled `needs work`, `/not-me:review` reviews
 PRs labeled `needs review`, `/not-me:prove` runs a PR's testing steps on its
 deploy target, `/not-me` routes between them, and `setup`, `config`, `doctor`,
-`status`, `ticket`, `retro` and `allow-repo` support them. It replaces three
+`status`, `ticket`, `suggest`, `retro` and `allow-repo` support them. It replaces three
 bespoke skill families Dave uses daily (YaleSites `not_dave*`, palliative-care-rag
 `pcr-*`, YDS-Web-Component `wc_dave*`). Mechanics live in a stdlib-only Python
 CLI (`notme`), judgment stays in the model, and a small PreToolUse guard hook blocks
@@ -84,6 +84,17 @@ the risky actions. Project specifics live in markdown config docs with three lay
   its rules (the run log notes `truncated`). On a label queue, field values come only from
   projects owned by the tracker's owner (anyone can add a public issue to their
   own project), and every text value is cut to `picking.value_max_chars`.
+- Suggest (issue 73): `/not-me:suggest` is how a person fills the
+  assigned-to-me queue. `notme suggest-issues` lists the issues the queue would
+  pick if they were the operator's (same eligibility, epic order, facts and
+  `picking` block as `pick-issue`) that nobody is assigned to, plus `untrusted`
+  ([{number, author}] only). `notme assign-issue N` adds the operator and nobody
+  else, through the write gate (dry run: ledger only), and refuses an issue
+  outside the tracker, assigned to anyone else, or not in the suggest list now;
+  it reads the assignees back. The skill is person-only
+  (`disable-model-invocation: true`); the router, loops and `--bg` never call
+  it, and it assigns only the numbers the person names in that session.
+  `pick-issue`'s `unassigned_only` result carries `suggest: /not-me:suggest`.
 
 ## Decisions made on day one that are not obvious from the code
 

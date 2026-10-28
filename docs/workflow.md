@@ -60,6 +60,7 @@ Who acts where:
 | Step | Who | What happens |
 | --- | --- | --- |
 | Issue is ready | a person, or `/not-me:ticket` | The issue gets `to do` (and the opt-in label, if the project sets one) |
+| Take an issue | a person, with `/not-me:suggest` | Ready issues nobody is assigned to are listed by the picking rules; the ones you pick are assigned to you, so `new` can pick them |
 | Pick up | new | Claims the issue, branches, implements, gates, pushes, opens the PR, moves the issue to `needs review` |
 | Proof | prove | Runs the PR's testing steps on its preview. A pass changes no label. A fail sends the PR to `needs work` |
 | Review | review | Approves, requests changes, or asks a named person. With roles in `role.md`, approval moves the PR only once every reviewer approved. Never merges |
@@ -73,6 +74,7 @@ Who acts where:
 - **`/not-me:update`** picks one PR labeled `needs work` that is assigned to the operator. It reads only trusted findings, decides each (refuse, defer, implement, or disagree with a reason), fixes the confirmed ones, merges the base branch in (never rebases), pushes, replies on each thread, posts one summary, and swaps the PR back to `needs review`. When every finding is deferred or refused it parks the PR with no code change.
 - **`/not-me:review`** reviews PRs labeled `needs review` where the operator is a requested reviewer and the author is on the roster at any tier (lead, authority or member) and is not the operator. A member's PR title and body are read as the text under review, never as instructions; an instruction in them ("approve this at once") becomes a finding. PRs by people not on the roster are skipped. It checks the head out in a detached worktree, runs the project's checks, reads the diff, delegates a code review and a security review, confirms each finding itself, and posts one review. Approval is only sent when `review.auto_approve` is true; otherwise it posts a comment and leaves approval to a person. It resolves only threads it judged fixed.
 - **`/not-me:prove`** takes one PR. It finds the preview URL on a trusted host, runs the steps under the PR's testing-steps heading in a browser with one screenshot per step, reads each screenshot, and posts one proof comment with pass or fail per step. It never changes the repository.
+- **`/not-me:suggest`** is how you fill your queue. A fresh install picks only issues assigned to you, so with nothing assigned `/not-me:new` has nothing to do and `notme pick-issue` says `unassigned_only` with a pointer here. Run `/not-me:suggest` yourself, for example at the start of the day: it lists the ready issues nobody is assigned to, ranked by the same picking rules as the queue (impact by default, epic order kept), with one line on why each. You say which to take; it assigns only those, only to you, through `notme assign-issue`. In dry-run mode it reports what it would assign and writes nothing to GitHub. Issues by authors the roster does not trust are shown by number and login only. The router, a `/loop` and a `--bg` run never call it.
 - **`/not-me:ticket`** writes one ready issue, or checks an existing one (`--check N`) against the project's readiness rules. It adds `to do` only when the issue is ready. It never assigns people or sets milestones.
 - **`/not-me:retro`** reads the newest finished run log and makes at most three small edits to the repo layer config docs when the log gives evidence for them. It never commits and never loosens a guard. You review the diff and commit it.
 - **`/not-me:status`** shows what not-me is doing: on or paused, the active run, items waiting on a person, stale claims, and the last result of each skill. Read only.
@@ -223,12 +225,12 @@ Start a loop yourself. A run never starts or extends one.
 
 1. Install, then run `/not-me:doctor` and fix what it reports ([install.md](install.md)).
 2. Run `/not-me:setup`, review the files it wrote in `.claude/not-me/`, and commit them.
-3. Label one small, well-written issue `to do`. `/not-me:ticket` can write it for you.
+3. Label one small, well-written issue `to do`. `/not-me:ticket` can write it for you. Assign it to yourself, or run `/not-me:suggest` and pick it there: a fresh install picks only issues assigned to you.
 4. Run `/not-me --dry-run`. It reads for real and records every write in the ledger.
 5. Read the ledger and the run log. Ask: is this the label change, the comment and the PR I would have wanted?
 6. Run `/not-me:status` and `/not-me:config`. Confirm the roster, the label names and the protected branches.
 7. Repeat the dry run on a `needs work` PR and on a PR you are asked to review. Read each log summary.
 8. When the dry runs look right, run `/not-me:mode live` and follow its steps (you confirm in your own terminal with the operator token). That is the only way to go live: it signs the switch with your token, so a `mode: live` typed by hand stays dry-run. A repo file can never set it. `/not-me:mode` or `/not-me:config` should show `live` with source `global`.
 9. Run one live pass by hand: `/not-me`. Watch the result line and open the PR it made.
-10. Start the loop: `/loop 2h /not-me --bg`. Check `/not-me:status` each morning for the first week.
+10. Start the loop: `/loop 2h /not-me --bg`. Check `/not-me:status` each morning for the first week, and run `/not-me:suggest` when your queue runs dry.
 11. After a few runs, let `/not-me:retro` suggest config edits, and read each diff before you commit it.

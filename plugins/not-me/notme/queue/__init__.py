@@ -138,6 +138,12 @@ class BaseQueue:
         self.sync = self.queue_cfg.get("sync") is True  # queue.sync: mirror each state change to the other side
         self.sync_warnings: List[str] = []  # one per mirror write that failed (see sync.mirror)
         self.unassigned_skipped = 0  # eligible issues the last candidates() left out only because nobody is assigned
+        # /not-me:suggest: only issues nobody is assigned to (the operator's own are already in their queue), whatever
+        # queue.include_unassigned says. Set by the caller; grants nothing, since claiming still checks assignees.
+        self.only_unassigned = False
+        # [{number, author}] of otherwise eligible, unassigned issues the last candidates() left out for an untrusted
+        # author: numbers and logins only, never a title or body
+        self.untrusted_skipped: List[Dict[str, Any]] = []
         self.held_back: List[Dict[str, int]] = []  # eligible issues the last candidates() left out for epic order
         picking = self.meta.get("picking") or {}
         if not isinstance(picking, dict):
@@ -201,14 +207,25 @@ class BaseQueue:
         """Whether the roster trusts this author to direct work. Both queues filter candidates through this."""
         return bool(self.roster.is_trusted(author))
 
+    def _trusted_author(self, number: Any, author: Optional[str], assignees: Sequence[str]) -> bool:
+        """trusted(author). An untrusted, unassigned issue is noted in untrusted_skipped by number and login only."""
+        if self.trusted(author):
+            return True
+        if not assignees:
+            self.untrusted_skipped.append({"number": int(number), "author": author or None})
+        return False
+
     def _is_me(self, login: Optional[str]) -> bool:
         return (login or "").lower() == self.operator.lower()
 
     def _assignees_allow(self, assignees: Sequence[str]) -> bool:
         """Check this last, after every other eligibility rule. Assigned to the operator alone: yes. Assigned to
-        anyone else: never. Nobody: only with queue.include_unassigned; otherwise counted in unassigned_skipped."""
+        anyone else: never. Nobody: only with queue.include_unassigned; otherwise counted in unassigned_skipped.
+        With only_unassigned (the suggest list): nobody assigned, and nothing else."""
         if any(not self._is_me(a) for a in assignees):
             return False
+        if self.only_unassigned:
+            return not assignees
         if assignees or self.include_unassigned:
             return True
         self.unassigned_skipped += 1

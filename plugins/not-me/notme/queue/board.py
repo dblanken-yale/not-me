@@ -145,7 +145,7 @@ class BoardQueue(BaseQueue):
         queue.board.priority_fields named, in its order (higher first, none last), then oldest. picking.fields are
         only read and reported: how they weigh is the Picking work rules' call, not the queue's. An issue behind an
         earlier open, unstarted issue in a trusted epic is left out (see held_back)."""
-        self.unassigned_skipped, self.held_back = 0, []
+        self.unassigned_skipped, self.held_back, self.untrusted_skipped = 0, [], []
         opt_in = self.queue_cfg.get("opt_in_label")
         todo = self.board_states.get("todo")
         skip = set()
@@ -161,7 +161,7 @@ class BoardQueue(BaseQueue):
             if (item["status"] != todo
                     or str(item["state"]).upper() != "OPEN"
                     or (opt_in and opt_in.lower() not in names) or names & skip
-                    or not self.trusted(item["author"])
+                    or not self._trusted_author(item["number"], item["author"], item["assignees"])
                     or not self._assignees_allow(item["assignees"])):  # last, so only eligible ones are counted
                 continue
             found.append(self._candidate(item))

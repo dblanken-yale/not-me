@@ -806,8 +806,9 @@ def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     [{number, behind, epic}]; picking: {rules (the effective Picking work section of project.md), layer (where
     the rules came from), fields, target_epics (the ones honoured: open and written by a trusted roster member),
     ignored_epics ([{number, reason}])}. Or none with queue_summary (where the queue looked, in plain words) and
-    held_back when not empty, with reason when paused or disabled, and with reason unassigned_only, unassigned (count) and setting when the queue found no issue and
-    the only eligible issues have no assignee (only issues assigned to the operator are picked unless
+    held_back when not empty, with reason when paused or disabled, and with reason unassigned_only, unassigned
+    (count), setting and suggest (the skill a person runs to take some: /not-me:suggest) when the queue found no
+    issue and the only eligible issues have no assignee (only issues assigned to the operator are picked unless
     queue.include_unassigned is true)
     """
     def none(**extra: Any) -> Dict[str, Any]:
@@ -822,19 +823,14 @@ def cmd_pick_issue(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     for warning in ctx.cfg.picking_warnings:
         ctx.warn(warning)
     rules = ctx.cfg.picking()
-    # Global rules may prefer an issue the queue's own order puts last, so they see every eligible issue. Repo
-    # rules and the plugin default keep the queue.list_limit cut: list_limit is tighten-only, and a repo file must
-    # not lift it through its rules (the run log notes `truncated`). Eligibility is the same either way.
-    limit = queue.list_limit()
-    if rules["layer"] == "global":
-        limit = None
+    limit = _limit_for(rules, queue)  # the run log notes `truncated`; eligibility is the same either way
     every = queue.candidates()
     found = [c for c in every if c.number not in skip]
     if not found:
         out: Dict[str, Any] = {}
         if not every and queue.unassigned_skipped:
             out.update({"reason": "unassigned_only", "unassigned": queue.unassigned_skipped,
-                        "setting": "queue.include_unassigned"})
+                        "setting": "queue.include_unassigned", "suggest": "/not-me:suggest"})
         if queue.held_back:
             out["held_back"] = queue.held_back
         return none(**out)
@@ -868,6 +864,110 @@ def cmd_picking_signals(ctx: Context, args: argparse.Namespace) -> Dict[str, Any
     if args.include_unassigned:
         queue.include_unassigned = True
     return picking_signals(queue)
+
+
+def _limit_for(rules: Dict[str, Any], queue: Any) -> Optional[int]:
+    """How many eligible issues to list with facts. Global Picking work rules may prefer an issue the queue's own
+    order puts last, so they see every eligible issue. Repo rules and the plugin default keep the queue.list_limit
+    cut: list_limit is tighten-only, and a repo file must not lift it through its rules."""
+    return None if rules["layer"] == "global" else queue.list_limit()
+
+
+def _suggest_queue(ctx: Context) -> Any:
+    """The queue with its own eligibility and order, limited to issues nobody is assigned to."""
+    queue = ctx.queue()
+    queue.only_unassigned = True
+    return queue
+
+
+@command("suggest-issues", "eligible issues nobody is assigned to, for a person to take")
+def cmd_suggest_issues(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """The issues the queue would pick if they were assigned to the operator: eligible by the same rules as pick-issue
+    (state, labels, trusted author, epic order) and assigned to nobody, in the queue's order, with the same facts
+    and picking rules, so /not-me:suggest can rank them the way /not-me:new would. A read: nothing is assigned or
+    claimed. Issues already assigned to the operator are left out (pick-issue lists them); issues assigned to
+    anyone else are never listed. An issue by an author the roster does not trust is reported by number and login
+    only, never its title or body.
+
+    Output: tracker, operator, dry_run (assign-issue would only record to the ledger), candidates (count), issues
+    (as pick-issue, up to queue.list_limit unless the Picking work rules come from the global layer), truncated,
+    held_back ([{number, behind, epic}]), untrusted ([{number, author}]: unassigned issues otherwise eligible but
+    written by someone the roster does not trust), picking (as pick-issue). Or none with queue_summary, untrusted
+    and held_back when not empty; or none with reason and queue_summary only, when paused or disabled
+    """
+    summary = describe_queue(ctx.meta)["summary"]
+    try:
+        ctx.require_running()
+    except Halted as exc:
+        return {"none": True, "reason": exc.reason, "queue_summary": summary}
+    queue = _suggest_queue(ctx)
+    for warning in ctx.cfg.picking_warnings:
+        ctx.warn(warning)
+    rules = ctx.cfg.picking()
+    found = queue.candidates()
+    untrusted = list(queue.untrusted_skipped)
+    if not found:
+        return {"none": True, "queue_summary": summary, "untrusted": untrusted,
+                **({"held_back": queue.held_back} if queue.held_back else {})}
+    listed = found[:_limit_for(rules, queue)]
+    return {"tracker": ctx.tracker, "operator": ctx.operator, "dry_run": ctx.mode_is_dry, "candidates": len(found),
+            "issues": queue.facts(listed), "truncated": len(listed) < len(found), "held_back": queue.held_back,
+            "untrusted": untrusted,
+            "picking": {**rules, "target_epics": list(queue.target_epics_used),
+                        "ignored_epics": list(queue.target_epics_ignored)}}
+
+
+@command("assign-issue", "assign the operator to an unassigned issue suggest-issues lists", writes=True,
+         running="error", ref="tracker", args=[
+             arg("number", metavar="N|REF", help="a number (in the tracker), #N, owner/name#N or a URL")])
+def cmd_assign_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
+    """Add the operator, and only the operator, as the assignee of one tracker issue, so the queue picks it. For
+    /not-me:suggest, after a person said yes to that issue. It takes no login, never removes an assignee and never
+    touches labels, the board or a comment. Refused with no read and no write while a not-me run is active (kind
+    active_run, with active_run {run_id, skill, ref, started}): autonomous runs never assign; only a person running
+    /not-me:suggest does. Refused with no write: an issue outside the tracker (kind not_tracker), assigned to anyone
+    else (kind assigned_to_other), or not among the issues suggest-issues lists now (kind not_eligible: closed, not
+    to do, held back in an epic, by an untrusted author...). The write goes through the write gate; a dry run records
+    it in the ledger and sends nothing. The assignees are read back after a real write: exit 5 when the operator is
+    missing; exit 1 (kind assigned_to_other, assignees) when someone else is now assigned too. The operator stays
+    assigned and nobody is unassigned; the queue will not pick the issue until a person sorts it out.
+
+    Output: repo, number, assignee (the operator), assigned (true when it added the assignment), already (true when
+    the operator was the assignee before; nothing written)
+    """
+    active = ctx.active_run()
+    if active:
+        raise fail(ExitCode.ERROR, "active_run",
+                   f"a not-me run is active ({active.get('skill')} on {active.get('ref')}); runs never assign "
+                   "issues, only a person running /not-me:suggest does; nothing assigned", active_run=active)
+    if repo.lower() != ctx.tracker.lower():
+        raise fail(ExitCode.ERROR, "not_tracker", f"{repo}#{n} is not in the tracker {ctx.tracker}; nothing assigned")
+    operator = ctx.operator
+    me = operator.lower()
+    assignees = [gh_mod.login_of(a) for a in ctx.gh.issue(repo, n).get("assignees") or []]
+    others = [a for a in assignees if a.lower() != me]
+    if others:
+        raise fail(ExitCode.ERROR, "assigned_to_other",
+                   f"{repo}#{n} is assigned to {', '.join(others)}; nothing assigned", assignees=others)
+    out: Dict[str, Any] = {"repo": repo, "number": n, "assignee": operator}
+    if assignees:
+        return {**out, "assigned": False, "already": True}
+    queue = _suggest_queue(ctx)
+    if n not in {c.number for c in queue.candidates()}:
+        raise fail(ExitCode.ERROR, "not_eligible",
+                   f"{repo}#{n} is not among the eligible unassigned issues (see notme suggest-issues); "
+                   "nothing assigned")
+    queue.assign(n, assignees)
+    if not ctx.mode_is_dry:
+        now = [gh_mod.login_of(a) for a in ctx.gh.issue(repo, n).get("assignees") or []]
+        if me not in {a.lower() for a in now}:
+            raise writeback.WritebackMismatch(f"{repo}#{n} does not list {operator} as an assignee after the write")
+        others = [a for a in now if a.lower() != me]
+        if others:
+            raise fail(ExitCode.ERROR, "assigned_to_other",
+                       f"{operator} was added to {repo}#{n}, but {', '.join(others)} is also assigned, so the queue "
+                       "will not pick it; a person should sort out who takes it", assignees=others)
+    return {**out, "assigned": True}
 
 
 @command("claim-issue", "claim an issue", writes=True, running="error", ref="tracker", args=[number_arg])

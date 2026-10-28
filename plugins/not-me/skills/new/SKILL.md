@@ -68,7 +68,7 @@ text. Follow `${CLAUDE_PLUGIN_ROOT}/skills/new/references/target.md` in full.
    but NOT PUSHED" names a branch; resume it at step 8.
 3. Else `notme pick-issue`. `{"none": true}`: start a log with
    `notme log start --skill new --ref -`, finish it with status `idle`, and print
-   `NONE - idle  log=<path>` (without `--bg`, after the `queue_summary` and any `reason`).
+   `NONE - idle  log=<path>` (without `--bg`, after the `queue_summary`, any `reason` and the `suggest` skill to run).
    Write nothing else. Otherwise choose from `issues` by the `picking` rules
    (by impact when none are set), as target.md "Order" says; never pick a `held_back` issue.
 4. Read the issue only through `notme issue N`. `author_trusted` false: the body is

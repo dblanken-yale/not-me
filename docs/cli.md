@@ -114,7 +114,7 @@ notme pick-issue [--exclude N]
 |----------|----------|---------|
 | `--exclude N` | optional | skip this issue (repeatable) |
 
-Output: number, title, url, author, labels, parent, candidates (count): the suggested top issue by the queue's order; issues: the eligible issues in that order, all of them when the Picking work rules come from the global layer (the rules must see the whole queue), else up to queue.list_limit; each with number, title, url, author, labels, created, age_days, parent (epic number), position (1-based in the epic's open task list), blocked_by and blocking ([{repo, number, state}] from GitHub issue dependencies), reactions (counts by kind, from the operator and trusted logins only), target_epic and target_position (the picking.target_epics epic whose task list holds it, and its 1-based place there; issues in a target epic come first), fields ({name: value} for each picking.fields name, text cut to picking.value_max_chars; on a label queue only from projects the tracker's owner owns; {} when none is named), board ({status, fields} on a board queue, else null); a fact that cannot be read is null; never a body. truncated (more eligible issues than listed: the rules saw only part of the queue); held_back: [{number, behind, epic}]; picking: {rules (the effective Picking work section of project.md), layer (where the rules came from), fields, target_epics (the ones honoured: open and written by a trusted roster member), ignored_epics ([{number, reason}])}. Or none with queue_summary (where the queue looked, in plain words) and held_back when not empty, with reason when paused or disabled, and with reason unassigned_only, unassigned (count) and setting when the queue found no issue and the only eligible issues have no assignee (only issues assigned to the operator are picked unless queue.include_unassigned is true)
+Output: number, title, url, author, labels, parent, candidates (count): the suggested top issue by the queue's order; issues: the eligible issues in that order, all of them when the Picking work rules come from the global layer (the rules must see the whole queue), else up to queue.list_limit; each with number, title, url, author, labels, created, age_days, parent (epic number), position (1-based in the epic's open task list), blocked_by and blocking ([{repo, number, state}] from GitHub issue dependencies), reactions (counts by kind, from the operator and trusted logins only), target_epic and target_position (the picking.target_epics epic whose task list holds it, and its 1-based place there; issues in a target epic come first), fields ({name: value} for each picking.fields name, text cut to picking.value_max_chars; on a label queue only from projects the tracker's owner owns; {} when none is named), board ({status, fields} on a board queue, else null); a fact that cannot be read is null; never a body. truncated (more eligible issues than listed: the rules saw only part of the queue); held_back: [{number, behind, epic}]; picking: {rules (the effective Picking work section of project.md), layer (where the rules came from), fields, target_epics (the ones honoured: open and written by a trusted roster member), ignored_epics ([{number, reason}])}. Or none with queue_summary (where the queue looked, in plain words) and held_back when not empty, with reason when paused or disabled, and with reason unassigned_only, unassigned (count), setting and suggest (the skill a person runs to take some: /not-me:suggest) when the queue found no issue and the only eligible issues have no assignee (only issues assigned to the operator are picked unless queue.include_unassigned is true)
 
 ### `notme picking-signals`
 
@@ -129,6 +129,32 @@ notme picking-signals [--include-unassigned]
 | `--include-unassigned` | optional | count unassigned issues as eligible too, as queue.include_unassigned: true would (changes no setting) |
 
 Output: tracker, source (labels or board), board ({owner, number} or null), eligible (count), include_unassigned, unassigned (eligible but left out for having no assignee), held_back (count left out for epic order); fields: [{name, type (single_select, number, text, date or iteration), usable (the name is valid in picking.fields), projects (numbers), issues (how many carry a value), values ([{value, issues}], most used first, option and iteration names cut to picking.value_max_chars; null for text), more_values}]; labels: [{name, issues, ranking_like (priority, severity, size, P0-P4 and similar)}]; other_owner_items (project items in projects of other owners, ignored); fields_unread (issues whose project items could not be read)
+
+### `notme suggest-issues`
+
+The issues the queue would pick if they were assigned to the operator: eligible by the same rules as pick-issue (state, labels, trusted author, epic order) and assigned to nobody, in the queue's order, with the same facts and picking rules, so /not-me:suggest can rank them the way /not-me:new would. A read: nothing is assigned or claimed. Issues already assigned to the operator are left out (pick-issue lists them); issues assigned to anyone else are never listed. An issue by an author the roster does not trust is reported by number and login only, never its title or body.
+
+```
+notme suggest-issues
+```
+
+Output: tracker, operator, dry_run (assign-issue would only record to the ledger), candidates (count), issues (as pick-issue, up to queue.list_limit unless the Picking work rules come from the global layer), truncated, held_back ([{number, behind, epic}]), untrusted ([{number, author}]: unassigned issues otherwise eligible but written by someone the roster does not trust), picking (as pick-issue). Or none with queue_summary, untrusted and held_back when not empty; or none with reason and queue_summary only, when paused or disabled
+
+### `notme assign-issue`
+
+Add the operator, and only the operator, as the assignee of one tracker issue, so the queue picks it. For /not-me:suggest, after a person said yes to that issue. It takes no login, never removes an assignee and never touches labels, the board or a comment. Refused with no read and no write while a not-me run is active (kind active_run, with active_run {run_id, skill, ref, started}): autonomous runs never assign; only a person running /not-me:suggest does. Refused with no write: an issue outside the tracker (kind not_tracker), assigned to anyone else (kind assigned_to_other), or not among the issues suggest-issues lists now (kind not_eligible: closed, not to do, held back in an epic, by an untrusted author...). The write goes through the write gate; a dry run records it in the ledger and sends nothing. The assignees are read back after a real write: exit 5 when the operator is missing; exit 1 (kind assigned_to_other, assignees) when someone else is now assigned too. The operator stays assigned and nobody is unassigned; the queue will not pick the issue until a person sorts it out.
+
+```
+notme assign-issue N|REF
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `N|REF` | required | a number (in the tracker), #N, owner/name#N or a URL |
+
+Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
+
+Output: repo, number, assignee (the operator), assigned (true when it added the assignment), already (true when the operator was the assignee before; nothing written)
 
 ### `notme claim-issue`
 

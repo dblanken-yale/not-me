@@ -260,7 +260,7 @@ Every value in `labels` must be a string, and the config check rejects anything 
 - Its author is a lead or authority on the roster (with no roster, only you).
 - It is assigned to you. With `queue.include_unassigned: true`, an issue with no assignee counts too.
 
-An issue assigned to anyone else is never picked, whatever the setting. A fresh install picks only issues assigned to you. To also pick unassigned ones, set this in your global `~/.claude/not-me/project.md`:
+An issue assigned to anyone else is never picked, whatever the setting. A fresh install picks only issues assigned to you. To take some unassigned issues one by one, run `/not-me:suggest`: it lists them by the picking rules and assigns the ones you choose to you. To also pick unassigned ones automatically, set this in your global `~/.claude/not-me/project.md`:
 
 ```yaml
 queue: {include_unassigned: true}
