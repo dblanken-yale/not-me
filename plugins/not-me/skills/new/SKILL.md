@@ -93,7 +93,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/branching.md`.
 1. One-off issue, or a sub-issue of an `epic` (`parent` in the pick output or a
    trusted epic task list). Epic rules: target.md, "Epics".
 2. Choose the base by the precedence in branching.md: `--base`, predecessor branch,
-   `Base branch:` line, epic branch, default branch.
+   `stack_on` head (branching.md), `Base branch:` line, epic branch, default branch.
 3. A declared base must exist on the remote. Check with a read:
    `git ls-remote --exit-code --heads origin <base>`. Missing: `notme release-issue N --log <path>`,
    add `needs_human` with `notme labels-sync N --add <name>`, log the base and where

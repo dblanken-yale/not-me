@@ -59,16 +59,18 @@ flowchart TD
         ⚙ models, standards.md Delegation"]
         u4["Verify and gate
         ⚙ verify.md"]
-        u5["Merge base in, push, reply on every thread,
-        swap to 'needs review'"]
+        u5["Merge base in (the predecessor's branch on a stacked PR),
+        send the branch up, reply on every thread, swap to 'needs review'"]
         u1 --> u2 --> u3 --> u4 --> u5
     end
 
     subgraph new ["new leg: implement an issue"]
-        n1["Pick a ready issue and claim it
-        ⚙ queue, picking, Picking work rules"]
-        n2["Branch from the base
-        ⚙ standards.md branch, protected_branches"]
+        n1["Pick a ready issue and claim it; an issue that waits on one open PR
+        is ready when its trusted 'Stack on:' line names it
+        ⚙ queue, queue.stacking, picking, Picking work rules"]
+        n2["Branch from the base: the default branch, an epic's branch,
+        or the open PR's branch for a stacked issue
+        ⚙ standards.md branch, protected_branches, queue.stacking"]
         n3["Implement through a delegated subagent, failing test first
         ⚙ models, standards.md Delegation"]
         n4["Verify and gate: baseline, tests, simplify, code review,

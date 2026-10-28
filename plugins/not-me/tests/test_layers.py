@@ -224,6 +224,21 @@ class LayerCaseTests(unittest.TestCase):
         cfg = self.global_and_repo("---\nqueue: {include_unassigned: true}\n---\n", "---\nschema: 1\n---\n")
         self.assertIs(cfg.meta["project"]["queue"]["include_unassigned"], True)
 
+    def test_repo_may_turn_stacking_off_but_never_on(self):
+        cfg = self.global_and_repo(None, "---\nqueue: {stacking: off}\n---\n")
+        self.assertEqual(cfg.meta["project"]["queue"]["stacking"], "off")  # declared to off tightens
+        self.assertEqual([w for w in cfg.warnings if "only tighten" in w], [])
+        for loosening in ("declared", "null", "true", "maybe"):
+            with self.subTest(loosening):
+                cfg = self.global_and_repo("---\nqueue: {stacking: off}\n---\n",
+                                           f"---\nqueue: {{stacking: {loosening}}}\n---\n")
+                self.assertEqual(cfg.meta["project"]["queue"]["stacking"], "off")
+                self.assertEqual(len([w for w in cfg.warnings if "only tighten" in w]), 1)
+                ignored = cfg.explain()["keys"]["project.queue.stacking"]["ignored"]
+                self.assertEqual([i["layer"] for i in ignored], ["repo"])
+        cfg = self.global_and_repo(None, "---\nschema: 1\n---\n")
+        self.assertEqual(cfg.meta["project"]["queue"]["stacking"], "declared")  # the default
+
     def test_repo_may_lower_list_limit_but_never_raise_or_clear_it(self):
         cfg = self.global_and_repo(None, "---\nqueue: {list_limit: 3}\n---\n")
         self.assertEqual(cfg.meta["project"]["queue"]["list_limit"], 3)  # lower than the default: tightens

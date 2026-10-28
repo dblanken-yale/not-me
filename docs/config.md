@@ -199,6 +199,7 @@ Anyone with push access can edit the repo layer, and it is committed, so not-me 
 | `mode` | set `dry-run` | set `live`. The value is ignored |
 | `enabled` | set `false` | set `true` over a lower `false` |
 | `queue.include_unassigned` | set `false` | set `true` over a lower `false` |
+| `queue.stacking` | set `off` | set `declared` over a lower `off`, or set it to `null`. The value is ignored |
 | `queue.list_limit` | lower it | raise it above the lower layer's value, or set it (or the whole `queue` map) to `null` |
 | `picking.value_max_chars` | lower it | raise it above the lower layer's value, or set `null` |
 | `picking.fields`, `picking.target_epics` and the `## Picking work` section | set anything | nothing: they only order eligible issues |
@@ -344,6 +345,25 @@ Your token needs the `project` scope, and the board must be confirmed with `/not
 
 The `board_states` defaults (`To Do`, `In progress`, `In review`, `Blocked`) are only a guess. Map each key to the real column name on your board, spelled the way the board spells it; `/not-me:doctor` warns about a name the board does not have.
 
+### Stacking on an open PR
+
+An issue that depends on one open PR is normally not ready: it waits until that PR merges. When it needs only that one PR, its author can say so with a line in the issue body:
+
+```
+Stack on: acme/app#91
+```
+
+The reference is a PR, or an issue whose single open PR is used. The issue is then ready, and `/not-me:new` branches from that PR's head branch, opens its PR against that branch, and starts the Summary with `Builds on acme/app#91`. The CLI reads the line, never the model, and honours it only when:
+
+- the issue author is on the roster (the same rule as the rest of the issue text);
+- the PR is open, not a draft, written by a roster member, and from a branch in the same repo, not a fork;
+- the PR's repo is the tracker or a companion repo you confirmed with `/not-me:allow-repo`;
+- no other blocker of the issue is open.
+
+Otherwise the issue is left out of `pick-issue` and listed under `stack_held` with the reason. A merged PR makes the issue a normal one on the default branch; a PR closed without merging keeps it waiting. When the PR gets new commits, `/not-me:update` on the stacked PR merges that branch in (a merge, never a rebase). When the PR merges, GitHub retargets the stacked PR. Nothing here force-pushes, deletes a branch or merges.
+
+Set `queue.stacking: off` to never stack: the line is ignored and the issue waits. The default is `declared`. The repo layer may only turn it off. `/not-me:setup` explains the line and asks for the default, and `/not-me:ticket` offers to add the line when an issue's only blocker is an open PR. Base order: `--base`, an epic's predecessor branch, `Stack on:`, `Base branch:`, the epic's branch, the default branch.
+
 ### Keeping labels and the board in step
 
 A team that uses both labels and a board can set `queue.sync: true` (default `false`). Each claim, move and release then updates both sides, whichever `queue.source` is set:
@@ -466,6 +486,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `queue.board_states.in_progress` | `In progress` | Board column name for claimed work |
 | `queue.board_states.in_review` | `In review` | Board column name for work waiting on review |
 | `queue.board_states.blocked` | `Blocked` | Board column name for blocked work |
+| `queue.stacking` | `declared` | `declared` lets an issue with a trusted `Stack on: owner/repo#PR` line start from that open PR's branch; `off` never stacks, and such an issue waits for the merge. The repo layer may set `off`, never `declared` over a lower `off` (see [Stacking on an open PR](#stacking-on-an-open-pr)) |
 | `queue.sync` | `false` | `true` makes each claim, move and release also update the side `queue.source` does not read: the board Status for a labels source, the labels for a board source. Needs `queue.board` set; a board named in the repo layer must be confirmed on the global allow list; a failed mirror write is a warning (see [Keeping labels and the board in step](#keeping-labels-and-the-board-in-step)) |
 | `picking.fields` | `[]` | Board field names whose values `notme pick-issue` lists for each issue, for the rules in the `## Picking work` section to use. Any layer may set it (see [Picking work](#picking-work)) |
 | `picking.target_epics` | `[]` | Epic issue numbers to finish first, in this order. One counts only when a trusted roster member wrote it. Any layer may set it (see [Picking work](#picking-work)) |

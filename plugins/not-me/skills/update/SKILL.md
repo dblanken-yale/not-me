@@ -105,8 +105,8 @@ git merge --ff-only origin/<head_ref>
 ```
 
 3. `notme git checkpoint --base <base> --fetch` (Checkpoint A). Merge, never
-   rebase. Conflicts you cannot resolve with confidence: abort the merge, log the
-   files, and fail (failure table).
+   rebase; on a stacked PR `<base>` is the predecessor's branch. Conflicts you
+   cannot resolve with confidence: abort the merge, log the files, fail (failure table).
 4. Rebuild or restart the app when the project's verify doc says a branch switch
    needs it (`## Environment start`, `## Build`).
 

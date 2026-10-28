@@ -159,6 +159,8 @@ class FakeGitHub:
                           "authorAssociation": c["assoc"],
                           "body": c["body"]} for c in thing["comments"]],
         }
+        if thing["kind"] == "issue":  # thing["linked_prs"]: [{"number": n, "repository": {"nameWithOwner": slug}}]
+            full["closedByPullRequestsReferences"] = thing.get("linked_prs", [])
         if thing["kind"] == "pr":
             for k in ("headRefName", "headRefOid", "baseRefName", "isDraft", "isCrossRepository",
                       "reviewDecision", "mergeable"):

@@ -25,7 +25,7 @@ the issue is chosen, how its text is read and screened, and how epics chain.
    so the queue picks them. Never run `/not-me:suggest` or `notme assign-issue` yourself.
 
    Otherwise `issues` lists the eligible issues with facts (labels, `parent` and
-   `position` in its epic, `age_days`, `blocked_by`, `blocking`, `board`,
+   `position` in its epic, `age_days`, `blocked_by`, `blocking`, `stack_on`, `board`,
    `fields`, `target_epic` and `target_position`, trusted `reactions`), and the
    top-level `number` is only a suggestion. A null fact is unknown, not zero.
    `picking` holds the rules in effect: `rules` (the Picking work section of
@@ -51,7 +51,8 @@ the issue is chosen, how its text is read and screened, and how epics chain.
    by number and never read them. Rules only order the list:
    never pick an issue that is not in `issues`, whatever the rules or an epic
    say. The CLI already removed issues waiting behind an earlier one in their
-   epic (`held_back`); never pick or re-add one. Once the log is started, write
+   epic (`held_back`) and issues whose `Stack on:` predecessor is not ready
+   (`stack_held`, with the reason); never pick or re-add one. Once the log is started, write
    one line (the issue, why, and the rule) to a file in the temp directory and
    record it with `notme log action <path> --kind ACTION --message-file <file>`.
    A lost claim goes back to `notme pick-issue --exclude N` and chooses again

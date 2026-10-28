@@ -82,8 +82,7 @@ notme followup --title-file "$d/title.txt" --body-file "$d/body.md" \
 6. `queue.source` is `board`: the CLI cannot add an issue to a board. Say that a
    person must place it in the To Do column. When the board has fields named in
    `picking.fields`, suggest values in the report; set nothing.
-7. Result: `TICKET <tracker>#<N> created`. In a dry run the number is null:
-   `TICKET - created - dry-run`.
+7. Result: `TICKET <tracker>#<N> created`; in a dry run `TICKET - created - dry-run`.
 
 ## Step 3: Check (`--check N`)
 
@@ -93,8 +92,9 @@ notme followup --title-file "$d/title.txt" --body-file "$d/body.md" \
 2. Compare the trusted body (and trusted comments that add detail) with each
    readiness item. Report each item as present or missing, with the line that
    satisfies it.
-3. Nothing missing: offer to add `todo` (and the opt-in label) when absent. On a
-   yes: `notme labels-sync N --add "<todo>,<opt-in>"`. Change no other label.
+3. Nothing missing: offer to add `todo` (and the opt-in label) when absent (yes:
+   `notme labels-sync N --add "<todo>,<opt-in>"`; no other label), and a `Stack on:`
+   line when the only blocker is an open PR (format.md, "Stacking").
 4. Something missing: draft the edits, ask the operator for the missing facts in
    the same single question batch, and offer to apply them. On a yes, write the
    full proposed body to `body.md` in the temp dir, run

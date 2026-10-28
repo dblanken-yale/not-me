@@ -46,7 +46,11 @@ An issue is ready to pick up when it has:
 - what is out of scope
 
 An issue whose body says another PR or issue must merge first is not ready
-until that one is merged or closed.
+until that one is merged or closed. The exception is a trusted `Stack on:
+owner/repo#PR` line: when that PR is open, not a draft, from a trusted author,
+and the only open blocker, the issue is ready and branches from the PR's branch.
+Another open blocker, a draft or closed PR, or `queue.stacking: off` keeps it
+not ready; a merged PR makes it a normal issue.
 
 ## Ticket format
 
