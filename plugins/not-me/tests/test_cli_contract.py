@@ -339,6 +339,7 @@ class DryRunTests(CliCase):
         reason = self.write_file("reason.txt", "Because the test says so\n")
         self.cases = {
             "claim-issue": ["claim-issue", "4"],
+            "assign-issue": ["assign-issue", "4"],
             "release-issue": ["release-issue", "1", "--reason-file", reason],
             "move-issue": ["move-issue", "1", "--to", "needs_review", "--reason-file", reason],
             "transition": ["transition", "1", "--from", "in_progress", "--to", "needs_review",

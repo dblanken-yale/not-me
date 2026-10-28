@@ -52,6 +52,7 @@ import fnmatch
 import glob
 import json
 import os
+import os as _host_os  # the real host: tests swap `os` for a simulated Windows view
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -461,10 +462,12 @@ class Unparsed(ValueError):
 
 class _Word(str):
     """A word with its quoting removed. `glob` and `brace` mark an unquoted glob or {a,b} brace expansion.
-    `raw` is the word with its unquoted backslashes kept, the way a Windows path is typed (C:\\Users\\x)."""
+    `raw` is the word with its unquoted backslashes kept, the way a Windows path is typed (C:\\Users\\x).
+    `expands` marks a $ or backtick outside single quotes: the shell fills in part of the word at run time."""
     glob = False
     brace = False
     quoted = False
+    expands = False
     raw = ""
 
 
@@ -523,6 +526,7 @@ class _Lexer:
         self.cuts: List[Tuple[int, int]] = []  # here-document bodies, as (start, end) spans
         self.pending: List[Tuple[str, bool, bool, SimpleCommand]] = []  # (delimiter, strip tabs, quoted, cmd)
         self.funcdef = False
+        self.dq_expands = False  # set by dquote when the quoted text holds a $ or backtick
         self.depth = 0
 
     def nest(self, delta: int) -> None:
@@ -658,19 +662,23 @@ class _Lexer:
         s, n = self.s, self.n
         out: List[str] = []
         escaped: Set[int] = set()  # indexes in out of the characters an unquoted backslash escaped
-        glob = quoted = bracket = False
+        glob = quoted = bracket = expands = False
         brace = 0  # 1 after an unquoted {, 2 after a , or .. inside it, 3 after the closing }
         while self.i < n:
             c = s[self.i]
             if c in _META:
                 if c in "<>" and s.startswith("(", self.i + 1):  # <( ) and >( ) process substitution
                     out.append(self.sub(2, ")"))
+                    expands = True
                     continue
                 break
+            if c == "$" and not s.startswith("'", self.i + 1):  # $VAR, ${ }, $( ), $(( )), $"..." and a stray $
+                expands = True
             if c == "`":
                 if stop == "`":
                     break
                 out.append(self.sub(1, "`"))
+                expands = True
             elif c == "\\":
                 nxt = s[self.i + 1:self.i + 2]
                 if nxt == "`" and stop == "`":
@@ -688,8 +696,10 @@ class _Lexer:
                 self.i = end + 1
                 quoted = True
             elif c == '"':
+                self.dq_expands = False
                 out.append(self.dquote(stop))
                 quoted = True
+                expands = expands or self.dq_expands
             elif c == "$" and s.startswith("'", self.i + 1):
                 out.append(self.ansi())
                 quoted = True
@@ -712,7 +722,7 @@ class _Lexer:
                 out.append(c)
                 self.i += 1
         w = _Word("".join(out))
-        w.glob, w.brace, w.quoted = glob, brace == 3, quoted
+        w.glob, w.brace, w.quoted, w.expands = glob, brace == 3, quoted, expands
         w.raw = "".join("\\" + p if k in escaped else p for k, p in enumerate(out)) if escaped else str(w)
         return w
 
@@ -741,11 +751,15 @@ class _Lexer:
                     self.i += 1
             elif c == "`":
                 out.append(self.sub(1, "`"))
+                self.dq_expands = True  # after the body: a word inside it resets the flag
             elif c == "$" and s.startswith("(", self.i + 1):
                 out.append(self.dollar_paren())
+                self.dq_expands = True
             elif c == "$" and s.startswith("{", self.i + 1):
                 out.append(self.param(dq=True))
+                self.dq_expands = True
             else:
+                self.dq_expands = self.dq_expands or c == "$"
                 out.append(c)
                 self.i += 1
 
@@ -1367,9 +1381,13 @@ class _State:
     """Per-command state: the hook's real working directory, the command's text (code without here-document
     bodies, and raw with them), the branch a checkout moved to, and memoised lookups."""
 
-    def __init__(self, cwd: str, parsed: Parsed, raw: str, depth: int = 0):
+    def __init__(self, cwd: str, parsed: Parsed, raw: str, depth: int = 0, parent: Optional["_State"] = None):
         self.dir = cwd
         self.depth = depth
+        self.parent = parent  # the state of the command whose shell runs this one as a body (bash -c, eval)
+        self.commands = parsed.commands
+        self.funcdef = parsed.funcdef
+        self.subs = parsed.subs
         self.text = parsed.code + "\n" + parsed.code.replace("\\\n", "")
         self.raw = raw
         self.background = bool(_BACKGROUND.search(parsed.code))
@@ -1390,7 +1408,8 @@ class _State:
         return _unshell(self.raw)
 
 
-def _bash(cmd: str, cwd: str, ctx: GuardContext, depth: int = 0) -> Iterator[Block]:
+def _bash(cmd: str, cwd: str, ctx: GuardContext, depth: int = 0,
+          parent: Optional[_State] = None) -> Iterator[Block]:
     """Judge every simple command in cmd; a command the lexer cannot read is judged as opaque text. When a word
     held an unquoted backslash, every command is judged again with those backslashes kept: bash drops them
     (C:\\Users\\x reads as C:Usersx) but a Windows path is typed with them, so either form reaching a guarded path
@@ -1403,7 +1422,7 @@ def _bash(cmd: str, cwd: str, ctx: GuardContext, depth: int = 0) -> Iterator[Blo
     for p in (parsed, _raw_variant(parsed)):
         if p is None:
             continue
-        st = _State(cwd, p, cmd, depth)
+        st = _State(cwd, p, cmd, depth, parent)
         for c in p.commands:
             yield from _command(c, st, ctx)
 
@@ -1414,6 +1433,7 @@ def _raw_word(w: str) -> str:
         return w
     out = _Word(raw)
     out.glob, out.brace, out.quoted, out.raw = w.glob, w.brace, w.quoted, raw  # type: ignore[attr-defined]
+    out.expands = getattr(w, "expands", False)
     return out
 
 
@@ -1451,7 +1471,7 @@ def _body(text: str, st: _State, ctx: GuardContext, blk: Blk, what: str) -> Iter
     if st.depth >= MAX_BODY_DEPTH:
         yield from _opaque(text, blk, f"{what} nests commands more than {MAX_BODY_DEPTH} deep")
         return
-    yield from _bash(text, st.dir, ctx, st.depth + 1)
+    yield from _bash(text, st.dir, ctx, st.depth + 1, st)
 
 
 def _core(words: List[str]) -> List[str]:
@@ -1554,8 +1574,16 @@ def _path_checks(c: SimpleCommand, st: _State, ctx: GuardContext, blk: Blk) -> I
     prog = _prog(core[0]) if core else ""
     recursive = prog in _TOKEN_COPIERS or prog == "rg" or (prog in ("grep", "egrep", "fgrep") and (
         "r" in _short_flags(core[1:]).lower() or "--recursive" in core[1:]))
+    # a search pattern or sed script only mentions a name, it opens nothing: those words are not paths
+    skip: Set[int] = set()
+    spec = _PATTERN_SPECS.get(prog)
+    if spec is not None and _pattern_trusted(c, st, ctx, core, prog):
+        off = len(c.words) - len(core)
+        skip = {off + k for k in _pattern_words(core, spec, prog == "sed")}
     args: List[str] = []
-    for w in c.words:
+    for i, w in enumerate(c.words):
+        if i in skip:
+            continue
         if not w.startswith("-"):
             args.append(w)
         if "=" in w:
@@ -1566,6 +1594,229 @@ def _path_checks(c: SimpleCommand, st: _State, ctx: GuardContext, blk: Blk) -> I
         if found:
             yield blk(SELF, found[0], found[1])
             return
+
+
+# How grep, rg and sed take their options, so the word that holds the pattern (or sed script) can be found.
+# short: flags that take no value; value: flags that take one (attached or the next word); attached: flags whose
+# value is optional in some build and so counts only when attached (-C2); refuse: flags that let the command write
+# files. Any flag not listed means the pattern cannot be told apart from a file: nothing is exempted.
+_GREP_LONG_BOOL = frozenset((
+    "extended-regexp", "fixed-strings", "basic-regexp", "perl-regexp", "ignore-case", "no-ignore-case",
+    "invert-match", "word-regexp", "line-regexp", "count", "color", "colour", "only-matching", "quiet", "silent",
+    "no-messages", "byte-offset", "with-filename", "no-filename", "line-number", "initial-tab", "null", "null-data",
+    "text", "recursive", "dereference-recursive", "files-with-matches", "files-without-match", "line-buffered"))
+_GREP_SPEC = {
+    "short": "0123456789EFGHIJLMOPRSTUVZabchilnopqrsuvwxyz", "value": "ABDdefm", "attached": "C",
+    "long_bool": _GREP_LONG_BOOL, "long_value": frozenset((
+        "regexp", "file", "after-context", "before-context", "max-count", "label", "devices", "directories",
+        "binary-files", "include", "exclude", "exclude-dir", "exclude-from", "include-dir", "group-separator")),
+    "long_attached": frozenset(("context",)), "pattern": ("e", "regexp"), "file": ("f", "file"), "refuse": ""}
+_PATTERN_SPECS: Dict[str, Dict[str, Any]] = {
+    "grep": _GREP_SPEC, "egrep": _GREP_SPEC, "fgrep": _GREP_SPEC,
+    "rg": {
+        "short": ".FHILNPSUVabchilnopqsuvwxz0", "value": "ABCEMTdefgjmrt", "attached": "",
+        "long_bool": frozenset((
+            "hidden", "no-ignore", "follow", "ignore-case", "case-sensitive", "smart-case", "fixed-strings",
+            "word-regexp", "line-regexp", "invert-match", "count", "count-matches", "files-with-matches",
+            "files-without-match", "line-number", "no-line-number", "with-filename", "no-filename", "heading",
+            "no-heading", "only-matching", "quiet", "json", "vimgrep", "multiline", "multiline-dotall", "pcre2",
+            "crlf", "null", "null-data", "text", "binary", "search-zip", "no-messages", "trim", "column",
+            "byte-offset", "stats", "unrestricted", "no-config", "passthru", "no-ignore-vcs", "no-ignore-parent",
+            "no-ignore-global", "no-ignore-dot", "no-ignore-exclude", "no-ignore-files", "one-file-system",
+            "line-buffered", "block-buffered", "no-require-git", "max-columns-preview", "no-unicode")),
+        "long_value": frozenset((
+            "regexp", "file", "after-context", "before-context", "context", "glob", "iglob", "type", "type-not",
+            "type-add", "type-clear", "max-count", "max-columns", "max-depth", "max-filesize", "replace",
+            "encoding", "threads", "color", "colors", "context-separator", "field-context-separator",
+            "field-match-separator", "path-separator", "sort", "sortr", "pre", "pre-glob", "ignore-file",
+            "dfa-size-limit", "regex-size-limit", "engine")),
+        "long_attached": frozenset(), "pattern": ("e", "regexp"), "file": ("f", "file"), "refuse": ""},
+    # sed -l takes a value in GNU and none in BSD, so it is left unlisted
+    "sed": {
+        "short": "Enrsuza", "value": "ef", "attached": "", "long_attached": frozenset(),
+        "long_bool": frozenset((
+            "quiet", "silent", "regexp-extended", "separate", "unbuffered", "null-data", "zero-terminated",
+            "posix", "debug", "sandbox", "follow-symlinks")),
+        "long_value": frozenset(("expression", "file")),
+        "pattern": ("e", "expression"), "file": ("f", "file"), "refuse": "iI"},
+}
+
+
+def _host_writable(path: str) -> bool:
+    """path, or any directory above it, can be changed by the current user (so the entry under it could be
+    replaced), or path does not exist. Uses the host's own os module: the program runs on this machine."""
+    p = _host_os.path.abspath(path)
+    if not _host_os.path.lexists(p):
+        return True
+    while True:
+        if _host_os.access(p, _host_os.W_OK):
+            return True
+        up = _host_os.path.dirname(p)
+        if up == p:
+            return False
+        p = up
+
+
+def _program_fixed(prog: str, st: _State, ctx: GuardContext) -> bool:
+    """A bare prog runs a file this user cannot change: the first PATH entry holding an executable prog is an
+    absolute directory with no relative or empty entry before it, and that file, every link it goes through, its
+    real target and every directory above each of them are not writable by the user. Never on Windows. Memoised
+    per decision; no subprocess."""
+    def compute() -> bool:
+        if _host_os.name == "nt":
+            return False
+        path = ctx.env.get("PATH")
+        for entry in (_host_os.defpath if path is None else path).split(_host_os.pathsep):
+            if not entry or not _host_os.path.isabs(entry):
+                return False  # a relative entry finds a program in whatever directory the shell is in
+            found = _host_os.path.join(entry, prog)
+            if _host_os.path.isfile(found) and _host_os.access(found, _host_os.X_OK):
+                break
+        else:
+            return False
+        hop = found
+        for _ in range(40):
+            if _host_writable(hop):
+                return False
+            if not _host_os.path.islink(hop):
+                break
+            hop = _host_os.path.normpath(_host_os.path.join(_host_os.path.dirname(hop), _host_os.readlink(hop)))
+        else:
+            return False
+        return not _host_writable(_host_os.path.realpath(found))
+    try:
+        return bool(st.once(("pattern-program", prog), compute))
+    except (OSError, ValueError):
+        return False
+
+
+def _pattern_trusted(c: SimpleCommand, st: _State, ctx: GuardContext, core: List[str], prog: str) -> bool:
+    """The pattern of this grep/rg or the script of this sed may be exempted from the path check. Only when the
+    whole command line is this one simple command (no other command, no function definition, no $( ), backtick or
+    <( ) anywhere, not a body another shell runs), nothing comes before the program (no assignment, prefix or
+    wrapper), the program is a bare name the shell does not fill in, no word after it is filled in at run time or
+    is a glob or brace (either could become an option), the hook's environment adds no options or functions, and
+    the name resolves on PATH to a file the user cannot change (_program_fixed). Anything else: nothing is
+    exempted. A function or alias from the user's own shell startup files is outside what the guard sees."""
+    if len(st.commands) != 1 or st.commands[0] is not c or st.parent is not None or st.funcdef or st.subs:
+        return False
+    if not core or len(c.words) != len(core) or c.words != core:
+        return False
+    head = core[0]
+    if str(head) != prog or any(sep in getattr(head, "raw", "") for sep in "/\\"):
+        return False
+    if any(getattr(w, "expands", False) or getattr(w, "glob", False) or getattr(w, "brace", False) for w in core):
+        return False
+    env = ctx.env
+    if prog == "rg" and env.get("RIPGREP_CONFIG_PATH") and "--no-config" not in core[1:]:
+        return False
+    if prog in ("grep", "egrep", "fgrep") and env.get("GREP_OPTIONS"):
+        return False
+    if env.get("BASH_ENV") or any(k.startswith("BASH_FUNC_") for k in env):
+        return False
+    return _program_fixed(prog, st, ctx)
+
+
+def _pattern_words(core: List[str], spec: Dict[str, Any], sed: bool) -> Set[int]:
+    """Indexes in core of the words that are only a grep/rg search pattern or a read-only sed script: the first
+    operand when no -e or -f was given, else the values of -e before the first operand. spec is the
+    _PATTERN_SPECS entry for core[0]; sed says whether core[0] is sed. Empty when an option is unknown, a sed
+    could write in place, or the operands cannot be told apart with confidence."""
+    pat_short, pat_long = spec["pattern"]
+    file_short, file_long = spec["file"]
+    exempt: List[Tuple[int, str]] = []  # (word index, pattern or script text)
+    given = False  # -e or -f: then no operand is the pattern
+    first: Optional[int] = None  # the first operand; options after it may be operands under POSIX parsing
+    i, n, done = 1, len(core), False
+    while i < n:
+        a = core[i]
+        if done or a == "-" or not a.startswith("-"):
+            first = i if first is None else first
+            i += 1
+            continue
+        if a == "--":
+            done = True
+            i += 1
+            continue
+        if a.startswith("--"):
+            name, eq, _ = a[2:].partition("=")
+            if name in spec["long_bool"] or (eq and name in spec["long_attached"]):
+                i += 1
+                continue
+            if name not in spec["long_value"] or (not eq and i + 1 >= n):
+                return set()
+            at = i if eq else i + 1
+            if name in (pat_long, file_long):
+                given = True
+                if name == pat_long and first is None:
+                    exempt.append((at, a.partition("=")[2] if eq else core[at]))
+            i = at + 1
+            continue
+        at = None
+        for k, ch in enumerate(a[1:], 2):
+            if ch in spec["refuse"]:
+                return set()
+            if ch in spec["short"]:
+                continue
+            attached = k < len(a)
+            if ch in spec["attached"] and attached:
+                break
+            if ch not in spec["value"] or (not attached and i + 1 >= n):
+                return set()
+            at = i if attached else i + 1
+            if ch in (pat_short, file_short):
+                given = True
+                if ch == pat_short and first is None:
+                    exempt.append((at, a[k:] if attached else core[at]))
+            break
+        i = (at if at is not None else i) + 1
+    if not given and first is not None:
+        exempt.append((first, core[first]))
+    return {k for k, text in exempt if not sed or _sed_reads_only(text)}
+
+
+_SED_DELIM_BAD = frozenset("\\\n[")
+
+
+def _sed_reads_only(script: str) -> bool:
+    """The sed script only prints, deletes or substitutes: no w/W/r/R/e (they open files or run commands), no s///
+    flag beyond g, p, i, I, m, M and digits, and no text, label or bracket the simple scan here could misread."""
+    i, n = 0, len(script)
+
+    def part(j: int, delim: str) -> int:
+        """Index just past the part that starts at j and ends at an unescaped delim; -1 when it cannot be read."""
+        while j < n:
+            ch = script[j]
+            if ch in "\n[":
+                return -1
+            if ch == "\\":
+                j += 2
+                continue
+            if ch == delim:
+                return j + 1
+            j += 1
+        return -1
+    while i < n:
+        ch = script[i]
+        if ch in " \t\n;{}!,$~+0123456789":
+            i += 1
+        elif ch == "/":
+            i = part(i + 1, "/")
+        elif ch in "sy":
+            if i + 1 >= n or script[i + 1] in _SED_DELIM_BAD:
+                return False
+            delim = script[i + 1]
+            i = part(i + 2, delim)
+            i = part(i, delim) if i >= 0 else -1
+            while ch == "s" and 0 <= i < n and script[i] in "gpiImM0123456789":
+                i += 1
+        elif ch in "pdnNgGhHxlqQPDz=":
+            i += 1
+        else:
+            return False
+        if i < 0:
+            return False
+    return True
 
 
 def _protected(arg: str, st: _State, ctx: GuardContext, recursive: bool) -> Optional[Tuple[str, str]]:

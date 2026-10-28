@@ -4,6 +4,8 @@ config
 preflight
 pick-issue
 picking-signals
+suggest-issues
+assign-issue
 claim-issue
 release-issue
 move-issue

@@ -129,6 +129,7 @@ flowchart TD
 | `/not-me:review [owner/repo#N ...] [--dry-run] [--bg]` | Review `needs review` PRs where you are a reviewer: approve, request changes, or ask a person. Never merges |
 | `/not-me:prove <pr-ref> [--dry-run] [--bg]` | Run a PR's testing steps in a browser on its preview and post a proof comment |
 | `/not-me:ticket [--check N] [--title T] [--parent N] [--dry-run]` | Create a ready issue, or check an existing one against the readiness rules |
+| `/not-me:suggest [--dry-run]` | List ready issues nobody is assigned to, ranked by the picking rules, and assign the ones you pick to you. Run by a person, never by a loop |
 | `/not-me:retro [log path] [--bg]` | Turn evidence in a finished run log into at most three small config edits |
 | `/not-me:status` | Show state, the active run, items waiting on a person, stale claims, last results |
 | `/not-me:setup [--global] [doc] [--check] [--upgrade] [--answers FILE]` | Guided setup of `.claude/not-me/`, or the global layer with `--global` |

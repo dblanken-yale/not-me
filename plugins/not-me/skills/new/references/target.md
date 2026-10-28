@@ -20,8 +20,9 @@ the issue is chosen, how its text is read and screened, and how epics chain.
    unassigned ones when `queue.include_unassigned` is true; an issue assigned to
    someone else is never returned. `{"none": true}` is NONE. With `reason`
    `unassigned_only`, also log one line saying `unassigned` issues are ready but
-   unassigned, and that assigning them or setting `queue.include_unassigned: true`
-   in the global layer lets the queue pick them.
+   unassigned, and that a person can take some with `/not-me:suggest` (the
+   `suggest` field), or set `queue.include_unassigned: true` in the global layer
+   so the queue picks them. Never run `/not-me:suggest` or `notme assign-issue` yourself.
 
    Otherwise `issues` lists the eligible issues with facts (labels, `parent` and
    `position` in its epic, `age_days`, `blocked_by`, `blocking`, `board`,
