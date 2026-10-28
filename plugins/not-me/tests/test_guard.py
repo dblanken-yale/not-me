@@ -483,6 +483,20 @@ class MessageTests(unittest.TestCase):
                          ctx)
         self.assertIn("no github origin", r.message)
         self.assertIn("Relax this rule (not recommended): set guard.other_repo: off", r.message)
+        # with other_repo off the unknown path is still a possible protected branch; with both off it passes
+        def off(*names: str) -> GuardContext:
+            c = GuardContext(write_ctx=writes.GuardContext(
+                origin_repo="acme/app", allowed_repos=("acme/app",), protected_branches=("main",),
+                rules={r: r not in names for r in guard.RULES}))
+            c.git = lambda args, cwd: None
+            return c
+        ev = {"tool_name": "Bash", "tool_input": {"command": "git -C $W merge x"}, "cwd": "."}
+        r = guard.decide(ev, off("other_repo"))
+        self.assertIsInstance(r, Block)
+        self.assertEqual(r.rule, "protected_branches")
+        self.assertIn("shell variables in a `git -C` path", r.message)
+        self.assertNotIn("Relax this rule", r.message)
+        self.assertIsNone(guard.decide(ev, off("other_repo", "protected_branches")))
 
     def test_decide_fills_message_and_tool(self):
         ctx = self.ctx()

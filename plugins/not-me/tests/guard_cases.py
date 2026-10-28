@@ -1859,13 +1859,35 @@ for cmd in ("git -C $W reset --hard", "git -C $W reset HEAD~1", "git -C $W rebas
 # a real rule still fires under its own name first, and a rule switched off stays off
 bash(B, PB, 'git -C "$W/.." commit -m x', "offalias")
 bash(B, PB, "git -C $W/.. merge feature/y", "offalias")
-bash(A, None, 'git -C "$W/.." commit -m x', "off")
-bash(A, None, "git -C $W merge feature/y", "off")
+# with other_repo off the unknown path still counts as a possible protected branch; with both off it passes
+_VAR_C_PB_ID = f"G{len(CASES) + 1:03d}"
+bash(B, PB, "git -C $W merge feature/y", "off")
+bash(B, PB, 'git -C "$W/.." commit -m x', "off")
+bash(B, PB, "git -C $W reset --hard", "off")
+bash(B, OR, "git -C $W merge feature/y", "mainpboff")
 bash(A, None, "git -C $W merge feature/y", "alloff")
+bash(A, None, 'git -C "$W/.." commit -m x', "alloff")
+# a checkout or switch through an unknown path cannot be tracked: a later commit would read a branch that drifted
+_VAR_C_SWITCH_ID = f"G{len(CASES) + 1:03d}"
+bash(B, OR, 'git -C "$W/.." switch feature/y && git commit -m x', "main")
+for cmd in ('git -C "$W/.." checkout -b feature/y; git commit -m x', 'git -C "$W/.." switch feature/y && git push',
+            "git -C $W checkout feature/y", "git -C $W switch feature/y"):
+    bash(B, OR, cmd, "main")
+bash(B, PB, 'git -C "$W/.." switch feature/y && git commit -m x', "offalias")
+# leading options do not hide a remote, submodule or clean write
+for cmd in ("git -C $W remote -v add up https://github.com/acme/other", "git -C $W remote -v set-url origin x",
+            "git -C $W remote --verbose rename origin up", "git -C $W remote -v remove origin",
+            "git -C $W submodule --quiet update", "git -C $W submodule -q foreach true",
+            "git -C $W clean -f -e -n", "git -C $W clean -fn --exclude=x"):
+    bash(B, OR, cmd)
+_REMOTE_V_ID = f"G{len(CASES) + 1:03d}"
+bash(B, OR, "git remote -v add up https://github.com/acme/other")
+for cmd in ("git remote -v set-url origin x", "git remote --verbose rename origin up"):
+    bash(B, OR, cmd)
 for cmd in ("git -C $W config --get user.name", "git -C $W remote -v", "git -C $W remote", "git -C $W branch",
-            "git -C $W branch --show-current", "git -C $W branch -a", "git -C $W checkout feature/y",
-            "git -C $W switch feature/y", "git -C $W submodule status", "git -C $W clean -n",
-            'git -C "$W/.." status'):
+            "git -C $W branch --show-current", "git -C $W branch -a", "git -C $W remote -v show origin",
+            "git -C $W remote --verbose get-url origin", "git -C $W submodule status", "git -C $W submodule -q status",
+            "git -C $W submodule --quiet", "git -C $W clean -n", 'git -C "$W/.." status', "git remote -v show origin"):
     bash(A, None, cmd)  # reads through a subcommand the guard checks stay allowed
 KEEP_END = len(CASES)
 
@@ -1895,4 +1917,7 @@ MESSAGE_CHECKS: Dict[str, List[str]] = {
     _VAR_C_ALIAS_HERE_ID: ["/not-me:allow-repo acme/other"],
     _VAR_C_MERGE_ID: ["shell variables in a `git -C` path", "write the path out in full"],
     _VAR_C_UP_ID: ["shell variables in a `git -C` path", "write the path out in full"],
+    _VAR_C_PB_ID: ["not-me guard [protected_branches]", "shell variables in a `git -C` path"],
+    _VAR_C_SWITCH_ID: ["shell variables in a `git -C` path"],
+    _REMOTE_V_ID: ["git remote add can redirect pushes"],
 }

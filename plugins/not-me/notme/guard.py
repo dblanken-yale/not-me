@@ -2046,16 +2046,19 @@ _BRANCH_WRITE_LONG = ("--delete", "--move", "--copy", "--force", "--set-upstream
 
 def _git_reads(sub: str, args: List[str]) -> bool:
     """A subcommand with a _GIT_RULES handler, used in a form that changes nothing git would push or keep."""
-    if sub in ("checkout", "switch"):  # moves HEAD only, as for --git-dir and GIT_DIR=
-        return True
+    # checkout and switch are not reads here: the guard would track the branch of the wrong checkout, and a later
+    # commit or push in the same command would be judged on that drifted branch
     if sub == "config":
         return _config_reads(args)
     if sub == "remote":
-        return not args or args[0] in ("-v", "--verbose", "show", "get-url")
+        return _remote_verb(args) in ("", "show", "get-url")
     if sub == "submodule":
-        return args[:1] in ([], ["status"], ["summary"])
-    if sub == "clean":
-        return "n" in _short_flags(args) or "--dry-run" in args
+        return next((a for a in args if not a.startswith("-")), "") in ("", "status", "summary")
+    if sub == "clean":  # -e takes a value, so `-e -n` is no dry run
+        flags = _short_flags(args)
+        if "e" in flags or any(_long(a.split("=", 1)[0], "--exclude") for a in args):
+            return False
+        return "n" in flags or "--dry-run" in args
     if sub == "branch":
         if _BRANCH_WRITE_SHORT & set(_short_flags(args)) or any(a.split("=", 1)[0].startswith(_BRANCH_WRITE_LONG)
                                                                   for a in args):
@@ -2067,8 +2070,10 @@ def _git_reads(sub: str, args: List[str]) -> bool:
 def _var_path(blk: Blk, opt: str) -> Block:
     fix = "write the path out in full (`git -C /abs/path <sub> ...`)" if opt == "-C" else \
         f"drop {opt} and run `git -C /abs/path <sub> ...` with the path written out in full"
-    b = blk("other_repo", f"the guard does not expand shell variables in a `git {opt}` path",
-            fix + "; a rewritten command is checked afresh, so this is not a retry")
+    # the unknown checkout may be another repo or on a protected branch: reported under the first of those rules on
+    b = blk(OPAQUE, f"the guard does not expand shell variables in a `git {opt}` path",
+            fix + "; a rewritten command is checked afresh, so this is not a retry",
+            rules=("other_repo", "protected_branches"))
     b.no_relax = True
     return b
 
@@ -2149,9 +2154,18 @@ def _git_commit(c: _GitCall) -> Iterator[Block]:
         yield _unknown_target(c.blk, "the checkout has no github origin", "commit in a checkout of an allowed repo")
 
 
+def _remote_verb(args: List[str]) -> str:
+    """The git remote subcommand after any leading -v/--verbose ("" for a plain listing)."""
+    rest = list(args)
+    while rest and rest[0] in ("-v", "--verbose"):
+        rest.pop(0)
+    return rest[0] if rest else ""
+
+
 def _git_remote(c: _GitCall) -> Iterator[Block]:
-    if c.args and c.args[0] in ("add", "set-url", "rename"):
-        yield c.blk("other_repo", f"git remote {c.args[0]} can redirect pushes", "ask the operator to change remotes")
+    verb = _remote_verb(c.args)
+    if verb in ("add", "set-url", "rename"):
+        yield c.blk("other_repo", f"git remote {verb} can redirect pushes", "ask the operator to change remotes")
 
 
 _CONFIG_READ_OPTS = {"--get", "--get-all", "--get-regexp", "--list", "-l", "--show-origin", "--show-scope", "--global",
