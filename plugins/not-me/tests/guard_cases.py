@@ -1884,6 +1884,27 @@ _REMOTE_V_ID = f"G{len(CASES) + 1:03d}"
 bash(B, OR, "git remote -v add up https://github.com/acme/other")
 for cmd in ("git remote -v set-url origin x", "git remote --verbose rename origin up"):
     bash(B, OR, cmd)
+# git takes -v clusters, repeats and abbreviated long options, so any leading option comes before the verb
+_REMOTE_VV_ID = f"G{len(CASES) + 1:03d}"
+bash(B, OR, "git remote -vv add up https://github.com/acme/other")
+for pre in ("", "-C $W "):
+    for rest in ("remote -vv add up https://github.com/acme/other", "remote --verb add up x", "remote --verbo add up x",
+                 "remote -vvv set-url origin x", "remote -v -v rename origin up"):
+        bash(B, OR, f"git {pre}{rest}")
+for cmd in ("git -C $W remote -vv remove origin", "git -C $W remote --verb prune origin"):
+    bash(B, OR, cmd)
+# clean: an abbreviated --exclude or a pathspec after -- swallows the -n, so neither is a dry run
+for cmd in ("git -C $W clean -f --e -n", "git -C $W clean -f --ex -n", "git -C $W clean -f -- -n",
+            "git -C $W clean -f --exclude -n"):
+    bash(B, OR, cmd)
+# branch: abbreviated long write options next to --list are not a listing
+for cmd in ("git -C $W branch --list --del feature/y", "git -C $W branch --list --set-up=origin/x",
+            "git -C $W branch -l --mov a b", "git -C $W branch --list --forc main"):
+    bash(B, OR, cmd)
+for cmd in ("git -C $W remote -vv", "git remote -vv", "git -C $W remote -vv show origin", "git -C $W remote get-url origin",
+            "git remote get-url origin", "git -C $W clean -nd", "git -C $W clean --dry-run", "git -C $W branch -vv",
+            "git -C $W branch --list 'feat*'", "git -C $W branch -r", "git -C $W submodule -q --cached status"):
+    bash(A, None, cmd)
 for cmd in ("git -C $W config --get user.name", "git -C $W remote -v", "git -C $W remote", "git -C $W branch",
             "git -C $W branch --show-current", "git -C $W branch -a", "git -C $W remote -v show origin",
             "git -C $W remote --verbose get-url origin", "git -C $W submodule status", "git -C $W submodule -q status",
@@ -1920,4 +1941,5 @@ MESSAGE_CHECKS: Dict[str, List[str]] = {
     _VAR_C_PB_ID: ["not-me guard [protected_branches]", "shell variables in a `git -C` path"],
     _VAR_C_SWITCH_ID: ["shell variables in a `git -C` path"],
     _REMOTE_V_ID: ["git remote add can redirect pushes"],
+    _REMOTE_VV_ID: ["git remote add can redirect pushes"],
 }

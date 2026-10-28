@@ -2039,9 +2039,19 @@ def _cmd_git(t, c, st, ctx, blk, depth: int = 0):
             yield _var_path(blk, var_opt)
 
 
-_BRANCH_WRITE_SHORT = set("dDmMcCfu")
-_BRANCH_WRITE_LONG = ("--delete", "--move", "--copy", "--force", "--set-upstream-to", "--unset-upstream",
-                      "--edit-description", "--track", "--no-track", "--create-reflog")
+# git branch options that only list; git accepts abbreviated long options, so anything not spelled out here is a write
+_BRANCH_READ_SHORT = set("arvliq")
+_BRANCH_READ_LONG = {"--list", "--all", "--remotes", "--verbose", "--show-current", "--color", "--no-color", "--format",
+                     "--sort", "--ignore-case", "--column", "--no-column", "--abbrev", "--no-abbrev", "--quiet",
+                     "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--omit-empty"}
+
+
+def _branch_lists(args: List[str]) -> bool:
+    opts = [a for a in args if a.startswith("-")]
+    if not set(_short_flags(opts)) <= _BRANCH_READ_SHORT or \
+            any(a.startswith("--") and a.split("=", 1)[0] not in _BRANCH_READ_LONG for a in opts):
+        return False
+    return not _positionals(args) or "--list" in args or "l" in _short_flags(opts)
 
 
 def _git_reads(sub: str, args: List[str]) -> bool:
@@ -2054,16 +2064,14 @@ def _git_reads(sub: str, args: List[str]) -> bool:
         return _remote_verb(args) in ("", "show", "get-url")
     if sub == "submodule":
         return next((a for a in args if not a.startswith("-")), "") in ("", "status", "summary")
-    if sub == "clean":  # -e takes a value, so `-e -n` is no dry run
-        flags = _short_flags(args)
-        if "e" in flags or any(_long(a.split("=", 1)[0], "--exclude") for a in args):
+    if sub == "clean":  # -e (or any abbreviation of --exclude) takes a value and -- starts pathspecs: no -n after them
+        opts = args[:args.index("--")] if "--" in args else args
+        flags = _short_flags(opts)
+        if "e" in flags or any(len(n) > 2 and "--exclude".startswith(n) for n in (a.split("=", 1)[0] for a in opts)):
             return False
-        return "n" in flags or "--dry-run" in args
+        return "n" in flags or "--dry-run" in opts
     if sub == "branch":
-        if _BRANCH_WRITE_SHORT & set(_short_flags(args)) or any(a.split("=", 1)[0].startswith(_BRANCH_WRITE_LONG)
-                                                                  for a in args):
-            return False
-        return not _positionals(args) or "--list" in args or "l" in _short_flags(args)
+        return _branch_lists(args)
     return False
 
 
@@ -2155,11 +2163,9 @@ def _git_commit(c: _GitCall) -> Iterator[Block]:
 
 
 def _remote_verb(args: List[str]) -> str:
-    """The git remote subcommand after any leading -v/--verbose ("" for a plain listing)."""
-    rest = list(args)
-    while rest and rest[0] in ("-v", "--verbose"):
-        rest.pop(0)
-    return rest[0] if rest else ""
+    """The git remote subcommand after every leading option ("" for a plain listing): git takes -vv, -v -v and
+    abbreviations such as --verb, so no option spelling may hide the verb."""
+    return next((a for a in args if not a.startswith("-")), "")
 
 
 def _git_remote(c: _GitCall) -> Iterator[Block]:
