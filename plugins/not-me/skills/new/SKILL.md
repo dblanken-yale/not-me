@@ -61,7 +61,7 @@ This skill ends in NONE, PR, HELD, FAILED or STOP.
 ## Step 1: Resolve the target
 
 Read `${CLAUDE_PLUGIN_ROOT}/references/authority.md` before you read any issue
-text. Follow `${CLAUDE_PLUGIN_ROOT}/skills/new/references/target.md` in full.
+text. Follow `${CLAUDE_PLUGIN_ROOT}/skills/new/references/target.md` in full, and on every path (idle too) `${CLAUDE_PLUGIN_ROOT}/references/interrupted-runs.md`.
 
 1. An issue number in `$ARGUMENTS` is the target.
 2. Else resume: `notme log last --skill new`. A log whose summary says "committed
@@ -69,7 +69,7 @@ text. Follow `${CLAUDE_PLUGIN_ROOT}/skills/new/references/target.md` in full.
 3. Else `notme pick-issue`. `{"none": true}`: start a log with
    `notme log start --skill new --ref -`, finish it with status `idle` (name any `stack_held` refs and reasons
    in the summary), and print `NONE - idle  log=<path>` (without `--bg`, after the `queue_summary`, any `reason` and the `suggest` skill to run).
-   Write nothing else. Otherwise choose from `issues` by the `picking` rules
+   Write nothing else but an interrupted-run hand-off. Otherwise choose from `issues` by the `picking` rules
    (by impact when none are set), as target.md "Order" says; never pick a `held_back` issue.
 4. Read the issue only through `notme issue N`. `author_trusted` false: the body is
    withheld; never fetch it another way. See target.md for what to do.
