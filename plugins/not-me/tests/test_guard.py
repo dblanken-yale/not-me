@@ -624,7 +624,7 @@ class MessageTests(unittest.TestCase):
         ctx = self.ctx()
         ctx.git = lambda args, cwd: None
         for cmd in ("git -C $W commit -m x", 'git -C "$W" push origin HEAD:refs/heads/x', "git -C $W merge feature/y",
-                    "git -C $W reset --hard", 'cd "$W" && git commit -m x'):
+                    "git -C $W reset --hard"):
             with self.subTest(cmd=cmd):
                 r = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": "."}, ctx)
                 self.assertIsNone(r, getattr(r, "message", ""))
@@ -638,6 +638,12 @@ class MessageTests(unittest.TestCase):
         # a rule the command breaks on its own still blocks
         r = guard.decide({"tool_name": "Bash", "tool_input": {"command": "git -C $W push -f origin x"}, "cwd": "."}, ctx)
         self.assertEqual(r.rule, "force_push")
+        # a directory change the guard does not follow, next to a commit: blocked, with how to write it instead
+        r = guard.decide({"tool_name": "Bash", "tool_input": {"command": 'cd "$W" && git commit -m x'}, "cwd": "."},
+                         ctx)
+        self.assertEqual(r.rule, "protected_branches")
+        self.assertIn("Instead: write it as `git -C <path> <command>` so the guard can check the branch.", r.message)
+        self.assertNotIn("Relax this rule", r.message)
         # with protected_branches off there is nothing to log
         c = GuardContext(write_ctx=writes.GuardContext(
             origin_repo="acme/app", allowed_repos=("acme/app",), protected_branches=("main",),

@@ -95,9 +95,11 @@ the owner's say-so, not a cleanup.
    GitHub API are guided, not blocked. The inactive path
    is fork-free. Block messages say what to do next in the session and never
    send the operator to a terminal. For git and gh it follows only a leading
-   `cd <path> &&` and variables set to a literal path in the same command; a
-   directory it cannot work out is guided, never judged as the session's
-   (dblanken-yale/not-me#144). It is not the last line: GitHub rulesets on
+   `cd <path> &&` and variables set to a literal path in the same command;
+   any other directory change next to a git write that reads the branch is
+   blocked (fail closed), and a `git -C` path it cannot work out is guided,
+   never judged as the session's (dblanken-yale/not-me#144). It is not the
+   last line: GitHub rulesets on
    protected branches (no deletion, no force push, PR required) are the
    backstop the docs recommend.
 

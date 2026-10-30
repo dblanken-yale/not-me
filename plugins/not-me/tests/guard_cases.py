@@ -276,6 +276,151 @@ def write(want: str, rule: Optional[str], tool: str, path: str, variant: str = "
 
 
 A, B, G = "allow", "block", "guide"  # guide: runs, and the guard logs it under the rule
+
+
+# dblanken-yale/not-me#144, final rule: the guard follows exactly one directory change, a leading
+# `cd <literal path> &&` with only && and pipes after it and no other cd, pushd, popd, source, eval, trap or function
+# definition in the command. Any other directory change next to a git write that reads the branch (commit, merge,
+# rebase, cherry-pick, am, push, reset --hard, a forced branch change, checkout -B) blocks under protected_branches,
+# unless an absolute `git -C` names the checkout. These directory-change shapes, written below with what an earlier
+# guard decided, now decide as listed here.
+CD_OUTCOMES: Dict[Tuple[str, str], Tuple[str, Optional[str]]] = {
+    # a followed leading cd into {F}/other: judged there (acme/other, off the allowed list), so guided
+    ('cd {F}/other && git commit -m "fix: (x" && git push', 'app'): (G, OR),
+    ('cd {F}/other 2>&1 && git log | head -1 && git push >&2', 'app'): (G, OR),
+    ('cd {F}/other && git commit -F msg.txt', 'app'): (G, OR),
+    ('cd {F}/other && sudo git push', 'app'): (G, OR),
+    ('c\\\nd {F}/other && git push', 'app'): (G, OR),
+    ('cd\t{F}/other && git push', 'app'): (G, OR),
+    ("bash -c 'cd ../other && git push'", 'app'): (G, OR),
+    # any other directory change next to a push: blocked
+    ('cd {F}/other && ( (cd {F}/live) ; git push )', 'app'): (B, PB),
+    ('OLDPWD={F}/other; cd -; git push', 'app'): (B, PB),
+    ('PWD={F}/other/x; cd ..; git push', 'app'): (B, PB),
+    ('cd {F}/other; function f { cd {F}/app; }; f; git push', 'app'): (B, PB),
+    ('cd {F}/live && cd {F}/app; git push', 'app'): (B, PB),
+    ("$'\\x63d' {F}/other; git push", 'app'): (B, PB),
+    ("'cd' {F}/other; git push", 'app'): (B, PB),
+    ('( (cd {F}/other) ; git push )', 'app'): (B, PB),
+    ('(cd .not-me-companion/comp && git push origin HEAD)', 'host'): (B, PB),
+    ('(cd .not-me-companion/comp && git push)', 'host@h0'): (B, PB),
+    ('(cd {F}/live && git push', 'app'): (B, PB),
+    ('(cd {F}/other && git push origin HEAD); git status', 'app'): (B, PB),
+    ('(cd {F}/other && git push)', 'app'): (B, PB),
+    ('(cd {F}/other && make test); git push', 'app'): (B, PB),
+    ('(cd {F}/other); (git push)', 'app'): (B, PB),
+    ('. /dev/stdin <<< "cd {F}/other"; git push', 'app'): (B, PB),
+    ('. scripts/goother.sh && git push', 'app'): (B, PB),
+    ('. scripts/nested.sh && cd {F}/live && git push', 'app'): (B, PB),
+    ('CDPATH={F} cd other && git push', 'app'): (B, PB),
+    ('W={F}/live; . ./env.sh && git -C $W commit -m x', 'main'): (B, PB),
+    ('W={F}/live; eval "$X"; git -C $W commit -m x', 'main'): (B, PB),
+    ('W={F}/live; function f { W={F}/main; }; f; git -C $W commit -m x', 'main'): (B, PB),
+    ('W={F}/live; source x.sh; git -C $W commit -m x', 'main'): (B, PB),
+    ("W={F}/live; trap 'W=x' EXIT; git -C $W commit -m x", 'main'): (B, PB),
+    ('bash -c \'eval "g""it push https://github.com/acme/other HEAD"\'', 'app'): (B, PB),
+    ('builtin cd {F}/other; git push', 'app'): (B, PB),
+    ('c\\d {F}/other; git push', 'app'): (B, PB),
+    ('case x in a) cd {F}/live;; esac; git push', 'app'): (B, PB),
+    ('cd \t {F}/other;git push', 'app'): (B, PB),
+    ('cd "$NOWHERE" && git commit -m x', 'main'): (B, PB),
+    ('cd "$NOWHERE" && git push', 'app'): (B, PB),
+    ('cd -@ {F}/other && git push', 'app'): (B, PB),
+    ('cd -L {F}/live && git push', 'app'): (B, PB),
+    ('cd -L {F}/other && git push', 'app'): (B, PB),
+    ('cd -P {F}/live && git commit -m x', 'main'): (B, PB),
+    ('cd -P {F}/other/.. && git push', 'app'): (B, PB),
+    ('cd -e -- {F}/other && git push', 'app'): (B, PB),
+    ('cd .not-me-companion/comp && git status && cd .. && cd .. && git push', 'host'): (B, PB),
+    ('cd scripts; git commit -m x', 'app'): (B, PB),
+    ('cd {F}/live && cd .. && git commit -m x', 'main'): (B, PB),
+    ('cd {F}/live && source x.sh && git commit -m x', 'main'): (B, PB),
+    ('cd {F}/live && x=$(cd {F}/other && pwd) && git push', 'app'): (B, PB),
+    ('cd {F}/live) && git push', 'app'): (B, PB),
+    ('cd {F}/live; git commit -m x', 'app'): (B, PB),
+    ('cd {F}/main && true & git commit -m x', 'app'): (B, PB),
+    ('cd {F}/main; git merge --abort', 'app'): (B, PB),
+    ('cd {F}/main; git push origin feature/x', 'app'): (B, PB),
+    ('cd {F}/main; git reset x', 'app'): (G, PB),
+    ('cd {F}/nosuch && git commit -m x', 'main'): (G, OR),
+    ('cd {F}/other && (cd {F}/live && (cd {F}/app) && git push)', 'app'): (B, PB),
+    ('cd {F}/other && (cd {F}/live && git push) && git push', 'app'): (B, PB),
+    ('cd {F}/other {F}/app && git push', 'app'): (B, PB),
+    ('cd {F}/other; ! cd {F}/live && git push', 'app'): (B, PB),
+    ('cd {F}/other; (pushd {F}/live); git push', 'app'): (B, PB),
+    ('cd {F}/other; [ -n "$CI" ] && cd {F}/live; git push', 'app'): (B, PB),
+    ("cd {F}/other; bash -c 'cd {F}/app; make'; cd {F}/live; git push", 'app'): (B, PB),
+    ("cd {F}/other; bash -c 'true; cd {F}/live '; git push", 'app'): (B, PB),
+    ('cd {F}/other; cd {F}/app | cat; git push', 'app'): (B, PB),
+    ('cd {F}/other; cd {F}/app; cd -; git push', 'app'): (B, PB),
+    ('cd {F}/other; cd {F}/live 2>/dev/null && git push', 'app'): (B, PB),
+    ('cd {F}/other; cd {F}/live > {F}/nope/x; git push', 'app'): (B, PB),
+    ('cd {F}/other; cd {F}/live; cd -; cd -; cd {F}/live && git push', 'app'): (B, PB),
+    ('cd {F}/other; cd {F}/live; cd {F}/nosuch; cd -; git push', 'app'): (B, PB),
+    ('cd {F}/other; cd {F}/live; cd ~-; git push', 'app'): (B, PB),
+    ('cd {F}/other; cd {F}/nope/../live; git push', 'app'): (B, PB),
+    ('cd {F}/other; cd ~ && git push', 'app'): (B, PB),
+    ('cd {F}/other; cd ~+ && git push', 'app'): (B, PB),
+    ('cd {F}/other; cd; git push', 'app'): (B, PB),
+    ('cd {F}/other; coproc cd {F}/app; git push', 'app'): (B, PB),
+    ('cd {F}/other; echo $(true; cd {F}/live ); git push', 'app'): (B, PB),
+    ('cd {F}/other; echo `true; cd {F}/live `; git push', 'app'): (B, PB),
+    ('cd {F}/other; env cd {F}/app; git push', 'app'): (B, PB),
+    ('cd {F}/other; f() { cd {F}/app; }; f; git push', 'app'): (B, PB),
+    ('cd {F}/other; false && cd {F}/live && git push', 'app'): (B, PB),
+    ('cd {F}/other; false && cd {F}/live; git push', 'app'): (B, PB),
+    ('cd {F}/other; for d in x; do cd {F}/live && git push; done', 'app'): (B, PB),
+    ('cd {F}/other; git commit -m "fix (x; cd {F}/live "; git push', 'app'): (B, PB),
+    ('cd {F}/other; if false; then cd {F}/live; fi; git push', 'app'): (B, PB),
+    ('cd {F}/other; make && cd {F}/live; git push', 'app'): (B, PB),
+    ('cd {F}/other; pushd {F}/live >/dev/null && git push', 'app'): (B, PB),
+    ('cd {F}/other; pushd {F}/live; popd; pushd {F}/live && git push', 'app'): (B, PB),
+    ('cd {F}/other; pushd {F}/live; pushd {F}/nosuch; popd; git push', 'app'): (B, PB),
+    ('cd {F}/other; true | cd {F}/app; git push', 'app'): (B, PB),
+    ('cd {F}/other; true || cd {F}/live && git push', 'app'): (B, PB),
+    ('cd {F}/other; true || cd {F}/live; git push', 'app'): (B, PB),
+    ('cd {F}/other; while false; do cd {F}/live; done; git push', 'app'): (B, PB),
+    ('cd {F}/other; { cd {F}/app; } | cat; git push', 'app'): (B, PB),
+    ('cd {F}/other; { cd {F}/live; }; git push', 'app'): (B, PB),
+    ('cd ~nosuchuser-xyz && git push', 'app'): (B, PB),
+    ('chdir {F}/other; git push', 'app'): (B, PB),
+    ('command cd {F}/other; git push', 'app'): (B, PB),
+    ("echo $'x\\'y' ; cd {F}/other ; echo \\'; git push", 'app'): (B, PB),
+    ('echo $(true; cd {F}/other ); git push', 'app'): (B, PB),
+    ("echo 'cd {F}/other' > x.sh; source x.sh; git push", 'app'): (B, PB),
+    ('eval "cd {F}/other"; git push', 'app'): (B, PB),
+    ("eval 'cd {F}/other'; git push", 'app'): (B, PB),
+    ('export ${V}={F}/other; cd; git push', 'app'): (B, PB),
+    ("export 'X'=1; cd {F}/live && git push", 'app'): (B, PB),
+    ('f() { :; }; W={F}/live; git -C $W commit -m x', 'main'): (B, PB),
+    ('f() { true; }; f; git commit -m x', 'app'): (B, PB),
+    ('make test; (cd .not-me-companion/comp && make test); git commit -q -m x; cd .not-me-companion/comp && git add . && git commit -q -m y', 'host@hproj'): (B, PB),
+    ('pushd +1 && git push', 'app'): (B, PB),
+    ('pushd {F}/other && git push', 'app'): (B, PB),
+    ('pushd {F}/other; DIRSTACK[1]={F}/other; popd; git push', 'app'): (B, PB),
+    ('pushd {F}/other; cd ~+1 && git push', 'app'): (B, PB),
+    ('pushd {F}/other; cd ~-1 && git push', 'app'): (B, PB),
+    ('pushd {F}/other; dirs -c; popd; git push', 'app'): (B, PB),
+    ('pushd {F}/other; popd; git push', 'app'): (B, PB),
+    ('pushd {F}/other; pushd {F}/live; cd ~1; git push', 'app'): (B, PB),
+    ('source /dev/null; git push', 'app'): (B, PB),
+    ('source scripts/goother.sh; git push', 'app'): (B, PB),
+    ('source scripts/missing.sh; git push', 'app'): (B, PB),
+    ('source scripts/nested.sh; git push', 'app'): (B, PB),
+    ('source scripts/plainenv.sh; git push', 'app'): (B, PB),
+    ('time if true; then cd {F}/other; fi; git push', 'app'): (B, PB),
+    ("trap 'cd {F}/other' DEBUG; git push", 'app'): (B, PB),
+    ('true && { cd {F}/other; } && git push', 'app'): (B, PB),
+    ('true || cd {F}/app; cd {F}/other &>/dev/null && git push', 'app'): (B, PB),
+    ('x=$(cd {F}/other) git push', 'app'): (B, PB),
+    ('{ cd {F}/other; } && git push', 'app'): (B, PB),
+}
+
+
+def cd_case(cmd: str, variant: str = "app", want: str = "allow", rule: Optional[str] = None) -> None:
+    """A case whose outcome the final #144 rule may have changed: CD_OUTCOMES wins, else want and rule."""
+    w, r = CD_OUTCOMES.get((cmd, variant), (want, rule))
+    bash(w, r, cmd, variant)
 # A grep or sed pattern exemption needs the program to resolve to a file the user cannot change, which the guard
 # never trusts on Windows: there these cases block like any other word naming a protected file.
 PAT = (B, SP) if os.name == "nt" else (A, None)
@@ -326,7 +471,7 @@ bash(G, OR, "gh api repos/{owner}/{repo}/issues -f title=x")
 bash(A, None, "gh pr create --title x --body y")  # gh's default repo, acme/app
 bash(G, OR, "git -C {F}/other push origin HEAD")
 bash(G, OR, "git -C {F}/other push")
-bash(A, None, "cd {F}/other; git push")  # a cd before ; is not followed: judged where the session is
+bash(B, PB, "cd {F}/other; git push")  # a cd before ; is not followed: judged where the session is
 bash(G, OR, "git push https://github.com/acme/lib.git HEAD")
 bash(G, OR, "git push --repo=https://github.com/acme/lib.git HEAD")
 bash(G, OR, "git push git@gitlab.com:x/y.git HEAD")
@@ -935,12 +1080,12 @@ for _variant in ("app", "nogit"):
                 "ln -s /tmp/x {H}/", "install -m 600 /tmp/x {H}", "ditto /tmp/x {H}/..",
                 "tar -xzf x.tgz -C {H}/..", "tar xf x.tar --directory={H}", "unzip x.zip -d {H}",
                 "unzip -o x.zip -d{H}/.."):
-        bash(B, SP, cmd, _variant)
+        cd_case(cmd, _variant, B, SP)
 for cmd in ("cp notes.txt {H}/..", "cp -r scripts /tmp/copy", "tar -xzf x.tgz -C /tmp/out",
             "unzip x.zip -d /tmp/out", "rsync -a scripts/ /tmp/copy/", "mv a.txt b.txt", "cp -r {H} /tmp/backup",
             "tar -xzf x.tgz", "tar xf x.tar", "unzip x.zip", "tar -czf x.tgz -C {H}/.. .", "unzip -l x.zip",
             "less README.md", "more README.md"):
-    bash(A, None, cmd)
+    cd_case(cmd, "app", A, None)
 # mv moves whole directories, so a destination above the home counts, and so does moving the home or a directory
 # above it; ln can link a directory there too. tar -P extracts to the archive's absolute paths. (Round 2 of the
 # #118 security review.) An extract with no -C or -d writes into the tracked working directory: test_guard
@@ -949,7 +1094,7 @@ for _variant in ("app", "nogit"):
     for cmd in ("mv notes.txt {H}/..", "mv /tmp/x {H}/../..", "mv {H} /tmp/x", "mv {H}/.. /tmp/y",
                 "mv -t /tmp {H}", "ln -s /tmp/x {H}/..", "tar -xPf x.tar", "tar xPf x.tar",
                 "tar -x --absolute-names -f x.tar"):
-        bash(B, SP, cmd, _variant)
+        cd_case(cmd, _variant, B, SP)
 # less and more can write a log file (-o, --log-file): they are not readers of the global project.md
 bash(B, SP, "less -o {H}/project.md README.md", "gdry")
 bash(B, SP, "less {H}/project.md", "gdry")
@@ -1016,50 +1161,6 @@ edit(B, SP, "Write", {"file_path": "{H}/project.md",
 # the directory unknown: a git write there runs and is logged (guided). Any other cd is not followed: writes are
 # judged in the hook's real working directory, or the `git -C` / `gh -R` they name. Setting HOME, which moves
 # ~/.gitconfig and so where git pushes, still blocks a git write.
-# These were allowed while no cd was followed; now they are judged in {F}/other (acme/other, off the allowed list)
-# or in a directory the guard cannot name, so they run and are logged under other_repo.
-FOLLOWED = {
-    "bash -c 'cd ../other && git push'",
-    'c\\\nd {F}/other && git push',
-    'cd\t{F}/other && git push',
-    'cd "$NOWHERE" && git push',
-    'cd -@ {F}/other && git push',
-    'cd -L {F}/live && git push',
-    'cd -L {F}/other && git push',
-    'cd -P {F}/other/.. && git push',
-    'cd -e -- {F}/other && git push',
-    'cd .not-me-companion/comp && git status && cd .. && cd .. && git push',
-    'cd {F}/other && (cd {F}/live && (cd {F}/app) && git push)',
-    'cd {F}/other && (cd {F}/live && git push) && git push',
-    'cd {F}/other && git commit -F msg.txt',
-    'cd {F}/other && git commit -m "fix: (x" && git push',
-    'cd {F}/other && sudo git push',
-    'cd {F}/other 2>&1 && git log | head -1 && git push >&2',
-    'cd {F}/other {F}/app && git push',
-    'cd ~nosuchuser-xyz && git push',
-}
-
-
-# Security review of dblanken-yale/not-me#144: past a cd that may or may not have worked, git is judged both where
-# the session is and where the cd went; a directory the guard cannot work out there counts as a protected branch.
-BOTH_UNKNOWN = {
-    "cd {F}/other && ( (cd {F}/live) ; git push )", "OLDPWD={F}/other; cd -; git push",
-    "PWD={F}/other/x; cd ..; git push", "cd {F}/other; function f { cd {F}/app; }; f; git push",
-    "cd {F}/live && cd {F}/app; git push",
-}
-
-
-def cd_case(cmd: str, variant: str = "app") -> None:
-    """A command that changes directory and writes: blocked when it is in BOTH_UNKNOWN, guided when it is in
-    FOLLOWED, else allowed."""
-    if cmd in BOTH_UNKNOWN:
-        bash(B, PB, cmd, variant)
-    elif cmd in FOLLOWED:
-        bash(G, OR, cmd, variant)
-    else:
-        bash(A, None, cmd, variant)
-
-
 _C = ".not-me-companion/comp"
 NEW_BLOCK_START = len(CASES)
 bash(A, None, "cd {F}/live && git push")  # even into another checkout of the allowed repo
@@ -1078,7 +1179,7 @@ for cmd in (
         "read HOME < /dev/null; cd; git push", "printf -v HOME %s {F}/other; cd; git push",
         "local HOME={F}/other; cd; git push",
         ):
-    bash(B, PB, cmd)
+    cd_case(cmd, "app", B, PB)
 # The reduced guard (docs/guards.md) decides these differently from the rows above.
 for cmd in (
         "(cd {F}/other && git push)",
@@ -1187,10 +1288,10 @@ for cmd in (
 for cmd in (
         "cd {F}/other; xargs cd {F}/app </dev/null; git push",
 ):
-    bash(B, PB, cmd)
-bash(A, None, "cd {F}/other; cd {F}/app & git push")  # a cd before ; is not followed (docs/guards.md)
-bash(A, None, "cd {F}/other; if true; then cd {F}/app; fi & git push")
-bash(A, None, "cd {F}/other; nohup cd {F}/app; git push")
+    cd_case(cmd, "app", B, PB)
+bash(B, PB, "cd {F}/other; cd {F}/app & git push")  # a cd before ; is not followed (docs/guards.md)
+bash(B, PB, "cd {F}/other; if true; then cd {F}/app; fi & git push")
+bash(B, PB, "cd {F}/other; nohup cd {F}/app; git push")
 bash(A, None, 'cd "$NOWHERE" && cat o*')  # after a cd, a relative glob that can name the token
 # after a leading cd an alias is looked up where git runs: {F}/other has no pp alias (the session's checkout does)
 bash(A, None, "cd {F}/other && git pp")
@@ -1231,7 +1332,7 @@ for cmd in (
 for cmd in (
         "cd {F}/other && xargs git push </dev/null",
 ):
-    bash(B, PB, cmd)
+    cd_case(cmd, "app", B, PB)
 # A quoted assignment prefix, backslash-newline, braces, globs and =cmd no longer hide a command.
 for cmd in (
         'x="a b" gh pr create --repo acme/other --title x --body y',
@@ -1240,13 +1341,13 @@ for cmd in (
         "cat <<'EOF'\nx\\\nEOF\ngit push https://github.com/acme/other HEAD\nEOF",
         "cat <<EOF\n$(git push https://github.com/acme/other HEAD)\nEOF",
         "$'\\x67it' push https://github.com/acme/other HEAD"):
-    bash(G, OR, cmd)
+    cd_case(cmd, "app", G, OR)
 # The reduced guard (docs/guards.md) decides these differently from the rows above.
 for cmd in (
         "x='a b' git push --force",
         "x+=1 git push --force",
 ):
-    bash(B, FP, cmd)
+    cd_case(cmd, "app", B, FP)
 for cmd in (
         "x=a\\ b git push",
         'GIT_X="1 2" git commit -m y',
@@ -1260,7 +1361,7 @@ for cmd in (
         "/usr/bin/gi? push https://github.com/acme/other HEAD",
         "=git push https://github.com/acme/other HEAD",
 ):
-    bash(B, PB, cmd)
+    cd_case(cmd, "app", B, PB)
 bash(B, FP, "git push \\\n  --force")
 bash(B, FP, "noglob git push --force")
 # GIT_DIR, GIT_WORK_TREE and --git-dir/--work-tree with a write
@@ -1268,7 +1369,7 @@ for cmd in (
         "GIT_DIR={F}/other/.git; git push", "read GIT_DIR < x; git commit -m y",
         "GIT_WORK_TREE={F}/other git commit -m x", "git --work-tree={F}/other commit -m x",
         "git --git-dir={F}/other/.git commit -m x", "declare -x GIT_DIR=x; git push"):
-    bash(B, PB, cmd)
+    cd_case(cmd, "app", B, PB)
 # Too long, too deep or unreadable: judged as opaque text, so allowed unless it holds an opaque-text word.
 bash(A, None, "true " * 7000 + "; git status")
 bash(A, None, "echo " + "$(" * 70 + "x" + ")" * 70)
@@ -1333,16 +1434,16 @@ for cmd in (
         f"cat <<-EOF\n\tx\n\tEOF\ngit push {OTHER}",
         # whitespace between cd and its operand
         ):
-    bash(G, OR, cmd)
+    cd_case(cmd, "app", G, OR)
 # From the round above, still hard blocks since dblanken-yale/not-me#141: what a push sends, or which branch it lands
 # on, cannot be checked (a -c alias, submodules), and a graphql query the guard cannot read may delete or change
 # settings.
 for cmd in ("git -c alias.x=log x", "git push --recurse-submodules=on-demand origin feature/x",
             "git push --recurse-submodules origin feature/x"):
-    bash(B, PB, cmd)
+    cd_case(cmd, "app", B, PB)
 for cmd in ('gh api graphql -f query="$(cat q.graphql)"', 'gh api graphql -f query="$Q"',
             "gh api graphql -F query=@q.graphql", "gh api graphql -F owner=acme"):
-    bash(B, DG, cmd)
+    cd_case(cmd, "app", B, DG)
 # The reduced guard (docs/guards.md) decides these differently from the rows above.
 for cmd in (
         "git rebase --exec=true main",
@@ -1396,7 +1497,7 @@ for cmd in (
         f"cat <<EOF | bash\ngit push {OTHER}\nEOF",
         f"cat <<-EOF | sh\n\tgit push {OTHER}\n\tEOF",
 ):
-    bash(B, PB, cmd)
+    cd_case(cmd, "app", B, PB)
 bash(B, PB, "git push origin feature/x", "recurse")  # push.recurseSubmodules in the repo config
 ROUND1_END = len(CASES)
 for cmd in ("git log --oneline", "git diff --stat", "git -c color.ui=always log", "git remote -v",
@@ -1416,7 +1517,7 @@ for cmd in (
         # exec and config variables set by any means
         # push.default and the upstream decide a bare push
         "git -c push.default=matching push"):
-    bash(B, PB, cmd)
+    cd_case(cmd, "app", B, PB)
 bash(G, OR, "git config push.default matching")
 # The reduced guard (docs/guards.md) decides these differently from the rows above.
 for cmd in (
@@ -1456,7 +1557,7 @@ for cmd in (
 for cmd in (
         "git push --for origin feature/x",
 ):
-    bash(B, FP, cmd)
+    cd_case(cmd, "app", B, FP)
 for variant in ("matching", "upmain", "pushspec"):
     bash(B, PB, "git push", variant)
 ROUND2_END = len(CASES)
@@ -1496,7 +1597,7 @@ for cmd in (
         # 6. namerefs, eval and source as setters
         # 8. rg runs a program only through --pre
         ):
-    bash(G, OR, cmd)
+    cd_case(cmd, "app", G, OR)
 # The reduced guard (docs/guards.md) decides these differently from the rows above.
 for cmd in (
         "set -a; : ${GIT_DIR:=../other/.git}; git push",
@@ -1562,7 +1663,7 @@ for cmd in (
         "bash < scripts/ship.sh",
         "printf 'g%sit push x' '' | sh",
 ):
-    bash(B, PB, cmd)
+    cd_case(cmd, "app", B, PB)
 bash(B, PB, "git push", "mirror")  # 7. remote.origin.mirror decides a bare push
 ROUND3_END = len(CASES)
 for cmd in ('rg "git push" docs', 'rg -n "gh pr" docs', 'grep -rn "gh pr" docs', "git diff main...HEAD --stat",
@@ -1585,7 +1686,7 @@ for cmd in (
         "ruby -e 'system(\"g\"+\"it push https://gith\"+\"ub.com/acme/other HEAD\")'",
         "node -e 'require(\"child_process\").execSync(\"g\"+\"it push https://gith\"+\"ub.com/acme/other HEAD\")'",
 ):
-    bash(B, PB, cmd)
+    cd_case(cmd, "app", B, PB)
 for cmd in (
         "vim -c 'exe \"!g\".\"it push https://gith\".\"ub.com/acme/other HEAD\"'",
         "python3 -c 'print(1)'",
@@ -1699,7 +1800,7 @@ for cmd in (
 for cmd in ("python3 -u scripts/evil.py", "python3 scripts/evil.py", "python3 -W ignore scripts/allow.py",
             "python3 -u -B scripts/allow.py", "pwsh -NoProfile -NonInteractive -File scripts/evil.ps1",
             "python3 -X dev scripts/evil.py"):
-    bash(B, SP, cmd)
+    cd_case(cmd, "app", B, SP)
 # the file arguments of a module call are not read (like the modules a script imports)
 for cmd in ("python3 -m pytest scripts/evil.py", "python3 -m unittest scripts/allow.py",
             "python3 -m pytest -q scripts/evil.py"):
@@ -1745,7 +1846,7 @@ for variant in ("app", "bare", "nogit"):
                 "timeout 60 claude -p hi", "bash -c 'claude -p hi'", "npx @anthropic-ai/claude-code -p hi",
                 "C=claude; $C -p hi", "claude", "claude-code -p hi",
                 "claude plugin validate --strict plugins/not-me"):
-        bash(A, None, cmd, variant)
+        cd_case(cmd, variant, A, None)
 bash(A, None, "sh scripts/resume.sh abc")
 for tool, tin in (("mcp__ccd_session_mgmt__send_message", {"session_id": "x", "message": "status please"}),
                   ("mcp__terminal__run_in_terminal", {"command": "claude --resume abc -p hi"}),
@@ -1769,20 +1870,20 @@ KEEP_START = len(CASES)
 # protected_branches: commits, merges, rebases, cherry-picks, am and hard resets on a protected branch; pushes to one
 for cmd in ("git commit -m x", "git merge feature/y", "git rebase feature/y", "git cherry-pick abc123",
             "git am < x.patch", "git reset --hard HEAD~1"):
-    bash(B, PB, cmd, "main")
+    cd_case(cmd, "main", B, PB)
 for cmd in ("git push origin main", "git push origin HEAD:develop", "git push origin feature/x:master",
             "git push origin feature/x:refs/heads/main", "git push --all origin", "git push --mirror origin"):
-    bash(B, PB, cmd)
+    cd_case(cmd, "app", B, PB)
 bash(B, PB, "git push", "upmain")  # a bare push whose upstream is main
 bash(B, PB, "git push", "main")
 bash(B, PB, "git push origin $(git branch --show-current)")  # a refspec the shell fills in cannot be checked
 for cmd in ("git merge --abort", "git cherry-pick --continue", "git reset --soft HEAD~1", "git reset HEAD x"):
-    bash(A, None, cmd, "main")
+    cd_case(cmd, "main", A, None)
 # force_push
 for cmd in ("git push --force origin feature/x", "git push -f", "git push --force-with-lease origin feature/x",
             "git push origin +feature/x", "git push --delete origin feature/x", "git push origin :feature/x",
             "git push --forc origin feature/x", "git push -fu origin feature/x"):
-    bash(B, FP, cmd)
+    cd_case(cmd, "app", B, FP)
 # merging a pull request is not the guard's business (no not-me skill merges; a person may, or may ask Claude to);
 # merging in a repo off the allowed list is still a write to another repo
 for cmd in ("gh pr merge 5 --repo acme/app --squash", "gh pr merge 5 --repo acme/app --admin",
@@ -1798,7 +1899,7 @@ for cmd in ("gh pr merge 5 -R acme/app --delete-branch", "gh pr merge 5 -R acme/
             "bash -c 'gh pr merge 5 -R acme/app --squash --delete-branch'",
             "python3 -c 'import os; os.system(\"gh pr merge 5 --delete-branch\")'",
             "python3 -c 'import os; os.system(\"gh pr close 5 -d\")'"):
-    bash(B, FP, cmd)
+    cd_case(cmd, "app", B, FP)
 for cmd in ("gh pr merge 5 -R acme/app --squash", "gh pr merge 5 -R acme/app --delete-branch=false",
             "gh pr close 5 -R acme/app -c 'superseded'", "gh pr merge 5 -R acme/app -t 'do it'",
             "python3 -c 'import os; os.system(\"gh pr merge 5 --squash\")'"):
@@ -1826,7 +1927,7 @@ for cmd in ("gh secret set TOKEN --repo acme/app --body x", "gh variable set X -
             "gh repo edit acme/app --visibility public", "gh repo delete acme/app --yes",
             "gh issue delete 1 --repo acme/app --yes", "gh api -X DELETE repos/acme/app/git/refs/heads/x",
             "gh api --method DELETE repos/acme/app/labels/x", "rm -rf .git", "git clean -fdx", "git branch -D main"):
-    bash(B, DG, cmd)
+    cd_case(cmd, "app", B, DG)
 bash(A, None, "gh ruleset view 1 --repo acme/app")  # a read
 for cmd in ("git branch -D feature/old", "git clean -fd", "rm -rf node_modules build", "git reset --hard HEAD~1"):
     cd_case(cmd)
@@ -1838,12 +1939,12 @@ for variant in ("app", "nogit"):
     write(A, None, "Read", "{H}/allowed-repos.json", variant)
     for cmd in ("cat {H}/allowed-repos.json", "cat ~/.claude/not-me/allowed-repos.json",
                 "echo {{}} > {H}/allowed-repos.json"):
-        bash(B, SP, cmd, variant)
+        cd_case(cmd, variant, B, SP)
     for cmd in ("notme mode live", "python3 -m notme.cli mode live", "notme allow-repo add acme/other",
                 "notme pause off", 'script -q -c "notme pause off" /dev/null', "nohup notme pause off &",
                 "bash -c 'notme allow-repo add acme/other'", "N=notme; $N pause off", "notme mode show",
                 "notme mode dry-run", "notme pause on", "notme allow-repo list", "notme status"):
-        bash(A, None, cmd, variant)
+        cd_case(cmd, variant, A, None)
 # opaque text: parsed where it can be, else blocked only for the words that matter, under the first rule that is on
 _OPAQUE_ID = f"G{len(CASES) + 1:03d}"
 bash(B, PB, "python3 -c 'import os; os.system(\"git push origin main\")'")
@@ -1855,7 +1956,7 @@ bash(B, DG, "eval \"$(printf 'gh secret set X')\"")
 for cmd in ("python3 -c 'import os; os.system(\"gh secret delete X -R acme/app\")'",
             "node -e 'fetch(\"https://api.github.com/repos/acme/app/actions/secrets/X\")'",
             "bash scripts/envsecret.sh"):
-    bash(B, DG, cmd)
+    cd_case(cmd, "app", B, DG)
 SCRIPTS["envsecret.sh"] = "#!/bin/sh\ncurl -X PUT https://api.github.com/repos/acme/app/environments/prod/secrets/X\n"
 for cmd in ("python3 -c 'print(\"secret\")'", "node -e 'const secretKey = 1'", "gh secret list --repo acme/app"):
     cd_case(cmd)
@@ -1864,7 +1965,7 @@ bash(B, PB, "git push --force 'unclosed")  # opaque: push reports under the firs
 bash(B, FP, "bash -c 'git push --force'", "off")
 bash(A, None, "bash -c 'git push --force'", "alloff")
 # and what it lets through
-bash(G, PB, "cd sub && git commit -m x")  # no such directory: the checkout is unknown, so logged (#144)
+bash(G, OR, "cd sub && git commit -m x")  # no such directory: the checkout is unknown, so logged (#144)
 for cmd in ("python3 -c 'print(1)'", "shellcheck $(git ls-files '*.sh')",
             "bash -c 'git log --oneline -5'", "node -e 'console.log([1, 2].map(x => x * 2))'",
             "FOO=1 git push origin feature/x", "git log --ext-diff -p", "git frobnicate", "python3 scripts/tool.py",
@@ -1904,7 +2005,7 @@ for cmd in ("git -C $W merge feature/y", 'git -C "$W/.." commit -m x', "git -C $
             "git -C $W branch -D feature/y", "git -C $W clean -fd", "git -C $W/.. merge feature/y",
             "git -C $W branch feature/y", "git -C $W config user.name x", "git -C $W submodule update",
             "git -C $W -C sub commit -m x"):
-    bash(G, PB, cmd)
+    cd_case(cmd, "app", G, PB)
 bash(G, OR, 'git -C "$W/.." push origin HEAD:refs/heads/x')
 bash(B, PB, "git -C $W subtree add --prefix=x y")  # subtree is not built in: looked up as an alias
 for variant in ("offalias", "off"):
@@ -1918,20 +2019,20 @@ bash(A, None, 'git -C "$W/.." commit -m x', "alloff")
 # later commit or push runs and is logged rather than judged on a branch that may have drifted
 for cmd in ('git -C "$W/.." switch feature/y && git commit -m x', 'git -C "$W/.." checkout -b feature/y; git commit -m x',
             'git -C "$W/.." switch feature/y && git push', "git -C $W checkout feature/y", "git -C $W switch feature/y"):
-    bash(G, PB, cmd, "main")
+    cd_case(cmd, "main", G, PB)
 bash(G, PB, 'git -C "$W/.." switch feature/y && git commit -m x', "offalias")
 bash(B, PB, 'git -C "$W" switch feature/y && git push origin HEAD:main', "main")  # a named protected branch
 # leading options do not hide a remote, submodule or clean write; through an unknown path each is guided
 for cmd in ("git -C $W remote -v add up https://github.com/acme/other", "git -C $W remote -v set-url origin x",
             "git -C $W remote --verbose rename origin up"):
-    bash(G, OR, cmd)
+    cd_case(cmd, "app", G, OR)
 for cmd in ("git -C $W remote -v remove origin", "git -C $W submodule --quiet update",
             "git -C $W submodule -q foreach true", "git -C $W clean -f -e -n", "git -C $W clean -fn --exclude=x"):
-    bash(G, PB, cmd)
+    cd_case(cmd, "app", G, PB)
 _REMOTE_V_ID = f"G{len(CASES) + 1:03d}"
 bash(G, OR, "git remote -v add up https://github.com/acme/other")
 for cmd in ("git remote -v set-url origin x", "git remote --verbose rename origin up"):
-    bash(G, OR, cmd)
+    cd_case(cmd, "app", G, OR)
 # git takes -v clusters, repeats and abbreviated long options, so any leading option comes before the verb
 _REMOTE_VV_ID = f"G{len(CASES) + 1:03d}"
 bash(G, OR, "git remote -vv add up https://github.com/acme/other")
@@ -1940,65 +2041,66 @@ for pre in ("", "-C $W "):
                  "remote -vvv set-url origin x", "remote -v -v rename origin up"):
         bash(G, OR, f"git {pre}{rest}")  # a remote write is guided, through an unknown path too
 for cmd in ("git -C $W remote -vv remove origin", "git -C $W remote --verb prune origin"):
-    bash(G, PB, cmd)
+    cd_case(cmd, "app", G, PB)
 # clean: an abbreviated --exclude or a pathspec after -- swallows the -n, so neither is a dry run (a write: logged)
 for cmd in ("git -C $W clean -f --e -n", "git -C $W clean -f --ex -n", "git -C $W clean -f -- -n",
             "git -C $W clean -f --exclude -n"):
-    bash(G, PB, cmd)
+    cd_case(cmd, "app", G, PB)
 # branch: abbreviated long write options next to --list are not a listing (a write: logged)
 for cmd in ("git -C $W branch --list --del feature/y", "git -C $W branch --list --set-up=origin/x",
             "git -C $W branch -l --mov a b", "git -C $W branch --list --forc main"):
-    bash(G, PB, cmd)
+    cd_case(cmd, "app", G, PB)
 # dblanken-yale/not-me#144: a run commits in its own worktree on a feature branch while the session sits on main.
 # {F}/live is a checkout of acme/app on feature/x; the "main" fixture is on main.
 bash(A, None, "git -C {F}/live add x && git -C {F}/live commit -F m", "main")
-bash(A, None, "cd {F}/live && git add x && git commit -F m", "main")  # the shape the issue reports
-bash(B, PB, "cd {F}/live; git commit -F m", "main")  # after ; the cd may have failed
+bash(A, None, "cd {F}/live && git add a && git commit -F m", "main")  # the shape the issue reports: followed
+bash(B, PB, "cd {F}/main && git add a && git commit -F m")  # the same shape into a checkout of main
+bash(A, None, "cd {F}/live && git add x && git commit -m x | cat", "main")
 bash(A, None, 'W={F}/live; git -C "$W" add x && git -C $W commit -F m', "main")
 bash(A, None, "export W={F}/live; git -C ${W} commit -m x", "main")
 bash(A, None, "R={F}; W=$R/live && git -C $W commit -m x", "main")
-bash(A, None, "W={F}/live; cd $W && git commit -m x", "main")
+bash(A, None, "W={F}/live; echo function; git -C $W commit -m x", "main")  # `function` as data defines nothing
 bash(B, PB, "W={F}/main; git -C $W commit -m x")  # a literal path to a checkout of main still blocks
-bash(B, PB, "cd {F}/main && git commit -m x")  # judged where the cd lands, not in the session's checkout
 bash(B, PB, "cd {F}/live && git push origin HEAD:main", "main")  # a protected branch it names still blocks
-bash(B, PB, "cd {F}/live && git commit -m x & git commit -m y", "main")  # the second runs in the session
 bash(B, FP, "git -C $W push --force origin feature/x")
 bash(B, PB, "git -C $W push origin HEAD:main")
-# a path the guard cannot work out: guided, never judged by the session's directory (here on main)
-for cmd in ('cd "$NOWHERE" && git commit -m x', "cd {F}/nosuch && git commit -m x",             "W={F}/live; W=$(pwd); git -C $W commit -m x", "W={F}/live; read W < f; git -C $W commit -m x",
-            "(W={F}/live); git -C $W commit -m x", "W={F}/live git -C $W commit -m x", "cd -P {F}/live && git commit -m x",
-            "cd {F}/live && cd .. && git commit -m x", "cd {F}/live && source x.sh && git commit -m x",
-            "true && W={F}/live; git -C $W commit -m x", "f() { :; }; W={F}/live; git -C $W commit -m x"):
-    bash(G, PB, cmd, "main")
 bash(B, PB, "git commit -m x", "main")  # no cd and no -C: the session's own branch
-bash(B, PB, "(cd {F}/live && true); git commit -m x", "main")  # a cd in a subshell is not leading: not followed
-# Security review of dblanken-yale/not-me#144: a leading cd is followed only across &&; after ; or a newline (or
-# past the end of its && list) the cd may have failed or not, so git is judged both where the session is and where
-# the cd went, and blocks when either is a protected branch or cannot be worked out. A script, eval, trap, function or
-# builtin that may set a variable by name makes every tracked variable unknown.
-for cmd in ("cd {F}/live; git commit -m x", "cd {F}/live\ngit commit -m x", "cd {F}/live && git add x; git commit -m x",
-            "cd {F}/live || exit 1; git commit -m x", "cd {F}/live && true || git commit -m x",
-            "cd {F}/live && git add x & git commit -m x"):
-    bash(B, PB, cmd, "main")
-bash(A, None, "cd {F}/live && git add x && git commit -m x | cat", "main")
-# the session on a feature branch, the cd target on main: blocked through either directory
-for cmd in ("cd {F}/main; git commit -m x", "cd {F}/main\ngit commit -m x", "cd {F}/main || true; git commit -m x",
-            "cd {F}/main && true; git commit -m x", 'cd "$NOWHERE"; git commit -m x', "cd {F}/main; git push",
-            "cd {F}/main; git reset --hard", "cd {F}/main; git merge feature/y", "cd {F}/main; git push origin HEAD",
-            "f() { cd {F}/main; }; f; git commit -m x", "function f { cd {F}/main; }; f; git commit -m x"):
-    bash(B, PB, cmd)
-for cmd in ("cd {F}/live; git commit -m x", "cd {F}/main && true & git commit -m x",
-            "cd {F}/main; git -C {F}/live commit -m x", "cd {F}/main; git merge --abort", "cd {F}/main; git reset x",
-            "cd {F}/main; git push origin feature/x", "f() { true; }; f; git commit -m x"):
-    bash(A, None, cmd)
-bash(A, None, "W={F}/live; echo function; git -C $W commit -m x", "main")  # `function` as data defines nothing
-bash(G, PB, "W={F}/live; function f { :; }; git -C $W commit -m x", "main")
-for cmd in ("W={F}/live; source x.sh; git -C $W commit -m x", 'W={F}/live; eval "$X"; git -C $W commit -m x',
-            "W={F}/live; set -a; git -C $W commit -m x", "W={F}/live; declare -x Y=1; git -C $W commit -m x",
-            "W={F}/live; export Y; git -C $W commit -m x", "W={F}/live; read -r Y < f; git -C $W commit -m x",
-            "W={F}/live; . ./env.sh && git -C $W commit -m x", "W={F}/live; trap 'W=x' EXIT; git -C $W commit -m x",
-            "W={F}/live; function f { W={F}/main; }; f; git -C $W commit -m x"):
+# a leading cd to a directory that does not exist: git would not run (&&); judged where it would be
+for cmd in ("cd sub && git commit -m x", "cd {F}/nosuch && git commit -m x"):
+    bash(G, OR, cmd, "main" if "nosuch" in cmd else "app")
+# a variable the guard cannot fill in, with no directory change: guided, never judged by the session's directory
+for cmd in ("W={F}/live; W=$(pwd); git -C $W commit -m x", "W={F}/live; read W < f; git -C $W commit -m x",
+            "(W={F}/live); git -C $W commit -m x", "W={F}/live git -C $W commit -m x",
+            "true && W={F}/live; git -C $W commit -m x", "W={F}/live; set -a; git -C $W commit -m x",
+            "W={F}/live; declare -x Y=1; git -C $W commit -m x", "W={F}/live; export Y; git -C $W commit -m x",
+            "W={F}/live; read -r Y < f; git -C $W commit -m x"):
     bash(G, PB, cmd, "main")
+# any other directory change (a cd that is not leading or not joined by &&, cd after ;, || or &, a second cd,
+# pushd, popd, source, eval, trap, a function definition) next to a git write that reads the branch: blocked, in
+# whichever checkout the session sits
+for variant in ("main", "app"):
+    for cmd in ("cd {F}/live; git commit -m x", "cd {F}/live\ngit commit -m x", "cd {F}/live && git add x; git commit -m x",
+                "cd {F}/live || exit 1; git commit -m x", "cd {F}/live && true || git commit -m x",
+                "cd {F}/live && git add x & git commit -m x", "cd {F}/live && git commit -m x & git commit -m y",
+                "cd {F}/main; git commit -m x", "cd {F}/main || true; git commit -m x",
+                "cd {F}/main && true; git commit -m x", 'cd "$NOWHERE"; git commit -m x', 'cd "$NOWHERE" && git commit -m x',
+                "cd -P {F}/live && git commit -m x", "cd {F}/live && cd .. && git commit -m x",
+                "cd {F}/live && source x.sh && git commit -m x", "W={F}/live; cd $W && git commit -m x",
+                "(cd {F}/live && true); git commit -m x", "pushd {F}/live && git commit -m x",
+                "cd {F}/main; git push", "cd {F}/main; git push origin HEAD", "cd {F}/main; git push origin feature/x",
+                "cd {F}/main; git reset --hard", "cd {F}/main; git merge feature/y", "cd {F}/main; git merge --abort",
+                "cd {F}/live; git branch -D old", "cd {F}/live; git checkout -B y", "cd {F}/live; git switch -C y",
+                "f() { cd {F}/main; }; f; git commit -m x", "function f { cd {F}/main; }; f; git commit -m x",
+                "f() { true; }; f; git commit -m x", "f() { :; }; W={F}/live; git -C $W commit -m x",
+                "W={F}/live; function f { :; }; git -C $W commit -m x",
+                "W={F}/live; function f { W={F}/main; }; f; git -C $W commit -m x",
+                "W={F}/live; source x.sh; git -C $W commit -m x", 'W={F}/live; eval "$X"; git -C $W commit -m x',
+                "W={F}/live; . ./env.sh && git -C $W commit -m x", "W={F}/live; trap 'W=x' EXIT; git -C $W commit -m x"):
+        bash(B, PB, cmd, variant)
+# a directory change next to a write that does not read the branch, or next to an absolute git -C: judged as usual
+for cmd in ("cd {F}/main; git -C {F}/live commit -m x", "cd {F}/main && true & git add x", "cd {F}/main; git status"):
+    bash(A, None, cmd)
+bash(G, PB, "cd {F}/main; git reset x")  # a soft reset in a checkout it cannot name: logged
 # a copy or move with a relative destination reaches the not-me home check: `..` from the checkout is the fixture
 # root, a directory above the home
 bash(B, SP, "cp -r backup ..")
@@ -2031,7 +2133,7 @@ bash(G, OR, "gh issue comment 3 --repo acme/other --body-file b.md")
 bash(G, OR, "gh project item-edit --id X --project-id P --field-id F --text x")
 for cmd in ("gh project item-list 7 --owner acme --format json", "gh project list --owner acme",
             "gh project field-list 7 --owner acme --format json", "gh project view 7 --owner acme"):
-    bash(A, None, cmd)
+    cd_case(cmd, "app", A, None)
 bash(A, None, "gh project item-add 7 --owner acme --url https://github.com/acme/app/issues/1")  # names acme/app
 bash(G, OR, "GH_REPO=acme/app gh project item-edit --id X --project-id P --field-id F --text x")
 bash(A, None, "gh project item-edit --id X --project-id P --field-id F --text x", "off")  # other_repo off: no log
