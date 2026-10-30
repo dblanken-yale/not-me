@@ -19,26 +19,49 @@ def sh(*args, cwd=None) -> str:
     return proc.stdout.strip()
 
 
+def _commit(cwd, name, text, msg) -> None:
+    (Path(cwd) / name).write_text(text, encoding="utf-8")
+    sh("add", name, cwd=cwd)
+    sh("commit", "-q", "-m", msg, cwd=cwd)
+
+
 class Repo(unittest.TestCase):
+    """A work checkout with one pushed commit and its bare origin. The pair is built once per class as a template
+    and copied for each test (a copy is a few file writes, the setup about ten git processes); origin's URL, the
+    one absolute path inside, is then pointed at the copy."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        template = Path(tempfile.mkdtemp(prefix="notme-git-template-")).resolve()
+        cls.addClassCleanup(shutil.rmtree, template, ignore_errors=True)
+        cls._template = template
+        remote, work = template / "origin.git", template / "work"
+        sh("init", "-q", "--bare", "-b", "main", str(remote))
+        sh("init", "-q", "-b", "main", str(work))
+        sh("config", "user.name", "Test", cwd=work)
+        sh("config", "user.email", "test@example.com", cwd=work)
+        sh("config", "commit.gpgsign", "false", cwd=work)
+        sh("remote", "add", "origin", str(remote), cwd=work)
+        _commit(work, "a.txt", "one\n", "first")
+        sh("push", "-q", "origin", "main", cwd=work)
+        cls.prepare_template(work)
+
+    @classmethod
+    def prepare_template(cls, work: Path) -> None:
+        """Extra setup every test in the class starts from."""
+
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp(prefix="notme-git-")).resolve()
         self.addCleanup(lambda: shutil.rmtree(self.dir, ignore_errors=True))
         self.remote = self.dir / "origin.git"
-        sh("init", "-q", "--bare", "-b", "main", str(self.remote))
         self.work = self.dir / "work"
-        sh("init", "-q", "-b", "main", str(self.work))
-        sh("config", "user.name", "Test", cwd=self.work)
-        sh("config", "user.email", "test@example.com", cwd=self.work)
-        sh("config", "commit.gpgsign", "false", cwd=self.work)
-        sh("remote", "add", "origin", str(self.remote), cwd=self.work)
-        self.commit("a.txt", "one\n", "first")
-        sh("push", "-q", "origin", "main", cwd=self.work)
+        shutil.copytree(str(self._template / "origin.git"), str(self.remote), symlinks=True, ignore=shutil.ignore_patterns("*.lock"))
+        shutil.copytree(str(self._template / "work"), str(self.work), symlinks=True, ignore=shutil.ignore_patterns("*.lock"))
+        sh("remote", "set-url", "origin", str(self.remote), cwd=self.work)
 
     def commit(self, name, text, msg, cwd=None):
-        cwd = cwd or self.work
-        (Path(cwd) / name).write_text(text, encoding="utf-8")
-        sh("add", name, cwd=cwd)
-        sh("commit", "-q", "-m", msg, cwd=cwd)
+        _commit(cwd or self.work, name, text, msg)
 
 
 class BasicTests(Repo):
@@ -201,10 +224,10 @@ class MergeTests(Repo):
 
 
 class PushTests(Repo):
-    def setUp(self):
-        super().setUp()
-        sh("checkout", "-q", "-b", "feat/x", cwd=self.work)
-        self.commit("x.txt", "x\n", "x")
+    @classmethod
+    def prepare_template(cls, work: Path) -> None:
+        sh("checkout", "-q", "-b", "feat/x", cwd=work)
+        _commit(work, "x.txt", "x\n", "x")
 
     def remote_refs(self):
         return sh("for-each-ref", "--format=%(refname)", cwd=self.remote).splitlines()

@@ -86,6 +86,10 @@ SCHEMA: Dict[str, Dict[str, KeySpec]] = {
     },
 }
 
+SCHEMA["verify"] = {
+    "baseline": KeySpec(enum=("always", "auto")),  # auto only skips a baseline the base's green CI already shows
+}
+
 SCHEMA["review"] = {
     "block_on": KeySpec(items_enum=("blocker", "major", "minor"), required_items=("blocker",),
                         tighten_only="superset"),

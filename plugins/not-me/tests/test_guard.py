@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from notme import guard, runlog, writes
+from notme import guard, paths, runlog, writes
 from notme.guard import Block, GuardContext
 from tests import PLUGIN_ROOT
 from tests import guard_cases as gc
@@ -37,9 +37,9 @@ class _Fixtures(unittest.TestCase):
         cls._patch.stop()
         shutil.rmtree(cls.root, ignore_errors=True)
 
-    def ctx(self, variant: str = "app") -> GuardContext:
+    def ctx(self, variant: str = "app", git=paths.run_git) -> GuardContext:
         cwd, home = gc.variant_paths(self.root, variant)
-        return GuardContext.from_project(cwd, home=home, env=dict(self.env, NOT_ME_HOME=str(home)))
+        return GuardContext.from_project(cwd, home=home, env=dict(self.env, NOT_ME_HOME=str(home)), git=git)
 
     def hook(self, stdin: str, variant: str = "app") -> subprocess.CompletedProcess:
         _, home = gc.variant_paths(self.root, variant)
@@ -47,17 +47,53 @@ class _Fixtures(unittest.TestCase):
                               env=dict(self.env, NOT_ME_HOME=str(home)), timeout=60)
 
 
-class GuardTableTests(_Fixtures):
-    """Every case in guard_cases, in-process through decide()."""
+# The two table tests below are the slowest in the suite, so their cases are split over several classes (shards) that a
+# parallel runner can spread over workers. Each shard owns gc.CASES[shard::TABLE_SHARDS]; TableShardTests checks that
+# the shards together cover every case exactly once.
+TABLE_SHARDS = 2
+
+
+def _shard(shard: int) -> list:
+    return gc.CASES[shard::TABLE_SHARDS]
+
+
+def _memo_git(git):
+    """git with every answer cached by (args, cwd). The guard only reads git (config, remotes, branch) and the table
+    never changes the fixture tree, so each answer is the one real git gives; it just forks once instead of per case."""
+    cache = {}
+
+    def run(args, cwd):
+        key = (tuple(args), str(cwd))
+        if key not in cache:
+            cache[key] = git(args, cwd)
+        return cache[key]
+    return run
+
+
+class TableShardTests(unittest.TestCase):
+    def test_shards_cover_every_case_once(self):
+        self.assertGreaterEqual(len(gc.CASES), 110)
+        shards = [_shard(i) for i in range(TABLE_SHARDS)]
+        self.assertEqual(sum(len(s) for s in shards), len(gc.CASES))
+        self.assertEqual(sorted(c[0] for s in shards for c in s), sorted(c[0] for c in gc.CASES))
+        for name, base in (("GuardTableShard", _GuardTable), ("WindowsTypedPathTableShard", _WindowsTypedPathTable)):
+            found = sorted(cls.shard for cls in globals().values()
+                           if isinstance(cls, type) and issubclass(cls, base) and cls.__name__.startswith(name))
+            self.assertEqual(found, list(range(TABLE_SHARDS)), name)
+
+
+class _GuardTable:
+    """Every case in guard_cases, in-process through decide() (mixed into one class per shard)."""
+    shard: int
 
     def test_cases(self):
-        self.assertGreaterEqual(len(gc.CASES), 110)
         ctxs = {}
-        for case in gc.CASES:
+        git = _memo_git(paths.run_git)
+        for case in _shard(self.shard):
             cid, want, rule, tool, tin, variant = case
             with self.subTest(cid=cid, tool=tool, input=tin, variant=variant):
                 if variant not in ctxs:
-                    ctxs[variant] = self.ctx(variant)
+                    ctxs[variant] = self.ctx(variant, git=git)
                     if not guard.is_active(ctxs[variant]):
                         ctxs[variant].self_only()  # as the hook does
                 ctx = ctxs[variant]
@@ -72,12 +108,22 @@ class GuardTableTests(_Fixtures):
                         self.assertIn(text, result.message)
 
 
-class WindowsTypedPathTableTests(_Fixtures):
+class GuardTableShard0Tests(_GuardTable, _Fixtures):
+    shard = 0
+
+
+class GuardTableShard1Tests(_GuardTable, _Fixtures):
+    shard = 1
+
+
+class _WindowsTypedPathTable:
     """Table cases that name a fixture path, with the path typed the Windows way (C:\\Users\\x\\home). Bash drops
     unquoted backslashes, so before the guard judged words in both spellings these self-protection blocks came back
     allowed on Windows (fail open). Each case must decide as the table says both as written and, where it holds no
     quotes, with every path quoted (the shell keeps the backslashes). On Windows this runs on the real disk; elsewhere
-    tests/winsim.py shows the fixture tree to the guard under Windows names with ntpath as its path module."""
+    tests/winsim.py shows the fixture tree to the guard under Windows names with ntpath as its path module.
+    Mixed into one class per shard."""
+    shard: int
 
     def setUp(self):
         self.ctxs = {}
@@ -110,15 +156,21 @@ class WindowsTypedPathTableTests(_Fixtures):
             if self.sim is not None:
                 self.sim.start()
                 ctx = self.sim.context(ctx)
+            if not ctx.only_self:
+                ctx.git = _memo_git(ctx.git)
             self.ctxs[variant] = ctx
         cwd, _ = gc.variant_paths(self.root, variant)
         return guard.decide({"tool_name": tool, "tool_input": tin, "cwd": self.win(cwd), "session_id": gc.SESSION},
                             self.ctxs[variant])
 
+    @staticmethod
+    def names_a_path(tin) -> bool:
+        return any(k in json.dumps(tin) for k in ("{F}", "{H}", "{P}"))
+
     def test_cases_with_backslash_paths(self):
         checked = 0
-        for cid, want, rule, tool, tin, variant in gc.CASES:
-            if not any(k in json.dumps(tin) for k in ("{F}", "{H}", "{P}")):
+        for cid, want, rule, tool, tin, variant in _shard(self.shard):
+            if not self.names_a_path(tin):
                 continue
             checked += 1
             _, home = gc.variant_paths(self.root, variant)
@@ -132,8 +184,20 @@ class WindowsTypedPathTableTests(_Fixtures):
                                      "allow" if want == "guide" else want, getattr(result, "message", ""))
                     if isinstance(result, Block):
                         self.assertEqual(result.rule, rule)
-        self.assertGreater(checked, 100)
+        self.assertGreater(checked, 100 // TABLE_SHARDS)
 
+
+class WindowsTypedPathTableShardTests(unittest.TestCase):
+    def test_the_table_names_enough_paths(self):
+        self.assertGreater(sum(1 for c in gc.CASES if _WindowsTypedPathTable.names_a_path(c[4])), 100)
+
+
+class WindowsTypedPathTableShard0Tests(_WindowsTypedPathTable, _Fixtures):
+    shard = 0
+
+
+class WindowsTypedPathTableShard1Tests(_WindowsTypedPathTable, _Fixtures):
+    shard = 1
 
 
 @unittest.skipIf(os.name == "nt", "the pattern exemption is never given on Windows")

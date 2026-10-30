@@ -8,7 +8,7 @@ not-me is configured by six small markdown files. Each file has settings at the 
 | --- | --- |
 | `project.md` | Who and where: tracker repo, queue, labels, guard rules, models, limits, and the roster of people you trust |
 | `standards.md` | How work is shaped: branch names, commit style, PR title and template, issue readiness |
-| `verify.md` | How to prove a change works: start, tests, lint, build, CI parity |
+| `verify.md` | How to prove a change works: start, baseline, targeted tests, tests, lint, build, CI parity, person-only commands |
 | `review.md` | What a review looks at, which labels it applies |
 | `prove.md` | How to find the test site for a PR and run its testing steps |
 | `role.md` | Which reviewers must approve a PR, their roles, and the pass label each role earns |
@@ -446,6 +446,26 @@ repos:
 - `repos` is a replace key, not a union. A higher layer's list replaces the lower one.
 - The names in `repos` need confirming on your machine if they come from the repo layer (above).
 
+## Faster runs: targeted tests, the baseline, and the CI wait
+
+By default a run uses the full test, lint and build commands at every step, runs a full baseline before any edit, and waits for CI after the push. Three settings make runs faster without weakening the final check. `notme verify-plan` reports what is in force for a run.
+
+**Targeted tests.** Pin one or more commands in a fenced code block under `## Targeted tests` in `verify.md`. Each takes the changed test files or test names as trailing arguments. Runs then use them for red then green, after the implementer, and after each fix round, and tell implementers to run only them. The full `## Tests`, `## Lint` and `## Build` commands run once, right before the push. When Checkpoint B (merging the base in before the push) brings in commits, the targeted tests run again, and the full set only when they cannot cover the change. Left as shipped, the section configures nothing and every step runs the full commands, as before. Blank lines and lines that start with `#` in the block are ignored.
+
+````markdown
+## Targeted tests
+
+```bash
+python3 -m unittest
+```
+````
+
+**The baseline.** `baseline` in `verify.md` is `always` (default) or `auto`. With `auto`, a run skips the full baseline when the latest CI is green at the commit it starts from: the base branch's head SHA for a new issue, the local `HEAD` after Checkpoint A for a rework (`/not-me:update`). That is the PR head when Checkpoint A merged nothing; a merge commit it made has no CI, so the baseline runs. It logs that it skipped it and why. A CI result with more check runs or statuses than one page holds counts as unreadable. A red, pending, missing or unreadable CI result still runs the baseline. Any layer may set it.
+
+**The CI wait.** `limits.ci_wait_minutes` in `project.md` is how long a run waits for CI after the push (default `20`). `0` means open the PR and do not wait; a red CI result is then left to `/not-me:update` or a person.
+
+**Person-only commands.** List commands a run must never start, such as live evals or anything that calls a paid model or service for real, under `## Person only` in `verify.md`. A person runs them.
+
 ## The routing policy
 
 `models.strategy` decides how not-me spreads work across models.
@@ -559,7 +579,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `markers.legacy` | `[]` | Older run-marker strings that are still recognised as not-me's own. Union across layers |
 | `attribution` | `inherit` | `inherit` adds nothing and lets the client decide, `none` adds no line at all, any other text is added as the last line of commit messages and PR bodies |
 | `limits.fix_loop` | `3` | Fix rounds before a run gives up and parks |
-| `limits.ci_wait_minutes` | `20` | Minutes to wait for CI on a pushed head |
+| `limits.ci_wait_minutes` | `20` | Minutes to wait for CI on a pushed head. `0` means open the PR and do not wait; a red CI result is left to `/not-me:update` or a person |
 | `limits.claim_stale_hours` | `8` | Hours before an unfinished claim with no pushed branch is reported as stale. It is reported, never released automatically |
 | `models.strategy` | `orchestrate` | `orchestrate` or `single`. See "The routing policy" |
 | `models.single_model` | `opus` | The model used for everything when `strategy` is `single` |
@@ -589,7 +609,8 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `schema` | `1` | Config format version. `verify.md` has no other keys. Its sections hold the commands, and leaving a section as is lets not-me discover them |
+| `schema` | `1` | Config format version. The sections hold the commands, and leaving a section as is lets not-me discover them. `## Targeted tests` pins commands for the work in progress; see "Faster runs" |
+| `baseline` | `always` | `always` or `auto`. `auto` skips the full baseline when the base branch's CI is green at its head, and logs why. Any layer may set it |
 
 ### review.md
 
