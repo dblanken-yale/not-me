@@ -471,7 +471,7 @@ class TokenizerTests(unittest.TestCase):
                     "cp -r C:\\Users\\op\\homes\\h0 backup"):  # only backslashes: a Windows path
             self.assertTrue(bash(cmd), cmd)
         self.assertTrue(guard.needs_check({"tool_name": "Write", "tool_input": {"file_path": "x"}}))
-        self.assertFalse(guard.needs_check({"tool_name": "mcp__github__create_issue", "tool_input": {}}))
+        self.assertTrue(guard.needs_check({"tool_name": "mcp__github__create_issue", "tool_input": {}}))
         self.assertFalse(guard.needs_check({"tool_name": "mcp__terminal__run_in_terminal", "tool_input": {}}))
 
 
@@ -1046,7 +1046,7 @@ class HooksJsonTests(unittest.TestCase):
         data = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
         entry = data["hooks"]["PreToolUse"][0]
         self.assertEqual(entry["matcher"],
-                         "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|NotebookRead|Grep|Glob|LS")
+                         "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|NotebookRead|Grep|Glob|LS|mcp__.*github.*")
         hook = entry["hooks"][0]
         self.assertEqual((hook["type"], hook["timeout"]), ("command", 10))
         self.assertIn('bin/notme-python" "${CLAUDE_PLUGIN_ROOT}/hooks/repo_guard.py"', hook["command"])
@@ -1151,12 +1151,20 @@ class GuideNotBlockTests(_Fixtures):
         self.assertIsNone(result)
         self.assertEqual([b.rule for b in ctx.guided], ["process"])
 
-    def test_mcp_tools_are_not_judged(self):
-        for tool in ("mcp__github__add_issue_comment", "mcp__github__merge_pull_request", "mcp__x__delete_repo"):
+    def test_mcp_tools_get_only_the_hard_rules(self):
+        self.assertFalse(guard.needs_check({"tool_name": "mcp__x__delete_repo", "tool_input": {}}))
+        # GitHub MCP tools: no repo check, and merging a pull request is a person's call
+        for tool in ("mcp__github__add_issue_comment", "mcp__github__merge_pull_request"):
             with self.subTest(tool=tool):
-                self.assertFalse(guard.needs_check({"tool_name": tool, "tool_input": {"owner": "a", "repo": "b"}}))
-                self.assertIsNone(guard.decide({"tool_name": tool, "tool_input": {"owner": "a", "repo": "b"}},
-                                               self.ctx()))
+                ctx = self.ctx()
+                self.assertTrue(guard.needs_check({"tool_name": tool, "tool_input": {}}))
+                self.assertIsNone(guard.decide({"tool_name": tool, "tool_input": {"owner": "a", "repo": "b"}}, ctx))
+                self.assertEqual(ctx.guided, [])
+        for tool, tin, rule in (("mcp__github__delete_repository", {}, "destructive_git"),
+                                ("mcp__github__push_files", {"branch": "main"}, "protected_branches")):
+            with self.subTest(tool=tool):
+                result = guard.decide({"tool_name": tool, "tool_input": dict(tin, owner="a", repo="b")}, self.ctx())
+                self.assertEqual(getattr(result, "rule", None), rule)
 
     def test_hook_logs_a_guided_call_and_allows_it(self):
         log = self.root / "app" / ".git" / "not-me" / "logs" / "guard.jsonl"

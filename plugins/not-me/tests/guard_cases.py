@@ -1268,7 +1268,8 @@ for cmd in (
         "cd {F}/other && gh pr create -R acme/app --title x --body y",
         "cd {F}/other && gh pr comment 1 --repo acme/app -b x",
         "cd {F}/other && gh api -X POST repos/acme/app/issues/1/comments -f body=x",
-        "cd {F}/other && " + 'gh api graphql -f query="mutation { x }" --not-me-board',
+        "cd {F}/other && " + 'gh api graphql -f query="mutation { updateProjectV2ItemFieldValue(input:{}) { x } }"'
+        " --not-me-board",
         "cd {F}/other && sudo git push",
 ):
     bash(A, None, cmd)
@@ -2056,10 +2057,57 @@ bash(B, DG, "gh api -X POST repos/acme/app/%2e%2e/app/rulesets --input r.json")
 # a -c key that changes what a push sends blocks the push; on a read it is guided
 bash(B, PB, "git -c remote.origin.push=refs/heads/x:refs/heads/main push")
 bash(G, OR, "git -c url.https://github.com/acme/other.insteadOf=https://github.com/acme/app fetch")
-# GitHub MCP tools are not judged, deletes and merges included
-mcp(A, None, "mcp__github__delete_file", {"owner": "acme", "repo": "other", "path": "x"})
+# GitHub MCP tools: no repo check (any repo), merging a pull request is a person's call; other MCP tools are not judged
+mcp(A, None, "mcp__github__delete_file", {"owner": "acme", "repo": "other", "path": "x", "branch": "feature/x"})
 mcp(A, None, "mcp__plugin_github_github__merge_pull_request", {"owner": "acme", "repo": "other", "pullNumber": 1})
+mcp(A, None, "mcp__github__add_issue_comment", {"owner": "acme", "repo": "other", "issue_number": 1, "body": "x"})
+mcp(A, None, "mcp__other__delete_everything", {"owner": "acme", "repo": "app"})
 GUIDE_END = len(CASES)
+
+# Security review of dblanken-yale/not-me#141, fix round 1: bypasses of rules that stay hard blocks.
+REVIEW_START = len(CASES)
+# a. GraphQL read the way GraphQL reads it: comments, commas, no argument list, aliases; unknown mutations refused
+bash(B, DG, "gh api graphql -f query=$'mutation { deleteRepository # x\\n(input:{}) { clientMutationId } }'")
+bash(B, DG, 'gh api graphql -f query="mutation { a: deleteIssue, b: addComment(input:{}) { clientMutationId } }"')
+bash(B, DG, 'gh api graphql -f query="mutation { deleteIssue { clientMutationId } }"')
+bash(B, PB, 'gh api graphql -f query="mutation { x: updateRef(input:{}) { clientMutationId } }"')
+bash(B, DG, 'gh api graphql -f query="mutation { createEnvironment(input:{}) { clientMutationId } }"')
+bash(B, DG, 'gh api graphql -f query="mutation { frobnicateRepo(input:{}) { clientMutationId } }"')  # not known safe
+bash(B, DG, 'gh api graphql -f query="mutation { ...F } fragment F on Mutation { deleteIssue }"')
+bash(B, DG, "gh api graphql -f query='mutation { addComment(input:{body:\"x) { clientMutationId } }'")  # open string
+bash(G, OR, 'gh api graphql -f query="mutation { addComment(input:{body:\\"deleteRepository(\\"}) { id } }"')
+bash(A, None, 'gh api graphql -f query="query { repository(owner:\\"a\\", name:\\"b\\") { deleteBranchOnMerge } }"')
+# b. push-affecting -c or GIT_CONFIG_* with a git that runs other gits
+bash(B, PB, "git -c remote.origin.push=refs/heads/x:refs/heads/main rebase --exec 'git push' main")
+bash(B, PB, "git -c remote.origin.pushurl=x submodule foreach 'git push'")
+bash(B, PB, "git -c push.default=matching bisect run sh -c 'git push'")
+bash(B, PB, "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0=x git submodule foreach true")
+bash(B, PB, "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0=x git bisect run true")
+bash(A, None, "git submodule foreach 'git status'")
+# c. @file values cannot be read, and refs/heads/ is the same branch
+bash(B, PB, "gh api -X PUT repos/acme/app/contents/x.md -f message=x -f content=eA== -F branch=@b.txt")
+bash(B, PB, "gh api -X PUT repos/acme/app/contents/x.md -f message=x -f content=eA== -f branch=refs/heads/main")
+bash(B, PB, "gh api -X PATCH repos/acme/app/git/refs/heads/feature/x -f sha=abc -F force=@f.txt")
+bash(B, PB, "gh api -X PATCH repos/acme/app/git/refs/heads/feature/x --raw-field sha=@s.txt")
+# d. merges without a pull request
+bash(B, PB, 'gh api graphql -f query="mutation { mergeBranch(input:{}) { clientMutationId } }"')
+bash(B, PB, "gh api -X POST repos/acme/app/merges -f base=main -f head=feature/x")
+bash(B, PB, "gh api -X POST repos/acme/app/merges -f head=feature/x")
+bash(B, PB, "gh api -X POST repos/acme/app/merge-upstream -f branch=main")
+bash(A, None, "gh api -X POST repos/acme/app/merges -f base=feature/x -f head=feature/y")
+# e. GitHub MCP tools: the hard rules only
+mcp(B, PB, "mcp__github__create_or_update_file", {"owner": "acme", "repo": "app", "path": "x", "branch": "main"})
+mcp(B, PB, "mcp__github__push_files", {"owner": "acme", "repo": "other", "branch": "refs/heads/main", "files": []})
+mcp(B, PB, "mcp__github__delete_file", {"owner": "acme", "repo": "app", "path": "x"})  # no branch: the default
+mcp(A, None, "mcp__github__push_files", {"owner": "acme", "repo": "other", "branch": "feature/x", "files": []})
+mcp(B, FP, "mcp__github__update_ref", {"owner": "acme", "repo": "app", "ref": "feature/x", "force": True})
+mcp(B, DG, "mcp__github__delete_repository", {"owner": "acme", "repo": "app"})
+mcp(B, DG, "mcp__github__delete_branch", {"owner": "acme", "repo": "app", "branch": "feature/x"})
+mcp(B, DG, "mcp__plugin_github_github__create_or_update_secret", {"owner": "acme", "repo": "app"})
+mcp(B, DG, "mcp__github__update_repository", {"owner": "acme", "repo": "app"})
+mcp(A, None, "mcp__github__get_secret_scanning_alert", {"owner": "acme", "repo": "app"})
+mcp(A, None, "mcp__github__create_branch", {"owner": "acme", "repo": "app", "branch": "feature/y"})
+REVIEW_END = len(CASES)
 
 # Substrings a block message must contain, by case id. Guided cases print no message; test_guard checks their rule.
 MESSAGE_CHECKS: Dict[str, List[str]] = {

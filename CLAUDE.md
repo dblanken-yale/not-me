@@ -71,9 +71,9 @@ the owner's say-so, not a cleanup.
    whose key also switches the CLI write gate's repo check), and repo-layer
    config edits during a run (`process`). An issue or comment on another repo is fine when the
    operator asked in the session, and always on the plugin's own repo; runs
-   stay on the project's repos through the CLI's write gate. MCP tools are not
-   judged at all. Text it does not parse (a `bash -c` body too deep, inline
-   code, a script file, a command it cannot lex) is allowed unless it holds one
+   stay on the project's repos through the CLI's write gate. GitHub MCP tools
+   get the hard rules only, other MCP tools are not judged. Text it does not
+   parse (a `bash -c` body too deep, inline code, a script file, a command it cannot lex) is allowed unless it holds one
    of a few words (`push`, `reset --hard`, a GitHub secrets action, a protected
    path name and the like), then blocked under the first relevant hard rule
    that is on. Self-protection is always on: the operator token, the live-mode

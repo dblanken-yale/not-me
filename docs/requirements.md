@@ -116,7 +116,7 @@ The full list is in `plugins/not-me/references/prohibitions.md`. No config setti
 
 ### What the PreToolUse hook intercepts
 
-One hook, from `hooks/hooks.json`, with the matcher `Bash|Write|Edit|MultiEdit|NotebookEdit|Read|NotebookRead|Grep|Glob|LS` and a 10 second timeout. It runs before the tool does. MCP tools are not judged.
+One hook, from `hooks/hooks.json`, with the matcher `Bash|Write|Edit|MultiEdit|NotebookEdit|Read|NotebookRead|Grep|Glob|LS|mcp__.*github.*` and a 10 second timeout. It runs before the tool does. GitHub MCP tools get the hard rules only; other MCP tools are not judged.
 
 - Exit code 0: the tool call goes ahead.
 - Exit code 2: the tool call does not run. The message on stderr goes back to Claude, which reads why it was blocked and what to do instead.

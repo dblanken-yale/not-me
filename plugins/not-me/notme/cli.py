@@ -2007,7 +2007,8 @@ def cmd_allow_repo_list(ctx: Context, args: argparse.Namespace) -> Dict[str, Any
 def cmd_guard_check(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """Decide one hook event read from stdin as JSON.
 
-    Output: decision (allow or block), rule, message
+    Output: decision (allow, guided or block), rule, message. guided: the hook lets the call run and logs it
+    under a process rule (see docs/guards.md); message is the reason.
     """
     try:
         event = json.loads(ctx.deps.stdin.read())
@@ -2027,6 +2028,8 @@ def cmd_guard_check(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     except TypeError as exc:
         raise fail(ExitCode.USAGE, "usage", str(exc)) from None
     if block is None:
+        if gctx.guided:
+            return {"decision": "guided", "rule": gctx.guided[0].rule, "message": gctx.guided[0].reason}
         return allow
     return {"decision": "block", "rule": block.rule, "message": block.message or block.reason}
 

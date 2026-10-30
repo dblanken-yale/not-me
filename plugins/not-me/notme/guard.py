@@ -28,7 +28,7 @@ references/prohibitions.md:
                       stops the log lines, and lifts the CLI write gate's
                       repo check too)
   process             edits to the repo layer config while a run is active
-MCP tools are not judged at all.
+GitHub MCP tools get the hard rules only (see _mcp); other MCP tools are not judged.
 Self-protection is always on, in every directory: the operator token, the
 live-mode epoch and marker and the allow list (by
 file path), `notme allow-repo add|remove`, `notme pause off` and `notme mode`
@@ -140,17 +140,45 @@ _PROTECTION = re.compile(r"/branches/[^/]+/protection(/|$)")
 _SECRETS = re.compile(r"/(actions|dependabot|codespaces)/(secrets|variables)(/|$)"
                       r"|/environments/[^/]+/(secrets|variables)(/|$)")
 _RULESETS = re.compile(r"/rulesets(/|$)")
-# GraphQL mutations that delete or change settings or rulesets, matched as a field call (name, then "(") in a literal
-# mutation query, so the same words inside a comment body do not count
-_GQL_DESTRUCTIVE = re.compile(r"(?<![A-Za-z0-9_])(?:delete[A-Za-z0-9_]*|[A-Za-z0-9_]*(?:BranchProtectionRule|Ruleset)"
-                              r"|updateRepository|archiveRepository|unarchiveRepository|transferRepository"
-                              r"|updateEnterprise[A-Za-z0-9_]*|updateOrganization[A-Za-z0-9_]*)(?![A-Za-z0-9_])"
-                              r"(?=\s*\()", re.IGNORECASE)
-# GraphQL mutations that move a branch without a push: one can force it or land on a protected branch
-_GQL_REFS = re.compile(r"(?<![A-Za-z0-9_])(?:updateRefs?|createCommitOnBranch)(?![A-Za-z0-9_])(?=\s*\()",
-                       re.IGNORECASE)
+# GraphQL, read the way GraphQL reads it: block strings, strings, # comments, names, punctuation; commas and
+# whitespace are skipped. A lone quote is an unterminated string.
+_GQL_TOKEN = re.compile(r'"""(?:[^"\\]|\\.|"(?!""))*"""|"(?:[^"\\\n]|\\.)*"|#[^\n\r]*|[A-Za-z_][A-Za-z0-9_]*'
+                        r'|\.\.\.|[^\s,]')
+_GQL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# top-level mutation fields that delete or change settings or rulesets (lowercased names)
+_GQL_DESTRUCTIVE = re.compile(r"^(?:delete.*|.*(?:branchprotectionrule|ruleset).*|updaterepository|archiverepository"
+                              r"|unarchiverepository|transferrepository|updateenterprise.*|updateorganization.*"
+                              r"|.*secret.*|.*environment.*|.*deploykey.*)$")
+# mutations that move a branch without a push: one can force it or land on a protected branch
+_GQL_REFS = frozenset({"updateref", "updaterefs", "createref", "createcommitonbranch", "mergebranch",
+                       "revertpullrequest"})
+# the mutations a session or the plugin uses on comments, reviews, issues, pull requests, labels, assignees and board
+# items; any other mutation is refused, since the guard cannot tell what it changes (merging a pull request is a
+# person's call the guard does not judge, decision 11)
+_GQL_SAFE = frozenset(n.lower() for n in (
+    "addComment", "updateIssueComment", "addReaction", "removeReaction", "addLabelsToLabelable",
+    "removeLabelsFromLabelable", "addAssigneesToAssignable", "removeAssigneesFromAssignable", "createIssue",
+    "updateIssue", "closeIssue", "reopenIssue", "addSubIssue", "removeSubIssue", "reprioritizeSubIssue",
+    "createPullRequest", "updatePullRequest", "closePullRequest", "reopenPullRequest", "markPullRequestReadyForReview",
+    "convertPullRequestToDraft", "requestReviews", "addPullRequestReview", "addPullRequestReviewComment",
+    "addPullRequestReviewThread", "addPullRequestReviewThreadReply", "submitPullRequestReview",
+    "updatePullRequestReview", "resolveReviewThread", "unresolveReviewThread", "mergePullRequest",
+    "enablePullRequestAutoMerge", "disablePullRequestAutoMerge", "addProjectV2ItemById", "addProjectV2DraftIssue",
+    "updateProjectV2ItemFieldValue", "clearProjectV2ItemFieldValue", "updateProjectV2ItemPosition",
+    "archiveProjectV2Item", "unarchiveProjectV2Item"))
 _GIT_REF_PATH = re.compile(r"^repos/[^/]+/[^/]+/git/refs/heads/(.+)$")
 _CONTENTS_PATH = re.compile(r"^repos/[^/]+/[^/]+/contents(/|$)")
+# REST merges without a pull request: field that names the branch the merge lands on
+_MERGE_PATHS = ((re.compile(r"^repos/[^/]+/[^/]+/merges/?$"), "base"),
+                (re.compile(r"^repos/[^/]+/[^/]+/merge-upstream/?$"), "branch"))
+# GitHub MCP tools: the guard applies its hard rules only (see _mcp)
+_MCP_GITHUB = re.compile(r"^mcp__.*github.*", re.IGNORECASE)
+_MCP_SETTINGS = re.compile(r"secret|variable|ruleset|protection|deploy_key|webhook|collaborator|(^|_)update_repo"
+                           r"|archive_repo|transfer_repo|(^|_)delete_(repo|branch|ref|tag|release|label|workflow)")
+_MCP_BRANCH_TOOLS = frozenset({"create_or_update_file", "push_files", "delete_file", "update_ref", "merge_branch"})
+# git subcommands that run child git commands (which inherit -c settings and GIT_CONFIG_* variables)
+_NESTED_GIT = frozenset({"rebase", "submodule", "bisect", "filter-branch", "for-each-repo", "difftool", "mergetool",
+                         "maintenance", "worktree"})
 
 # Opaque text: what decoded text the guard does not parse may not hold, with the rules a match is reported under
 # (the first one that is on). Matched against every spelling _spellings makes. Every matcher is linear in the text:
@@ -892,10 +920,10 @@ _PARAM_OP = re.compile(r"^[#!]?[A-Za-z0-9_@*?$-]*?(?:\[[^\[\]]*\])?(?::?[-=+?]|#
 
 def needs_check(event: Mapping[str, Any]) -> bool:
     """False for calls no rule can care about (cheap, no processes): Bash commands that mention nothing the guard
-    judges, and every MCP tool (the operator decides which MCP tools to install and allow)."""
+    judges, and MCP tools other than GitHub ones (the operator decides which MCP tools to install and allow)."""
     tool = event.get("tool_name")
     if isinstance(tool, str) and tool.startswith("mcp__"):
-        return False
+        return bool(_MCP_GITHUB.match(tool))
     if tool != "Bash":
         return True
     tin = event.get("tool_input")
@@ -1119,8 +1147,10 @@ def _decide(event: Mapping[str, Any], ctx: GuardContext) -> Decision:
         cands = _file(tool, str(tin.get("file_path") or tin.get("notebook_path") or ""), cwd, ctx, tin)
     elif tool in _READ_TOOLS:
         cands = _read_tool(tool, tin, cwd, ctx)
+    elif _MCP_GITHUB.match(tool):
+        cands = _mcp(tool, tin, ctx)
     else:
-        return None  # MCP and every other tool: not the guard's business
+        return None  # other MCP tools and every other tool: not the guard's business
     for block in cands:
         if ctx.only_self and block.rule != SELF:
             continue
@@ -1375,6 +1405,34 @@ def _file(tool: str, fpath: str, cwd: str, ctx: GuardContext, tin: Mapping[str, 
     if ".git" in parts or parts[-1] == ".gitconfig" or "/.config/git/" in low or low.startswith(".config/git/"):
         yield blk("other_repo", "git config and hooks can change where git pushes",
                   "change git settings by hand, outside the agent")
+
+
+def _mcp(tool: str, tin: Mapping[str, Any], ctx: GuardContext) -> Iterator[Block]:
+    """GitHub MCP tools get the hard rules only (no repo check): deletes and settings, and writes, ref updates or
+    merges without a pull request that land on a protected branch. Merging a pull request is a person's call the
+    guard does not judge (decision 11), as with gh pr merge."""
+    name = tool.split("__")[-1].lower()
+    if name.startswith(("get_", "list_", "search_")) or name.endswith("_read"):
+        return
+    blk = _blk(_short(tool))
+    deletes = (name.startswith("delete_") or "_delete_" in name) and name != "delete_file"
+    if _MCP_SETTINGS.search(name) or deletes:
+        yield blk("destructive_git", f"{name}: settings, secrets and deletion are human actions",
+                  "ask the operator to do this on GitHub")
+        return
+    writes_branch = name in _MCP_BRANCH_TOOLS or ("ref" in name.split("_") and not name.startswith("create_")) or (
+        "merge" in name and "pull_request" not in name)
+    if not writes_branch:
+        return
+    if tin.get("force") not in (None, False, "false", "False", 0):
+        yield blk("force_push", f"{name} with force rewrites published history",
+                  "push new commits on top instead; ask the operator if a rewrite is really needed")
+        return
+    raw = next((tin.get(k) for k in ("branch", "ref", "base") if isinstance(tin.get(k), str) and tin.get(k)), "")
+    branch = _branch_name(str(raw))
+    if not branch or branch in ctx.protected_branches:
+        yield blk("protected_branches", f"{name} changes {branch or 'the default branch'}, which may be protected",
+                  "pass a feature branch, or push one and open a pull request")
 
 
 # --- Bash ----------------------------------------------------------------------
@@ -2274,9 +2332,9 @@ def _cmd_git(t, c, st, ctx, blk, depth: int = 0):
         return
     key = next((k for k in c_keys if _PUSH_KEY.match(k.lower())), None)
     if key is not None:
-        if sub == "push" or (sub and sub not in _GIT_BUILTINS):
-            # the push (or the alias it may hide) is judged from the repo config, not this -c: what it sends to which
-            # branch cannot be checked
+        if sub == "push" or sub in _NESTED_GIT or (sub and sub not in _GIT_BUILTINS):
+            # the push (or the alias it may hide, or a git it runs, which inherits the -c) is judged from the repo
+            # config, not this -c: what it sends to which branch cannot be checked
             yield blk("protected_branches", f"git -c {_short(key, 40)} changes what or where this push sends, so the "
                                             "branch it pushes to cannot be checked",
                       "run git push without -c and name the branch: git push origin <branch>")
@@ -2293,12 +2351,13 @@ def _cmd_git(t, c, st, ctx, blk, depth: int = 0):
         return  # an external git-<name> program is outside the guard's view
     redirect = redirect or st.once(("git-env",), lambda: (lambda m: _short(m.group(0), 40) if m else None)(
         _GIT_ENV.search(st.plain_text)))
-    if redirect and sub in _GIT_RULES and sub not in ("checkout", "switch"):
+    if redirect and (sub in _GIT_RULES or sub in _NESTED_GIT) and sub not in ("checkout", "switch"):
         if var_redirect is not None:
             yield _var_path(blk, var_redirect)
             return
-        if sub in _BRANCH_WRITES and not _git_reads(sub, args):
-            # the branch this write lands on belongs to a repository the guard did not look at
+        if (sub in _BRANCH_WRITES or sub in _NESTED_GIT) and not _git_reads(sub, args):
+            # the branch this write lands on belongs to a repository the guard did not look at, and a git this one
+            # runs inherits the variables
             yield blk("protected_branches", f"{redirect} points git at another repository or config, so the branch "
                                             f"git {sub} changes cannot be checked",
                       "run git without it, with `git -C /abs/path` naming the checkout")
@@ -2817,18 +2876,29 @@ def _gh_api(t: List[str], seg: str, st: _State, ctx: GuardContext, blk: Blk) -> 
             b.no_relax = True
             yield b
             return
-        query = queries[0]
-        hit = _GQL_DESTRUCTIVE.search(query) if mutation else None
-        if hit:
-            yield blk("destructive_git", f"gh api graphql {hit.group(0)}: settings, rulesets and deletion are human "
-                                         "actions", "ask the operator to do this on GitHub")
+        names = _gql_mutation_fields(queries[0])
+        if names is None and mutation:
+            b = blk("destructive_git", "gh api graphql: the guard cannot read this mutation, and a mutation can delete "
+                                       "data or change settings", "write the mutation out plainly, one field per line")
+            b.no_relax = True
+            yield b
             return
-        hit = _GQL_REFS.search(query) if mutation else None
-        if hit:
-            yield blk("protected_branches", f"gh api graphql {hit.group(0)} moves a branch without a push, so the "
-                                            "branch it changes cannot be checked",
-                      "commit on a feature branch and git push origin <branch>")
-            return
+        for name in names or ():
+            low = name.lower()
+            if low in _GQL_REFS:
+                yield blk("protected_branches", f"gh api graphql {name} moves a branch without a push, so the branch "
+                                                "it changes cannot be checked",
+                          "commit on a feature branch and git push origin <branch>")
+                return
+            if _GQL_DESTRUCTIVE.match(low):
+                yield blk("destructive_git", f"gh api graphql {name}: settings, secrets, rulesets and deletion are "
+                                             "human actions", "ask the operator to do this on GitHub")
+                return
+            if low not in _GQL_SAFE:
+                yield blk("destructive_git", f"gh api graphql {name} is not a mutation the guard knows is safe",
+                          "use a gh pr, issue or project command, or ask the operator to do this on GitHub")
+                return
+        mutation = mutation or bool(names)
         atfile = any("@" in f for f in fields)
         if (mutation or atfile) and BOARD_MARKER not in seg:
             why = "a mutation" if mutation else "an @file field"
@@ -2865,28 +2935,90 @@ def _gh_api(t: List[str], seg: str, st: _State, ctx: GuardContext, blk: Blk) -> 
     yield from _check_target(ctx, repo, blk)
 
 
+def _gql_mutation_fields(query: str) -> Optional[List[str]]:
+    """The top-level field names of every mutation operation in a GraphQL document (aliases skipped, directives
+    ignored), read the way GraphQL reads it: # comments and commas do not count, strings are opaque. None when the
+    document cannot be read (an unterminated string, unbalanced brackets, a fragment spread in a mutation)."""
+    toks: List[str] = []
+    for m in _GQL_TOKEN.finditer(query):
+        t = m.group(0)
+        if t.startswith("#"):
+            continue
+        if t.startswith('"'):
+            if len(t) < 2 or not t.endswith('"'):
+                return None
+            t = '"'
+        toks.append(t)
+    fields: List[str] = []
+    depth = paren = 0
+    pending = in_mut = False
+    for i, t in enumerate(toks):
+        if t == "(":
+            paren += 1
+        elif t == ")":
+            paren -= 1
+        elif paren:
+            pass
+        elif t == "{":
+            if depth == 0:
+                in_mut, pending = pending, False
+            depth += 1
+        elif t == "}":
+            depth -= 1
+            if depth == 0:
+                in_mut = False
+        elif depth == 0 and t == "mutation":
+            pending = True
+        elif in_mut and depth == 1:
+            if t == "...":
+                return None
+            prev = toks[i - 1] if i else ""
+            nxt = toks[i + 1] if i + 1 < len(toks) else ""
+            if _GQL_NAME.match(t) and prev != "@" and nxt != ":":
+                fields.append(t)
+        if depth < 0 or paren < 0:
+            return None
+    return None if depth or paren or pending else fields
+
+
+def _branch_name(value: str) -> str:
+    return value[len("refs/heads/"):] if value.startswith("refs/heads/") else value
+
+
 def _api_branch_writes(method: str, ep: str, fields: List[str], inputs: List[str], ctx: GuardContext,
                        blk: Blk) -> Iterator[Block]:
-    """REST writes that move a branch without a push: a ref update (which can force) and a contents write (a commit
-    on the branch it names, or on the default branch when it names none)."""
+    """REST writes that move a branch without a push: a ref update (which can force), a contents write (a commit
+    on the branch it names, or on the default branch when it names none) and a merge without a pull request. A
+    field value from a file (@file) or the shell cannot be read, so it counts as a protected branch."""
     values = {k.lower(): v for k, _, v in (f.partition("=") for f in fields)}
+
+    def unreadable(v: str) -> bool:
+        return v.startswith("@") or _unresolved(v)
+
     ref = _GIT_REF_PATH.match(ep)
     if ref and method in ("PATCH", "POST", "PUT"):
-        if inputs:
-            yield blk("protected_branches", f"gh api {method} {ep} with --input cannot be checked",
-                      "pass the fields with -f/-F so the guard can read them")
+        if inputs or any(unreadable(v) for v in values.values()):
+            yield blk("protected_branches", f"gh api {method} {ep} with --input or an @file value cannot be checked",
+                      "pass the fields inline with -f/-F so the guard can read them")
         elif values.get("force", "").lower() not in ("", "false", "0"):
             yield blk("force_push", "a forced ref update rewrites published history",
                       "push new commits on top instead; ask the operator if a rewrite is really needed")
-        elif ref.group(1).strip("/") in ctx.protected_branches:
+        elif _branch_name(ref.group(1).strip("/")) in ctx.protected_branches:
             yield blk("protected_branches", f"updates to the protected branch {ref.group(1)} are not allowed",
                       "push a feature branch and open a pull request")
     if _CONTENTS_PATH.match(ep) and method in ("PUT", "POST", "PATCH"):
-        branch = values.get("branch", "")
-        if inputs or not branch or _unresolved(branch) or branch in ctx.protected_branches:
+        branch = _branch_name(values.get("branch", ""))
+        if inputs or not branch or unreadable(branch) or branch in ctx.protected_branches:
             yield blk("protected_branches", f"gh api {method} {ep} commits to "
                                             f"{branch or 'the default branch'}, which may be protected",
                       "commit on a feature branch and git push origin <branch>, or pass -f branch=<feature branch>")
+    for pattern, key in _MERGE_PATHS:
+        if pattern.match(ep) and method in ("POST", "PUT", "PATCH"):
+            branch = _branch_name(values.get(key, ""))
+            if inputs or not branch or unreadable(branch) or branch in ctx.protected_branches:
+                yield blk("protected_branches", f"gh api {method} {ep} merges into "
+                                                f"{branch or 'a branch the guard cannot read'}, which may be protected",
+                          "merge through a pull request, which a person merges")
 
 
 _COMMANDS: Dict[str, Callable[..., Iterator[Block]]] = {

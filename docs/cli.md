@@ -852,7 +852,7 @@ Decide one hook event read from stdin as JSON.
 notme guard check
 ```
 
-Output: decision (allow or block), rule, message
+Output: decision (allow, guided or block), rule, message. guided: the hook lets the call run and logs it under a process rule (see docs/guards.md); message is the reason.
 
 ### `notme guard selftest`
 

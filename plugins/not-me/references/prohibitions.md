@@ -75,9 +75,10 @@ can see it happened.
    `.git/config`, git hooks or `~/.gitconfig`. Ask the operator in a QUESTION.
 3. **Config during a run.** A run never edits `.claude/not-me/`. It proposes the
    change as a QUESTION; `/not-me:retro` edits that folder after the run ends.
-4. **MCP tools.** The guard does not judge MCP tools; the operator decides which ones
-   to install and allow. Every rule on this page still holds for them, and a run
-   still uses the `notme` CLI for every GitHub write.
+4. **MCP tools.** The guard gives GitHub MCP tools its hard rules only and does not
+   judge other MCP tools; the operator decides which ones to install and allow. Every
+   rule on this page still holds for them, and a run still uses the `notme` CLI for
+   every GitHub write.
 5. **Commands inside code.** Run git, gh and the not-me CLI directly, never from inside
    interpreter code. Code that only holds such a word (in text it edits, say) runs
    and is logged.

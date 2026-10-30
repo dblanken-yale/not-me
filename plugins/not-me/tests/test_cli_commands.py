@@ -864,10 +864,13 @@ class GuardCheckTests(base.CliCase):
         (self.project / ".claude" / "not-me").mkdir(parents=True)
         allow = self.ok("guard", "check", stdin=self.event("ls -la"))
         self.assertEqual(allow, {"decision": "allow", "rule": None, "message": ""})
-        block = self.ok("guard", "check", stdin=self.event("gh pr comment 3 -R evil/repo --body hi"))
-        self.assertEqual(block["decision"], "block")
-        self.assertEqual(block["rule"], "other_repo")
-        self.assertIn("evil/repo", block["message"])
+        # a write to another repo is guided (dblanken-yale/not-me#141): it runs and is logged
+        guided = self.ok("guard", "check", stdin=self.event("gh pr comment 3 -R evil/repo --body hi"))
+        self.assertEqual((guided["decision"], guided["rule"]), ("guided", "other_repo"))
+        self.assertIn("evil/repo", guided["message"])
+        block = self.ok("guard", "check", stdin=self.event("git push --force origin feature/x"))
+        self.assertEqual((block["decision"], block["rule"]), ("block", "force_push"))
+        self.assertIn("not-me guard [force_push]", block["message"])
 
     def test_bad_stdin_is_usage(self):
         code, payload, _ = self.cli("guard", "check", stdin="not json")
