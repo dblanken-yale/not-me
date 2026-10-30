@@ -326,7 +326,7 @@ bash(G, OR, "gh api repos/{owner}/{repo}/issues -f title=x")
 bash(A, None, "gh pr create --title x --body y")  # gh's default repo, acme/app
 bash(G, OR, "git -C {F}/other push origin HEAD")
 bash(G, OR, "git -C {F}/other push")
-bash(G, OR, "cd {F}/other; git push")
+bash(A, None, "cd {F}/other; git push")  # a cd before ; is not followed: judged where the session is
 bash(G, OR, "git push https://github.com/acme/lib.git HEAD")
 bash(G, OR, "git push --repo=https://github.com/acme/lib.git HEAD")
 bash(G, OR, "git push git@gitlab.com:x/y.git HEAD")
@@ -1011,46 +1011,32 @@ edit(B, SP, "Write", {"file_path": "{H}/project.md",
                       "content": "---\nschema: 1\nx: " + "[" * 2000 + "]" * 2000 + "\nmode: live\n---\n"},
      "gdryrun")
 
-# The guard follows only a leading `cd <path>` (dblanken-yale/not-me#144): git and gh after it are judged in that
-# directory. A later cd, pushd, popd, source, eval or trap, or a leading cd whose directory it cannot work out, leaves
+# The guard follows only a leading `cd <path> &&` (dblanken-yale/not-me#144): git and gh in its && list are judged in
+# that directory. A later cd, pushd, popd, source, eval or trap, or a leading cd whose directory it cannot work out, leaves
 # the directory unknown: a git write there runs and is logged (guided). Any other cd is not followed: writes are
 # judged in the hook's real working directory, or the `git -C` / `gh -R` they name. Setting HOME, which moves
 # ~/.gitconfig and so where git pushes, still blocks a git write.
 # These were allowed while no cd was followed; now they are judged in {F}/other (acme/other, off the allowed list)
 # or in a directory the guard cannot name, so they run and are logged under other_repo.
 FOLLOWED = {
-    "cd {F}/other; git push", "cd .not-me-companion/comp && git status && cd .. && cd .. && git push",
-    "cd {F}/other && (cd {F}/live && git push) && git push", "cd {F}/other && ( (cd {F}/live) ; git push )",
-    "cd {F}/other && (cd {F}/live && (cd {F}/app) && git push)", "cd {F}/other; echo $(true; cd {F}/live ); git push",
-    "cd {F}/other; echo `true; cd {F}/live `; git push", "cd {F}/other; bash -c 'true; cd {F}/live '; git push",
-    'cd {F}/other; git commit -m "fix (x; cd {F}/live "; git push', 'cd {F}/other && git commit -m "fix: (x" && git push',
-    "cd {F}/live) && git push", "cd {F}/other; { cd {F}/live; }; git push",
-    "cd {F}/other; pushd {F}/live >/dev/null && git push", "cd {F}/other; (pushd {F}/live); git push",
-    "cd {F}/other; cd {F}/app | cat; git push", "cd {F}/other; true | cd {F}/app; git push",
-    "cd {F}/other; { cd {F}/app; } | cat; git push", "cd {F}/other; coproc cd {F}/app; git push",
-    "cd {F}/other 2>&1 && git log | head -1 && git push >&2", "cd {F}/other; cd {F}/app; cd -; git push",
-    "cd {F}/other; cd {F}/live; cd -; cd -; cd {F}/live && git push", "cd {F}/other; cd; git push",
-    "cd {F}/other; cd ~ && git push", "cd ~nosuchuser-xyz && git push", "cd -L {F}/other && git push",
-    "cd -L {F}/live && git push", "cd -e -- {F}/other && git push", "cd -P {F}/other/.. && git push",
-    "cd -@ {F}/other && git push", "cd {F}/other {F}/app && git push", "OLDPWD={F}/other; cd -; git push",
-    "PWD={F}/other/x; cd ..; git push", 'cd "$NOWHERE" && git push',
-    "cd {F}/other; function f { cd {F}/app; }; f; git push", "cd {F}/other; env cd {F}/app; git push",
-    "cd {F}/other; pushd {F}/live; pushd {F}/nosuch; popd; git push",
-    "cd {F}/other; pushd {F}/live; popd; pushd {F}/live && git push",
-    "cd {F}/other; cd {F}/live; cd {F}/nosuch; cd -; git push", "cd {F}/other; cd {F}/live; cd ~-; git push",
-    "cd {F}/other; cd ~+ && git push", "cd {F}/other; bash -c 'cd {F}/app; make'; cd {F}/live; git push",
-    "cd {F}/other; false && cd {F}/live; git push", "cd {F}/other; false && cd {F}/live && git push",
-    "cd {F}/other; true || cd {F}/live; git push", "cd {F}/other; true || cd {F}/live && git push",
-    'cd {F}/other; [ -n "$CI" ] && cd {F}/live; git push', "cd {F}/other; if false; then cd {F}/live; fi; git push",
-    "cd {F}/other; while false; do cd {F}/live; done; git push",
-    "cd {F}/other; for d in x; do cd {F}/live && git push; done", "cd {F}/other; ! cd {F}/live && git push",
-    "cd {F}/other; cd {F}/nope/../live; git push", "cd {F}/other; cd {F}/live > {F}/nope/x; git push",
-    "cd {F}/other; make && cd {F}/live; git push", "cd {F}/other; cd {F}/live 2>/dev/null && git push",
-    "cd {F}/live && cd {F}/app; git push", "cd {F}/other; cd {F}/app & git push",
-    "cd {F}/other; if true; then cd {F}/app; fi & git push", "cd {F}/other; nohup cd {F}/app; git push",
-    "c\\d {F}/other; git push", "'cd' {F}/other; git push", "$'\\x63d' {F}/other; git push",
-    "cd {F}/other && git commit -F msg.txt", "cd {F}/other && sudo git push", "c\\\nd {F}/other && git push",
-    "cd\t{F}/other && git push", "cd \t {F}/other;git push", "bash -c 'cd ../other && git push'",
+    "bash -c 'cd ../other && git push'",
+    'c\\\nd {F}/other && git push',
+    'cd\t{F}/other && git push',
+    'cd "$NOWHERE" && git push',
+    'cd -@ {F}/other && git push',
+    'cd -L {F}/live && git push',
+    'cd -L {F}/other && git push',
+    'cd -P {F}/other/.. && git push',
+    'cd -e -- {F}/other && git push',
+    'cd .not-me-companion/comp && git status && cd .. && cd .. && git push',
+    'cd {F}/other && (cd {F}/live && (cd {F}/app) && git push)',
+    'cd {F}/other && (cd {F}/live && git push) && git push',
+    'cd {F}/other && git commit -F msg.txt',
+    'cd {F}/other && git commit -m "fix: (x" && git push',
+    'cd {F}/other && sudo git push',
+    'cd {F}/other 2>&1 && git log | head -1 && git push >&2',
+    'cd {F}/other {F}/app && git push',
+    'cd ~nosuchuser-xyz && git push',
 }
 
 
@@ -1190,9 +1176,9 @@ for cmd in (
         "cd {F}/other; xargs cd {F}/app </dev/null; git push",
 ):
     bash(B, PB, cmd)
-bash(G, OR, "cd {F}/other; cd {F}/app & git push")  # a later cd leaves the directory unknown (docs/guards.md)
-bash(G, OR, "cd {F}/other; if true; then cd {F}/app; fi & git push")
-bash(G, OR, "cd {F}/other; nohup cd {F}/app; git push")
+bash(A, None, "cd {F}/other; cd {F}/app & git push")  # a cd before ; is not followed (docs/guards.md)
+bash(A, None, "cd {F}/other; if true; then cd {F}/app; fi & git push")
+bash(A, None, "cd {F}/other; nohup cd {F}/app; git push")
 bash(A, None, 'cd "$NOWHERE" && cat o*')  # after a cd, a relative glob that can name the token
 # after a leading cd an alias is looked up where git runs: {F}/other has no pp alias (the session's checkout does)
 bash(A, None, "cd {F}/other && git pp")
@@ -1955,7 +1941,7 @@ for cmd in ("git -C $W branch --list --del feature/y", "git -C $W branch --list 
 # {F}/live is a checkout of acme/app on feature/x; the "main" fixture is on main.
 bash(A, None, "git -C {F}/live add x && git -C {F}/live commit -F m", "main")
 bash(A, None, "cd {F}/live && git add x && git commit -F m", "main")  # the shape the issue reports
-bash(A, None, "cd {F}/live; git commit -F m", "main")
+bash(B, PB, "cd {F}/live; git commit -F m", "main")  # after ; the cd may have failed
 bash(A, None, 'W={F}/live; git -C "$W" add x && git -C $W commit -F m', "main")
 bash(A, None, "export W={F}/live; git -C ${W} commit -m x", "main")
 bash(A, None, "R={F}; W=$R/live && git -C $W commit -m x", "main")
@@ -1967,14 +1953,27 @@ bash(B, PB, "cd {F}/live && git commit -m x & git commit -m y", "main")  # the s
 bash(B, FP, "git -C $W push --force origin feature/x")
 bash(B, PB, "git -C $W push origin HEAD:main")
 # a path the guard cannot work out: guided, never judged by the session's directory (here on main)
-for cmd in ('cd "$NOWHERE" && git commit -m x', "cd {F}/nosuch && git commit -m x", "cd {F}/live || exit 1; git commit -m x",
-            "W={F}/live; W=$(pwd); git -C $W commit -m x", "W={F}/live; read W < f; git -C $W commit -m x",
+for cmd in ('cd "$NOWHERE" && git commit -m x', "cd {F}/nosuch && git commit -m x",             "W={F}/live; W=$(pwd); git -C $W commit -m x", "W={F}/live; read W < f; git -C $W commit -m x",
             "(W={F}/live); git -C $W commit -m x", "W={F}/live git -C $W commit -m x", "cd -P {F}/live && git commit -m x",
             "cd {F}/live && cd .. && git commit -m x", "cd {F}/live && source x.sh && git commit -m x",
             "true && W={F}/live; git -C $W commit -m x", "f() { :; }; W={F}/live; git -C $W commit -m x"):
     bash(G, PB, cmd, "main")
 bash(B, PB, "git commit -m x", "main")  # no cd and no -C: the session's own branch
 bash(B, PB, "(cd {F}/live && true); git commit -m x", "main")  # a cd in a subshell is not leading: not followed
+# Security review of dblanken-yale/not-me#144: a leading cd is followed only across &&; after ; or a newline (or
+# past the end of its && list) the cd may have failed, so git is judged where the session is. A script, eval, trap,
+# function or builtin that may set a variable by name makes every tracked variable unknown.
+for cmd in ("cd {F}/live; git commit -m x", "cd {F}/live\ngit commit -m x", "cd {F}/live && git add x; git commit -m x",
+            "cd {F}/live || exit 1; git commit -m x", "cd {F}/live && true || git commit -m x",
+            "cd {F}/live && git add x & git commit -m x"):
+    bash(B, PB, cmd, "main")
+bash(A, None, "cd {F}/live && git add x && git commit -m x | cat", "main")
+for cmd in ("W={F}/live; source x.sh; git -C $W commit -m x", 'W={F}/live; eval "$X"; git -C $W commit -m x',
+            "W={F}/live; set -a; git -C $W commit -m x", "W={F}/live; declare -x Y=1; git -C $W commit -m x",
+            "W={F}/live; export Y; git -C $W commit -m x", "W={F}/live; read -r Y < f; git -C $W commit -m x",
+            "W={F}/live; . ./env.sh && git -C $W commit -m x", "W={F}/live; trap 'W=x' EXIT; git -C $W commit -m x",
+            "W={F}/live; function f { W={F}/main; }; f; git -C $W commit -m x"):
+    bash(G, PB, cmd, "main")
 # a copy or move with a relative destination reaches the not-me home check: `..` from the checkout is the fixture
 # root, a directory above the home
 bash(B, SP, "cp -r backup ..")

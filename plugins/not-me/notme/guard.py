@@ -1376,6 +1376,10 @@ _VAR_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*
 _ASSIGN_NAME = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\+?)=")
 _DIR_CHANGERS = frozenset({"cd", "pushd", "popd", "chdir"})
 _DIR_RUNNERS = frozenset({"source", ".", "eval", "trap"})  # may run a cd the guard does not see
+# builtins that may set a variable by name (set -a exports, read and the like assign)
+_VAR_SETTERS = frozenset({"set", "declare", "typeset", "local", "readonly", "export", "read", "mapfile", "readarray",
+                          "printf", "getopts", "let", "unset"})
+_IN_AND_LIST = {"&&", "|", "|&", "(", ")"}  # operators that keep a command in the && list a leading cd started
 _SEQ = {";", "&&", "\n"}  # operators that keep the next command in this shell, run after the one before
 
 
@@ -1384,9 +1388,9 @@ class _State:
     bodies, and raw with them), the branch a checkout moved to, and memoised lookups.
 
     For git and gh it also tracks (dblanken-yale/not-me#144) the directory they run in and the variables set to a
-    literal value earlier in the same command. Only a leading `cd <path>` is followed (after any plain variable
-    assignments, joined by `&&`, `;` or a newline); a later cd, pushd or popd, or a leading cd whose directory
-    cannot be worked out, leaves the directory unknown (`cur` None). Every other path check uses `dir`, the hook's
+    literal value earlier in the same command. Only a leading `cd <path>` joined by `&&` is followed (after any
+    plain variable assignments), and only while its && list lasts; a later cd, pushd or popd, or a leading cd whose
+    directory cannot be worked out, leaves the directory unknown (`cur` None). Every other path check uses `dir`, the hook's
     real working directory."""
 
     def __init__(self, cwd: str, parsed: Parsed, raw: str, depth: int = 0, parent: Optional["_State"] = None):
@@ -1441,14 +1445,17 @@ class _State:
 
     def step(self, c: SimpleCommand) -> None:
         """Bring the directory and variables up to date before c runs."""
-        if self.funcdef:  # a function body may run any time: nothing is tracked
+        if self.funcdef or "function" in c.words:  # a function body may run any time: nothing is tracked
+            self.funcdef = True
+            self.vars = dict.fromkeys(self.vars)
+            if self.followed:
+                self.cur = None
             return
         if not c.nested:
-            for tok in _GAP_TOKEN.findall(c.before):
-                if self.cd_open and tok == "&":  # the list holding the cd ran in the background
-                    self.cur, self.cd_open = self.base, False
-                elif tok in (";", "\n", ";;", ";&", ";;&"):
-                    self.cd_open = False
+            # the && list that holds the followed cd ends at anything but && or a pipe: past it the cd may have
+            # failed (or run in the background), so the command runs where the session is
+            if self.cd_open and set(_GAP_TOKEN.findall(c.before)) - _IN_AND_LIST:
+                self.cur, self.cd_open = self.base, False
             gap_ok = set(_GAP_TOKEN.findall(c.before)) <= _SEQ
             if self.prelude:
                 assigns = self._assignments(c) if gap_ok else None
@@ -1463,6 +1470,9 @@ class _State:
             # sourced script, eval, a trap) leaves it unknown
             if self.followed and (_DIR_CHANGERS | _DIR_RUNNERS) & set(c.words):
                 self.cur = None
+        # a script, eval, trap or builtin that may set variables by name: forget every variable
+        if (_DIR_RUNNERS | _VAR_SETTERS) & set(c.words):
+            self.vars = dict.fromkeys(self.vars)
         for name in list(self.vars):
             if name in c.words or re.search(r"(?<![A-Za-z0-9_$])" + name + r"(?:\[|\+?=)", c.raw):
                 self.vars[name] = None
@@ -1485,14 +1495,15 @@ class _State:
 
     def _leading_cd(self, c: SimpleCommand) -> None:
         nxt = _GAP_TOKEN.findall(self.after.get(id(c), ""))
-        first = nxt[0] if nxt else "\n"
-        if first in ("|", "|&", "&"):  # in a pipeline or in the background: the cd does not reach later commands
+        # followed only across &&: after ; or a newline the cd may have failed and git would run where the session
+        # is, so that is where it is judged
+        if nxt[:1] != ["&&"]:
             return
         self.followed = True
         arg = c.words[1] if len(c.words) == 2 else None
         path = None
         # one operand, no option, no glob or brace; ~ only as the user's own home, and only while HOME is untouched
-        if first in _SEQ and arg and not arg.startswith("-") and not getattr(arg, "glob", False) and \
+        if arg and not arg.startswith("-") and not getattr(arg, "glob", False) and \
                 not getattr(arg, "brace", False) and \
                 (not arg.startswith("~") or ((arg == "~" or arg.startswith("~/")) and "HOME" not in self.vars)):
             value = self.literal(getattr(arg, "raw", "") or arg, getattr(arg, "expands", False))
@@ -1504,7 +1515,7 @@ class _State:
                 full = _norm(value, self.cur or self.dir)
                 path = full if _path.isdir(full) else None
         self.cur = path
-        self.cd_open = first == "&&"
+        self.cd_open = True
 
 
 def _bash(cmd: str, cwd: str, ctx: GuardContext, depth: int = 0,

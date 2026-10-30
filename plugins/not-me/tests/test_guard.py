@@ -660,13 +660,14 @@ class MessageTests(unittest.TestCase):
                 return guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(cwd)}, ctx)
             self.assertEqual(run("git commit -m x", main).rule, "protected_branches")
             for cmd in (f"cd {wt} && git add x && git commit -F m", f"W={wt}; git -C $W commit -m x",
-                        f'W={wt}; git -C "$W" add x && git -C "${{W}}" commit -F m', f"cd {wt}; git commit -m x",
-                        "cd ../wt && git commit -m x"):
+                        f'W={wt}; git -C "$W" add x && git -C "${{W}}" commit -F m', "cd ../wt && git commit -m x"):
                 with self.subTest(cmd=cmd):
                     self.assertIsNone(run(cmd, main))
                     self.assertEqual(ctx.guided, [])
+            # after ; the cd may have failed: judged where the session is (security review of #144)
             for cmd, cwd in ((f"cd {main} && git commit -m x", wt), (f"W={main}; git -C $W commit -m x", wt),
-                             (f"cd {wt} && git commit -m x & git commit -m y", main)):
+                             (f"cd {wt} && git commit -m x & git commit -m y", main),
+                             (f"cd {wt}; git commit -m x", main)):
                 with self.subTest(cmd=cmd):
                     self.assertEqual(run(cmd, cwd).rule, "protected_branches")
 
