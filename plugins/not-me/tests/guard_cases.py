@@ -898,9 +898,39 @@ edit(A, None, "Edit", {"file_path": "{H}/project.md", "old_string": "mode: dry-r
                        "new_string": "mode: dry-run\nenabled: false"})
 edit(A, None, "Edit", {"file_path": "{H}/project.md", "old_string": "# Project", "new_string": "mode: live"})
 edit(A, None, "Write", {"file_path": "{F}/gdry/.claude/not-me/project.md", "content": LIVE_FRONT})
-# A shell write of the global project.md is not the guard's business.
-bash(A, None, "echo 'mode: live' >> {H}/project.md", "gdry")
-bash(A, None, "cat {H}/project.md", "gdry")
+# A shell write of the global project.md blocks like a Write or Edit would (security review of #118): the mode
+# changes through /not-me:mode. Reads, and copying it elsewhere, stay allowed; the repo layer's project.md is not it.
+for _variant in ("gdry", "gdryrun", "nogit"):
+    bash(B, SP, "echo 'mode: live' >> {H}/project.md", _variant)
+    bash(A, None, "cat {H}/project.md", _variant)
+bash(B, SP, "echo x | tee -a {H}/project.md", "gdry")
+bash(B, SP, "sed -i '' 's/dry-run/live/' {H}/project.md", "gdry")
+bash(B, SP, "sed -i.bak -e 's/dry-run/live/' $NOT_ME_HOME/project.md", "gdry")
+bash(B, SP, "cp /tmp/x {H}/project.md", "gdry")
+bash(B, SP, "cp /tmp/x {H}/PROJECT.md", "gdry")
+bash(B, SP, "mv /tmp/x {H}/project.md", "gdry")
+bash(B, SP, "printf 'mode: live' > {H}/proj*.md", "gdry")
+bash(B, SP, "python3 scripts/tool.py > {H}/project.md", "gdry")
+_global_shell_id = CASES[-1][0]
+bash(A, None, "sed -n 1,5p {H}/project.md", "gdry")
+bash(A, None, "grep mode {H}/project.md", "gdry")
+bash(A, None, "head -3 {H}/project.md", "gdry")
+bash(A, None, "cp {H}/project.md /tmp/backup.md", "gdry")
+bash(A, None, "diff {H}/project.md /tmp/backup.md", "gdry")
+bash(A, None, "echo x >> {F}/app/.claude/not-me/project.md")
+bash(A, None, "echo x >> {F}/app/project.md")
+# A copy, move, link or extract into the not-me home, or a recursive one into a directory above it, could replace
+# the allow list (security review of #118).
+for _variant in ("app", "nogit"):
+    for cmd in ("cp -r /tmp/x {H}", "cp -R /tmp/x/ {H}/", "cp -a /tmp/x {H}/..", "cp /tmp/* {H}",
+                "cp -t {H} /tmp/x", "rsync -a /tmp/x/ {H}/", "rsync -r /tmp/x {H}/../..", "mv /tmp/x {H}",
+                "ln -s /tmp/x {H}/", "install -m 600 /tmp/x {H}", "ditto /tmp/x {H}/..",
+                "tar -xzf x.tgz -C {H}/..", "tar xf x.tar --directory={H}", "unzip x.zip -d {H}",
+                "unzip -o x.zip -d{H}/.."):
+        bash(B, SP, cmd, _variant)
+for cmd in ("cp notes.txt {H}/..", "mv notes.txt {H}/..", "cp -r scripts /tmp/copy", "tar -xzf x.tgz -C /tmp/out",
+            "unzip x.zip -d /tmp/out", "rsync -a scripts/ /tmp/copy/", "mv a.txt b.txt", "cp -r {H} /tmp/backup"):
+    bash(A, None, cmd)
 # `notme mode live` is the operator's /not-me:mode live, in every spelling and in or out of a run.
 bash(A, None, "notme mode live")
 bash(A, None, "{P}/bin/notme mode live", "running")
@@ -2005,6 +2035,7 @@ ROUND_B_END = len(CASES)
 # Substrings a block message must contain, by case id. Guided cases print no message; test_guard checks their rule.
 MESSAGE_CHECKS: Dict[str, List[str]] = {
     _mode_edit_id: ["changes only through /not-me:mode", "run /not-me:mode"],
+    _global_shell_id: ["changes only through /not-me:mode", "run /not-me:mode"],
     _OPAQUE_ID: ["python3 runs code the guard does not parse", "holds `push`", "not-me guard [protected_branches]"],
     _VAR_C_ID: ["not-me guard [protected_branches]", "Why: the guard does not expand shell variables in a `git -C` path",
                 "Instead: write the path out in full (`git -C /abs/path <sub> ...`); a rewritten command is "

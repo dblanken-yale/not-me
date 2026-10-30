@@ -214,7 +214,7 @@ Two more things are listed in the repo layer but only take effect once they are 
 - Extra repos in `tracker` and `repos` (companion repos).
 - A project board in `queue.board`.
 
-A name counts when `.claude/not-me/project.md` names it under the same key in the commit `refs/remotes/origin/HEAD` points at in your main checkout (run `git fetch` after the merge; a clone sets `origin/HEAD`, and `git remote set-head origin --auto` sets it when it is missing). The working tree, a checked-out branch and a pull request's head never count, so a pull request cannot widen what not-me touches until it is reviewed and merged. To use a name sooner, or one not in any config, run `/not-me:allow-repo owner/name` for a repo, or `/not-me:allow-repo --board owner/number` for a board. Until one of those holds, the `notme` CLI refuses to write there and says why. Allow-list entries live in `~/.claude/not-me/allowed-repos.json`, outside the repo. See [guards.md](guards.md).
+A name counts when `.claude/not-me/project.md` names it under the same key in the commit the `origin` remote reports for its default branch (`git ls-remote origin HEAD`), read from your local copy of that commit (run `git fetch` after the merge). The working tree, a checked-out branch, a pull request's head and any local ref never count, so a pull request cannot widen what not-me touches until it is reviewed and merged. To use a name sooner, or one not in any config, run `/not-me:allow-repo owner/name` for a repo, or `/not-me:allow-repo --board owner/number` for a board. Until one of those holds, the `notme` CLI refuses to write there and says why. Allow-list entries live in `~/.claude/not-me/allowed-repos.json`, outside the repo. See [guards.md](guards.md).
 
 ## Label mapping
 

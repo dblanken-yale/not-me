@@ -43,8 +43,10 @@ the owner's say-so, not a cleanup.
    enable approval, shorten `protected_branches`, or add `allow_repos`; it can
    name a tracker, companion repos and a board, and the write gate trusts
    those once the same names are in `.claude/not-me/project.md` as committed
-   on the default branch (the commit `refs/remotes/origin/HEAD` points at in
-   the main checkout, never the working tree), or once the operator allowed
+   on the default branch (the commit `git ls-remote origin HEAD` reports,
+   read from the local object store when it is already there; never the
+   working tree or a local ref, which a session can move; the hook does not
+   ask the remote), or once the operator allowed
    them with `/not-me:allow-repo` (owner, 2026-10-30,
    dblanken-yale/not-me#118). Reason: a PR branch or a compromised repo file
    must not be able to widen what the plugin may touch; a file reaches the
@@ -82,8 +84,10 @@ the owner's say-so, not a cleanup.
    of a few words (`push`, `reset --hard`, a GitHub secrets action, a protected
    path name and the like), then blocked under the first relevant hard rule
    that is on. Self-protection is always on: the allow list file by path; a
-   Write or Edit that leaves the global `mode` other than dry-run; the
-   plugin's own files; the global config during a run. The not-me CLI itself
+   copy, move, link or extract into the not-me home (or, recursive, into a
+   directory above it); a Write or Edit that leaves the global `mode` other
+   than dry-run, and any shell write of the global `project.md` (reads
+   pass); the plugin's own files; the global config during a run. The not-me CLI itself
    is not judged: `allow-repo add|remove`, `pause off` and `mode live` are
    the operator's slash commands, a process rule in `prohibitions.md`
    (decision 4). Keywords in

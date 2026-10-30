@@ -1035,7 +1035,7 @@ class GuardContext:
         base = self.root or self.cwd
         cfg = config.load(project_dir=str(base), home=str(self.home), env=self.env)
         origin_url = self.git(["remote", "get-url", "origin"], base) or ""  # "" stops writes asking git again
-        return writes.GuardContext.from_config(cfg, origin_url=origin_url, checkout=base)
+        return writes.GuardContext.from_config(cfg, origin_url=origin_url, checkout=base, default_branch=False)
 
     @property
     def origin_repo(self) -> Optional[str]:
@@ -1178,9 +1178,9 @@ def _pattern_hit(pattern: str, base: str, guarded: List[_Guarded]) -> Optional[_
     p = _path.expanduser(pattern)
     if not _path.isabs(p) and not p.startswith("*"):
         p = _path.join(base, p)
-    p = _path.normcase(_path.normpath(p))
+    p = _path.normcase(_path.normpath(p)).lower()  # without case: a case-insensitive file system ignores it
     for g in guarded:
-        if any(fnmatch.fnmatchcase(c, p) for c in g[:2]):
+        if any(fnmatch.fnmatchcase(c.lower(), p) for c in g[:2]):
             return g
     return None
 
@@ -1565,6 +1565,126 @@ def _path_checks(c: SimpleCommand, st: _State, ctx: GuardContext, blk: Blk) -> I
         if found:
             yield blk(SELF, found[0], found[1])
             return
+    yield from _global_doc_checks(c, st, ctx, blk)
+    yield from _home_dest_checks(core, st, ctx, blk)
+
+
+# The global layer's project.md holds `mode`; a shell write of it would go live without /not-me:mode, so a shell
+# word or redirection naming it blocks unless the program only reads (dblanken-yale/not-me#118).
+_GLOBAL_DOC_ENTRY = ((GLOBAL_DOC, "the global not-me config changes only through /not-me:mode and the operator's "
+                                  "own editor, so the change is shown and logged", MODE_HINT),)
+# programs that only read the files named on their command line
+_READERS = frozenset({"cat", "head", "tail", "less", "more", "grep", "egrep", "fgrep", "rg", "wc", "diff", "cmp",
+                      "file", "stat", "ls", "bat", "md5", "md5sum", "shasum", "sha1sum", "sha256sum", "od",
+                      "hexdump", "strings", "nl", "realpath", "readlink", "basename", "dirname", "test", "["})
+_READ_REDIRS = ("<", "<<", "<<-", "<<<", "<&")
+
+
+def _sed_reads(args: List[str]) -> bool:
+    """sed with these arguments only reads its files: no in-place flag, no script file, and every script (each -e
+    value, else the first operand) reads only."""
+    if any(a.startswith("--in-place") or a.startswith("--file") for a in args):
+        return False
+    if set("iIf") & set(_short_flags([a for a in args if not a.startswith("-e") or a == "-e"])):
+        return False
+    scripts: List[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-e", "--expression"):
+            scripts.append(args[i + 1] if i + 1 < len(args) else "")
+            i += 2
+            continue
+        if a.startswith("--expression="):
+            scripts.append(a.split("=", 1)[1])
+        elif a.startswith("-e") and len(a) > 2:
+            scripts.append(a[2:])
+        i += 1
+    if not scripts:
+        scripts = _positionals(args)[:1]
+    return all(_sed_reads_only(_unshell(s)) for s in scripts)
+
+
+def _global_doc_checks(c: SimpleCommand, st: _State, ctx: GuardContext, blk: Blk) -> Iterator[Block]:
+    """A shell word or output redirection that names the global project.md, unless the program only reads it."""
+    core = _core(list(c.words))
+    prog = _prog(core[0]) if core else ""
+    reads = prog in _READERS or (prog == "sed" and _sed_reads(core[1:]))
+    targets = [t for op, t in c.redirs if op not in _READ_REDIRS]
+    if prog in ("cp", "rsync", "ditto"):  # copying it somewhere reads it; only the destination is written
+        targets += _dest_dirs(prog, list(core[1:]))[0]
+    elif not reads:
+        for w in c.words:
+            if not w.startswith("-"):
+                targets.append(w)
+            if "=" in w:
+                targets.append(w.split("=", 1)[1])
+    for a in targets:
+        found = _protected(a, st, ctx, _GLOBAL_DOC_ENTRY, by_name=False)
+        if found:
+            yield blk(SELF, found[0], found[1])
+            return
+
+
+# Programs that write into a destination directory, and how to find it: a destination that is the not-me home
+# lets a copy or an extract replace the allow list. For a recursive copy or an extract, a directory above the home
+# counts too (the copy can recreate .claude/not-me/allowed-repos.json under it).
+_DEST_LAST = {"cp": "rRa", "rsync": "ra", "mv": "", "ln": "", "install": "", "ditto": None}
+
+
+def _dest_dirs(prog: str, args: List[str]) -> Tuple[List[str], bool]:
+    """(destination words, whether a directory above the home counts) for a write-capable command."""
+    dests: List[str] = []
+    for i, a in enumerate(args):
+        if a in ("-t", "--target-directory") and i + 1 < len(args) and prog in ("cp", "mv", "ln", "install"):
+            dests.append(args[i + 1])
+        elif a.startswith("--target-directory="):
+            dests.append(a.split("=", 1)[1])
+    if prog in _DEST_LAST:
+        flags = _DEST_LAST[prog]
+        recursive = flags is None or bool(set(flags) & set(_short_flags(args))) or any(
+            a in ("--recursive", "--archive") for a in args)
+        pos = _positionals(args)
+        if len(pos) >= 2:
+            dests.append(pos[-1])
+        return dests, recursive
+    if prog in ("tar", "bsdtar", "gtar"):
+        for i, a in enumerate(args):
+            if a in ("-C", "--directory") and i + 1 < len(args):
+                dests.append(args[i + 1])
+            elif a.startswith("--directory="):
+                dests.append(a.split("=", 1)[1])
+            elif a.startswith("-C") and len(a) > 2:
+                dests.append(a[2:])
+        return dests, True
+    if prog == "unzip":
+        for i, a in enumerate(args):
+            if a == "-d" and i + 1 < len(args):
+                dests.append(args[i + 1])
+            elif a.startswith("-d") and len(a) > 2:
+                dests.append(a[2:])
+        return dests, True
+    return dests, False
+
+
+def _home_dest_checks(core: List[str], st: _State, ctx: GuardContext, blk: Blk) -> Iterator[Block]:
+    """A copy, move, link or extract whose destination is the not-me home (or, recursive, a directory above it)."""
+    prog = _prog(core[0]) if core else ""
+    if prog not in _DEST_LAST and prog not in ("tar", "bsdtar", "gtar", "unzip"):
+        return
+    dests, above = _dest_dirs(prog, list(core[1:]))
+    if not dests:
+        return
+    home = st.once(("home",), lambda: _norm(str(ctx.home), st.dir))
+    for d in dests:
+        a = _shell_word(d, ctx)
+        if not a or _UNRESOLVED.search(a) or _GLOB.search(a):
+            continue  # a destination the shell fills in cannot be placed; the allow list's name still blocks
+        full = _norm(a, st.dir)
+        if full.lower() == home.lower() or (above and _under(home.lower(), full.lower())):
+            yield blk(SELF, f"{prog} would write into the not-me home ({_short(d, 60)}), which can replace the allow "
+                            "list", ALLOW_HINT)
+            return
 
 
 # How grep, rg and sed take their options, so the word that holds the pattern (or sed script) can be found.
@@ -1790,19 +1910,25 @@ def _sed_reads_only(script: str) -> bool:
     return True
 
 
-def _protected(arg: str, st: _State, ctx: GuardContext) -> Optional[Tuple[str, str]]:
-    """(why, hint) when arg names a protected file: by its name after a path separator (in any directory), by its
-    real path, or through a glob; a part the shell fills in ($VAR, $(...), backticks, {a,b}) counts as * when the
-    rest still pins the pattern near a protected file."""
+def _shell_word(arg: str, ctx: GuardContext) -> str:
+    """arg with quotes dropped and $HOME, $NOT_ME_HOME and ${HOME...}/${NOT_ME_HOME...} filled in."""
     a = _expand_home(arg.replace('"', "").replace("'", ""), ctx)
-    a = _HOME_PARAM.sub(lambda m: str(ctx.home) if m.group(1) == "NOT_ME_HOME"
-                        else (ctx.env.get("HOME") or _path.expanduser("~")), a)
+    return _HOME_PARAM.sub(lambda m: str(ctx.home) if m.group(1) == "NOT_ME_HOME"
+                           else (ctx.env.get("HOME") or _path.expanduser("~")), a)
+
+
+def _protected(arg: str, st: _State, ctx: GuardContext, entries: Tuple[Tuple[str, str, str], ...] = _BASH_GUARDED,
+               by_name: bool = True) -> Optional[Tuple[str, str]]:
+    """(why, hint) when arg names a protected file (entries: names in the not-me home): by its name after a path
+    separator in any directory (when by_name), by its real path, or through a glob; a part the shell fills in
+    ($VAR, $(...), backticks, {a,b}) counts as * when the rest still pins the pattern near a protected file."""
+    a = _shell_word(arg, ctx)
     if not a or "\n" in a:
         return None
-    guarded = st.once(("guarded",), lambda: _guarded(ctx, st.dir, _BASH_GUARDED))
+    guarded = st.once(("guarded", entries[0][0]), lambda: _guarded(ctx, st.dir, entries))
     parts = [p.lower() for p in _PATH_SEP.split(a)]
-    if len(parts) > 1:
-        for (name, why, hint) in _BASH_GUARDED:
+    if by_name and len(parts) > 1:
+        for (name, why, hint) in entries:
             if parts[-1] == name:
                 return why, hint
 
@@ -1812,7 +1938,8 @@ def _protected(arg: str, st: _State, ctx: GuardContext) -> Optional[Tuple[str, s
 
     def hit(path: str) -> Optional[Tuple[str, str]]:
         full = _norm(path, st.dir)
-        g = next((g for g in guarded if _under(full, g[0])), None)
+        # compared without case too: a case-insensitive file system opens the file under any case
+        g = next((g for g in guarded if _under(full, g[0]) or full.lower() == g[0].lower()), None)
         return (g[2], g[3]) if g is not None else None
     if _UNRESOLVED.search(a):
         pattern = _UNRESOLVED.sub("*", a)

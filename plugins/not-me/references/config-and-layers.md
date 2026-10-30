@@ -57,7 +57,7 @@ a `WARN`; do not try to honour it.
 
 The tracker, companion repos in `repos` and a project board declared only in the
 repo layer take effect when the same names are in that file on the default branch
-(origin/HEAD) of the main checkout, or when the operator's allow list confirms them.
+(the commit `git ls-remote origin HEAD` reports, as fetched into the main checkout), or when the operator's allow list confirms them.
 A name only on a feature branch, a PR head or in the working tree does not count:
 the CLI write gate refuses writes there; treat that as any blocked write.
 

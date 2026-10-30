@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from notme import writes
 from notme.writes import Decision, GuardContext, WriteTarget, check_write
@@ -298,9 +299,10 @@ def _git(cwd, *args):
 
 
 class CommittedRepoLayerTests(unittest.TestCase):
-    """Repos and the board the repo layer names count as allowed when the same names are on the default branch
-    (origin/HEAD) of the main checkout: that copy reached it through a reviewed PR (dblanken-yale/not-me#118).
-    The working tree, a feature branch or a PR head never widen anything."""
+    """Repos and the board the repo layer names count as allowed when the same names are on the default branch:
+    the commit the origin remote reports for HEAD, read from the local object store (dblanken-yale/not-me#118).
+    That copy reached it through a reviewed PR. The working tree, a feature branch, a PR head and any local ref
+    the session could move never widen anything. The remote here is a bare repository on disk."""
 
     def setUp(self):
         self.tc = TempCase()
@@ -308,11 +310,17 @@ class CommittedRepoLayerTests(unittest.TestCase):
         self.tc.write("global", "project", GLOBAL_MD)
         self.tc.write("repo", "project", PROJECT_MD.replace("number: 6}", "number: 6}\ntracker: acme/issues"))
         p = self.tc.project
+        self.remote = self.tc.root / "remote.git"
+        _git(self.tc.root, "init", "-q", "--bare", "-b", "main", str(self.remote))
         _git(p, "init", "-q", "-b", "main")
         _git(p, "add", "-f", ".claude/not-me/project.md")
         _git(p, "commit", "-q", "-m", "config")
-        _git(p, "update-ref", "refs/remotes/origin/main", "HEAD")
-        _git(p, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        _git(p, "remote", "add", "origin", str(self.remote))
+        self.publish()
+
+    def publish(self, ref="main"):
+        """Make the project's `ref` the remote's default branch, as a reviewed merge on GitHub would."""
+        _git(self.remote, "fetch", "-q", str(self.tc.project), f"+{ref}:main")
 
     def ctx(self):
         return GuardContext.from_config(self.tc.load(), origin_url="git@github.com:acme/app.git")
@@ -338,16 +346,41 @@ class CommittedRepoLayerTests(unittest.TestCase):
         _git(p, "commit", "-q", "-am", "widen")
         self.assertFalse(check_write(WriteTarget.repo("acme/evil"), self.ctx()).ok)
 
-    def test_without_origin_head_nothing_counts(self):
-        _git(self.tc.project, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+    def test_moved_local_refs_do_not_widen(self):
+        """A forged local commit behind origin/HEAD, origin/main or main changes nothing: the remote is asked."""
+        p = self.tc.project
+        _git(p, "checkout", "-q", "-b", "forged")
+        self.tc.write("repo", "project", PROJECT_MD.replace("acme/app-ui", "acme/evil"))
+        _git(p, "commit", "-q", "-am", "widen")
+        _git(p, "update-ref", "refs/remotes/origin/main", "forged")
+        _git(p, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        _git(p, "update-ref", "refs/heads/main", "forged")
+        _git(p, "remote", "set-head", "origin", "main")
+        ctx = self.ctx()
+        self.assertFalse(check_write(WriteTarget.repo("acme/evil"), ctx).ok)
+        self.publish("forged")  # once the remote's default branch really has it, it counts
+        self.assertTrue(check_write(WriteTarget.repo("acme/evil"), self.ctx()).ok)
+
+    def test_a_default_branch_commit_not_fetched_yet_counts_for_nothing(self):
+        self.assertEqual(writes.default_branch_names(self.tc.project, sha_of=lambda _d: "0" * 40)["repos"],
+                         frozenset())
+
+    def test_without_a_reachable_remote_nothing_counts(self):
+        _git(self.tc.project, "remote", "set-url", "origin", str(self.tc.root / "nowhere.git"))
         ctx = self.ctx()
         self.assertFalse(check_write(WriteTarget.repo("acme/app-ui"), ctx).ok)
         self.assertIsNone(ctx.board)
 
+    def test_the_hook_never_asks_the_remote(self):
+        with mock.patch.object(writes, "_git", side_effect=AssertionError("ran git for the default branch")):
+            ctx = GuardContext.from_config(self.tc.load(), origin_url="git@github.com:acme/app.git",
+                                           default_branch=False)
+        self.assertFalse(check_write(WriteTarget.repo("acme/app-ui"), ctx).ok)
+
     def test_allow_repos_in_the_repo_layer_never_counts(self):
         self.tc.write("repo", "project", "---\nschema: 1\nallow_repos: [acme/evil]\n---\n")
         _git(self.tc.project, "commit", "-q", "-am", "allow")
-        _git(self.tc.project, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.publish()
         self.assertFalse(check_write(WriteTarget.repo("acme/evil"), self.ctx()).ok)
 
 

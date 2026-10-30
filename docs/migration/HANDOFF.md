@@ -153,7 +153,7 @@ them without asking him.
    gone; `references/prohibitions.md` "Operator commands" is the rule. Every
    change prints a summary and appends to `<not-me home>/settings-changes.jsonl`.
    Repos and the board named in the repo layer count as allowed when the same
-   names are in `.claude/not-me/project.md` on origin/HEAD of the main checkout
+   names are in `.claude/not-me/project.md` at the commit `git ls-remote origin HEAD` reports
    (`writes.default_branch_names`), so setup's allow-repo step is only needed
    before the config merges. Restricted mode still guards `--project-dir` and
    `NOT_ME_HOME`.

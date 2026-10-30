@@ -271,24 +271,53 @@ def allowlist_list(home: Any, project: Optional[str] = None) -> List[Dict[str, s
 # --- the repo layer on the default branch ------------------------------------
 
 REPO_LAYER_PROJECT = ".claude/not-me/project.md"
-_ORIGIN_REF = "refs/remotes/origin/"
+_SHA = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
+REMOTE_TIMEOUT = 10  # seconds for `git ls-remote origin HEAD`
 
 
-def default_branch_names(project_dir: Any) -> Dict[str, FrozenSet[str]]:
+def _git(args: List[str], cwd: Any, timeout: float = 10) -> Optional[subprocess.CompletedProcess]:
+    """`git <args>` in cwd with no prompt for credentials; None when git cannot run or times out."""
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")
+    try:
+        return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=timeout,
+                              stdin=subprocess.DEVNULL, env=env)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def remote_default_sha(project_dir: Any) -> Optional[str]:
+    """The commit the origin remote's HEAD (its default branch) points at, asked of the remote itself: a read,
+    never a local ref the session could have moved. None when the remote cannot be asked."""
+    proc = _git(["ls-remote", "origin", "HEAD"], project_dir, timeout=REMOTE_TIMEOUT)
+    if proc is None or proc.returncode != 0:
+        return None
+    for line in proc.stdout.splitlines():
+        sha, _, name = line.partition("\t")
+        if name.strip() == "HEAD" and _SHA.match(sha.strip()):
+            return sha.strip()
+    return None
+
+
+def default_branch_names(project_dir: Any, sha_of: Any = remote_default_sha) -> Dict[str, FrozenSet[str]]:
     """The repos and board the repo layer names as committed on the default branch, lowercased by key: tracker,
-    repos (their names) and board ("owner/number"). The default branch is the commit refs/remotes/origin/HEAD
-    points at in project_dir's repository; the file is read from that commit, never from the working tree, so a
-    checked-out PR branch or an uncommitted edit adds nothing. A missing origin/HEAD, a missing file or one that
-    does not parse gives empty sets, so nothing extra counts."""
+    repos (their names) and board ("owner/number"). The default branch commit is the one the origin remote
+    reports for HEAD (sha_of, a read from the remote); the file is read from that exact commit, which must
+    already be in the local object store, never from the working tree or a local ref, so a checked-out PR
+    branch, an uncommitted edit or a moved local ref adds nothing. An unreachable remote, a commit not fetched
+    yet, a missing file or one that does not parse gives empty sets, so nothing extra counts."""
     out: Dict[str, FrozenSet[str]] = {"tracker": frozenset(), "repos": frozenset(), "board": frozenset()}
     if project_dir is None:
         return out
-    ref = paths.run_git(["symbolic-ref", "-q", "refs/remotes/origin/HEAD"], project_dir)
-    if not ref or not ref.startswith(_ORIGIN_REF) or len(ref) == len(_ORIGIN_REF):
+    sha = sha_of(project_dir)
+    if not sha or not _SHA.match(sha):
         return out
-    text = paths.run_git(["cat-file", "blob", f"{ref}:{REPO_LAYER_PROJECT}"], project_dir)
-    if not text:
+    have = _git(["cat-file", "-e", f"{sha}^{{commit}}"], project_dir)
+    if have is None or have.returncode != 0:
         return out
+    shown = _git(["cat-file", "blob", f"{sha}:{REPO_LAYER_PROJECT}"], project_dir)
+    if shown is None or shown.returncode != 0:
+        return out
+    text = shown.stdout
     try:
         meta, _ = frontmatter.parse(text, source=REPO_LAYER_PROJECT)
     except Exception:  # FrontmatterError or anything a hostile file provokes: nothing counts
@@ -328,8 +357,11 @@ class GuardContext:
             object.__setattr__(self, "dry_run", self.mode == "dry-run" or os.environ.get("NOT_ME_DRY_RUN") == "1")
 
     @classmethod
-    def from_config(cls, cfg: Any, origin_url: Optional[str] = None, checkout: Any = None) -> "GuardContext":
-        """Build from a loaded Config; origin_url overrides asking git (for tests)."""
+    def from_config(cls, cfg: Any, origin_url: Optional[str] = None, checkout: Any = None,
+                    default_branch: bool = True) -> "GuardContext":
+        """Build from a loaded Config; origin_url overrides asking git (for tests). default_branch False skips
+        asking the remote for the default branch (the hook: no network on a tool call; the names it would add
+        are only guided there anyway), so repo-layer names count only through the allow list."""
         meta = cfg.meta.get("project", {}) if getattr(cfg, "meta", None) else {}
         project_dir = Path(checkout) if checkout else cfg.project_dir
         if origin_url is None and project_dir is not None:
@@ -348,7 +380,8 @@ class GuardContext:
 
         def on_default_branch() -> Dict[str, Any]:
             if not merged:
-                merged.append(default_branch_names(getattr(cfg, "project_dir", None) or project_dir))
+                merged.append(default_branch_names(getattr(cfg, "project_dir", None) or project_dir)
+                              if default_branch else default_branch_names(None))
             return merged[0]
 
         def from_repo_layer(key: str) -> bool:
