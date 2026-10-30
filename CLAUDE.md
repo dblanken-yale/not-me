@@ -44,7 +44,9 @@ the owner's say-so, not a cleanup.
    name companion repos and a board, but the write gate trusts those only once
    the operator confirmed them in the global allow list. Reason: a PR branch
    or a compromised repo file must not be able to widen what the plugin may
-   touch. (`notme/layers.py` `tighten_only`, `notme/writes.py`.)
+   touch. (`notme/layers.py` `tighten_only`, `notme/writes.py`.) Since the
+   guard only guides writes to other repos (decision 3), the CLI's write gate
+   is what holds this line for runs.
 
 2. **Every GitHub write goes through one gated path.** `GhClient.write` →
    `writes.check_write`. Reads are an explicit allow-list; disguised
@@ -53,27 +55,39 @@ the owner's say-so, not a cleanup.
    Thread replies use REST and never resolve threads. Pushes send an explicit
    refspec, verify every push URL, and never force.
 
-3. **The guard is small and cannot be widened by the model.** Four rule groups
-   (other repo, protected branches, force push, destructive actions), each
-   relaxable only with `confirm_guard_off` in the same layer and never from the
-   repo layer. It keeps a short list (`docs/guards.md`): commits, merges,
-   rebases, cherry-picks, am and hard resets on a protected branch and pushes to
-   one; force pushes and remote deletes; git and gh writes to repos off the
-   allowed list and anything that changes where git pushes; GitHub settings,
-   secrets, rulesets, releases and deletions, `rm -rf .git`, `clean -x` and
-   forced deletes of a protected branch. Text it does not parse (a `bash -c`
-   body too deep, inline code, a script file, a command it cannot lex) is
-   allowed unless it holds one of a few words (`push`, `reset --hard`, a GitHub
-   secrets action, a protected path name and the like), then blocked under the first relevant rule
+3. **The guard guides; it hard-blocks only what breaks the process or cannot
+   be undone** (owner, 2026-10-30, dblanken-yale/not-me#141). Three hard rule
+   groups (protected branches, force push, destructive actions), each relaxable
+   only with `confirm_guard_off` in the same layer and never from the repo
+   layer. They keep a short list (`docs/guards.md`, with the audit table):
+   commits, merges, rebases, cherry-picks, am and hard resets on a protected
+   branch and pushes to one, including pushes whose target it cannot see and
+   API ref or contents writes to one; force pushes and remote deletes; GitHub
+   settings, secrets, rulesets, releases and deletions, `rm -rf .git`,
+   `clean -x` and forced deletes of a protected branch. Everything else is a
+   process rule in `references/prohibitions.md`: the guard lets the call run
+   and logs it to `guard.jsonl` as `guided`. Guided today: git and gh writes to
+   repos off the allowed list and changes to where git pushes (`other_repo`,
+   whose key also switches the CLI write gate's repo check), and repo-layer
+   config edits during a run (`process`). An issue or comment on another repo is fine when the
+   operator asked in the session, and always on the plugin's own repo; runs
+   stay on the project's repos through the CLI's write gate. MCP tools are not
+   judged at all. Text it does not parse (a `bash -c` body too deep, inline
+   code, a script file, a command it cannot lex) is allowed unless it holds one
+   of a few words (`push`, `reset --hard`, a GitHub secrets action, a protected
+   path name and the like), then blocked under the first relevant hard rule
    that is on. Self-protection is always on: the operator token, the live-mode
    epoch and marker and the allow list by path;
    `notme allow-repo add|remove`, `pause off` and `mode` other than show or
    dry-run as parsed commands in every invocation form; a pseudo-terminal or
-   detached wrapper around notme; the plugin's own files; the config during a
-   run. The inactive path is fork-free. Block messages name the exact
-   `/not-me:allow-repo owner/name` command. The guard does not follow `cd`, and
-   it is not the last line: GitHub rulesets on protected branches (no deletion,
-   no force push, PR required) are the backstop the docs recommend.
+   detached wrapper around notme (these change with dblanken-yale/not-me#118);
+   the plugin's own files; the global config during a run. Keywords in
+   interpreter code that starts no process and names no git, gh, notme or
+   GitHub API are guided, not blocked. The inactive path
+   is fork-free. Block messages say what to do next in the session and never
+   send the operator to a terminal. The guard does not follow `cd`, and it is
+   not the last line: GitHub rulesets on protected branches (no deletion, no
+   force push, PR required) are the backstop the docs recommend.
 
 4. **The CLI's trust anchor is the checkout it runs in.** Restricted mode is
    the default. It relaxes only when all of these hold: stdin is a terminal,

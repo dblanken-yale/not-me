@@ -72,6 +72,9 @@ UNDO change PAGE_SIZE in pager.py:12
    with the exact block message.
 3. A guard block is an our-side failure: follow "Failures on our side" below.
    The block message says to continue; in a not-me run, stop instead.
+4. A call the guard lets run and logs as `guided` is not a block. The process
+   rule behind it (`prohibitions.md`, "Process rules the guard logs, not blocks")
+   still applies: a run that breaks one logs a `WARN` naming the rule.
 
 ## Failures on our side
 

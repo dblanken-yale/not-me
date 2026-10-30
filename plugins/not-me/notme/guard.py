@@ -6,25 +6,35 @@ working directory (push URLs, current branch, aliases) lazily through
 context (`GuardContext.from_project`) and the inactive path start no
 processes: the checkout is found by walking up for `.git`.
 
-Outside a not-me project (`is_active` false) the four rule groups are off, but
+Outside a not-me project (`is_active` false) the rule groups are off, but
 self-protection still applies: the hook calls `ctx.self_only()`, which stubs
 git and config so nothing forks, and `decide` keeps only self_protect blocks.
 
-Rule groups, each switched by `guard.<rule>` in project.md:
-  other_repo          git and gh writes may only target allowed repos, and
-                      nothing may change where git pushes
+The guard guides runs to the right process and hard-blocks only what breaks
+the process or cannot be undone (dblanken-yale/not-me#141). Hard rule groups,
+each switched by `guard.<rule>` in project.md:
   protected_branches  no commits, merges, rebases, cherry-picks, am or hard
                       resets on a protected branch, and no pushes to one
   force_push          no history rewrites or remote branch deletion
   destructive_git     shown as "destructive": GitHub settings, secrets,
                       rulesets, releases and deletions, rm -rf .git, clean -x,
                       forced deletes of protected branches
+Guided rules (GUIDED) are found the same way but never block: `decide` records
+them in `ctx.guided` and the hook logs the first one to guard.jsonl with
+outcome "guided". The process rule each stands for lives in
+references/prohibitions.md:
+  other_repo          git and gh writes to repos off the allowed list, and
+                      changes to where git pushes (`guard.other_repo: off`
+                      stops the log lines, and lifts the CLI write gate's
+                      repo check too)
+  process             edits to the repo layer config while a run is active
+MCP tools are not judged at all.
 Self-protection is always on, in every directory: the operator token, the
 live-mode epoch and marker and the allow list (by
 file path), `notme allow-repo add|remove`, `notme pause off` and `notme mode`
 other than show or dry-run (as parsed commands), a pseudo-terminal or
-detached process around notme, the plugin's own files, and not-me config
-during a run. Live mode is signed: `mode: live` counts only next to a marker
+detached process around notme, the plugin's own files, and the global not-me
+config during a run. Live mode is signed: `mode: live` counts only next to a marker
 that `notme mode live` writes with the operator token, so no file edit can
 turn it on; the Edit/Write check on the global project.md is an early,
 friendly refusal, not the boundary. Merging pull requests is not the guard's
@@ -53,12 +63,14 @@ import glob
 import json
 import os
 import os as _host_os  # the real host: tests swap `os` for a simulated Windows view
+import posixpath
 import re
 import subprocess
 from dataclasses import dataclass, field
 from functools import cached_property, lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, Iterator, List, Mapping, Optional, Set, Tuple
+from urllib.parse import unquote
 
 from . import paths, redact, runlog, writes
 from .frontmatter import parse as parse_frontmatter  # stdlib only: no config stack
@@ -67,12 +79,16 @@ from .writes import parse_origin, valid_slug
 RULES = writes.GUARD_RULES
 RULE_LABEL = {"destructive_git": "destructive"}
 SELF = "self_protect"
+PROCESS = "process"  # a process rule with no config key: always guided, never blocked
+# found and logged as guided, never blocked: the process rule each stands for lives in references/prohibitions.md
+GUIDED = frozenset({"other_repo", PROCESS})
 OPAQUE = "opaque"  # cannot be parsed: reported under the first enabled rule in Block.rules
 
 ALLOWLIST_NAME = writes.ALLOWLIST_FILE
 BOARD_MARKER = "--not-me-board"
 ACTIVE_RUN_STALE_HOURS = 6
 CONFIG_HINT = ".claude/not-me/project.md"
+GLOBAL_CONFIG_HINT = "~/.claude/not-me/project.md"  # the repo layer cannot relax a rule; the global layer can
 PLUGIN_PROTECTED_DIRS = ("hooks", "bin", "notme", "cli", "skills")
 SCRIPT_READ_LIMIT = 1 << 20
 SCRIPT_SUFFIXES = (".sh", ".bash", ".zsh")
@@ -92,7 +108,7 @@ OPERATOR_TOKEN = "operator-token"  # the human-confirm token file under the glob
 # imports no more than it needs); only `notme mode live`, run by a person, writes it
 LIVE_MARKER_NAME = "mode-live.sig"
 LIVE_MARKER_WHY = "the live-mode marker is the operator's own signature"
-LIVE_HINT = "the operator runs /not-me:mode live in their own terminal"
+LIVE_HINT = "ask the operator to run /not-me:mode live"
 # the random epoch that keys the marker together with the token (humans.LIVE_EPOCH); it is replaced on every return
 # to dry-run, so the agent may neither read nor write it, exactly like the token
 LIVE_EPOCH_NAME = "mode-live.epoch"
@@ -124,11 +140,17 @@ _PROTECTION = re.compile(r"/branches/[^/]+/protection(/|$)")
 _SECRETS = re.compile(r"/(actions|dependabot|codespaces)/(secrets|variables)(/|$)"
                       r"|/environments/[^/]+/(secrets|variables)(/|$)")
 _RULESETS = re.compile(r"/rulesets(/|$)")
-_MCP_TOOL = re.compile(r"^mcp__.*github.*", re.IGNORECASE)
-_READ_MCP_PREFIX = re.compile(r"^(get|list|search)_[a-z0-9_]+$")
-_MCP_WRITE_WORDS = re.compile(
-    r"(^|_)(merge|create|update|delete|add|remove|set|write|push|run|rerun|dismiss|request|submit|assign|close|"
-    r"reopen|fork|edit|lock|unlock|cancel|enable|disable|trigger|mark|star|approve|comment|upload|transfer)(_|$)")
+# GraphQL mutations that delete or change settings or rulesets, matched as a field call (name, then "(") in a literal
+# mutation query, so the same words inside a comment body do not count
+_GQL_DESTRUCTIVE = re.compile(r"(?<![A-Za-z0-9_])(?:delete[A-Za-z0-9_]*|[A-Za-z0-9_]*(?:BranchProtectionRule|Ruleset)"
+                              r"|updateRepository|archiveRepository|unarchiveRepository|transferRepository"
+                              r"|updateEnterprise[A-Za-z0-9_]*|updateOrganization[A-Za-z0-9_]*)(?![A-Za-z0-9_])"
+                              r"(?=\s*\()", re.IGNORECASE)
+# GraphQL mutations that move a branch without a push: one can force it or land on a protected branch
+_GQL_REFS = re.compile(r"(?<![A-Za-z0-9_])(?:updateRefs?|createCommitOnBranch)(?![A-Za-z0-9_])(?=\s*\()",
+                       re.IGNORECASE)
+_GIT_REF_PATH = re.compile(r"^repos/[^/]+/[^/]+/git/refs/heads/(.+)$")
+_CONTENTS_PATH = re.compile(r"^repos/[^/]+/[^/]+/contents(/|$)")
 
 # Opaque text: what decoded text the guard does not parse may not hold, with the rules a match is reported under
 # (the first one that is on). Matched against every spelling _spellings makes. Every matcher is linear in the text:
@@ -167,8 +189,10 @@ _DANGER: Tuple[Tuple[Matcher, Tuple[str, ...]], ...] = (
                 r"(?![A-Za-z0-9_-])", re.IGNORECASE)), (_DG,)),
     (_found(re.compile(r"branch\s+(?:\S+\s+)?-[A-Za-z]*D")), (_DG,)),
     (_found(re.compile(r"clean\s+(?:\S+\s+)?-[A-Za-z]*[xX]")), (_DG,)),
-    (_then(re.compile(r"rm\s+-[A-Za-z]*[rR]"), re.compile(r"\.git(?![A-Za-z0-9_-])")), (_DG,)),
 )
+# rm -r of .git: the one opaque-text word that needs no git or gh command to do harm
+_RM_DOT_GIT = _then(re.compile(r"rm\s+-[A-Za-z]*[rR]"), re.compile(r"\.git(?![A-Za-z0-9_-])"))
+_DANGER += ((_RM_DOT_GIT, (_DG,)),)
 # protected path names: self-protection in any opaque text
 _SELF_TEXT = re.compile(r"operator-token|mode-live\.(?:sig|epoch)|allowed-repos\.json", re.IGNORECASE)
 # the not-me CLI's human switches, in text the guard does not parse that sits in the command itself (not in a
@@ -176,7 +200,11 @@ _SELF_TEXT = re.compile(r"operator-token|mode-live\.(?:sig|epoch)|allowed-repos\
 _NOTME_TEXT = re.compile(r"allow-repo[\s,]+(?!list(?![A-Za-z0-9_-]))[^\s,]"
                          r"|(?<![A-Za-z0-9_-])pause[\s,]+-*off(?![A-Za-z0-9_-])|(?<![A-Za-z0-9_-])mode[\s,]+live",
                          re.IGNORECASE)
-_OPAQUE_HINT = "run the git, gh or notme command directly, with every word spelled out, so the guard can check it"
+# interpreter code that starts a process or reaches the GitHub API (or may build a call to either): its words count
+_RUNS_SOMETHING = re.compile(r"system|exec|spawn|popen|subprocess|child_process|shell|command|process|eval|`|qx"
+                             r"|%x|run\s*\(|call\s*\(|import\s*\(|__import__|importlib|getattr|ctypes|fetch|request"
+                             r"|urlopen|http|socket|github", re.IGNORECASE)
+_OPAQUE_HINT ="run the git, gh or notme command directly, with every word spelled out, so the guard can check it"
 
 # Bash commands that cannot matter to any rule skip the full check (applied with quotes/backslashes removed).
 _PREFILTER = re.compile(
@@ -260,13 +288,14 @@ _GH_GROUPS = {"pr", "issue", "repo", "release", "label", "run", "workflow", "sec
 _GH_DESTRUCTIVE: Dict[str, Optional[Set[str]]] = {
     "secret": {"set", "delete", "remove"},
     "variable": {"set", "delete", "remove"},
-    "issue": {"delete", "transfer"},
+    "issue": {"delete"},
     "repo": {"edit", "delete", "rename", "archive", "unarchive"},
     "release": {"delete", "delete-asset"},
     "label": {"delete"},
     "workflow": {"disable"},
-    "ruleset": None,
+    "ruleset": None,  # every verb but the reads in _RULESET_READS
 }
+_RULESET_READS = {"list", "ls", "view", "check"}
 # gh api flags that take a value -> what the value is (None = ignored)
 _API_VALUE_FLAGS: Dict[str, Optional[str]] = {
     "-X": "method", "--method": "method", "-f": "field", "-F": "field", "--field": "field",
@@ -278,20 +307,9 @@ _XARGS_VALUE = {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a", "--max-args", "-
 _PARALLEL_VALUE = {"-j", "-S", "-P", "-I", "-a", "--jobs", "--sshlogin", "--arg-file"}
 _SUDO_VALUE = {"-u", "-g", "-C", "-D", "-h", "-p", "-U", "-r", "-t", "--user", "--group", "--chdir"}
 _FIND_EXEC = {"-exec", "-execdir", "-ok", "-okdir"}
-_READ_MCP = {
-    "get_me", "get_file_contents", "get_commit", "list_commits", "list_branches", "list_tags", "get_tag",
-    "list_releases", "get_latest_release", "get_release_by_tag", "get_issue", "get_issue_comments", "issue_read",
-    "list_issues", "search_issues", "list_issue_types", "list_sub_issues", "get_label", "list_label",
-    "get_pull_request", "get_pull_request_files", "get_pull_request_diff", "get_pull_request_status",
-    "get_pull_request_comments", "get_pull_request_reviews", "get_pull_request_review_comments",
-    "pull_request_read", "list_pull_requests", "search_pull_requests", "search_code", "search_repositories",
-    "search_users", "search_orgs", "list_workflows", "list_workflow_runs", "get_workflow_run",
-    "get_workflow_run_logs", "list_workflow_jobs", "get_job_logs", "list_workflow_run_artifacts",
-    "get_code_scanning_alert", "list_code_scanning_alerts", "get_secret_scanning_alert",
-    "list_secret_scanning_alerts", "get_dependabot_alert", "list_dependabot_alerts", "list_discussions",
-    "get_discussion", "get_discussion_comments", "list_discussion_categories", "list_notifications",
-    "get_notification_details",
-}
+# git subcommands whose target branch the guard must know: pointed at another repository's git dir, they block
+_BRANCH_WRITES = frozenset({"commit", "push", "merge", "rebase", "cherry-pick", "am", "reset", "branch", "clean",
+                            "send-pack", "subtree"})
 
 # --- results ---------------------------------------------------------------
 
@@ -874,10 +892,10 @@ _PARAM_OP = re.compile(r"^[#!]?[A-Za-z0-9_@*?$-]*?(?:\[[^\[\]]*\])?(?::?[-=+?]|#
 
 def needs_check(event: Mapping[str, Any]) -> bool:
     """False for calls no rule can care about (cheap, no processes): Bash commands that mention nothing the guard
-    judges, and MCP tools other than GitHub ones."""
+    judges, and every MCP tool (the operator decides which MCP tools to install and allow)."""
     tool = event.get("tool_name")
     if isinstance(tool, str) and tool.startswith("mcp__"):
-        return bool(_MCP_TOOL.match(tool))
+        return False
     if tool != "Bash":
         return True
     tin = event.get("tool_input")
@@ -972,6 +990,7 @@ class GuardContext:
         self.plugin_root = Path(plugin_root) if plugin_root else paths.plugin_root(self.env)
         self.git = git
         self.only_self = False
+        self.guided: List[Block] = []  # what the last decide() let through under a GUIDED rule, for the log
         if write_ctx is not None:
             self.__dict__["write_ctx"] = write_ctx  # shadows the cached property
 
@@ -1053,21 +1072,13 @@ def render(block: Block, ctx: GuardContext) -> str:
     label = RULE_LABEL.get(block.rule, block.rule)
     head = f"not-me guard [{label}]: blocked `{block.command}`"
     lines = [head + (f": targeting {block.target}." if block.target else ".")]
-    if block.suggest_allow and block.target:
-        t = block.target
-        allowed = ", ".join(sorted(ctx.allowed_repos)) or "nothing (no origin found)"
-        lines += [f"This repo ({ctx.origin_repo or 'unknown origin'}) may write only to: {allowed}.",
-                  f"If {t} is intended, the operator runs:  /not-me:allow-repo {t}",
-                  f"  (all projects: /not-me:allow-repo {t} --everywhere; team-wide: list it under repos "
-                  f"in {CONFIG_HINT}, then each operator confirms it once with /not-me:allow-repo {t})"]
-    else:
-        lines.append(f"Why: {block.reason}.")
-        if block.hint:
-            lines.append(f"Instead: {block.hint}.")
+    lines.append(f"Why: {block.reason}.")
+    if block.hint:
+        lines.append(f"Instead: {block.hint}.")
     lines.append("Autonomous runs: do not retry; log a QUESTION naming the operator and continue.")
     if block.rule in RULES and not block.no_relax:
         lines.append(f"Relax this rule (not recommended): set guard.{block.rule}: off and "
-                     f"confirm_guard_off: [{block.rule}] in {CONFIG_HINT}")
+                     f"confirm_guard_off: [{block.rule}] in {GLOBAL_CONFIG_HINT}")
     lines.append("See effective config: /not-me:config")
     return "\n".join(lines)
 
@@ -1101,27 +1112,34 @@ def _decide(event: Mapping[str, Any], ctx: GuardContext) -> Decision:
     if not isinstance(tool, str) or not isinstance(tin, dict):
         raise TypeError("tool_name must be a string and tool_input an object")
     cwd = str(event.get("cwd") or ctx.cwd)
+    ctx.guided = []
     if tool == "Bash":
         cands = _bash(str(tin.get("command") or ""), cwd, ctx)
     elif tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
         cands = _file(tool, str(tin.get("file_path") or tin.get("notebook_path") or ""), cwd, ctx, tin)
     elif tool in _READ_TOOLS:
         cands = _read_tool(tool, tin, cwd, ctx)
-    elif _MCP_TOOL.match(tool):
-        cands = _mcp(tool, tin, ctx)
     else:
-        return None
+        return None  # MCP and every other tool: not the guard's business
     for block in cands:
         if ctx.only_self and block.rule != SELF:
             continue
         if block.rule == OPAQUE:
             enabled = [r for r in (block.rules or RULES) if ctx.rules.get(r, True)]
-            if not enabled:
+            hard = [r for r in enabled if r not in GUIDED]
+            if not hard:
+                if enabled:  # only a guided rule is left: record it, keep looking for a hard block
+                    block.rule = enabled[0]
+                    block.tool = tool
+                    ctx.guided.append(block)
                 continue
-            block.rule = enabled[0]
+            block.rule = hard[0]
         elif block.rule != SELF and not ctx.rules.get(block.rule, True):
             continue
         block.tool = tool
+        if block.rule in GUIDED:
+            ctx.guided.append(block)
+            continue
         block.message = render(block, ctx)
         return block
     return None
@@ -1345,33 +1363,18 @@ def _file(tool: str, fpath: str, cwd: str, ctx: GuardContext, tin: Mapping[str, 
                   "describe the change in a QUESTION for the operator")
     if ctx.active_run:
         home = _norm(str(ctx.home), cwd)
-        if _under(full, _norm(str(ctx.config_dir), cwd)) or (_path.dirname(full) == home and full.endswith(".md")):
-            yield blk(SELF, "not-me config is read-only while a not-me run is active",
+        # the global layer can switch hard rules off, so it stays closed during a run; the repo layer can only
+        # tighten, so an edit there is guided (a run proposes config changes as a QUESTION instead)
+        if _path.dirname(full) == home and full.endswith(".md"):
+            yield blk(SELF, "the global not-me config is read-only while a not-me run is active",
                       "log a QUESTION proposing the config change for the operator")
+        elif _under(full, _norm(str(ctx.config_dir), cwd)):
+            yield blk(PROCESS, "a run edits the repo layer config while a not-me run is active")
     low = fpath.replace("\\", "/").lower()
     parts = low.split("/")
     if ".git" in parts or parts[-1] == ".gitconfig" or "/.config/git/" in low or low.startswith(".config/git/"):
         yield blk("other_repo", "git config and hooks can change where git pushes",
                   "change git settings by hand, outside the agent")
-
-
-def _mcp(tool: str, tin: Mapping[str, Any], ctx: GuardContext) -> Iterator[Block]:
-    """GitHub MCP tools: read-only names pass; anything else must name an allowed repo, and merging is a human
-    action. Other MCP tools are not judged."""
-    name = tool.split("__")[-1]
-    if name in _READ_MCP or (_READ_MCP_PREFIX.match(name) and not _MCP_WRITE_WORDS.search(name)):
-        return
-    blk = _blk(_short(tool))
-    owner, repo = tin.get("owner"), tin.get("repo")
-    if isinstance(owner, str) and owner and isinstance(repo, str) and repo:
-        target: Optional[str] = f"{owner}/{repo}"
-    else:
-        target = repo_slug(repo)
-    if target:
-        yield from _check_target(ctx, target, blk)
-    else:
-        yield _unknown_target(blk, "not a known read-only tool and names no owner/repo",
-                              "pass owner and repo naming an allowed repo")
 
 
 # --- Bash ----------------------------------------------------------------------
@@ -1446,23 +1449,39 @@ def _raw_variant(parsed: Parsed) -> Optional[Parsed]:
     return Parsed(commands, parsed.subs, parsed.code, parsed.funcdef)
 
 
-def _opaque(text: str, blk: Blk, what: str, inline: bool = True) -> Iterator[Block]:
+def _opaque(text: str, blk: Blk, what: str, inline: bool = True, code: bool = False) -> Iterator[Block]:
     """Text the guard does not parse: allowed unless a spelling of it names a protected path (or, when it sits in
     the command itself, a not-me switch), which is self-protection, or holds a word in _DANGER, which blocks under
-    the first of that word's rules that is on."""
+    the first of that word's rules that is on.
+
+    code: the text is interpreter code (python -c, node -e, a here-document fed to an interpreter). Code that
+    starts no process and names no git, gh, notme or GitHub API runs none of those commands, so a not-me switch or
+    a _DANGER word in it (a string it edits, say) is guided under PROCESS, not blocked (dblanken-yale/not-me#141).
+    rm -r .git and the protected path names still block. Shell text is always judged by its words."""
     spellings = _spellings(text)
-    for v in spellings:
-        m = _SELF_TEXT.search(v) or (_NOTME_TEXT.search(v) if inline else None)
-        if m:
+    inert = code and not any(has_gh_git(v) or _NOTME_WORD.search(v) or _RUNS_SOMETHING.search(v) for v in spellings)
+    guided: Optional[Block] = None  # yielded last, and only when nothing blocks
+    for pattern in (_SELF_TEXT, _NOTME_TEXT if inline else None):
+        m = next((m for m in (pattern.search(v) for v in spellings) if m), None) if pattern else None
+        if m is None:
+            continue
+        if pattern is _SELF_TEXT or not inert:
             yield blk(SELF, f"{what}, and it names {_short(m.group(0), 40)}, which only the operator may touch or run",
                       "ask the operator")
             return
+        guided = blk(PROCESS, f"{what}, and it holds `{_short(m.group(0), 40)}` but runs no notme command")
     for v in spellings:
         for match, rules in _DANGER:
             hit = match(v)
-            if hit:
+            if not hit:
+                continue
+            if not inert or match is _RM_DOT_GIT:
                 yield blk(OPAQUE, f"{what}, and it holds `{_short(hit, 40)}`", _OPAQUE_HINT, rules=rules)
                 return
+            guided = guided or blk(PROCESS, f"{what}, and it holds `{_short(hit, 40)}` but runs no git or gh "
+                                            "command")
+    if guided is not None:
+        yield guided
 
 
 def _body(text: str, st: _State, ctx: GuardContext, blk: Blk, what: str) -> Iterator[Block]:
@@ -1909,7 +1928,7 @@ def _around_notme(wrapper: str, t: List[str], st: _State, blk: Blk) -> Iterator[
     is given."""
     why = (f"{wrapper} would run notme in a pseudo-terminal or a detached process, which passes the not-me CLI's "
            "human check")
-    hint = "the operator runs this not-me step in their own terminal"
+    hint = "run notme directly, or ask the operator to run the matching /not-me command"
     if any(_NOTME_WORD.search(v) for v in (st.plain_raw, st.raw)):
         yield blk(SELF, why, hint)
         return
@@ -2061,7 +2080,7 @@ def _from_input(c: SimpleCommand, st: _State, ctx: GuardContext, blk: Blk, what:
     whole command's text to judge."""
     if c.bodies:
         for b in c.bodies:
-            yield from (_body(b, st, ctx, blk, what) if shell else _opaque(b, blk, what))
+            yield from (_body(b, st, ctx, blk, what) if shell else _opaque(b, blk, what, code=True))
         return
     files = [target for op, target in c.redirs if op == "<"]
     for f in files:
@@ -2128,7 +2147,7 @@ def _interp(prog: str, args: List[str], c: SimpleCommand, st: _State, ctx: Guard
         a in _INLINE_LONG or a.split("=", 1)[0] in _INLINE_LONG
         or (letters and a.startswith("-") and not a.startswith("--") and set(a[1:]) & set(letters)) for a in args)
     if inline:
-        yield from _opaque("\n".join([" ".join(args)] + c.bodies), blk, what)
+        yield from _opaque("\n".join([" ".join(args)] + c.bodies), blk, what, code=True)
         return
     takes_value = _INTERP_VALUE.get(family, set())
     i = 0
@@ -2255,9 +2274,14 @@ def _cmd_git(t, c, st, ctx, blk, depth: int = 0):
         return
     key = next((k for k in c_keys if _PUSH_KEY.match(k.lower())), None)
     if key is not None:
-        yield blk("other_repo", f"git -c {_short(key, 40)} can change where or what git pushes",
-                  "run git without it; ask the operator to change git config")
-        return
+        if sub == "push" or (sub and sub not in _GIT_BUILTINS):
+            # the push (or the alias it may hide) is judged from the repo config, not this -c: what it sends to which
+            # branch cannot be checked
+            yield blk("protected_branches", f"git -c {_short(key, 40)} changes what or where this push sends, so the "
+                                            "branch it pushes to cannot be checked",
+                      "run git push without -c and name the branch: git push origin <branch>")
+            return
+        yield blk("other_repo", f"git -c {_short(key, 40)} can change where or what git pushes")
     if sub and sub not in _GIT_BUILTINS:
         alias = st.once(("alias", d, sub), lambda: ctx.git(["config", "--get", f"alias.{sub}"], d))
         if alias:
@@ -2272,10 +2296,15 @@ def _cmd_git(t, c, st, ctx, blk, depth: int = 0):
     if redirect and sub in _GIT_RULES and sub not in ("checkout", "switch"):
         if var_redirect is not None:
             yield _var_path(blk, var_redirect)
-        else:
-            yield blk("other_repo", f"{redirect} changes which repository or config git uses",
-                      "run git without it, in the checkout it should change")
-        return
+            return
+        if sub in _BRANCH_WRITES and not _git_reads(sub, args):
+            # the branch this write lands on belongs to a repository the guard did not look at
+            yield blk("protected_branches", f"{redirect} points git at another repository or config, so the branch "
+                                            f"git {sub} changes cannot be checked",
+                      "run git without it, with `git -C /abs/path` naming the checkout")
+            return
+        # config, remote and submodule: guided, then judged below (a submodule foreach body still counts)
+        yield blk("other_repo", f"{redirect} changes which repository or config git uses")
     handler = _GIT_RULES.get(sub)
     if handler is not None:
         for b in handler(_GitCall(ctx, st, blk, d, sub, args)):
@@ -2392,12 +2421,13 @@ def _git_switch(c: _GitCall) -> Iterator[Block]:
 
 
 def _git_send_pack(c: _GitCall) -> Iterator[Block]:
-    yield c.blk("other_repo", "git send-pack cannot be checked", "use git push")
+    yield c.blk("protected_branches", "git send-pack sends refs the guard cannot check", "use git push")
 
 
 def _git_subtree(c: _GitCall) -> Iterator[Block]:
     if "push" in c.args:
-        yield c.blk("other_repo", "git subtree push cannot be checked", "push the subtree repo from its own checkout")
+        yield c.blk("protected_branches", "the branch git subtree push lands on cannot be checked",
+                    "push the subtree repo from its own checkout")
 
 
 def _git_commit(c: _GitCall) -> Iterator[Block]:
@@ -2613,7 +2643,8 @@ def _git_push(c: _GitCall) -> Iterator[Block]:
         yield blk("protected_branches", "git push --all would push protected branches", "push one feature branch")
     if recurse or (_git_config(ctx, st, d, "push.recurseSubmodules") or "").strip().lower() not in (
             "", "no", "check", "false"):
-        yield blk("other_repo", "this push also pushes submodule repos", "push without recursing into submodules")
+        yield blk("protected_branches", "this push also pushes submodule repos, whose branches the guard cannot "
+                                        "check", "push without recursing into submodules")
     current = _branch(ctx, st, d)
     for r in refspecs or [""]:
         if _unresolved(r):
@@ -2697,7 +2728,8 @@ def _cmd_gh(t, c, st, ctx, blk):
 def _gh_write(t: List[str], ctx: GuardContext, blk: Blk) -> Iterator[Block]:
     group, verb = t[1], (t[2] if len(t) > 2 else "")
     what = f"gh {group} {verb}".strip()
-    if group in _GH_DESTRUCTIVE and (_GH_DESTRUCTIVE[group] is None or verb in _GH_DESTRUCTIVE[group]):
+    verbs = _GH_DESTRUCTIVE.get(group, set())
+    if (verbs is None and not (group == "ruleset" and verb in _RULESET_READS)) or (verbs and verb in verbs):
         yield blk("destructive_git", f"{what} changes settings, secrets or deletes data; that is a human action",
                   "ask the operator to do this by hand")
     if group == "pr" and verb in ("merge", "close") and any(
@@ -2779,28 +2811,48 @@ def _gh_api(t: List[str], seg: str, st: _State, ctx: GuardContext, blk: Blk) -> 
     if ep == "graphql":
         queries = [f.split("=", 1)[1] for f in fields if f.split("=", 1)[0] == "query" and "=" in f]
         if inputs or len(queries) != 1 or _unresolved(queries[0]) or queries[0].startswith("@"):
-            yield blk("other_repo", "gh api graphql without one literal query cannot be checked",
-                      "pass the query inline with -f query='...'")
+            # a query the guard cannot read may be a mutation that deletes or changes settings
+            b = blk("destructive_git", "gh api graphql without one literal query cannot be checked, and a mutation "
+                                       "can delete data or change settings", "pass the query inline with -f query='...'")
+            b.no_relax = True
+            yield b
+            return
+        query = queries[0]
+        hit = _GQL_DESTRUCTIVE.search(query) if mutation else None
+        if hit:
+            yield blk("destructive_git", f"gh api graphql {hit.group(0)}: settings, rulesets and deletion are human "
+                                         "actions", "ask the operator to do this on GitHub")
+            return
+        hit = _GQL_REFS.search(query) if mutation else None
+        if hit:
+            yield blk("protected_branches", f"gh api graphql {hit.group(0)} moves a branch without a push, so the "
+                                            "branch it changes cannot be checked",
+                      "commit on a feature branch and git push origin <branch>")
             return
         atfile = any("@" in f for f in fields)
-        if (mutation or atfile or inputs) and BOARD_MARKER not in seg:
-            why = "a mutation" if mutation else ("an @file field" if atfile else "--input")
-            yield blk("other_repo", f"gh api graphql with {why} cannot be checked",
-                      "use gh pr/issue commands with --repo, or the REST API under repos/owner/name")
+        if (mutation or atfile) and BOARD_MARKER not in seg:
+            why = "a mutation" if mutation else "an @file field"
+            yield blk("other_repo", f"gh api graphql with {why} names no repo the guard can check")
         return
     method = (values["method"][-1] if values["method"] else ("POST" if fields or inputs else "GET")).upper()
     if method in ("GET", "HEAD"):
         return
+    # dot segments and encoded separators: judge the path as GitHub would resolve it, too
+    plain = posixpath.normpath(unquote(ep).replace("\\", "/")).lstrip("/") if ep else ep
+    forms = (ep, plain)
+    m = _REPO_PATH.match(plain)
+    repo_root = bool(m) and not plain[m.end():].strip("/")
+    if method == "DELETE" or (repo_root and method == "PATCH") or any(
+            p.search(f) for p in (_PROTECTION, _SECRETS, _RULESETS) for f in forms):
+        yield blk("destructive_git", f"gh api {method} {ep}: settings, secrets and deletion are human actions",
+                  "ask the operator to do this on GitHub")
+        return
+    yield from _api_branch_writes(method, plain, fields, inputs, ctx, blk)
     if ".." in ep or "//" in ep or "\\" in ep or re.search(r"%(?:2e|2f|5c)", ep, re.I):
         yield blk("other_repo", f"gh api {method} {_short(ep, 60)}: dot segments or encoded separators can reach "
-                                "another repo", "spell out repos/owner/name/... plainly")
+                                "another repo")
         return
     m = _REPO_PATH.match(ep)
-    repo_root = bool(m) and not ep[m.end():].strip("/")
-    if method == "DELETE" or (repo_root and method == "PATCH") or _PROTECTION.search(ep) or _SECRETS.search(ep) \
-            or _RULESETS.search(ep):
-        yield blk("destructive_git", f"gh api {method} {ep}: settings, secrets and deletion are human actions",
-                  "ask the operator to do this by hand")
     if not m:
         yield _unknown_target(blk, f"gh api {method} {ep or '(no endpoint)'}",
                               "use an endpoint under repos/owner/name for an allowed repo")
@@ -2811,6 +2863,30 @@ def _gh_api(t: List[str], seg: str, st: _State, ctx: GuardContext, blk: Blk) -> 
                   f"spell out repos/{ctx.origin_repo or 'owner/name'}")
         return
     yield from _check_target(ctx, repo, blk)
+
+
+def _api_branch_writes(method: str, ep: str, fields: List[str], inputs: List[str], ctx: GuardContext,
+                       blk: Blk) -> Iterator[Block]:
+    """REST writes that move a branch without a push: a ref update (which can force) and a contents write (a commit
+    on the branch it names, or on the default branch when it names none)."""
+    values = {k.lower(): v for k, _, v in (f.partition("=") for f in fields)}
+    ref = _GIT_REF_PATH.match(ep)
+    if ref and method in ("PATCH", "POST", "PUT"):
+        if inputs:
+            yield blk("protected_branches", f"gh api {method} {ep} with --input cannot be checked",
+                      "pass the fields with -f/-F so the guard can read them")
+        elif values.get("force", "").lower() not in ("", "false", "0"):
+            yield blk("force_push", "a forced ref update rewrites published history",
+                      "push new commits on top instead; ask the operator if a rewrite is really needed")
+        elif ref.group(1).strip("/") in ctx.protected_branches:
+            yield blk("protected_branches", f"updates to the protected branch {ref.group(1)} are not allowed",
+                      "push a feature branch and open a pull request")
+    if _CONTENTS_PATH.match(ep) and method in ("PUT", "POST", "PATCH"):
+        branch = values.get("branch", "")
+        if inputs or not branch or _unresolved(branch) or branch in ctx.protected_branches:
+            yield blk("protected_branches", f"gh api {method} {ep} commits to "
+                                            f"{branch or 'the default branch'}, which may be protected",
+                      "commit on a feature branch and git push origin <branch>, or pass -f branch=<feature branch>")
 
 
 _COMMANDS: Dict[str, Callable[..., Iterator[Block]]] = {
@@ -2981,9 +3057,10 @@ def _logged_input(ctx: GuardContext, block: Block, tool_input: Any) -> Optional[
     return text[:LOG_INPUT_MAX] + LOG_TRUNCATED
 
 
-def log_block(ctx: GuardContext, block: Block, tool_input: Any = None) -> None:
-    """Append the block to the guard log in the default run-log root (none outside git), with the blocked input
-    (the Bash command or the tool's path, else its arguments without bodies) redacted and capped."""
+def log_block(ctx: GuardContext, block: Block, tool_input: Any = None, outcome: str = "blocked") -> None:
+    """Append the block (outcome "blocked") or a guided call that ran (outcome "guided") to the guard log in the
+    default run-log root (none outside git), with the input (the Bash command or the tool's path, else its
+    arguments without bodies) redacted and capped."""
     root = log_root(ctx.common_dir)
     if root is None:
         return
@@ -2992,7 +3069,8 @@ def log_block(ctx: GuardContext, block: Block, tool_input: Any = None) -> None:
     except Exception:  # noqa: BLE001 - logging never changes the decision
         shown = None
     runlog.guard_log_append(runlog.guard_log_path(root), {
-        "tool": block.tool, "rule": block.rule, "reason": block.reason, "target": block.target, "input": shown})
+        "outcome": outcome, "tool": block.tool, "rule": block.rule, "reason": block.reason, "target": block.target,
+        "input": shown})
 
 
 # Variables a Windows child process needs to start at all: Python before 3.11 cannot seed its hash randomisation

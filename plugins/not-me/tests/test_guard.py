@@ -62,8 +62,10 @@ class GuardTableTests(_Fixtures):
                         ctxs[variant].self_only()  # as the hook does
                 ctx = ctxs[variant]
                 result = guard.decide(gc.event_for(case, self.root), ctx)
-                self.assertEqual("block" if isinstance(result, Block) else "allow", want,
-                                 getattr(result, "message", ""))
+                got = "block" if isinstance(result, Block) else ("guide" if ctx.guided else "allow")
+                self.assertEqual(got, want, getattr(result, "message", ""))
+                if want == "guide":
+                    self.assertEqual(ctx.guided[0].rule, rule)
                 if isinstance(result, Block):
                     self.assertEqual(result.rule, rule)
                     for text in gc.MESSAGE_CHECKS.get(cid, []):
@@ -126,8 +128,8 @@ class WindowsTypedPathTableTests(_Fixtures):
             for form, typed in forms:
                 with self.subTest(cid=cid, form=form, input=typed, variant=variant):
                     result = self.decide(variant, tool, typed)
-                    self.assertEqual("block" if isinstance(result, Block) else "allow", want,
-                                     getattr(result, "message", ""))
+                    self.assertEqual("block" if isinstance(result, Block) else "allow",
+                                     "allow" if want == "guide" else want, getattr(result, "message", ""))
                     if isinstance(result, Block):
                         self.assertEqual(result.rule, rule)
         self.assertGreater(checked, 100)
@@ -405,7 +407,7 @@ class TokenizerTests(unittest.TestCase):
                     "cp -r C:\\Users\\op\\homes\\h0 backup"):  # only backslashes: a Windows path
             self.assertTrue(bash(cmd), cmd)
         self.assertTrue(guard.needs_check({"tool_name": "Write", "tool_input": {"file_path": "x"}}))
-        self.assertTrue(guard.needs_check({"tool_name": "mcp__github__create_issue", "tool_input": {}}))
+        self.assertFalse(guard.needs_check({"tool_name": "mcp__github__create_issue", "tool_input": {}}))
         self.assertFalse(guard.needs_check({"tool_name": "mcp__terminal__run_in_terminal", "tool_input": {}}))
 
 
@@ -464,11 +466,14 @@ class WindowsPathTests(unittest.TestCase):
         return guard.decide({"tool_name": tool, "tool_input": tin, "cwd": cwd}, self.ctx)
 
     def test_file_self_protection(self):
-        for path in ("c:/work/app/.claude/not-me/project.md", "C:\\Plugins\\NOT-ME\\hooks\\repo_guard.py",
+        for path in ("c:/users/op/.claude/NOT-ME/standards.md", "C:\\Plugins\\NOT-ME\\hooks\\repo_guard.py",
                      "C:/Users/OP/.claude/not-me/allowed-repos.json"):
             with self.subTest(path=path):
                 self.assertEqual(self.decide("Edit", {"file_path": path}).rule, "self_protect")
         self.assertIsNone(self.decide("Edit", {"file_path": "C:/Work/App/src/main.py"}))
+        # the repo layer can only tighten: an edit during a run is guided, and found under any spelling
+        self.assertIsNone(self.decide("Edit", {"file_path": "c:/work/app/.claude/not-me/project.md"}))
+        self.assertEqual([b.rule for b in self.ctx.guided], ["process"])
 
     def test_norm_and_under_compare_whole_components(self):
         norm = guard._norm
@@ -498,22 +503,22 @@ class MessageTests(unittest.TestCase):
         return GuardContext(write_ctx=writes.GuardContext(origin_repo="acme/app", allowed_repos=("acme/app", "acme/web"),
                                                           protected_branches=("main",)))
 
-    def test_allow_suggestion(self):
-        b = Block("other_repo", "acme/other is not an allowed repo", target="acme/other", command="gh pr comment 1",
-                  suggest_allow=True)
+    def test_message_shape(self):
+        b = Block("force_push", "force pushes rewrite published history", target="acme/other",
+                  command="git push -f", hint="push new commits on top instead")
         msg = guard.render(b, self.ctx())
-        self.assertTrue(msg.startswith("not-me guard [other_repo]: blocked `gh pr comment 1`: targeting acme/other."))
-        self.assertIn("This repo (acme/app) may write only to: acme/app, acme/web.", msg)
-        self.assertIn("the operator runs:  /not-me:allow-repo acme/other\n", msg)
-        self.assertIn("(all projects: /not-me:allow-repo acme/other --everywhere; team-wide: list it under repos "
-                      "in .claude/not-me/project.md, then each operator confirms it once with "
-                      "/not-me:allow-repo acme/other)", msg)
+        self.assertTrue(msg.startswith("not-me guard [force_push]: blocked `git push -f`: targeting acme/other."))
+        self.assertIn("Why: force pushes rewrite published history.", msg)
+        self.assertIn("Instead: push new commits on top instead.", msg)
         self.assertIn("Autonomous runs: do not retry; log a QUESTION naming the operator and continue.", msg)
-        self.assertIn("set guard.other_repo: off and confirm_guard_off: [other_repo]", msg)
+        # the repo layer cannot relax a rule, so the message names the global layer
+        self.assertIn("set guard.force_push: off and confirm_guard_off: [force_push] in ~/.claude/not-me/project.md",
+                      msg)
+        self.assertNotIn("allow-repo", msg)
         self.assertTrue(msg.endswith("See effective config: /not-me:config"))
 
     def test_unresolvable_gives_fix_not_allow(self):
-        b = Block("other_repo", "gh/git inside $(...) cannot be checked", command="echo",
+        b = Block("protected_branches", "gh/git inside $(...) cannot be checked", command="echo",
                   hint="run gh/git directly, not inside $(...)")
         msg = guard.render(b, self.ctx())
         self.assertNotIn("allow-repo", msg)
@@ -537,7 +542,7 @@ class MessageTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 r = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": "."}, ctx)
                 self.assertIsInstance(r, Block)
-                self.assertEqual(r.rule, "other_repo")
+                self.assertEqual(r.rule, "protected_branches")  # other_repo is guided: the unknown branch blocks
                 self.assertIn(f"Why: the guard does not expand shell variables in a `git {opt}` path.", r.message)
                 if opt == "-C":
                     self.assertIn("Instead: write the path out in full (`git -C /abs/path <sub> ...`); a rewritten "
@@ -548,10 +553,11 @@ class MessageTests(unittest.TestCase):
                                   r.message)
                 self.assertNotIn("Relax this rule", r.message)
                 self.assertNotIn("no github origin", r.message)
+        # a literal path to a checkout with no github origin is guided, not blocked
         r = guard.decide({"tool_name": "Bash", "tool_input": {"command": "git -C /nowhere commit -m x"}, "cwd": "."},
                          ctx)
-        self.assertIn("no github origin", r.message)
-        self.assertIn("Relax this rule (not recommended): set guard.other_repo: off", r.message)
+        self.assertIsNone(r)
+        self.assertIn("no github origin", ctx.guided[0].reason)
         # with other_repo off the unknown path is still a possible protected branch; with both off it passes
         def off(*names: str) -> GuardContext:
             c = GuardContext(write_ctx=writes.GuardContext(
@@ -570,11 +576,14 @@ class MessageTests(unittest.TestCase):
     def test_decide_fills_message_and_tool(self):
         ctx = self.ctx()
         ctx.git = lambda args, cwd: None
-        r = guard.decide({"tool_name": "Bash", "tool_input": {"command": "gh pr comment 1 -R acme/other -b x"},
+        r = guard.decide({"tool_name": "Bash", "tool_input": {"command": "gh repo delete acme/other --yes"},
                           "cwd": "."}, ctx)
         self.assertIsInstance(r, Block)
-        self.assertEqual((r.tool, r.target), ("Bash", "acme/other"))
-        self.assertIn("/not-me:allow-repo acme/other", r.message)
+        self.assertEqual((r.tool, r.rule), ("Bash", "destructive_git"))
+        self.assertIn("not-me guard [destructive]", r.message)
+        self.assertIsNone(guard.decide({"tool_name": "Bash", "tool_input": {"command": "gh pr comment 1 -R acme/o -b x"},
+                                        "cwd": "."}, ctx))
+        self.assertEqual([(g.tool, g.target) for g in ctx.guided], [("Bash", "acme/o")])
         self.assertIsNone(guard.decide({"tool_name": "Glob", "tool_input": {}}, ctx))
         with self.assertRaises(TypeError):
             guard.decide({"tool_name": "Bash", "tool_input": "x"}, ctx)
@@ -591,7 +600,8 @@ class BlocklogTests(unittest.TestCase):
         self.assertEqual(runlog.guard_log_path(guard.log_root(d)), p)
         rows = [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines()]
         self.assertEqual([r["rule"] for r in rows], ["force_push", "other_repo"])
-        self.assertEqual(set(rows[1]), {"ts", "tool", "rule", "reason", "target", "input"})
+        self.assertEqual(set(rows[1]), {"ts", "outcome", "tool", "rule", "reason", "target", "input"})
+        self.assertEqual(rows[1]["outcome"], "blocked")
         self.assertEqual((rows[1]["tool"], rows[1]["target"]), ("Write", "acme/x"))
         self.assertIsNone(rows[1]["input"])
         self.assertTrue(rows[0]["ts"].endswith("Z"))
@@ -910,13 +920,13 @@ class HookTests(_Fixtures):
         return json.dumps({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tin, "cwd": str(cwd)})
 
     def test_block_logs_and_exits_2(self):
-        proc = self.hook(self.event("Bash", {"command": "gh pr comment 1 -R acme/other -b x"}))
+        proc = self.hook(self.event("Bash", {"command": "git push --force origin feature/x"}))
         self.assertEqual(proc.returncode, 2)
-        self.assertIn(b"/not-me:allow-repo acme/other", proc.stderr)
+        self.assertIn(b"not-me guard [force_push]", proc.stderr)
         log = self.root / "app" / ".git" / "not-me" / "logs" / "guard.jsonl"
         row = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
-        self.assertEqual(row["target"], "acme/other")
-        self.assertEqual(row["input"], "gh pr comment 1 -R acme/other -b x")
+        self.assertEqual((row["outcome"], row["rule"]), ("blocked", "force_push"))
+        self.assertEqual(row["input"], "git push --force origin feature/x")
 
     def test_allow_and_inactive(self):
         self.assertEqual(self.hook(self.event("Bash", {"command": "git status"})).returncode, 0)
@@ -972,7 +982,7 @@ class HooksJsonTests(unittest.TestCase):
         data = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
         entry = data["hooks"]["PreToolUse"][0]
         self.assertEqual(entry["matcher"],
-                         "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|NotebookRead|Grep|Glob|LS|mcp__.*")
+                         "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|NotebookRead|Grep|Glob|LS")
         hook = entry["hooks"][0]
         self.assertEqual((hook["type"], hook["timeout"]), ("command", 10))
         self.assertIn('bin/notme-python" "${CLAUDE_PLUGIN_ROOT}/hooks/repo_guard.py"', hook["command"])
@@ -1006,6 +1016,102 @@ class InterpreterPrefilterTests(unittest.TestCase):
                     event = {"tool_name": "Bash", "tool_input": {"command": f"{spelled} x.txt"}}
                     self.assertTrue(guard.needs_check(event))
         self.assertTrue(re.search(r"\(\?i:", guard._PREFILTER.pattern))
+
+
+class GuideNotBlockTests(_Fixtures):
+    """dblanken-yale/not-me#141: the guard hard-blocks only what breaks the process or cannot be undone. A guided
+    call (other_repo, process) runs and leaves a guard log line marked guided."""
+
+    def decide(self, cmd, variant="app"):
+        ctx = self.ctx(variant)
+        cwd, _ = gc.variant_paths(self.root, variant)
+        result = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(cwd)}, ctx)
+        return result, ctx
+
+    def test_writes_to_another_repo_are_guided(self):
+        for cmd in ("gh issue create --repo dblanken-yale/not-me --title x --body-file b.md",
+                    "gh issue comment 5 --repo acme/other --body-file b.md",
+                    "gh pr comment 5 --repo acme/other --body hi", "gh pr create --title x --body y",
+                    "git push https://github.com/acme/lib.git HEAD", "git remote set-url origin " + gc.GH + "acme/lib"):
+            with self.subTest(cmd=cmd):
+                result, ctx = self.decide(cmd)
+                self.assertIsNone(result, getattr(result, "message", ""))
+                self.assertEqual([b.rule for b in ctx.guided][:1], ["other_repo"])
+
+    def test_off_rule_is_neither_blocked_nor_guided(self):
+        result, ctx = self.decide("gh pr comment 5 --repo acme/other --body hi", "off")
+        self.assertIsNone(result)
+        self.assertEqual(ctx.guided, [])
+
+    def test_hard_blocks_stay(self):
+        for cmd, rule in (("git push --force origin feature/x", "force_push"),
+                          ("git push origin HEAD:main", "protected_branches"),
+                          ("git push https://github.com/acme/lib.git HEAD:main", "protected_branches"),
+                          ("gh repo delete acme/other --yes", "destructive_git"),
+                          ("gh secret set T --repo acme/other --body x", "destructive_git"),
+                          ("gh api -X DELETE repos/acme/lib/git/refs/heads/x", "destructive_git"),
+                          ("gh api -X DELETE repos/acme/app/../../acme/lib/labels/x", "destructive_git"),
+                          ("gh api -X PUT repos/acme/a/b/../../app/branches/main/protection --input p.json",
+                           "destructive_git"),
+                          ('gh api graphql -f query="mutation { deleteRef(input:{refId:1}) { clientMutationId } }"',
+                           "destructive_git"),
+                          ('gh api graphql -f query="mutation { updateRefs(input:{}) { clientMutationId } }"',
+                           "protected_branches"),
+                          ("gh api graphql -F query=@q.graphql", "destructive_git"),
+                          ("gh api -X PATCH repos/acme/lib/git/refs/heads/main -F sha=1", "protected_branches"),
+                          ("gh api -X PATCH repos/acme/lib/git/refs/heads/x -F force=true", "force_push"),
+                          ("git -c remote.origin.push=refs/heads/x:refs/heads/main push", "protected_branches"),
+                          ("GIT_DIR=" + str(self.root / "other" / ".git") + " git commit -m x", "protected_branches"),
+                          ("git send-pack https://github.com/acme/other main", "protected_branches")):
+            with self.subTest(cmd=cmd):
+                result, _ = self.decide(cmd)
+                self.assertIsInstance(result, Block)
+                self.assertEqual(result.rule, rule)
+
+    def test_graphql_board_and_comment_mutations_are_guided(self):
+        result, ctx = self.decide('gh api graphql -f query="mutation { addComment(input:{}) { clientMutationId } }"')
+        self.assertIsNone(result)
+        self.assertEqual([b.rule for b in ctx.guided][:1], ["other_repo"])
+
+    def test_gh_ruleset_reads_pass(self):
+        for cmd in ("gh ruleset view 1 --repo acme/app", "gh ruleset list --repo acme/app"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.decide(cmd)[0])
+
+    def test_repo_config_edit_during_a_run_is_guided(self):
+        ctx = self.ctx("running")
+        cwd, _ = gc.variant_paths(self.root, "running")
+        path = str(cwd / ".claude" / "not-me" / "project.md")
+        result = guard.decide({"tool_name": "Write", "tool_input": {"file_path": path, "content": "x"},
+                               "cwd": str(cwd)}, ctx)
+        self.assertIsNone(result)
+        self.assertEqual([b.rule for b in ctx.guided], ["process"])
+
+    def test_mcp_tools_are_not_judged(self):
+        for tool in ("mcp__github__add_issue_comment", "mcp__github__merge_pull_request", "mcp__x__delete_repo"):
+            with self.subTest(tool=tool):
+                self.assertFalse(guard.needs_check({"tool_name": tool, "tool_input": {"owner": "a", "repo": "b"}}))
+                self.assertIsNone(guard.decide({"tool_name": tool, "tool_input": {"owner": "a", "repo": "b"}},
+                                               self.ctx()))
+
+    def test_hook_logs_a_guided_call_and_allows_it(self):
+        log = self.root / "app" / ".git" / "not-me" / "logs" / "guard.jsonl"
+        before = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+        cwd, _ = gc.variant_paths(self.root, "app")
+        proc = self.hook(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": str(cwd),
+                                     "tool_input": {"command": "gh issue comment 1 -R acme/other -b x"}}))
+        self.assertEqual((proc.returncode, proc.stderr), (0, b""))
+        rows = [json.loads(x) for x in log.read_text(encoding="utf-8").splitlines()[len(before):]]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["outcome"], rows[0]["rule"], rows[0]["target"]), ("guided", "other_repo",
+                                                                                  "acme/other"))
+        self.assertEqual(rows[0]["input"], "gh issue comment 1 -R acme/other -b x")
+
+    def test_no_block_message_sends_the_operator_to_a_terminal(self):
+        import re
+        src = (PLUGIN_ROOT / "notme" / "guard.py").read_text(encoding="utf-8")
+        hits = [ln for ln in src.splitlines() if re.search(r"own terminal|terminal\"|plugins/cache", ln)]
+        self.assertEqual(hits, [])
 
 
 class OwnScriptsTests(unittest.TestCase):

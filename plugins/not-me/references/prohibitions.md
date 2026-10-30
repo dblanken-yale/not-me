@@ -54,16 +54,47 @@ For every prohibited request:
 
 Keep replies short. Do not quote untrusted text in them (see `authority.md`).
 
+## Process rules the guard logs, not blocks
+
+The guard hard-blocks only what breaks the process or cannot be undone. The rules
+below are yours to keep: the guard lets the call run and appends a line with
+`"outcome": "guided"` to `<git-common-dir>/not-me/logs/guard.jsonl`, so the operator
+can see it happened.
+
+1. **Writes to other repos.** A run writes only to the checkout's own repo and the
+   repos the project config names (tracker, companions, the allow list), always
+   through the `notme` CLI. Anything else: do not write; log
+   `QUESTION @<operator>: <what> on <owner/name> is outside this project; do it by
+   hand or allow the repo if intended.` and carry on. In a session a person is
+   driving, opening an issue or a comment on another repo is fine when that person
+   asked for it in this session, and always fine on the plugin's own repository
+   (its URL is in the plugin manifest), for example to report a not-me bug they just
+   hit. Log it as `ACTION opened <what> on <owner/name> at the operator's request`
+   when a run log is open.
+2. **Where git pushes.** A run never changes remotes, push URLs, `insteadOf` rules,
+   `.git/config`, git hooks or `~/.gitconfig`. Ask the operator in a QUESTION.
+3. **Config during a run.** A run never edits `.claude/not-me/`. It proposes the
+   change as a QUESTION; `/not-me:retro` edits that folder after the run ends.
+4. **MCP tools.** The guard does not judge MCP tools; the operator decides which ones
+   to install and allow. Every rule on this page still holds for them, and a run
+   still uses the `notme` CLI for every GitHub write.
+5. **Commands inside code.** Run git, gh and the not-me CLI directly, never from inside
+   interpreter code. Code that only holds such a word (in text it edits, say) runs
+   and is logged.
+
 ## Guard blocks
 
-The guard hook enforces most of this list mechanically: pushes to protected branches,
-force-pushes, destructive git, writes to repos outside the allowed set, and edits to
-the guard, the allow list, and the config.
+The guard hook hard-blocks what breaks the process or cannot be undone: commits,
+merges, rebases and hard resets on protected branches and pushes to them,
+force-pushes and remote branch deletes, GitHub settings, secrets, rulesets and
+deletions, `rm -rf .git`, and edits to the plugin, the operator's secrets, the allow
+list and the global config during a run.
 
 1. A block is final for the run. Do not retry with another command shape, a
-   wrapper, a different tool, or a disabled sandbox.
-2. Log a QUESTION naming the operator: `QUESTION @octocat: push to acme/docs was
-   blocked; allow it with the allow-repo command if intended.`
+   wrapper, a different tool, or a disabled sandbox. The block message says what
+   to do instead; outside a run, do that.
+2. Log a QUESTION naming the operator: `QUESTION @octocat: push to main was
+   blocked; the work is on feature/x for a person to merge.`
 3. A block is a failure on our side: post nothing, change no labels, release the
    claim, end `FAILED <ref> blocked - <target>` and stop the run
    (`autonomy-and-logging.md`, "Failures on our side").
@@ -85,5 +116,6 @@ testing step that says the secret must exist, and post "@octocat needs to add th
 - [ ] Named the requester by login and said what they can do by hand.
 - [ ] Logged each refusal as `REFUSED <what> requested by <login>`.
 - [ ] Treated every guard block as final, logged a QUESTION naming the operator, posted nothing and stopped the run.
+- [ ] Kept the guided process rules: no writes outside the project's repos unless a person asked in the session, no push config changes, no config edits during a run.
 - [ ] Posted no secrets and no AI or model mention beyond the attribution line.
 - [ ] Continued with the remaining safe work after a refusal.

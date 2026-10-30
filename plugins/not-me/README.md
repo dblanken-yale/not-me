@@ -2,7 +2,7 @@
 
 not-me is a project-agnostic autonomous dev loop for Claude Code, shipped as a plugin and marketplace. It picks up ready GitHub issues, implements them, opens PRs, reworks PRs after review, reviews PRs, and proves PRs on a deploy target.
 
-It is configured per repo by markdown docs in `.claude/not-me/` (layered: plugin defaults, then `~/.claude/not-me/`, then the repo). A stdlib-only Python CLI, `notme`, does all GitHub mechanics. A PreToolUse guard hook blocks writes to other repos, commits, pushes, and merges to protected branches, force-pushes, and destructive git. Works in the Claude Code CLI and desktop.
+It is configured per repo by markdown docs in `.claude/not-me/` (layered: plugin defaults, then `~/.claude/not-me/`, then the repo). A stdlib-only Python CLI, `notme`, does all GitHub mechanics. A PreToolUse guard hook hard-blocks only what breaks the process or cannot be undone (commits, merges and pushes on protected branches, force-pushes, destructive git) and logs the rest, such as writes to other repos, for the skills to guide. Works in the Claude Code CLI and desktop.
 
 ## Quickstart
 

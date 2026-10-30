@@ -161,9 +161,25 @@ class TestGuardsDoc(unittest.TestCase):
         self.assertEqual(headings, list(RULES))
 
     def test_block_message_and_allow_command(self):
-        for phrase in ("not-me guard [other_repo]", "/not-me:allow-repo", "--everywhere", "--board",
-                       "confirm_guard_off"):
+        for phrase in ("not-me guard [protected_branches]", "/not-me:allow-repo", "--everywhere", "--board",
+                       "confirm_guard_off", "~/.claude/not-me/project.md"):
             self.assertIn(phrase, self.text)
+
+    def test_audit_table_marks_every_item(self):
+        # dblanken-yale/not-me#141: every guard rule, self-protection item and CLI trust check is keep, guide or remove
+        audit = self.text.split("## Audit: what blocks, what guides", 1)[1].split("\n## ", 1)[0]
+        for heading in ("### Guard rules", "### Self-protection", "### CLI trust checks"):
+            self.assertIn(heading, audit)
+        rows = [r for r in audit.splitlines() if r.startswith("| ") and not r.startswith("| ---")
+                and not r.startswith(("| Rule |", "| Item |", "| Check |"))]
+        self.assertGreater(len(rows), 25)
+        for row in rows:
+            outcome = row.split(" | ")[1]
+            self.assertTrue(outcome.startswith(("keep", "guide", "remove")), row)
+        messages = self.text.split("## The block message", 1)[1].split("\n## ", 1)[0].split("```")[1::2]
+        self.assertGreaterEqual(len(messages), 3)
+        for message in messages:
+            self.assertNotIn("terminal", message)
 
 
 class TestInstallDoc(unittest.TestCase):

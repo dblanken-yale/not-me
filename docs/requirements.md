@@ -116,7 +116,7 @@ The full list is in `plugins/not-me/references/prohibitions.md`. No config setti
 
 ### What the PreToolUse hook intercepts
 
-One hook, from `hooks/hooks.json`, with the matcher `Bash|Write|Edit|MultiEdit|NotebookEdit|mcp__.*github.*` and a 10 second timeout. It runs before the tool does.
+One hook, from `hooks/hooks.json`, with the matcher `Bash|Write|Edit|MultiEdit|NotebookEdit|Read|NotebookRead|Grep|Glob|LS` and a 10 second timeout. It runs before the tool does. MCP tools are not judged.
 
 - Exit code 0: the tool call goes ahead.
 - Exit code 2: the tool call does not run. The message on stderr goes back to Claude, which reads why it was blocked and what to do instead.
@@ -142,7 +142,7 @@ Ordinary commands that mention neither `git` nor `gh` cost tens of milliseconds.
 | `<git-common-dir>/not-me/active-run` | read and write | `notme`, a small JSON marker while a run is going | No |
 | `<git-common-dir>/not-me/logs/<skill>/<timestamp>-<ref>-<id>.md` | write | `notme`, one run log per run | No |
 | `<git-common-dir>/not-me/logs/intended-writes.jsonl` and `logs/payloads/<sha>.md` | write | `notme`, the dry-run ledger | No |
-| `<git-common-dir>/not-me/logs/guard.jsonl` | write | the hook, one line per block with the blocked input, redacted and capped | No |
+| `<git-common-dir>/not-me/logs/guard.jsonl` | write | the hook, one line per block or guided call with its input, redacted and capped | No |
 | `<main checkout>/.claude/worktrees/<name>/` | write, and removed after each PR | `notme git worktree-add` and `worktree-remove`, one detached worktree per PR a review checks out | No |
 | `<git-common-dir>/info/exclude` | one line appended, `/.claude/worktrees/`, once | `notme git worktree-add`, so review worktrees never show as untracked | No, it is git's local ignore file |
 | `not-me-<uid>/` under `$XDG_RUNTIME_DIR` or the system temp directory (mode 0700) | write | `notme`, body files and JSON payloads | No |

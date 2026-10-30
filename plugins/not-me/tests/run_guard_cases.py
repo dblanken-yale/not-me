@@ -52,6 +52,8 @@ def main(argv: "list[str]") -> int:
                 rc, err = run_case(case, root, env)
             problems = [f"crashed twice (signal {-rc})"] if first and rc < 0 else []
             got = {0: "allow", 2: "block"}.get(rc, f"exit {rc}")
+            if want == "guide":  # a guided call runs; decide()'s record of it is checked in test_guard
+                want = "allow"
             if got != want:
                 problems.append(f"want {want}, got {got}")
             if want == "block" and rule and f"not-me guard [{RULE_LABEL.get(rule, rule)}]" not in err:

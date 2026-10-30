@@ -549,7 +549,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `workspace.new` | `checkout` | `checkout` or `worktree` for new work |
 | `workspace.update` | `checkout` | `checkout` or `worktree` for rework |
 | `workspace.review` | `worktree` | `checkout` or `worktree` for reviews |
-| `guard.other_repo` | `on` | `on` or `off`. Writes may only target allowed repos |
+| `guard.other_repo` | `on` | `on` or `off`. The guard only logs (guides) a write to a repo off the allowed list; the `notme` CLI write gate refuses it. `off` lifts both |
 | `guard.protected_branches` | `on` | `on` or `off`. No commits, pushes, or merges on protected branches |
 | `guard.force_push` | `on` | `on` or `off`. No history rewrites or remote branch deletion |
 | `guard.destructive_git` | `on` | `on` or `off`. No hard resets of protected branches, forced branch deletes, `clean -x`, or settings, secrets, and deletions on GitHub |

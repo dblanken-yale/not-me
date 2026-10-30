@@ -49,6 +49,8 @@ def main(raw: "str | None" = None) -> int:
             ctx.self_only()  # outside a not-me project only self-protection applies
         block = guard.decide(event, ctx)
         if block is None:
+            if active and ctx.guided:  # a guided call runs; the log line is how the operator sees it
+                guard.log_block(ctx, ctx.guided[0], event.get("tool_input"), outcome="guided")
             return 0
         if active:  # never write a log into a repo that is not a not-me project
             guard.log_block(ctx, block, event.get("tool_input"))

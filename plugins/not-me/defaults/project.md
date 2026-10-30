@@ -35,7 +35,7 @@ labels:                          # label names used in the tracker, keyed by rol
 reviewers: {default: []}         # GitHub logins requested as reviewers, keyed by repo name or default
 router: [update, new]            # order in which the router tries work kinds
 workspace: {new: checkout, update: checkout, review: worktree}  # checkout | worktree per work kind
-guard: {other_repo: on, protected_branches: on, force_push: on, destructive_git: on}  # on | off; off needs confirm_guard_off in the same file; the repo layer may only set on (repo layer may only tighten)
+guard: {other_repo: on, protected_branches: on, force_push: on, destructive_git: on}  # on | off; off needs confirm_guard_off in the same file; the repo layer may only set on (repo layer may only tighten); other_repo: the guard only logs a write to another repo, the notme CLI refuses it
 confirm_guard_off: []            # guard rules this file deliberately turns off
 allow_repos: []                  # extra owner/name repos the guard lets not-me touch; union across layers; repo-layer entries are ignored (use /not-me:allow-repo)
 logs: {root: null}               # directory for run logs; null = <git-common-dir>/not-me/logs in the checkout

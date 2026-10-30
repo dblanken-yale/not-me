@@ -29,8 +29,8 @@ deploy target, `/not-me` routes between them, and `setup`, `config`, `doctor`,
 `status`, `ticket`, `suggest`, `retro` and `allow-repo` support them. It replaces three
 bespoke skill families Dave uses daily (YaleSites `not_dave*`, palliative-care-rag
 `pcr-*`, YDS-Web-Component `wc_dave*`). Mechanics live in a stdlib-only Python
-CLI (`notme`), judgment stays in the model, and a small PreToolUse guard hook blocks
-the risky actions. Project specifics live in markdown config docs with three layers
+CLI (`notme`), judgment stays in the model, and a small PreToolUse guard hook hard-blocks
+what breaks the process or cannot be undone and logs the rest (dblanken-yale/not-me#141). Project specifics live in markdown config docs with three layers
 (plugin defaults, `~/.claude/not-me/`, repo `.claude/not-me/`).
 
 ## State at handoff
