@@ -61,11 +61,11 @@ This skill ends in NONE, PUSHED, PARKED, FAILED or STOP.
 
 ## Step 1: Target and claim
 
+On every path (idle too) follow `${CLAUDE_PLUGIN_ROOT}/references/interrupted-runs.md`.
+
 1. A PR ref in `$ARGUMENTS` is the target.
-2. Else `notme pick-needs-work`. `{"none": true}`: look for an answered question
-   (`${CLAUDE_PLUGIN_ROOT}/skills/update/references/findings.md`, "Answered
-   questions"). Still nothing: `notme log start --skill update --ref -`, finish it
-   with status `idle`, print `NONE - idle  log=<path>`. Write nothing else.
+2. Else `notme pick-needs-work`. `{"none": true}`: look for an answered question (`${CLAUDE_PLUGIN_ROOT}/skills/update/references/findings.md`, "Answered questions").
+   Still nothing: `notme log start --skill update --ref -`, finish it with status `idle`, print `NONE - idle  log=<path>`. Write nothing else but an interrupted-run hand-off.
 3. `notme claim-pr <ref>`. Exit 3 (claimed elsewhere): take the next number in
    `others` from the pick output. A lost explicit ref: `STOP <ref> claimed elsewhere`.
 4. `notme log start --skill update --ref <ref>`. Keep `path` and `run_id`. Log the

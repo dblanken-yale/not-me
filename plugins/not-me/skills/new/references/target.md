@@ -7,6 +7,10 @@ the issue is chosen, how its text is read and screened, and how epics chain.
 
 ## Order
 
+On every path below, idle included, first follow
+`${CLAUDE_PLUGIN_ROOT}/references/interrupted-runs.md`: it records an interrupted
+last run before the pick and hands it to a person once your log is started.
+
 1. **Explicit number.** The first bare number in the arguments is the issue. Do not
    call `notme pick-issue`.
 2. **Resume.** `notme log last --skill new`. When it returns a `path`, read that
