@@ -16,13 +16,13 @@ mode is the default: a --project-dir or CLAUDE_PROJECT_DIR naming another checko
 ignored. Only a person gets those honoured: stdin is a terminal, neither CLAUDECODE nor CLAUDE_PROJECT_DIR is set,
 and no ancestor process is Claude Code (the CLI or the desktop app; the app's own terminal panel is a child of it,
 so use a separate terminal application). When the process ancestry cannot be read, the CLI stays restricted.
-NOT_ME_DRY_RUN can only turn dry-run on. `allow-repo add|remove`, `pause off` and `mode live` also need the
-private operator token in <not-me home>/operator-token (create it with `notme doctor --init-token`): a person types
-it at a hidden prompt, or a script sets NOT_ME_OPERATOR_CONFIRM to it.
-The PreToolUse guard is the enforcement; this check is a second layer.
+NOT_ME_DRY_RUN can only turn dry-run on. `allow-repo add|remove`, `pause` and `mode` run in a session too: the
+operator typing the matching slash command is the approval, and references/prohibitions.md keeps a run from issuing
+them on its own. Each change prints a summary of what changed and appends a line to the settings ledger
+(<not-me home>/settings-changes.jsonl).
 
 --dry-run, NOT_ME_DRY_RUN=1 or `mode: dry-run` send every write to the intended-writes ledger instead of
-GitHub; so does a `mode: live` that `notme mode live` did not sign (see `mode show`). Write commands then carry "dry_run": true. Write commands take --log PATH (an existing run log under
+GitHub. Write commands then carry "dry_run": true. Write commands take --log PATH (an existing run log under
 the log root) and append an ACTION line to it.
 
 `--help` prints argparse text instead of JSON.
@@ -327,6 +327,21 @@ notme wait-checks REF [--minutes N]
 | `--minutes N` | optional | give up after N minutes (default limits.ci_wait_minutes) |
 
 Output: state (success, failure, pending or none), checks, waited_s
+
+### `notme verify-plan`
+
+The verify plan for a run, from the effective verify doc, limits.ci_wait_minutes and a commit's CI. Reads only: the local origin/<base> ref (no fetch) and the check runs and statuses on GitHub of the checked commit: --sha when given (a rework run passes the PR head), else origin/<base>. The baseline is skipped only when verify.baseline is auto and that CI is green; a gh error, or more check runs or statuses than one page holds, makes base_ci unknown and the baseline runs. Targeted test commands are the lines of the fenced block in the verify doc's Targeted tests section (none when it is left as is). ci_wait is false when limits.ci_wait_minutes is 0.
+
+```
+notme verify-plan [--base B] [--sha SHA]
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `--base B` | optional | the base branch (default: the repo default branch) |
+| `--sha SHA` | optional | read the CI result of this commit (40 hex, e.g. the PR head) instead of origin/<base> |
+
+Output: base, base_sha, checked_sha (the commit whose CI was read), base_ci (success, failure, pending, none or unknown: the CI of checked_sha), baseline (setting, run, reason), targeted (configured, commands), ci_wait_minutes, ci_wait
 
 ### `notme feedback`
 
@@ -789,7 +804,7 @@ Output: run_id, reviewed
 
 ### `notme allow-repo add`
 
-Allow a repo (or, with --board, a project board) for this project or everywhere. Only a person may do this: it must run from a terminal Claude Code did not start and be given the operator token (typed at a hidden prompt, or in NOT_ME_OPERATOR_CONFIRM for scripts); otherwise the refusal (kind human_only) carries the command to run. The guard is the enforcement; this check is a second layer.
+Allow a repo (or, with --board, a project board) for this project or everywhere. The operator runs it through /not-me:allow-repo, in the session; a run never does on its own (references/prohibitions.md). Repos and the board named in the repo layer on the default branch are allowed without it. summary says in words what changed (or that nothing did); a change also appends a line to the settings ledger, whose path is ledger; entries is the allow list afterwards, as `allow-repo list` shows it.
 
 ```
 notme allow-repo add SLUG [--board OWNER/NUMBER] [--everywhere]
@@ -801,11 +816,11 @@ notme allow-repo add SLUG [--board OWNER/NUMBER] [--everywhere]
 | `--board OWNER/NUMBER` | optional |  |
 | `--everywhere` | optional | for every project, not only this one |
 
-Output: added, scope, repo or board
+Output: added, scope, repo or board, summary, ledger (when something changed), entries
 
 ### `notme allow-repo remove`
 
-Remove a repo (or --board) from the allow list. The same person check as add applies.
+Remove a repo (or --board) from the allow list, with the same summary, ledger line and entries as add.
 
 ```
 notme allow-repo remove SLUG [--board OWNER/NUMBER] [--everywhere]
@@ -817,7 +832,7 @@ notme allow-repo remove SLUG [--board OWNER/NUMBER] [--everywhere]
 | `--board OWNER/NUMBER` | optional |  |
 | `--everywhere` | optional | for every project, not only this one |
 
-Output: removed, scope, repo or board
+Output: removed, scope, repo or board, summary, ledger (when something changed), entries
 
 ### `notme allow-repo list`
 
@@ -837,7 +852,7 @@ Decide one hook event read from stdin as JSON.
 notme guard check
 ```
 
-Output: decision (allow or block), rule, message
+Output: decision (allow, guided or block), rule, message. guided: the hook lets the call run and logs it under a process rule (see docs/guards.md); message is the reason.
 
 ### `notme guard selftest`
 
@@ -994,7 +1009,7 @@ Output: enabled, paused (global, project), mode, repo, tracker, operator, active
 
 ### `notme pause`
 
-Turn not-me off or on for this project (or for every project with --global) by writing or removing the PAUSED file. Pick and claim commands then report paused. `pause off` needs the same person check as allow-repo add (else kind human_only, with the command for a person to run).
+Turn not-me off or on for this project (or for every project with --global) by writing or removing the PAUSED file. Pick and claim commands then report paused. The operator runs it through /not-me:pause; a run never turns a pause off on its own (references/prohibitions.md). summary says in words what changed (or that nothing did); a change also appends a line to the settings ledger, whose path is ledger.
 
 ```
 notme pause state [--global]
@@ -1005,21 +1020,21 @@ notme pause state [--global]
 | `state {on|off}` | required |  |
 | `--global` | optional | for every project |
 
-Output: paused, scope
+Output: paused, scope, summary, ledger (when something changed)
 
 ### `notme mode show`
 
-The effective mode, the layer, file and line it comes from, what the global and repo layers each say, and whether the repo layer pins dry-run (repo_pin: path, file, line). dry_run also counts --dry-run and NOT_ME_DRY_RUN. A global `mode: live` counts only when signed: live_confirmed says whether the marker that `notme mode live` writes (<not-me home>/mode-live.sig, an HMAC keyed by the operator token and the epoch) verifies; when the layers say live but it does not, mode is dry-run and unconfirmed holds the warning (else null). token_present says whether the operator token file exists; launcher is the absolute path of this notme, and live_cmd the command a person runs in their own terminal to go live, written for shell: posix, or git-bash on Windows (bin/notme is a bash script, so not PowerShell or cmd). Neither the token nor the marker is shown.
+The effective mode, the layer, file and line it comes from, what the global and repo layers each say, and whether the repo layer pins dry-run (repo_pin: path, file, line). dry_run also counts --dry-run and NOT_ME_DRY_RUN. `mode: live` counts only from the global layer: the repo layer can pin dry-run but never turn live mode on.
 
 ```
 notme mode show
 ```
 
-Output: mode, dry_run, source (layer, path, line[, ignored, downgraded]), layers (global, repo: mode, path, line, file), repo_pin, live_confirmed, unconfirmed, token_present, launcher, shell, live_cmd
+Output: mode, dry_run, source (layer, path, line[, ignored]), layers (global, repo: mode, path, line, file), repo_pin
 
 ### `notme mode dry-run`
 
-Set `mode: dry-run` in the repo layer (<project>/.claude/not-me/project.md), or with --global in the global layer (<not-me home>/project.md), which also deletes the live marker and replaces the epoch (<not-me home>/mode-live.epoch), so no saved copy of an old marker verifies again (the repo layer leaves both). Always allowed: it only tightens. A missing or empty file gets minimal frontmatter; otherwise only the mode line changes. Kind mode_edit_refused when the file cannot be edited safely: text without frontmatter, frontmatter that does not parse, a symlink or hard link in the repo layer, or a global symlink that does not lead to a regular project.md.
+Set `mode: dry-run` in the repo layer (<project>/.claude/not-me/project.md), or with --global in the global layer (<not-me home>/project.md). A missing or empty file gets minimal frontmatter; otherwise only the mode line changes. Kind mode_edit_refused when the file cannot be edited safely: text without frontmatter, frontmatter that does not parse, a symlink or hard link in the repo layer, or a global symlink that does not lead to a regular project.md. summary says in words what changed; the change also appends a line to the settings ledger, whose path is ledger.
 
 ```
 notme mode dry-run [--global]
@@ -1029,28 +1044,24 @@ notme mode dry-run [--global]
 |----------|----------|---------|
 | `--global` | optional | in the global layer, not the repo layer |
 
-Output: the mode show keys, plus written (layer, file, mode)
+Output: the mode show keys, plus written (layer, file, mode), summary, ledger
 
 ### `notme mode live`
 
-Set `mode: live` in the global layer only (the repo layer can never turn live mode on) and sign it: write <not-me home>/mode-live.sig, an HMAC-SHA256 keyed by the operator token and the epoch in <not-me home>/mode-live.epoch (created when missing), without which `mode: live` runs as dry-run. Only a person may do this, with the same check as allow-repo add (else kind human_only, with the command to run). After a token rotation, run it again. When the repo layer still pins dry-run, the global layer is written anyway and repo_pin names that file and line.
+Set `mode: live` in the global layer only (the repo layer can never turn live mode on). The operator runs it through /not-me:mode live, in the session; a run never does on its own (references/prohibitions.md). When the repo layer still pins dry-run, the global layer is written anyway, repo_pin names that file and line, and note says so. summary and ledger as for mode dry-run.
 
 ```
 notme mode live
 ```
 
-Output: the mode show keys, plus written (layer, file, mode) and, when the repo pins dry-run, note
+Output: the mode show keys, plus written (layer, file, mode), summary, ledger and, when the repo pins dry-run, note
 
 ### `notme doctor`
 
-Check the tools and setup: python, git and gh versions, config, mode (a warning when `mode: live` is set but not confirmed by `notme mode live`), config files (a warning when neither the global nor the repo layer holds a not-me config file), gh auth and scopes, pass labels (advice when role.md names any: the missing ones, for `labels-ensure`), the queue source (a warning when the pick label is missing, the board is not confirmed or not found, or a board_states column is not a status option; not run without gh), guard self-test, spawn depth. Exit 7 when the only failed required checks are gh, gh auth or gh scopes; exit 1 when another required check fails. --init-token instead creates <not-me home>/operator-token (random, mode 0600) and shows it once; only a person may run it (kind human_only otherwise), and an existing token is never replaced (kind token_exists: delete the file to make a new one).
+Check the tools and setup: python, git and gh versions, config, mode, config files (a warning when neither the global nor the repo layer holds a not-me config file), gh auth and scopes, pass labels (advice when role.md names any: the missing ones, for `labels-ensure`), the queue source (a warning when the pick label is missing, the board is not confirmed or not found, or a board_states column is not a status option; not run without gh), guard self-test, spawn depth. Exit 7 when the only failed required checks are gh, gh auth or gh scopes; exit 1 when another required check fails.
 
 ```
-notme doctor [--init-token]
+notme doctor
 ```
 
-| Argument | Required | Meaning |
-|----------|----------|---------|
-| `--init-token` | optional | create the operator token (a person only; shown once) |
-
-Output: ok, checks (name, ok, detail, required, fix, hint); with --init-token token, path
+Output: ok, checks (name, ok, detail, required, fix, hint)

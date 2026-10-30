@@ -57,7 +57,7 @@ class FieldsTests(unittest.TestCase):
         for plat in PLATFORMS:
             with on(plat):
                 checks = doctor.run(ok_runner, [], lambda: StubGh(), lambda: {"active": True, "selftest": True},
-                                    {doctor.SUBAGENT_DEPTH_ENV: "3"}, doctor.mode_check("live", None),
+                                    {doctor.SUBAGENT_DEPTH_ENV: "3"}, doctor.mode_check("live"),
                                     config_files=FILES)
             self.assertIn("config files", by_name(checks))
             for c in checks:
@@ -176,10 +176,9 @@ class FixTests(unittest.TestCase):
         self.assertEqual(guard["detail"], "self-test did not block")
         self.assertIsNone(guard["fix"])
         self.assertIn("/plugin update not-me@not-me", guard["hint"])
-        mode = doctor.mode_check("live", "mode: live is set but not confirmed; a person runs /not-me:mode live")
-        self.assertFalse(mode["ok"])
+        mode = doctor.mode_check("live")
+        self.assertEqual((mode["ok"], mode["detail"], mode["required"]), (True, "live", False))
         self.assertIsNone(mode["fix"])
-        self.assertIsNone(mode["hint"])
 
     def test_no_failures_means_nothing_to_offer(self):
         with on("linux"):

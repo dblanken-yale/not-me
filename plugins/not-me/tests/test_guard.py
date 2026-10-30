@@ -7,12 +7,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from notme import guard, runlog, writes
+from notme import guard, paths, runlog, writes
 from notme.guard import Block, GuardContext
 from tests import PLUGIN_ROOT
 from tests import guard_cases as gc
@@ -37,9 +38,9 @@ class _Fixtures(unittest.TestCase):
         cls._patch.stop()
         shutil.rmtree(cls.root, ignore_errors=True)
 
-    def ctx(self, variant: str = "app") -> GuardContext:
+    def ctx(self, variant: str = "app", git=paths.run_git) -> GuardContext:
         cwd, home = gc.variant_paths(self.root, variant)
-        return GuardContext.from_project(cwd, home=home, env=dict(self.env, NOT_ME_HOME=str(home)))
+        return GuardContext.from_project(cwd, home=home, env=dict(self.env, NOT_ME_HOME=str(home)), git=git)
 
     def hook(self, stdin: str, variant: str = "app") -> subprocess.CompletedProcess:
         _, home = gc.variant_paths(self.root, variant)
@@ -47,35 +48,83 @@ class _Fixtures(unittest.TestCase):
                               env=dict(self.env, NOT_ME_HOME=str(home)), timeout=60)
 
 
-class GuardTableTests(_Fixtures):
-    """Every case in guard_cases, in-process through decide()."""
+# The two table tests below are the slowest in the suite, so their cases are split over several classes (shards) that a
+# parallel runner can spread over workers. Each shard owns gc.CASES[shard::TABLE_SHARDS]; TableShardTests checks that
+# the shards together cover every case exactly once.
+TABLE_SHARDS = 2
+
+
+def _shard(shard: int) -> list:
+    return gc.CASES[shard::TABLE_SHARDS]
+
+
+def _memo_git(git):
+    """git with every answer cached by (args, cwd). The guard only reads git (config, remotes, branch) and the table
+    never changes the fixture tree, so each answer is the one real git gives; it just forks once instead of per case."""
+    cache = {}
+
+    def run(args, cwd):
+        key = (tuple(args), str(cwd))
+        if key not in cache:
+            cache[key] = git(args, cwd)
+        return cache[key]
+    return run
+
+
+class TableShardTests(unittest.TestCase):
+    def test_shards_cover_every_case_once(self):
+        self.assertGreaterEqual(len(gc.CASES), 110)
+        shards = [_shard(i) for i in range(TABLE_SHARDS)]
+        self.assertEqual(sum(len(s) for s in shards), len(gc.CASES))
+        self.assertEqual(sorted(c[0] for s in shards for c in s), sorted(c[0] for c in gc.CASES))
+        for name, base in (("GuardTableShard", _GuardTable), ("WindowsTypedPathTableShard", _WindowsTypedPathTable)):
+            found = sorted(cls.shard for cls in globals().values()
+                           if isinstance(cls, type) and issubclass(cls, base) and cls.__name__.startswith(name))
+            self.assertEqual(found, list(range(TABLE_SHARDS)), name)
+
+
+class _GuardTable:
+    """Every case in guard_cases, in-process through decide() (mixed into one class per shard)."""
+    shard: int
 
     def test_cases(self):
-        self.assertGreaterEqual(len(gc.CASES), 110)
         ctxs = {}
-        for case in gc.CASES:
+        git = _memo_git(paths.run_git)
+        for case in _shard(self.shard):
             cid, want, rule, tool, tin, variant = case
             with self.subTest(cid=cid, tool=tool, input=tin, variant=variant):
                 if variant not in ctxs:
-                    ctxs[variant] = self.ctx(variant)
+                    ctxs[variant] = self.ctx(variant, git=git)
                     if not guard.is_active(ctxs[variant]):
                         ctxs[variant].self_only()  # as the hook does
                 ctx = ctxs[variant]
                 result = guard.decide(gc.event_for(case, self.root), ctx)
-                self.assertEqual("block" if isinstance(result, Block) else "allow", want,
-                                 getattr(result, "message", ""))
+                got = "block" if isinstance(result, Block) else ("guide" if ctx.guided else "allow")
+                self.assertEqual(got, want, getattr(result, "message", ""))
+                if want == "guide":
+                    self.assertEqual(ctx.guided[0].rule, rule)
                 if isinstance(result, Block):
                     self.assertEqual(result.rule, rule)
                     for text in gc.MESSAGE_CHECKS.get(cid, []):
                         self.assertIn(text, result.message)
 
 
-class WindowsTypedPathTableTests(_Fixtures):
+class GuardTableShard0Tests(_GuardTable, _Fixtures):
+    shard = 0
+
+
+class GuardTableShard1Tests(_GuardTable, _Fixtures):
+    shard = 1
+
+
+class _WindowsTypedPathTable:
     """Table cases that name a fixture path, with the path typed the Windows way (C:\\Users\\x\\home). Bash drops
     unquoted backslashes, so before the guard judged words in both spellings these self-protection blocks came back
     allowed on Windows (fail open). Each case must decide as the table says both as written and, where it holds no
     quotes, with every path quoted (the shell keeps the backslashes). On Windows this runs on the real disk; elsewhere
-    tests/winsim.py shows the fixture tree to the guard under Windows names with ntpath as its path module."""
+    tests/winsim.py shows the fixture tree to the guard under Windows names with ntpath as its path module.
+    Mixed into one class per shard."""
+    shard: int
 
     def setUp(self):
         self.ctxs = {}
@@ -108,15 +157,21 @@ class WindowsTypedPathTableTests(_Fixtures):
             if self.sim is not None:
                 self.sim.start()
                 ctx = self.sim.context(ctx)
+            if not ctx.only_self:
+                ctx.git = _memo_git(ctx.git)
             self.ctxs[variant] = ctx
         cwd, _ = gc.variant_paths(self.root, variant)
         return guard.decide({"tool_name": tool, "tool_input": tin, "cwd": self.win(cwd), "session_id": gc.SESSION},
                             self.ctxs[variant])
 
+    @staticmethod
+    def names_a_path(tin) -> bool:
+        return any(k in json.dumps(tin) for k in ("{F}", "{H}", "{P}"))
+
     def test_cases_with_backslash_paths(self):
         checked = 0
-        for cid, want, rule, tool, tin, variant in gc.CASES:
-            if not any(k in json.dumps(tin) for k in ("{F}", "{H}", "{P}")):
+        for cid, want, rule, tool, tin, variant in _shard(self.shard):
+            if not self.names_a_path(tin):
                 continue
             checked += 1
             _, home = gc.variant_paths(self.root, variant)
@@ -126,12 +181,24 @@ class WindowsTypedPathTableTests(_Fixtures):
             for form, typed in forms:
                 with self.subTest(cid=cid, form=form, input=typed, variant=variant):
                     result = self.decide(variant, tool, typed)
-                    self.assertEqual("block" if isinstance(result, Block) else "allow", want,
-                                     getattr(result, "message", ""))
+                    self.assertEqual("block" if isinstance(result, Block) else "allow",
+                                     "allow" if want == "guide" else want, getattr(result, "message", ""))
                     if isinstance(result, Block):
                         self.assertEqual(result.rule, rule)
-        self.assertGreater(checked, 100)
+        self.assertGreater(checked, 100 // TABLE_SHARDS)
 
+
+class WindowsTypedPathTableShardTests(unittest.TestCase):
+    def test_the_table_names_enough_paths(self):
+        self.assertGreater(sum(1 for c in gc.CASES if _WindowsTypedPathTable.names_a_path(c[4])), 100)
+
+
+class WindowsTypedPathTableShard0Tests(_WindowsTypedPathTable, _Fixtures):
+    shard = 0
+
+
+class WindowsTypedPathTableShard1Tests(_WindowsTypedPathTable, _Fixtures):
+    shard = 1
 
 
 @unittest.skipIf(os.name == "nt", "the pattern exemption is never given on Windows")
@@ -163,43 +230,44 @@ class PatternProgramTests(_Fixtures):
     def test_writable_program_on_path_blocks(self):
         for name in ("grep", "rg", "sed"):
             with self.subTest(name=name):
-                cmd = "sed -n '/{H}/operator-token/p' README.md" if name == "sed" else name + " '{H}/operator-token'"
+                cmd = ("sed -n '/{H}/allowed-repos.json/p' README.md" if name == "sed"
+                       else name + " '{H}/allowed-repos.json'")
                 self.assertEqual(self.decide(cmd, self.planted(name)).rule, "self_protect")
 
     def test_system_program_allows(self):
         sysdir = self.system_dir("grep")
-        self.assertIsNone(self.decide("grep -n 'x/operator-token' README.md", sysdir))
-        self.assertIsNone(self.decide("sed -n '/operator-token/p' README.md", self.system_dir("sed")))
+        self.assertIsNone(self.decide("grep -n 'x/allowed-repos.json' README.md", sysdir))
+        self.assertIsNone(self.decide("sed -n '/allowed-repos.json/p' README.md", self.system_dir("sed")))
 
     def test_planted_program_before_system_dir_blocks(self):
         sysdir = self.system_dir("grep")
-        self.assertEqual(self.decide("grep '{H}/operator-token'", self.planted("grep") + os.pathsep + sysdir).rule,
-                         "self_protect")
+        self.assertEqual(self.decide("grep '{H}/allowed-repos.json'",
+                                     self.planted("grep") + os.pathsep + sysdir).rule, "self_protect")
 
     def test_link_in_writable_dir_to_system_program_blocks(self):
         sysdir = self.system_dir("grep")
         d = self.planted("other")
         os.symlink(os.path.join(sysdir, "grep"), os.path.join(d, "grep"))
-        self.assertEqual(self.decide("grep '{H}/operator-token'", d).rule, "self_protect")
+        self.assertEqual(self.decide("grep '{H}/allowed-repos.json'", d).rule, "self_protect")
 
     def test_relative_or_empty_entry_before_program_blocks(self):
         sysdir = self.system_dir("grep")
         for path in ("bin" + os.pathsep + sysdir, os.pathsep + sysdir, sysdir + os.pathsep):
             with self.subTest(path=path):
-                result = self.decide("grep 'x/operator-token' README.md", path)
+                result = self.decide("grep 'x/allowed-repos.json' README.md", path)
                 if path.endswith(os.pathsep):  # an empty entry after the program's directory is never reached
                     self.assertIsNone(result)
                 else:
                     self.assertEqual(result.rule, "self_protect")
 
     def test_program_not_on_path_blocks(self):
-        self.assertEqual(self.decide("grep 'x/operator-token' README.md", self.planted("other")).rule,
+        self.assertEqual(self.decide("grep 'x/allowed-repos.json' README.md", self.planted("other")).rule,
                          "self_protect")
 
     def test_system_rg_allows(self):
         sysdir = self.system_dir("rg")  # a system package (Linux); Homebrew and cargo installs are user-writable
-        self.assertIsNone(self.decide("rg '~/.claude/not-me/operator-token' README.md", sysdir))
-        self.assertIsNone(self.decide("rg -g '*.py' -t py -- ~/.claude/not-me/operator-token scripts", sysdir))
+        self.assertIsNone(self.decide("rg '~/.claude/not-me/allowed-repos.json' README.md", sysdir))
+        self.assertIsNone(self.decide("rg -g '*.py' -t py -- ~/.claude/not-me/allowed-repos.json scripts", sysdir))
 
 
 class CrlfEditTests(unittest.TestCase):
@@ -279,10 +347,11 @@ class ContextTests(_Fixtures):
             ctx.self_only()
             calls = [("Bash", {"command": "git push origin feature/x && git commit -m x && git pp"}, None),
                      ("Bash", {"command": "gh pr comment 1 --repo acme/other -b x"}, None),
-                     ("Bash", {"command": "notme pause off"}, guard.SELF),
+                     ("Bash", {"command": "notme pause off"}, None),
+                     ("Bash", {"command": f"cat {home / writes.ALLOWLIST_FILE}"}, guard.SELF),
                      ("Write", {"file_path": str(home / writes.ALLOWLIST_FILE)}, guard.SELF),
                      ("Write", {"file_path": "notes.txt"}, None),
-                     ("Read", {"file_path": str(home / guard.OPERATOR_TOKEN)}, guard.SELF),
+                     ("Read", {"file_path": str(home / "operator-token")}, None),
                      ("Read", {"file_path": "README.md"}, None)]
             with mock.patch("subprocess.run", boom), mock.patch("subprocess.Popen", boom), \
                     mock.patch("notme.config.load", boom):
@@ -396,13 +465,13 @@ class TokenizerTests(unittest.TestCase):
     def test_prefilter(self):
         def bash(cmd):
             return guard.needs_check({"tool_name": "Bash", "tool_input": {"command": cmd}})
-        for cmd in ("ls -la", "npm test", "cat <<EOF\ngit push\nEOF", "echo hello > out.txt", "cat -n notes"):
+        for cmd in ("ls -la", "npm test", "cat <<EOF\ngit push\nEOF", "echo hello > out.txt", "cat -n notes",
+                    "cat operator-token", "notme pause off", "tmux ls"):
             self.assertFalse(bash(cmd), cmd)
         for cmd in ("git status", "g''h pr list", "g\\it log", "${X} y", "./run", "make.sh", "python3 -c 1",
                     "find . -name x", "cat ~/.claude/not-me/allowed-repos.json", "sh <<EOF\ngh pr merge 1\nEOF",
-                    "cp -r /some/home x", "wc < /some/home/op*", "echo 0 > /some/home/m*.sig", "echo 0 >~/x",
-                    "cat operator-token", "nohup make &", "script -q /dev/null make",
-                    "cp -r C:\\Users\\op\\homes\\h0 backup"):  # only backslashes: a Windows path
+                    "cp -r /some/home x", "wc < /some/home/al*", "echo 0 >~/x", "cat allowed-repos.json",
+                    "nohup make &", "tar xf x.tar", "unzip x.zip", "cp -r C:\\Users\\op\\homes\\h0 backup"):  # only backslashes: a Windows path
             self.assertTrue(bash(cmd), cmd)
         self.assertTrue(guard.needs_check({"tool_name": "Write", "tool_input": {"file_path": "x"}}))
         self.assertTrue(guard.needs_check({"tool_name": "mcp__github__create_issue", "tool_input": {}}))
@@ -464,11 +533,14 @@ class WindowsPathTests(unittest.TestCase):
         return guard.decide({"tool_name": tool, "tool_input": tin, "cwd": cwd}, self.ctx)
 
     def test_file_self_protection(self):
-        for path in ("c:/work/app/.claude/not-me/project.md", "C:\\Plugins\\NOT-ME\\hooks\\repo_guard.py",
+        for path in ("c:/users/op/.claude/NOT-ME/standards.md", "C:\\Plugins\\NOT-ME\\hooks\\repo_guard.py",
                      "C:/Users/OP/.claude/not-me/allowed-repos.json"):
             with self.subTest(path=path):
                 self.assertEqual(self.decide("Edit", {"file_path": path}).rule, "self_protect")
         self.assertIsNone(self.decide("Edit", {"file_path": "C:/Work/App/src/main.py"}))
+        # the repo layer can only tighten: an edit during a run is guided, and found under any spelling
+        self.assertIsNone(self.decide("Edit", {"file_path": "c:/work/app/.claude/not-me/project.md"}))
+        self.assertEqual([b.rule for b in self.ctx.guided], ["process"])
 
     def test_norm_and_under_compare_whole_components(self):
         norm = guard._norm
@@ -487,8 +559,9 @@ class WindowsPathTests(unittest.TestCase):
         self.assertEqual([str(w) for w in words], ["cat", "C:Usersopx", "C:\\q", "C:\\d", "e f"])
         self.assertEqual([w.raw for w in words], ["cat", "C:\\Users\\op\\x", "C:\\q", "C:\\d", "e\\ f"])
         self.assertIsNone(self.decide("Bash", {"command": "git -C C:\\Work\\App status"}))
-        for cmd in ("cat C:\\Users\\op\\.claude\\not-me\\op*", "cat 'C:\\Users\\op\\.claude\\not-me\\operator-token'",
-                    "cp -r C:\\Users\\op\\.claude\\not-me D:\\x"):
+        for cmd in ("cat C:\\Users\\op\\.claude\\not-me\\allowed*",
+                    "cat 'C:\\Users\\op\\.claude\\not-me\\allowed-repos.json'",
+                    "echo {} > C:\\Users\\op\\.claude\\not-me\\allowed-repos.json"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.decide("Bash", {"command": cmd}).rule, "self_protect")
 
@@ -498,22 +571,26 @@ class MessageTests(unittest.TestCase):
         return GuardContext(write_ctx=writes.GuardContext(origin_repo="acme/app", allowed_repos=("acme/app", "acme/web"),
                                                           protected_branches=("main",)))
 
-    def test_allow_suggestion(self):
-        b = Block("other_repo", "acme/other is not an allowed repo", target="acme/other", command="gh pr comment 1",
-                  suggest_allow=True)
+    def test_message_shape(self):
+        b = Block("force_push", "force pushes rewrite published history", target="acme/other",
+                  command="git push -f", hint="push new commits on top instead")
         msg = guard.render(b, self.ctx())
-        self.assertTrue(msg.startswith("not-me guard [other_repo]: blocked `gh pr comment 1`: targeting acme/other."))
-        self.assertIn("This repo (acme/app) may write only to: acme/app, acme/web.", msg)
-        self.assertIn("the operator runs:  /not-me:allow-repo acme/other\n", msg)
-        self.assertIn("(all projects: /not-me:allow-repo acme/other --everywhere; team-wide: list it under repos "
-                      "in .claude/not-me/project.md, then each operator confirms it once with "
-                      "/not-me:allow-repo acme/other)", msg)
-        self.assertIn("Autonomous runs: do not retry; log a QUESTION naming the operator and continue.", msg)
-        self.assertIn("set guard.other_repo: off and confirm_guard_off: [other_repo]", msg)
+        self.assertTrue(msg.startswith("not-me guard [force_push]: blocked `git push -f`: targeting acme/other."))
+        self.assertIn("Why: force pushes rewrite published history.", msg)
+        self.assertIn("Instead: push new commits on top instead.", msg)
+        # dblanken-yale/not-me#132: one line that stops an autonomous run, matching "Failures on our side"
+        stop = "Autonomous runs: do not retry; log the block, end the run FAILED and post nothing."
+        self.assertIn(stop, msg)
+        self.assertEqual(sum(1 for ln in msg.splitlines() if ln.startswith("Autonomous runs:")), 1)
+        self.assertNotIn("continue", msg)
+        # the repo layer cannot relax a rule, so the message names the global layer
+        self.assertIn("set guard.force_push: off and confirm_guard_off: [force_push] in ~/.claude/not-me/project.md",
+                      msg)
+        self.assertNotIn("allow-repo", msg)
         self.assertTrue(msg.endswith("See effective config: /not-me:config"))
 
     def test_unresolvable_gives_fix_not_allow(self):
-        b = Block("other_repo", "gh/git inside $(...) cannot be checked", command="echo",
+        b = Block("protected_branches", "gh/git inside $(...) cannot be checked", command="echo",
                   hint="run gh/git directly, not inside $(...)")
         msg = guard.render(b, self.ctx())
         self.assertNotIn("allow-repo", msg)
@@ -528,53 +605,132 @@ class MessageTests(unittest.TestCase):
         msg = guard.render(Block("self_protect", "x", command="y"), self.ctx())
         self.assertNotIn("Relax this rule", msg)
 
-    def test_variable_git_path_says_spell_it_out(self):
+    def test_variable_git_dir_says_spell_it_out(self):
         ctx = self.ctx()
         ctx.git = lambda args, cwd: None
-        for cmd, opt in (("git -C $W commit -m x", "-C"), ('git -C "$W" push origin HEAD:refs/heads/x', "-C"),
-                         ("git --git-dir=$G commit -m x", "--git-dir"), ("git --work-tree `pwd` commit", "--work-tree"),
-                         ("git -C $W merge feature/y", "-C"), ("git -C $W reset --hard", "-C")):
+        for cmd, opt in (("git --git-dir=$G commit -m x", "--git-dir"), ("git --work-tree `pwd` commit", "--work-tree")):
             with self.subTest(cmd=cmd):
                 r = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": "."}, ctx)
                 self.assertIsInstance(r, Block)
-                self.assertEqual(r.rule, "other_repo")
+                self.assertEqual(r.rule, "protected_branches")  # other_repo is guided: the unknown branch blocks
                 self.assertIn(f"Why: the guard does not expand shell variables in a `git {opt}` path.", r.message)
-                if opt == "-C":
-                    self.assertIn("Instead: write the path out in full (`git -C /abs/path <sub> ...`); a rewritten "
-                                  "command is checked afresh, so this is not a retry.", r.message)
-                else:
-                    self.assertIn(f"Instead: drop {opt} and run `git -C /abs/path <sub> ...` with the path written "
-                                  "out in full; a rewritten command is checked afresh, so this is not a retry.",
-                                  r.message)
+                self.assertIn(f"Instead: drop {opt} and run `git -C /abs/path <sub> ...` with the path written "
+                              "out in full; a rewritten command is checked afresh, so this is not a retry.", r.message)
                 self.assertNotIn("Relax this rule", r.message)
-                self.assertNotIn("no github origin", r.message)
+
+    def test_unknown_git_c_path_is_guided_not_blocked(self):
+        """dblanken-yale/not-me#144: a git -C path the guard cannot work out is logged, never judged by the
+        session's directory."""
+        ctx = self.ctx()
+        ctx.git = lambda args, cwd: None
+        # git reads an unset -C path as the current directory, so the session's own branch decides: guided from a
+        # feature branch, blocked from a protected one (a push naming its destination never reads the branch)
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp).resolve()
+            for name, branch in (("main", "main"), ("wt", "feature/x")):
+                (d / name / ".git").mkdir(parents=True)
+                (d / name / ".git" / "HEAD").write_text(f"ref: refs/heads/{branch}\n", encoding="utf-8")
+            for cmd in ("git -C $W commit -m x", 'git -C "$W" push origin HEAD:refs/heads/x',
+                        "git -C $W merge feature/y", "git -C $W reset --hard"):
+                with self.subTest(cmd=cmd, cwd="wt"):
+                    ctx.guided = []
+                    r = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(d / "wt")},
+                                     ctx)
+                    self.assertIsNone(r, getattr(r, "message", ""))
+                    self.assertTrue(any("could not work out which checkout" in g.reason or "is not known" in g.reason
+                                        for g in ctx.guided), ctx.guided)
+            for cmd in ("git -C $W commit -m x", "git -C $W merge feature/y", "git -C $W reset --hard"):
+                with self.subTest(cmd=cmd, cwd="main"):
+                    r = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(d / "main")},
+                                     ctx)
+                    self.assertIsNotNone(r)
+                    self.assertEqual(r.rule, "protected_branches")
+            ctx.guided = []
+        # a literal path to a checkout with no github origin is guided, not blocked
         r = guard.decide({"tool_name": "Bash", "tool_input": {"command": "git -C /nowhere commit -m x"}, "cwd": "."},
                          ctx)
-        self.assertIn("no github origin", r.message)
-        self.assertIn("Relax this rule (not recommended): set guard.other_repo: off", r.message)
-        # with other_repo off the unknown path is still a possible protected branch; with both off it passes
-        def off(*names: str) -> GuardContext:
-            c = GuardContext(write_ctx=writes.GuardContext(
-                origin_repo="acme/app", allowed_repos=("acme/app",), protected_branches=("main",),
-                rules={r: r not in names for r in guard.RULES}))
-            c.git = lambda args, cwd: None
-            return c
-        ev = {"tool_name": "Bash", "tool_input": {"command": "git -C $W merge x"}, "cwd": "."}
-        r = guard.decide(ev, off("other_repo"))
-        self.assertIsInstance(r, Block)
+        self.assertIsNone(r)
+        self.assertIn("no github origin", ctx.guided[0].reason)
+        # a rule the command breaks on its own still blocks
+        r = guard.decide({"tool_name": "Bash", "tool_input": {"command": "git -C $W push -f origin x"}, "cwd": "."}, ctx)
+        self.assertEqual(r.rule, "force_push")
+        # a directory change the guard does not follow, next to a commit: blocked, with how to write it instead
+        r = guard.decide({"tool_name": "Bash", "tool_input": {"command": 'cd "$W" && git commit -m x'}, "cwd": "."},
+                         ctx)
         self.assertEqual(r.rule, "protected_branches")
-        self.assertIn("shell variables in a `git -C` path", r.message)
+        self.assertIn("Instead: write it as `git -C <path> <command>` so the guard can check the branch.", r.message)
         self.assertNotIn("Relax this rule", r.message)
-        self.assertIsNone(guard.decide(ev, off("other_repo", "protected_branches")))
+        # with protected_branches off there is nothing to log
+        c = GuardContext(write_ctx=writes.GuardContext(
+            origin_repo="acme/app", allowed_repos=("acme/app",), protected_branches=("main",),
+            rules={rule: rule != "protected_branches" for rule in guard.RULES}))
+        c.git = lambda args, cwd: None
+        self.assertIsNone(guard.decide({"tool_name": "Bash", "tool_input": {"command": "git -C $W merge x"},
+                                        "cwd": "."}, c))
+        self.assertEqual(c.guided, [])
+
+    def test_leading_cd_and_literal_variables_are_followed(self):
+        """dblanken-yale/not-me#144: git after a leading cd, or through a variable set to a literal path earlier in
+        the command, is judged on the branch checked out there."""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp).resolve()
+            for name, branch in (("main", "main"), ("wt", "feature/x")):
+                (d / name / ".git").mkdir(parents=True)
+                (d / name / ".git" / "HEAD").write_text(f"ref: refs/heads/{branch}\n", encoding="utf-8")
+            ctx = self.ctx()
+            ctx.git = lambda args, cwd: "https://github.com/acme/app.git" if args[:2] == ["remote", "get-url"] \
+                else None
+            main, wt = d / "main", d / "wt"
+
+            def run(cmd: str, cwd: Path) -> guard.Decision:
+                return guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(cwd)}, ctx)
+            self.assertEqual(run("git commit -m x", main).rule, "protected_branches")
+            for cmd in (f"cd {wt} && git add x && git commit -F m", f"W={wt}; git -C $W commit -m x",
+                        f'W={wt}; git -C "$W" add x && git -C "${{W}}" commit -F m', "cd ../wt && git commit -m x"):
+                with self.subTest(cmd=cmd):
+                    self.assertIsNone(run(cmd, main))
+                    self.assertEqual(ctx.guided, [])
+            # after ; the cd may have failed: judged where the session is (security review of #144)
+            for cmd, cwd in ((f"cd {main} && git commit -m x", wt), (f"W={main}; git -C $W commit -m x", wt),
+                             (f"cd {wt} && git commit -m x & git commit -m y", main),
+                             (f"cd {wt}; git commit -m x", main)):
+                with self.subTest(cmd=cmd):
+                    self.assertEqual(run(cmd, cwd).rule, "protected_branches")
+
+    def test_gh_default_repo_is_found_the_way_gh_finds_it(self):
+        """dblanken-yale/not-me#142: GH_REPO, then the gh repo set-default remote, then upstream, github, origin."""
+        remotes = {"cfg": ""}
+
+        def guided(cmd: str, env: dict = None) -> list:
+            c = GuardContext(env=env or {}, write_ctx=writes.GuardContext(
+                origin_repo="acme/app", allowed_repos=("acme/app",), protected_branches=("main",)))
+            c.git = lambda args, cwd: remotes["cfg"] if "--get-regexp" in args else None
+            self.assertIsNone(guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": "."}, c))
+            return [(g.rule, g.target, g.reason) for g in c.guided]
+        cmd = "gh issue comment 1 --body-file f"
+        remotes["cfg"] = "remote.origin.url https://github.com/acme/app.git\n"
+        self.assertEqual(guided(cmd), [])
+        self.assertEqual(guided(cmd, {"GH_REPO": "acme/other"})[0][:2], ("other_repo", "acme/other"))
+        remotes["cfg"] += "remote.upstream.url git@github.com:acme/up.git\n"
+        self.assertEqual(guided(cmd)[0][:2], ("other_repo", "acme/up"))
+        remotes["cfg"] += "remote.origin.gh-resolved base\n"
+        self.assertEqual(guided(cmd), [])  # set-default chose origin over upstream
+        remotes["cfg"] = ""
+        rule, target, reason = guided(cmd)[0]
+        self.assertEqual((rule, target), ("other_repo", "acme/app"))
+        self.assertIn("could not be worked out (no github remote); assumed acme/app", reason)
 
     def test_decide_fills_message_and_tool(self):
         ctx = self.ctx()
         ctx.git = lambda args, cwd: None
-        r = guard.decide({"tool_name": "Bash", "tool_input": {"command": "gh pr comment 1 -R acme/other -b x"},
+        r = guard.decide({"tool_name": "Bash", "tool_input": {"command": "gh repo delete acme/other --yes"},
                           "cwd": "."}, ctx)
         self.assertIsInstance(r, Block)
-        self.assertEqual((r.tool, r.target), ("Bash", "acme/other"))
-        self.assertIn("/not-me:allow-repo acme/other", r.message)
+        self.assertEqual((r.tool, r.rule), ("Bash", "destructive_git"))
+        self.assertIn("not-me guard [destructive]", r.message)
+        self.assertIsNone(guard.decide({"tool_name": "Bash", "tool_input": {"command": "gh pr comment 1 -R acme/o -b x"},
+                                        "cwd": "."}, ctx))
+        self.assertEqual([(g.tool, g.target) for g in ctx.guided], [("Bash", "acme/o")])
         self.assertIsNone(guard.decide({"tool_name": "Glob", "tool_input": {}}, ctx))
         with self.assertRaises(TypeError):
             guard.decide({"tool_name": "Bash", "tool_input": "x"}, ctx)
@@ -591,7 +747,8 @@ class BlocklogTests(unittest.TestCase):
         self.assertEqual(runlog.guard_log_path(guard.log_root(d)), p)
         rows = [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines()]
         self.assertEqual([r["rule"] for r in rows], ["force_push", "other_repo"])
-        self.assertEqual(set(rows[1]), {"ts", "tool", "rule", "reason", "target", "input"})
+        self.assertEqual(set(rows[1]), {"ts", "outcome", "tool", "rule", "reason", "target", "input"})
+        self.assertEqual(rows[1]["outcome"], "blocked")
         self.assertEqual((rows[1]["tool"], rows[1]["target"]), ("Write", "acme/x"))
         self.assertIsNone(rows[1]["input"])
         self.assertTrue(rows[0]["ts"].endswith("Z"))
@@ -611,9 +768,6 @@ class BlocklogInputTests(unittest.TestCase):
         self.ctx = GuardContext(common_dir=d / "git", home=self.home, env={})
         self.log = d / "git" / "not-me" / "logs" / "guard.jsonl"
 
-    def secret_file(self, name, value):
-        (self.home / name).write_text(value + "\n", encoding="utf-8")
-
     def logged(self, tool, tin):
         guard.log_block(self.ctx, Block("force_push", "r", tool=tool), tin)
         return json.loads(self.log.read_text(encoding="utf-8").splitlines()[-1])["input"]
@@ -625,8 +779,7 @@ class BlocklogInputTests(unittest.TestCase):
     def test_file_tools_log_the_path_never_the_body(self):
         for tool, tin in (("Write", {"file_path": "/x/a.py", "content": "BODY"}),
                           ("Edit", {"file_path": "/x/a.py", "old_string": "BODY", "new_string": "BODY"}),
-                          ("MultiEdit", {"file_path": "/x/a.py", "edits": [{"old_string": "BODY"}]}),
-                          ("Read", {"file_path": "/x/a.py"})):
+                          ("MultiEdit", {"file_path": "/x/a.py", "edits": [{"old_string": "BODY"}]})):
             with self.subTest(tool=tool):
                 self.assertEqual(self.logged(tool, tin), "/x/a.py")
         self.assertEqual(self.logged("NotebookEdit", {"notebook_path": "/x/n.ipynb", "new_source": "BODY"}),
@@ -642,23 +795,11 @@ class BlocklogInputTests(unittest.TestCase):
         guard.log_block(self.ctx, Block("force_push", "r", tool="Bash", command="git push -f"))
         self.assertEqual(json.loads(self.log.read_text(encoding="utf-8"))["input"], "git push -f")
 
-    def test_operator_token_and_live_files_are_redacted(self):
-        self.secret_file(guard.OPERATOR_TOKEN, "tok3n-abcdef123456")
-        self.secret_file(guard.LIVE_MARKER_NAME, "s1gnature-0011223344")
-        self.secret_file(guard.LIVE_EPOCH_NAME, "ep0ch-99887766")
-        got = self.logged("Bash", {"command": "echo tok3n-abcdef123456 s1gnature-0011223344 ep0ch-99887766 x"})
-        self.assertEqual(got, "echo [redacted] [redacted] [redacted] x")
-
-    def test_short_secret_file_values_are_not_used(self):
-        self.secret_file(guard.OPERATOR_TOKEN, "a")
-        self.assertEqual(self.logged("Bash", {"command": "cat a.txt"}), "cat a.txt")
-
-    def test_missing_secret_files_are_skipped(self):
+    def test_plain_commands_are_kept(self):
         self.assertEqual(self.logged("Bash", {"command": "git status"}), "git status")
 
-    def test_confirm_and_secret_named_assignments_keep_only_the_name(self):
+    def test_secret_named_assignments_keep_only_the_name(self):
         cases = {
-            "NOT_ME_OPERATOR_CONFIRM=abc notme x": "NOT_ME_OPERATOR_CONFIRM=[redacted] notme x",
             "GH_TOKEN=x gh pr list": "GH_TOKEN=[redacted] gh pr list",
             "export GITHUB_TOKEN='a b c'; gh api": "export GITHUB_TOKEN=[redacted]; gh api",
             'env api_key="q w" cmd': "env api_key=[redacted] cmd",
@@ -671,7 +812,6 @@ class BlocklogInputTests(unittest.TestCase):
             "TOKENS[0]=abc x": "TOKENS[0]=[redacted] x",
             'TOKENS[$i]+="a b" x': "TOKENS[$i]+=[redacted] x",
             "FOO[1]=bar BAR+=baz x": "FOO[1]=bar BAR+=baz x",
-            "NOT_ME_OPERATOR_CONFIRM=$(cat f) notme x": "NOT_ME_OPERATOR_CONFIRM=[redacted] notme x",
             "GH_TOKEN=`cat f` gh x": "GH_TOKEN=[redacted] gh x",
             "GH_TOKEN=a$(cat f)b gh x": "GH_TOKEN=[redacted] gh x",
         }
@@ -760,9 +900,8 @@ class BlocklogInputTests(unittest.TestCase):
         self.assertEqual(self.logged("Bash", {"command": "x" * guard.LOG_INPUT_MAX}), "x" * guard.LOG_INPUT_MAX)
 
     def test_no_secret_survives_the_cut(self):
-        secret = "tok3n-abcdef123456"
-        self.secret_file(guard.OPERATOR_TOKEN, secret)
-        cmd = "x" * (guard.LOG_INPUT_MAX - 6) + secret + " GH_TOKEN=supersecretvalue"
+        secret = "ghp_" + "A1" * 18
+        cmd = "x" * (guard.LOG_INPUT_MAX - 7) + " " + secret + " GH_TOKEN=supersecretvalue"
         got = self.logged("Bash", {"command": cmd})
         self.assertTrue(got.endswith(guard.LOG_TRUNCATED))
         for part in (secret[:6], "supersecret"):
@@ -826,20 +965,18 @@ class BlocklogInputTests(unittest.TestCase):
             with self.subTest(pad=pad):
                 text = pad * 20000 + "://u:p"
                 start = time.monotonic()
-                guard._redact(text, [])
+                guard._redact(text)
                 self.assertLess(time.monotonic() - start, 2.0)
 
     def test_secret_straddling_the_scan_cut_never_shows_in_part(self):
         # redacting shrinks the text, so the kept part can reach the place where the input was cut before redacting
-        secret = "tok3n-abcdef123456"
-        self.secret_file(guard.OPERATOR_TOKEN, secret)
+        secret = "ghp_" + "A1" * 18
         for cut in (guard._LOG_SCAN, guard._LOG_SCAN + guard._LOG_SCAN_MARGIN):
             for split in (1, 5, len(secret) - 1):
                 with self.subTest(cut=cut, split=split):
                     head = "TOKEN=" + "v" * (cut - split - 7) + " "
                     got = self.logged("Bash", {"command": head + secret + " tail"})
-                    self.assertIn(got, ("TOKEN=[redacted]" + guard.LOG_TRUNCATED,
-                                        "TOKEN=[redacted] " + guard.LOG_TRUNCATED))
+                    self.assertNotIn(secret[:split], got.replace("TOKEN=", ""))
         tok = "ghp_" + "A1" * 18
         head = "TOKEN=" + "v" * (guard._LOG_SCAN - 10 - 7) + " "
         got = self.logged("Bash", {"command": head + tok + " tail"})
@@ -910,13 +1047,13 @@ class HookTests(_Fixtures):
         return json.dumps({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tin, "cwd": str(cwd)})
 
     def test_block_logs_and_exits_2(self):
-        proc = self.hook(self.event("Bash", {"command": "gh pr comment 1 -R acme/other -b x"}))
+        proc = self.hook(self.event("Bash", {"command": "git push --force origin feature/x"}))
         self.assertEqual(proc.returncode, 2)
-        self.assertIn(b"/not-me:allow-repo acme/other", proc.stderr)
+        self.assertIn(b"not-me guard [force_push]", proc.stderr)
         log = self.root / "app" / ".git" / "not-me" / "logs" / "guard.jsonl"
         row = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
-        self.assertEqual(row["target"], "acme/other")
-        self.assertEqual(row["input"], "gh pr comment 1 -R acme/other -b x")
+        self.assertEqual((row["outcome"], row["rule"]), ("blocked", "force_push"))
+        self.assertEqual(row["input"], "git push --force origin feature/x")
 
     def test_allow_and_inactive(self):
         self.assertEqual(self.hook(self.event("Bash", {"command": "git status"})).returncode, 0)
@@ -953,6 +1090,26 @@ class HookTests(_Fixtures):
                 with self.subTest(tool=tool, input=tin, variant=variant):
                     self.assertEqual(mod.main(self.event(tool, tin, variant)), 0)
 
+    def test_main_leaves_no_watchdog_thread(self):
+        spec = importlib.util.spec_from_file_location("notme_repo_guard_hook", str(HOOK))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        for tin, variant, want in (({"command": "ls"}, "bare", 0), ({"command": "ls"}, "app", 0),
+                                   ({"command": "gh repo delete acme/other --yes"}, "app", 2)):
+            with self.subTest(input=tin, variant=variant):
+                with mock.patch("sys.stderr"):
+                    self.assertEqual(mod.main(self.event("Bash", tin, variant)), want)
+                timers = [t for t in threading.enumerate() if isinstance(t, threading.Timer) and t.is_alive()]
+                self.assertEqual(timers, [])
+
+    def test_script_exit_codes_and_streams(self):
+        proc = self.hook(self.event("Bash", {"command": "ls"}))
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, b"", b""))
+        proc = self.hook(self.event("Bash", {"command": "gh repo delete acme/other --yes"}))
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn(b"not-me guard [destructive]", proc.stderr)
+        self.assertEqual(proc.stdout, b"")
+
     def test_destructive_label(self):
         proc = self.hook(self.event("Bash", {"command": "gh secret set T --repo acme/app --body x"}))
         self.assertEqual(proc.returncode, 2)
@@ -972,7 +1129,7 @@ class HooksJsonTests(unittest.TestCase):
         data = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
         entry = data["hooks"]["PreToolUse"][0]
         self.assertEqual(entry["matcher"],
-                         "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|NotebookRead|Grep|Glob|LS|mcp__.*")
+                         "Bash|Write|Edit|MultiEdit|NotebookEdit|mcp__.*github.*")
         hook = entry["hooks"][0]
         self.assertEqual((hook["type"], hook["timeout"]), ("command", 10))
         self.assertIn('bin/notme-python" "${CLAUDE_PLUGIN_ROOT}/hooks/repo_guard.py"', hook["command"])
@@ -982,15 +1139,48 @@ class HooksJsonTests(unittest.TestCase):
         self.assertEqual(list(data["hooks"]), ["PreToolUse"])
 
 
-class LiveMarkerTests(unittest.TestCase):
-    """The guard protects the live-mode marker by name, the same cheap way as the allow list and the token."""
+class ExtractIntoCwdTests(unittest.TestCase):
+    """tar or unzip with no -C or -d extracts into the working directory: from the not-me home or a directory
+    above it, that can replace the allow list (security review of dblanken-yale/not-me#118)."""
 
-    def test_the_guard_names_the_marker_the_cli_writes(self):
-        from notme import humans
-        self.assertEqual(guard.LIVE_MARKER_NAME, humans.LIVE_MARKER)
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="notme-extract-")).resolve()
+        self.addCleanup(shutil.rmtree, str(self.dir), True)
+        self.home = self.dir / "user" / ".claude" / "not-me"
+        self.home.mkdir(parents=True)
+        self.work = self.dir / "work"
+        self.work.mkdir()
 
-    def test_a_shell_mention_of_the_marker_is_never_prefiltered_away(self):
-        for cmd in ("cp /tmp/x ~/.claude/x/mode-live.sig", "echo 0 > 'mode-live.sig'", "touch mode-l\\ive.sig"):
+    def rule(self, cmd, cwd):
+        ctx = GuardContext(cwd=str(cwd), root=None, home=str(self.home), env={})
+        block = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(cwd)}, ctx)
+        return getattr(block, "rule", None)
+
+    def test_an_extract_from_the_home_or_above_blocks(self):
+        for cwd in (self.home, self.home.parent, self.dir / "user"):
+            for cmd in ("tar -xzf x.tgz", "tar xf x.tar", "unzip x.zip", "tar -xf x.tar -C $D",
+                        "unzip x.zip -d \"$D\""):
+                with self.subTest(cwd=cwd, cmd=cmd):
+                    self.assertEqual(self.rule(cmd, cwd), guard.SELF)
+
+    def test_the_same_extract_elsewhere_and_a_listing_in_the_home_pass(self):
+        for cmd in ("tar -xzf x.tgz", "unzip x.zip", "tar -xf x.tar -C $D"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.rule(cmd, self.work))
+        for cmd in ("tar -tzf x.tgz", "unzip -l x.zip", "tar -czf ../x.tgz ."):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.rule(cmd, self.home))
+
+
+class AllowListNameTests(unittest.TestCase):
+    """The guard protects the allow list by name, the same cheap way the CLI names it."""
+
+    def test_the_guard_names_the_file_the_cli_writes(self):
+        self.assertEqual(guard.ALLOWLIST_NAME, writes.ALLOWLIST_FILE)
+
+    def test_a_shell_mention_of_the_allow_list_is_never_prefiltered_away(self):
+        for cmd in ("cp /tmp/x ~/.claude/x/allowed-repos.json", "echo 0 > 'allowed-repos.json'",
+                    "touch allowed-re\\pos.json"):
             with self.subTest(cmd=cmd):
                 self.assertTrue(guard.needs_check({"tool_name": "Bash", "tool_input": {"command": cmd}}))
 
@@ -1006,6 +1196,110 @@ class InterpreterPrefilterTests(unittest.TestCase):
                     event = {"tool_name": "Bash", "tool_input": {"command": f"{spelled} x.txt"}}
                     self.assertTrue(guard.needs_check(event))
         self.assertTrue(re.search(r"\(\?i:", guard._PREFILTER.pattern))
+
+
+class GuideNotBlockTests(_Fixtures):
+    """dblanken-yale/not-me#141: the guard hard-blocks only what breaks the process or cannot be undone. A guided
+    call (other_repo, process) runs and leaves a guard log line marked guided."""
+
+    def decide(self, cmd, variant="app"):
+        ctx = self.ctx(variant)
+        cwd, _ = gc.variant_paths(self.root, variant)
+        result = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(cwd)}, ctx)
+        return result, ctx
+
+    def test_writes_to_another_repo_are_guided(self):
+        for cmd in ("gh issue create --repo dblanken-yale/not-me --title x --body-file b.md",
+                    "gh issue comment 5 --repo acme/other --body-file b.md",
+                    "gh pr comment 5 --repo acme/other --body hi", "GH_REPO=acme/lib gh pr create --title x --body y",
+                    "git push https://github.com/acme/lib.git HEAD", "git remote set-url origin " + gc.GH + "acme/lib"):
+            with self.subTest(cmd=cmd):
+                result, ctx = self.decide(cmd)
+                self.assertIsNone(result, getattr(result, "message", ""))
+                self.assertEqual([b.rule for b in ctx.guided][:1], ["other_repo"])
+
+    def test_off_rule_is_neither_blocked_nor_guided(self):
+        result, ctx = self.decide("gh pr comment 5 --repo acme/other --body hi", "off")
+        self.assertIsNone(result)
+        self.assertEqual(ctx.guided, [])
+
+    def test_hard_blocks_stay(self):
+        for cmd, rule in (("git push --force origin feature/x", "force_push"),
+                          ("git push origin HEAD:main", "protected_branches"),
+                          ("git push https://github.com/acme/lib.git HEAD:main", "protected_branches"),
+                          ("gh repo delete acme/other --yes", "destructive_git"),
+                          ("gh secret set T --repo acme/other --body x", "destructive_git"),
+                          ("gh api -X DELETE repos/acme/lib/git/refs/heads/x", "destructive_git"),
+                          ("gh api -X DELETE repos/acme/app/../../acme/lib/labels/x", "destructive_git"),
+                          ("gh api -X PUT repos/acme/a/b/../../app/branches/main/protection --input p.json",
+                           "destructive_git"),
+                          ('gh api graphql -f query="mutation { deleteRef(input:{refId:1}) { clientMutationId } }"',
+                           "destructive_git"),
+                          ('gh api graphql -f query="mutation { updateRefs(input:{}) { clientMutationId } }"',
+                           "protected_branches"),
+                          ("gh api graphql -F query=@q.graphql", "destructive_git"),
+                          ("gh api -X PATCH repos/acme/lib/git/refs/heads/main -F sha=1", "protected_branches"),
+                          ("gh api -X PATCH repos/acme/lib/git/refs/heads/x -F force=true", "force_push"),
+                          ("git -c remote.origin.push=refs/heads/x:refs/heads/main push", "protected_branches"),
+                          ("GIT_DIR=" + str(self.root / "other" / ".git") + " git commit -m x", "protected_branches"),
+                          ("git send-pack https://github.com/acme/other main", "protected_branches")):
+            with self.subTest(cmd=cmd):
+                result, _ = self.decide(cmd)
+                self.assertIsInstance(result, Block)
+                self.assertEqual(result.rule, rule)
+
+    def test_graphql_board_and_comment_mutations_are_guided(self):
+        result, ctx = self.decide('gh api graphql -f query="mutation { addComment(input:{}) { clientMutationId } }"')
+        self.assertIsNone(result)
+        self.assertEqual([b.rule for b in ctx.guided][:1], ["other_repo"])
+
+    def test_gh_ruleset_reads_pass(self):
+        for cmd in ("gh ruleset view 1 --repo acme/app", "gh ruleset list --repo acme/app"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.decide(cmd)[0])
+
+    def test_repo_config_edit_during_a_run_is_guided(self):
+        ctx = self.ctx("running")
+        cwd, _ = gc.variant_paths(self.root, "running")
+        path = str(cwd / ".claude" / "not-me" / "project.md")
+        result = guard.decide({"tool_name": "Write", "tool_input": {"file_path": path, "content": "x"},
+                               "cwd": str(cwd)}, ctx)
+        self.assertIsNone(result)
+        self.assertEqual([b.rule for b in ctx.guided], ["process"])
+
+    def test_mcp_tools_get_only_the_hard_rules(self):
+        self.assertFalse(guard.needs_check({"tool_name": "mcp__x__delete_repo", "tool_input": {}}))
+        # GitHub MCP tools: no repo check, and merging a pull request is a person's call
+        for tool in ("mcp__github__add_issue_comment", "mcp__github__merge_pull_request"):
+            with self.subTest(tool=tool):
+                ctx = self.ctx()
+                self.assertTrue(guard.needs_check({"tool_name": tool, "tool_input": {}}))
+                self.assertIsNone(guard.decide({"tool_name": tool, "tool_input": {"owner": "a", "repo": "b"}}, ctx))
+                self.assertEqual(ctx.guided, [])
+        for tool, tin, rule in (("mcp__github__delete_repository", {}, "destructive_git"),
+                                ("mcp__github__push_files", {"branch": "main"}, "protected_branches")):
+            with self.subTest(tool=tool):
+                result = guard.decide({"tool_name": tool, "tool_input": dict(tin, owner="a", repo="b")}, self.ctx())
+                self.assertEqual(getattr(result, "rule", None), rule)
+
+    def test_hook_logs_a_guided_call_and_allows_it(self):
+        log = self.root / "app" / ".git" / "not-me" / "logs" / "guard.jsonl"
+        before = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+        cwd, _ = gc.variant_paths(self.root, "app")
+        proc = self.hook(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": str(cwd),
+                                     "tool_input": {"command": "gh issue comment 1 -R acme/other -b x"}}))
+        self.assertEqual((proc.returncode, proc.stderr), (0, b""))
+        rows = [json.loads(x) for x in log.read_text(encoding="utf-8").splitlines()[len(before):]]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["outcome"], rows[0]["rule"], rows[0]["target"]), ("guided", "other_repo",
+                                                                                  "acme/other"))
+        self.assertEqual(rows[0]["input"], "gh issue comment 1 -R acme/other -b x")
+
+    def test_no_block_message_sends_the_operator_to_a_terminal(self):
+        import re
+        src = (PLUGIN_ROOT / "notme" / "guard.py").read_text(encoding="utf-8")
+        hits = [ln for ln in src.splitlines() if re.search(r"own terminal|terminal\"|plugins/cache", ln)]
+        self.assertEqual(hits, [])
 
 
 class OwnScriptsTests(unittest.TestCase):

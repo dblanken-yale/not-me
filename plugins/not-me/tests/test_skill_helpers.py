@@ -8,7 +8,7 @@ PLUGIN = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN))
 from notme import frontmatter  # noqa: E402
 
-SKILLS = ["not-me", "status", "doctor", "config", "allow-repo"]
+SKILLS = ["not-me", "status", "doctor", "config", "allow-repo", "mode", "pause"]
 FORBIDDEN = ["/Users/", "/home/", "yalesites", "pantheon", "lando", "miketullo",
              "dblanken", "alan-", "Dave", "Mike"]
 EM_DASH = "—"
@@ -82,17 +82,22 @@ class HelperSkillsTest(unittest.TestCase):
             self.assertIn(phrase, text)
         self.assertLess(len(text.splitlines()), 90)
 
-    def test_allow_repo_is_human_only(self):
-        text, meta = load("allow-repo")
-        self.assertIs(meta.get("disable-model-invocation"), True)
-        self.assertIn("notme allow-repo list", text)
-        self.assertNotIn("allow-repo list --", text)
-        self.assertIn("hidden", text)
-        for line in text.splitlines():
-            if re.search(r"allow-repo (add|remove) ", line):
-                self.assertIn('"<notme>"', line)
-                self.assertNotIn("CLAUDE_PLUGIN_ROOT", line)
-        self.assertLess(len(text.splitlines()), 50)
+    def test_operator_skills_are_user_invocable_and_run_the_cli_themselves(self):
+        """allow-repo, mode and pause: only a person typing the slash command starts them, and they run the change
+        in the session and show it (dblanken-yale/not-me#118). No hand-back to a terminal, no token."""
+        for name, runs in (("allow-repo", ("notme allow-repo add", "notme allow-repo remove", "notme allow-repo list")),
+                           ("mode", ("notme mode show", "notme mode dry-run", "notme mode live")),
+                           ("pause", ("notme pause on", "notme pause off"))):
+            with self.subTest(skill=name):
+                text, meta = load(name)
+                self.assertIs(meta.get("disable-model-invocation"), True)
+                for cmd in runs:
+                    self.assertIn(cmd, text)
+                self.assertIn("summary", text)
+                low = text.lower()
+                for stale in ("terminal", "token", "cd ", "launcher", "plugin cache", "init-token"):
+                    self.assertNotIn(stale, low)
+                self.assertLess(len(text.splitlines()), 60)
 
     def test_read_only_skills_have_no_writes(self):
         for name in ("status", "config"):

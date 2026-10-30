@@ -1,5 +1,6 @@
 ---
 schema: 1                        # config format version
+baseline: always                 # always | auto; auto skips the full baseline when the base branch's CI is green at its head
 ---
 # Verify
 
@@ -14,7 +15,16 @@ docker-compose files or a Makefile.
 ## Baseline
 
 Run the tests once before changing anything and record failures that already
-exist, so they are not blamed on the change.
+exist, so they are not blamed on the change. With `baseline: auto` the run skips
+this when the base branch's CI is green at its head, and logs that it did.
+
+## Targeted tests
+
+Commands that run only some tests: the changed test files or test names go at
+the end of the command. Runs use them for red then green, after the implementer
+and after each fix round, and run the full Tests, Lint and Build once before the
+push. Left as is, none is configured and every step runs the full commands. To
+pin one, write it in a fenced code block here, one command per line.
 
 ## Tests
 
@@ -48,3 +58,8 @@ For UI changes, look at the result and check basic accessibility.
 ## Gate additions
 
 Extra checks this project requires before review. None by default.
+
+## Person only
+
+Commands a run never starts, such as live evals or anything that calls a paid
+model or service for real. A person runs them. None by default.

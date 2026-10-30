@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
 
-from . import git, paths
+from . import frontmatter, git, paths
 from .dryrun import utc_now
 
 SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.][A-Za-z0-9_.-]*$")  # no leading "-" in either part
@@ -268,6 +268,73 @@ def allowlist_list(home: Any, project: Optional[str] = None) -> List[Dict[str, s
     return out
 
 
+# --- the repo layer on the default branch ------------------------------------
+
+REPO_LAYER_PROJECT = ".claude/not-me/project.md"
+_SHA = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
+REMOTE_TIMEOUT = 10  # seconds for `git ls-remote origin HEAD`
+
+
+def _git(args: List[str], cwd: Any, timeout: float = 10) -> Optional[subprocess.CompletedProcess]:
+    """`git <args>` in cwd with no prompt for credentials; None when git cannot run or times out."""
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")
+    try:
+        return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=timeout,
+                              stdin=subprocess.DEVNULL, env=env)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def remote_default_sha(project_dir: Any) -> Optional[str]:
+    """The commit the origin remote's HEAD (its default branch) points at, asked of the remote itself: a read,
+    never a local ref the session could have moved. None when the remote cannot be asked."""
+    proc = _git(["ls-remote", "origin", "HEAD"], project_dir, timeout=REMOTE_TIMEOUT)
+    if proc is None or proc.returncode != 0:
+        return None
+    for line in proc.stdout.splitlines():
+        sha, _, name = line.partition("\t")
+        if name.strip() == "HEAD" and _SHA.match(sha.strip()):
+            return sha.strip()
+    return None
+
+
+def default_branch_names(project_dir: Any, sha_of: Any = remote_default_sha) -> Dict[str, FrozenSet[str]]:
+    """The repos and board the repo layer names as committed on the default branch, lowercased by key: tracker,
+    repos (their names) and board ("owner/number"). The default branch commit is the one the origin remote
+    reports for HEAD (sha_of, a read from the remote); the file is read from that exact commit, which must
+    already be in the local object store, never from the working tree or a local ref, so a checked-out PR
+    branch, an uncommitted edit or a moved local ref adds nothing. An unreachable remote, a commit not fetched
+    yet, a missing file or one that does not parse gives empty sets, so nothing extra counts."""
+    out: Dict[str, FrozenSet[str]] = {"tracker": frozenset(), "repos": frozenset(), "board": frozenset()}
+    if project_dir is None:
+        return out
+    sha = sha_of(project_dir)
+    if not sha or not _SHA.match(sha):
+        return out
+    have = _git(["cat-file", "-e", f"{sha}^{{commit}}"], project_dir)
+    if have is None or have.returncode != 0:
+        return out
+    shown = _git(["cat-file", "blob", f"{sha}:{REPO_LAYER_PROJECT}"], project_dir)
+    if shown is None or shown.returncode != 0:
+        return out
+    text = shown.stdout
+    try:
+        meta, _ = frontmatter.parse(text, source=REPO_LAYER_PROJECT)
+    except Exception:  # FrontmatterError or anything a hostile file provokes: nothing counts
+        return out
+    tracker = meta.get("tracker")
+    repos = meta.get("repos") if isinstance(meta.get("repos"), list) else []
+    board = ((meta.get("queue") or {}).get("board") or {}) if isinstance(meta.get("queue"), dict) else {}
+    board = board if isinstance(board, dict) else {}
+    number = board.get("number")
+    out["tracker"] = frozenset({tracker.lower()} if valid_slug(tracker) else ())
+    out["repos"] = frozenset(str(n).lower() for n in (r.get("name") if isinstance(r, dict) else r for r in repos)
+                             if valid_slug(n))
+    if board.get("owner") and isinstance(number, int) and not isinstance(number, bool):
+        out["board"] = frozenset({f"{board['owner']}/{number}".lower()})
+    return out
+
+
 # --- guard context ---------------------------------------------------------
 
 
@@ -290,8 +357,11 @@ class GuardContext:
             object.__setattr__(self, "dry_run", self.mode == "dry-run" or os.environ.get("NOT_ME_DRY_RUN") == "1")
 
     @classmethod
-    def from_config(cls, cfg: Any, origin_url: Optional[str] = None, checkout: Any = None) -> "GuardContext":
-        """Build from a loaded Config; origin_url overrides asking git (for tests)."""
+    def from_config(cls, cfg: Any, origin_url: Optional[str] = None, checkout: Any = None,
+                    default_branch: bool = True) -> "GuardContext":
+        """Build from a loaded Config; origin_url overrides asking git (for tests). default_branch False skips
+        asking the remote for the default branch (the hook: no network on a tool call; the names it would add
+        are only guided there anyway), so repo-layer names count only through the allow list."""
         meta = cfg.meta.get("project", {}) if getattr(cfg, "meta", None) else {}
         project_dir = Path(checkout) if checkout else cfg.project_dir
         if origin_url is None and project_dir is not None:
@@ -305,17 +375,28 @@ class GuardContext:
             warnings.append(warning)
         confirmed = [e["repo"] for scope in ([origin] if origin else []) + ["*"] for e in _entries(data, scope)]
         confirmed_lower = {c.lower() for c in confirmed}
+        # the repo layer as merged to the default branch, read only when a repo-layer name needs it
+        merged: List[Dict[str, Any]] = []
+
+        def on_default_branch() -> Dict[str, Any]:
+            if not merged:
+                merged.append(default_branch_names(getattr(cfg, "project_dir", None) or project_dir)
+                              if default_branch else default_branch_names(None))
+            return merged[0]
 
         def from_repo_layer(key: str) -> bool:
             return (getattr(cfg, "sources", {}).get(f"project.{key}") or {}).get("layer") == "repo"
 
         def untrusted(slug: Any, key: str) -> bool:
-            """A repo-layer name (committed, so untrusted) that the global allow list has not confirmed."""
+            """A repo-layer name (untrusted as read: the working tree may hold any branch) that is neither on the
+            default branch under the same key nor confirmed in the global allow list."""
             if not valid_slug(slug) or not from_repo_layer(key) or str(slug).lower() in confirmed_lower:
                 return False
+            if str(slug).lower() in on_default_branch()[key]:
+                return False
             where = (cfg.sources.get(f"project.{key}") or {}).get("path") or ".claude/not-me/project.md"
-            warnings.append(f"{slug} is listed in {where} but not confirmed; run /not-me:allow-repo {slug} "
-                            "(setup does this for you)")
+            warnings.append(f"{slug} is listed in {where} but not confirmed: it counts once it is on the default "
+                            f"branch, or run /not-me:allow-repo {slug}")
             return True
 
         tracker = meta.get("tracker")
@@ -343,10 +424,10 @@ class GuardContext:
             confirmed_boards = {b.lower() for scope in ([origin] if origin else []) + ["*"]
                                 for b in _board_entries(data, scope)}
             label = f"{board[0]}/{board[1]}"
-            if label.lower() not in confirmed_boards:
+            if label.lower() not in confirmed_boards and label.lower() not in on_default_branch()["board"]:
                 where = (cfg.sources.get("project.queue.board.owner") or {}).get("path") or ".claude/not-me/project.md"
-                warnings.append(f"board {label} is listed in {where} but not confirmed; "
-                                f"run /not-me:allow-repo --board {label}")
+                warnings.append(f"board {label} is listed in {where} but not confirmed: it counts once it is on the "
+                                f"default branch, or run /not-me:allow-repo --board {label}")
                 board = None
 
         guard = meta.get("guard")

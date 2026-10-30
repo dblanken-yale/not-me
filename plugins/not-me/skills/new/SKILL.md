@@ -128,8 +128,8 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/delegation.md`.
 3. Always dispatch the implementation to a subagent, even for a one-line change.
    This overrides any operator preference about delegation size. Brief one subagent with goal, files, conventions, scope ("no commits, no
    pushes, no posts"), and acceptance from the issue. Include the failing test
-   first rule. Log `DELEGATE <model> unit="..." try=1` with `notme log action
-   --kind DELEGATE`.
+   first rule, and the plan's targeted commands (step 6.1) as its only tests.
+   Log `DELEGATE <model> unit="..." try=1` with `notme log action --kind DELEGATE`.
 4. Audit yourself: read the diff, check scope, run the project's own test and lint
    commands from verify (step 6). Log `AUDIT pass|fail ...` with `--kind AUDIT`.
 5. Retry ladder from delegation.md, capped at `models.max_tries`, then do the unit
@@ -139,40 +139,40 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/delegation.md`.
 
 Read `${CLAUDE_PLUGIN_ROOT}/references/verification.md` and
 `${CLAUDE_PLUGIN_ROOT}/references/gate.md`. Commands come only from the body of
-the effective verify doc; never invent a test or lint command.
+the effective verify doc; never invent a test or lint command, never run a person-only one.
 
-1. Baseline before any edit: run `## Baseline` (or the test and lint sections);
-   log existing failures as `CHECK` lines.
+1. Before any edit: `notme verify-plan --base <base>`, then the baseline as it
+   says; log failures, or why it was skipped, as `CHECK` lines (verification.md).
 2. Reproduce a bug on the base before fixing. Cannot reproduce, or already fixed
    on the default branch: HELD (failure table). Do not guess at a fix.
-3. Red then green for every new behaviour.
+3. Red then green for every new behaviour, with the plan's targeted tests if any.
 4. UI diff: one `Visual check:` line (path form in the log, words form in the
    PR), and the light accessibility pass.
 5. Gate: tests red then green, `/simplify` when over about 20 changed lines, the
    code review (the `pr-review-toolkit` agent, or a general-purpose subagent when
    it is not installed), the security review as a foreground general-purpose
-   subagent, CI-parity lint on the whole tree, final tests, then each step under
-   `## Gate additions`. Log each as `GATE`. Fix findings in this run (gate.md).
+   subagent, CI-parity lint on the whole tree, final tests (full set, once, last),
+   then each step under `## Gate additions`. Log each as `GATE`. Fix findings in this run (gate.md).
 6. Cross-model claim check on `models.verifier` before posting; verdicts name the model.
 
 ## Step 7: Commit
 
-1. Stage only the paths this unit touched, by name. Never a blanket add.
+1. Stage only the paths this unit touched, by name; never a blanket add. In a run worktree
+   name it on every git call (`git -C <worktree> add`, `commit`); never `cd` into it first.
 2. Message per `standards.commit` (`conventional`: `fix(<N>): ...` or
    `feat(<N>): ...`, scope is the issue number, lowercase present tense).
-3. Write the message to a file. When `attribution` is text, end the message with
-   that line; `inherit` adds nothing; `none` adds nothing at all.
-4. Commit locally from the file:
+3. Write the message to a file (when `attribution` is text, end it with that line; `inherit` and
+   `none` add nothing), then commit from it; `<checkout>` is the run worktree, else the session checkout:
 
 <!-- allowed-raw-write -->
 ```bash
-git commit -F "$msgdir/commit-msg.txt"
+git -C <checkout> commit -F "$msgdir/commit-msg.txt"
 ```
 
 ## Step 8: Checkpoint B, push, CI
 
 1. `notme git checkpoint --base <base> --fetch` (Checkpoint B). New commits came
-   in: run the final tests again.
+   in: rerun tests as branching.md "Checkpoint B" says.
 2. Push the branch through the CLI only, companions first and the primary last
    (companions.md):
 
@@ -186,7 +186,7 @@ notme git push <branch> --log <path>
 4. CI: after the PR exists (step 9), poll `notme bundle <repo>#<pr>` until the
    `checks` for `head_sha` finish, up to `limits.ci_wait_minutes`. Red: read the
    failing job, fix, rerun locally, commit, push. Stop at `limits.fix_loop`
-   rounds; then park (failure table).
+   rounds; then park (failure table). `limits.ci_wait_minutes: 0`: no wait (verification.md).
 
 ## Step 9: Open the PR
 
@@ -253,7 +253,7 @@ checks. A clearly reported blocker is a correct outcome.
 - [ ] Claimed through the CLI and passed `--log` on every write.
 - [ ] Stopped on a declared base that does not exist.
 - [ ] Delegated the unit, audited it myself, logged DELEGATE and AUDIT.
-- [ ] Ran baseline, reproduction, red then green, and the full gate.
+- [ ] Ran verify-plan, the baseline, reproduction, red then green, and the full gate.
 - [ ] Committed only touched paths; pushed only through the CLI.
 - [ ] Opened the PR ready for review, moved the issue to `needs_review`, and left
       one upserted `new` marker comment on the issue naming the PR.

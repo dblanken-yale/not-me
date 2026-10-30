@@ -2,7 +2,7 @@
 
 not-me is a project-agnostic autonomous dev loop for Claude Code, shipped as a plugin and marketplace. It picks up ready GitHub issues, implements them, opens PRs, reworks PRs after review, reviews PRs, and proves PRs on a deploy target.
 
-It is configured per repo by markdown docs in `.claude/not-me/` (layered: plugin defaults, then `~/.claude/not-me/`, then the repo). A stdlib-only Python CLI, `notme`, does all GitHub mechanics. A PreToolUse guard hook blocks writes to other repos, commits, pushes, and merges to protected branches, force-pushes, and destructive git. Works in the Claude Code CLI and desktop.
+It is configured per repo by markdown docs in `.claude/not-me/` (layered: plugin defaults, then `~/.claude/not-me/`, then the repo). A stdlib-only Python CLI, `notme`, does all GitHub mechanics. A PreToolUse guard hook hard-blocks only what breaks the process or cannot be undone (commits, merges and pushes on protected branches, force-pushes, destructive git) and logs the rest, such as writes to other repos, for the skills to guide. Works in the Claude Code CLI and desktop.
 
 ## Quickstart
 
@@ -21,7 +21,7 @@ Then, in the repo you want to automate:
 /not-me --dry-run
 ```
 
-`--dry-run` reads from GitHub for real and records every write in a ledger instead of posting it. Read the ledger and the run log, then run `/not-me:mode live` and follow its steps in your own terminal (a repo file can never set live, and a hand-edited `mode: live` stays dry-run). Then schedule it:
+`--dry-run` reads from GitHub for real and records every write in a ledger instead of posting it. Read the ledger and the run log, then run `/not-me:mode live` (it sets `mode: live` in your global layer and says so; a repo file can never set live). Then schedule it:
 
 ```
 /loop 2h /not-me --bg
@@ -57,11 +57,16 @@ flowchart TD
         refuse, defer, implement, or disagree"]
         u3["Implement through a delegated subagent
         ⚙ models, standards.md Delegation"]
-        u4["Verify and gate
-        ⚙ verify.md"]
+        u4["Verify and gate: targeted tests during the work,
+        the full set once before the branch goes up
+        ⚙ verify.md, Targeted tests"]
         u5["Merge base in (the predecessor's branch on a stacked PR),
         send the branch up, reply on every thread, swap to 'needs review'"]
-        u1 --> u2 --> u3 --> u4 --> u5
+        u3b["Baseline, skipped when the base CI is green
+        ⚙ verify.md baseline: auto"]
+        u5b["Wait for CI
+        ⚙ limits.ci_wait_minutes, 0 skips it"]
+        u1 --> u2 --> u3b --> u3 --> u4 --> u5 --> u5b
     end
 
     subgraph new ["new leg: implement an issue"]
@@ -73,16 +78,21 @@ flowchart TD
         ⚙ standards.md branch, protected_branches, queue.stacking"]
         n3["Implement through a delegated subagent, failing test first
         ⚙ models, standards.md Delegation"]
-        n4["Verify and gate: baseline, tests, simplify, code review,
-        security review, CI-parity lint
-        ⚙ verify.md, limits.fix_loop"]
+        n3b["Baseline, skipped when the base CI is green
+        ⚙ verify.md baseline: auto"]
+        n4["Verify and gate: targeted tests during the work, simplify,
+        code review, security review, then the full tests, lint
+        and build once (CI parity)
+        ⚙ verify.md, Targeted tests, limits.fix_loop"]
         n4b["Gate additions and cross-model check
         ⚙ verify.md Gate additions, models.verifier"]
         n5["Commit and push through the CLI
         ⚙ standards.md commit, attribution"]
         n6["Open PR, move issue to 'needs review'
         ⚙ standards.md pr_title, pr_template, reviewers"]
-        n1 --> n2 --> n3 --> n4 --> n4b --> n5 --> n6
+        n7["Wait for CI on the PR
+        ⚙ limits.ci_wait_minutes, 0 skips it"]
+        n1 --> n2 --> n3b --> n3 --> n4 --> n4b --> n5 --> n6 --> n7
     end
 
     router -- "first" --> update
@@ -101,13 +111,13 @@ flowchart TD
     Dry-run records it in the ledger; live posts it
     ⚙ mode (default dry-run), guard, allow_repos"]
     live(["A person turns on live mode
-    in their own terminal"])
+    with /not-me:mode live"])
     merge(["A person approves, if review did not, and merges"])
 
     router -.-> review
     n6 -. "preview URL found" .-> prove
-    u5 --> retro
-    n6 --> retro
+    u5b --> retro
+    n7 --> retro
     review --> retro
     retro -.-> notify
     update --> writes
@@ -117,7 +127,7 @@ flowchart TD
 
     classDef optional stroke-dasharray: 5 5
     classDef person fill:#fde7c8,stroke:#c77700,color:#000
-    class review,prove,notify,n4b optional
+    class review,prove,notify,n4b,n3b,u3b,n7,u5b optional
     class live,merge person
 ```
 
@@ -137,8 +147,9 @@ flowchart TD
 | `/not-me:setup [--global] [doc] [--check] [--upgrade] [--answers FILE]` | Guided setup of `.claude/not-me/`, or the global layer with `--global` |
 | `/not-me:config [--layer default\|global\|repo]` | Explain the effective config and where each value came from |
 | `/not-me:doctor` | Check tools, GitHub auth, config, the guard self-test and subagent depth |
-| `/not-me:allow-repo <owner/name> [--everywhere]` | Show the allow list and print the command a person runs to change it (also `--board`, `--list`, `--remove`) |
-| `/not-me:mode [dry-run [--global] \| live]` | Show dry-run or live and where it is set, switch to dry-run, or get the steps to go live in your own terminal |
+| `/not-me:allow-repo <owner/name> [--everywhere]` | Show the allow list, or add or remove a repo or board and show what changed (also `--board`, `--list`, `--remove`). Repos and the board in the repo layer on the default branch count without it |
+| `/not-me:mode [dry-run [--global] \| live]` | Show dry-run or live and where it is set, or switch, and show what changed |
+| `/not-me:pause on\|off [--global]` | Pause not-me, or lift the pause, for this project or every project |
 
 ## Requirements
 

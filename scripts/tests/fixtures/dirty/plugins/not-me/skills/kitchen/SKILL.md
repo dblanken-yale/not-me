@@ -22,3 +22,4 @@ echo $CLAUDE_PLUGIN_ROOT/bin/notme
 ```
 
 Move it with `notme move-issue 4 --to blocked` and be done.
+Commit in the worktree: `cd <worktree> && git commit -F msg.txt`.

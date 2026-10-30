@@ -26,7 +26,7 @@ doc is not in scope for this run.
 | 14 | A command to run when a run ends? | `notify.command` | project |
 | 14a | Which layer gets the picking rules? Keep the current rules, or rank by a board field or label found? Include unassigned issues? Target epics? (see `picking.md`) | `picking.fields`, `picking.target_epics`, `queue.include_unassigned`, `## Picking work` | project |
 | 15 | Add to the global docs, or replace them? (only when a global doc exists) | `extends` | each doc |
-| 16 | Turn on live mode at the end if doctor passes? | none: the user runs `/not-me:mode live` | none (signed by the user) |
+| 16 | Turn on live mode at the end if doctor passes? | none: the user runs `/not-me:mode live` | none (the user's own command) |
 
 ## Global layer questions (`--global`)
 

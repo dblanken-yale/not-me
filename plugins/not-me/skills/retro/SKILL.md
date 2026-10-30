@@ -114,9 +114,9 @@ Read `${CLAUDE_PLUGIN_ROOT}/skills/retro/references/altitude.md`.
 
 1. `retro.file_upstream` false: the lesson goes in the audit log only.
 2. True: it would be filed on the plugin repository through `notme followup`
-   with the global `--repo` flag naming that repo. The guard blocks that write
-   until the operator allows the plugin repo once with `/not-me:allow-repo`;
-   a block means audit log only.
+   with the global `--repo` flag naming that repo. The CLI's write gate
+   refuses that write until the operator allows the plugin repo once with
+   `/not-me:allow-repo`; a refusal means audit log only.
 3. Today `notme followup` files in the tracker whatever `--repo` says. When the
    tracker is not the plugin repo, do not call it: write the title and body
    drafts into the audit log under `UPSTREAM` instead.

@@ -6,28 +6,37 @@ working directory (push URLs, current branch, aliases) lazily through
 context (`GuardContext.from_project`) and the inactive path start no
 processes: the checkout is found by walking up for `.git`.
 
-Outside a not-me project (`is_active` false) the four rule groups are off, but
+Outside a not-me project (`is_active` false) the rule groups are off, but
 self-protection still applies: the hook calls `ctx.self_only()`, which stubs
 git and config so nothing forks, and `decide` keeps only self_protect blocks.
 
-Rule groups, each switched by `guard.<rule>` in project.md:
-  other_repo          git and gh writes may only target allowed repos, and
-                      nothing may change where git pushes
+The guard guides runs to the right process and hard-blocks only what breaks
+the process or cannot be undone (dblanken-yale/not-me#141). Hard rule groups,
+each switched by `guard.<rule>` in project.md:
   protected_branches  no commits, merges, rebases, cherry-picks, am or hard
                       resets on a protected branch, and no pushes to one
   force_push          no history rewrites or remote branch deletion
   destructive_git     shown as "destructive": GitHub settings, secrets,
                       rulesets, releases and deletions, rm -rf .git, clean -x,
                       forced deletes of protected branches
-Self-protection is always on, in every directory: the operator token, the
-live-mode epoch and marker and the allow list (by
-file path), `notme allow-repo add|remove`, `notme pause off` and `notme mode`
-other than show or dry-run (as parsed commands), a pseudo-terminal or
-detached process around notme, the plugin's own files, and not-me config
-during a run. Live mode is signed: `mode: live` counts only next to a marker
-that `notme mode live` writes with the operator token, so no file edit can
-turn it on; the Edit/Write check on the global project.md is an early,
-friendly refusal, not the boundary. Merging pull requests is not the guard's
+Guided rules (GUIDED) are found the same way but never block: `decide` records
+them in `ctx.guided` and the hook logs the first one to guard.jsonl with
+outcome "guided". The process rule each stands for lives in
+references/prohibitions.md:
+  other_repo          git and gh writes to repos off the allowed list, and
+                      changes to where git pushes (`guard.other_repo: off`
+                      stops the log lines, and lifts the CLI write gate's
+                      repo check too)
+  process             edits to the repo layer config while a run is active
+GitHub MCP tools get the hard rules only (see _mcp); other MCP tools are not judged.
+Self-protection is always on, in every directory: the allow list file (by
+path: changes go through `notme allow-repo`, which shows and logs them), a
+Write or Edit that leaves the global `mode` other than dry-run (changes go
+through `notme mode`), the plugin's own files, and the global not-me config
+during a run. The not-me CLI itself is not judged: the operator's
+/not-me:allow-repo, /not-me:pause and /not-me:mode run it in the session, and
+references/prohibitions.md keeps a run from doing so on its own
+(dblanken-yale/not-me#118). Merging pull requests is not the guard's
 business: no not-me skill merges, and a person may merge or ask Claude to.
 
 Bash commands are split by `lex`, one linear pass that reads quotes,
@@ -38,12 +47,11 @@ including the ones inside $( ) and backticks. Text the guard does not parse
 code, a script file, a command name it cannot resolve, words xargs adds) is
 opaque: it is allowed unless its decoded text holds one of the words in
 _DANGER or _SELF_TEXT, and then blocked under the first relevant rule that is
-on. The guard does not follow cd: writes are judged in the hook's working
-directory, or the `git -C` / `gh -R` they name.
-
-Residual risk: a token file readable by the same OS user cannot be fully hidden
-from an agent running as that user; this guard is the enforcement, and the
-operator token is a second layer, not a secret.
+on. Writes are judged in the hook's working directory, or the `git -C` / `gh -R`
+they name. For git and gh the guard follows a leading `cd <path>` and fills in
+variables set to a literal path earlier in the same command; a directory it
+cannot work out is logged as guided, never judged as the session's own
+(dblanken-yale/not-me#144, see _State).
 """
 from __future__ import annotations
 
@@ -53,12 +61,14 @@ import glob
 import json
 import os
 import os as _host_os  # the real host: tests swap `os` for a simulated Windows view
+import posixpath
 import re
 import subprocess
 from dataclasses import dataclass, field
 from functools import cached_property, lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, Iterator, List, Mapping, Optional, Set, Tuple
+from urllib.parse import unquote
 
 from . import paths, redact, runlog, writes
 from .frontmatter import parse as parse_frontmatter  # stdlib only: no config stack
@@ -67,12 +77,16 @@ from .writes import parse_origin, valid_slug
 RULES = writes.GUARD_RULES
 RULE_LABEL = {"destructive_git": "destructive"}
 SELF = "self_protect"
+PROCESS = "process"  # a process rule with no config key: always guided, never blocked
+# found and logged as guided, never blocked: the process rule each stands for lives in references/prohibitions.md
+GUIDED = frozenset({"other_repo", PROCESS})
 OPAQUE = "opaque"  # cannot be parsed: reported under the first enabled rule in Block.rules
 
 ALLOWLIST_NAME = writes.ALLOWLIST_FILE
 BOARD_MARKER = "--not-me-board"
 ACTIVE_RUN_STALE_HOURS = 6
 CONFIG_HINT = ".claude/not-me/project.md"
+GLOBAL_CONFIG_HINT = "~/.claude/not-me/project.md"  # the repo layer cannot relax a rule; the global layer can
 PLUGIN_PROTECTED_DIRS = ("hooks", "bin", "notme", "cli", "skills")
 SCRIPT_READ_LIMIT = 1 << 20
 SCRIPT_SUFFIXES = (".sh", ".bash", ".zsh")
@@ -87,19 +101,13 @@ GLOB_LIMIT = 5000  # paths a glob may expand to before the guard stops expanding
 
 GitFn = Callable[[List[str], str], Optional[str]]
 
-OPERATOR_TOKEN = "operator-token"  # the human-confirm token file under the global not-me home
-# the token-signed live-mode marker under the global not-me home (humans.LIVE_MARKER, kept literal so the hook
-# imports no more than it needs); only `notme mode live`, run by a person, writes it
-LIVE_MARKER_NAME = "mode-live.sig"
-LIVE_MARKER_WHY = "the live-mode marker is the operator's own signature"
-LIVE_HINT = "the operator runs /not-me:mode live in their own terminal"
-# the random epoch that keys the marker together with the token (humans.LIVE_EPOCH); it is replaced on every return
-# to dry-run, so the agent may neither read nor write it, exactly like the token
-LIVE_EPOCH_NAME = "mode-live.epoch"
-LIVE_EPOCH_WHY = "the live-mode epoch is the operator's own secret"
-TOKEN_WHY, TOKEN_HINT = "the operator token is the operator's own confirmation", "ask the operator to confirm by hand"
-ALLOW_WHY, ALLOW_HINT = "only the operator changes the not-me allow list", "ask the operator to run /not-me:allow-repo"
-HOME_WHY = "the not-me home holds the operator's own secrets"
+# the allow list and the global mode change only through the not-me CLI, which shows and logs every change
+ALLOW_WHY = "the not-me allow list changes only through /not-me:allow-repo, which shows and logs the change"
+ALLOW_HINT = "ask the operator to run /not-me:allow-repo"
+MODE_HINT = "ask the operator to run /not-me:mode"
+# a block is a failure on not-me's side: an autonomous run stops (references/autonomy-and-logging.md,
+# dblanken-yale/not-me#132)
+AUTONOMOUS_LINE = "Autonomous runs: do not retry; log the block, end the run FAILED and post nothing."
 
 # --- patterns --------------------------------------------------------------
 
@@ -112,8 +120,6 @@ _PARAM_DEFAULT = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=+?]([^{}]*)\}")
 _ESC_SEQ = re.compile(r"\\(?:x([0-9A-Fa-f]{1,2})|([0-7]{1,3})|u([0-9A-Fa-f]{4}))")  # \x67, \147, g
 _SHELL_PIECES = re.compile(r"\$\{[^{}]*\}|\$\([^()]*\)|`[^`]*`|\$(?=['\"])")
 _GLOB = re.compile(r"[*?\[]")
-_BACKGROUND = re.compile(r"(?<![&<>|])&(?![&>])")  # a lone & (also zsh &! and ( ... ) &), not &&, 2>&1 or &>
-_LOCALHOST = re.compile(r"^(?:[^@]+@)?(?:localhost|127(?:\.\d+){3}|::1|\[::1\]|0\.0\.0\.0)$", re.IGNORECASE)
 _NOTME_WORD = re.compile(r"notme", re.IGNORECASE)
 # interpreter program names (lowercased, versioned or not); the prefilter is built from the same pattern
 _INTERP_NAMES = (r"(?:python|pythonw|py|node|nodejs|perl|ruby|php|deno|bun|lua|luajit|rscript|osascript|pwsh"
@@ -124,11 +130,47 @@ _PROTECTION = re.compile(r"/branches/[^/]+/protection(/|$)")
 _SECRETS = re.compile(r"/(actions|dependabot|codespaces)/(secrets|variables)(/|$)"
                       r"|/environments/[^/]+/(secrets|variables)(/|$)")
 _RULESETS = re.compile(r"/rulesets(/|$)")
-_MCP_TOOL = re.compile(r"^mcp__.*github.*", re.IGNORECASE)
-_READ_MCP_PREFIX = re.compile(r"^(get|list|search)_[a-z0-9_]+$")
-_MCP_WRITE_WORDS = re.compile(
-    r"(^|_)(merge|create|update|delete|add|remove|set|write|push|run|rerun|dismiss|request|submit|assign|close|"
-    r"reopen|fork|edit|lock|unlock|cancel|enable|disable|trigger|mark|star|approve|comment|upload|transfer)(_|$)")
+# GraphQL, read the way GraphQL reads it: block strings, strings, # comments, names, punctuation; commas and
+# whitespace are skipped. A lone quote is an unterminated string.
+# In a block string ("""...""") only \""" is an escape; any other backslash is an ordinary character (GraphQL spec).
+# A backslash before """ may only be read as that escape (no backtracking into a plain backslash and a close).
+_GQL_TOKEN = re.compile(r'"""(?:\\"""|(?!""")(?!\\""")[\s\S])*"""|"(?:[^"\\\n]|\\.)*"|#[^\n\r]*'
+                        r'|[A-Za-z_][A-Za-z0-9_]*|\.\.\.|[^\s,]')
+_GQL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# top-level mutation fields that delete or change settings or rulesets (lowercased names)
+_GQL_DESTRUCTIVE = re.compile(r"^(?:delete.*|.*(?:branchprotectionrule|ruleset).*|updaterepository|archiverepository"
+                              r"|unarchiverepository|transferrepository|updateenterprise.*|updateorganization.*"
+                              r"|.*secret.*|.*environment.*|.*deploykey.*)$")
+# mutations that move a branch without a push: one can force it or land on a protected branch
+_GQL_REFS = frozenset({"updateref", "updaterefs", "createref", "createcommitonbranch", "mergebranch",
+                       "revertpullrequest"})
+# the mutations a session or the plugin uses on comments, reviews, issues, pull requests, labels, assignees and board
+# items; any other mutation is refused, since the guard cannot tell what it changes (merging a pull request is a
+# person's call the guard does not judge, decision 11)
+_GQL_SAFE = frozenset(n.lower() for n in (
+    "addComment", "updateIssueComment", "addReaction", "removeReaction", "addLabelsToLabelable",
+    "removeLabelsFromLabelable", "addAssigneesToAssignable", "removeAssigneesFromAssignable", "createIssue",
+    "updateIssue", "closeIssue", "reopenIssue", "addSubIssue", "removeSubIssue", "reprioritizeSubIssue",
+    "createPullRequest", "updatePullRequest", "closePullRequest", "reopenPullRequest", "markPullRequestReadyForReview",
+    "convertPullRequestToDraft", "requestReviews", "addPullRequestReview", "addPullRequestReviewComment",
+    "addPullRequestReviewThread", "addPullRequestReviewThreadReply", "submitPullRequestReview",
+    "updatePullRequestReview", "resolveReviewThread", "unresolveReviewThread", "mergePullRequest",
+    "enablePullRequestAutoMerge", "disablePullRequestAutoMerge", "addProjectV2ItemById", "addProjectV2DraftIssue",
+    "updateProjectV2ItemFieldValue", "clearProjectV2ItemFieldValue", "updateProjectV2ItemPosition",
+    "archiveProjectV2Item", "unarchiveProjectV2Item"))
+_GIT_REF_PATH = re.compile(r"^repos/[^/]+/[^/]+/git/refs/heads/(.+)$")
+_CONTENTS_PATH = re.compile(r"^repos/[^/]+/[^/]+/contents(/|$)")
+# REST merges without a pull request: field that names the branch the merge lands on
+_MERGE_PATHS = ((re.compile(r"^repos/[^/]+/[^/]+/merges/?$"), "base"),
+                (re.compile(r"^repos/[^/]+/[^/]+/merge-upstream/?$"), "branch"))
+# GitHub MCP tools: the guard applies its hard rules only (see _mcp)
+_MCP_GITHUB = re.compile(r"^mcp__.*github.*", re.IGNORECASE)
+_MCP_SETTINGS = re.compile(r"secret|variable|ruleset|protection|deploy_key|webhook|collaborator|(^|_)update_repo"
+                           r"|archive_repo|transfer_repo|(^|_)delete_(repo|branch|ref|tag|release|label|workflow)")
+_MCP_BRANCH_TOOLS = frozenset({"create_or_update_file", "push_files", "delete_file", "update_ref", "merge_branch"})
+# git subcommands that run child git commands (which inherit -c settings and GIT_CONFIG_* variables)
+_NESTED_GIT = frozenset({"rebase", "submodule", "bisect", "filter-branch", "for-each-repo", "difftool", "mergetool",
+                         "maintenance", "worktree"})
 
 # Opaque text: what decoded text the guard does not parse may not hold, with the rules a match is reported under
 # (the first one that is on). Matched against every spelling _spellings makes. Every matcher is linear in the text:
@@ -167,23 +209,25 @@ _DANGER: Tuple[Tuple[Matcher, Tuple[str, ...]], ...] = (
                 r"(?![A-Za-z0-9_-])", re.IGNORECASE)), (_DG,)),
     (_found(re.compile(r"branch\s+(?:\S+\s+)?-[A-Za-z]*D")), (_DG,)),
     (_found(re.compile(r"clean\s+(?:\S+\s+)?-[A-Za-z]*[xX]")), (_DG,)),
-    (_then(re.compile(r"rm\s+-[A-Za-z]*[rR]"), re.compile(r"\.git(?![A-Za-z0-9_-])")), (_DG,)),
 )
+# rm -r of .git: the one opaque-text word that needs no git or gh command to do harm
+_RM_DOT_GIT = _then(re.compile(r"rm\s+-[A-Za-z]*[rR]"), re.compile(r"\.git(?![A-Za-z0-9_-])"))
+_DANGER += ((_RM_DOT_GIT, (_DG,)),)
 # protected path names: self-protection in any opaque text
-_SELF_TEXT = re.compile(r"operator-token|mode-live\.(?:sig|epoch)|allowed-repos\.json", re.IGNORECASE)
-# the not-me CLI's human switches, in text the guard does not parse that sits in the command itself (not in a
-# script file, whose own text may describe them; the CLI's restricted mode is the second layer there)
-_NOTME_TEXT = re.compile(r"allow-repo[\s,]+(?!list(?![A-Za-z0-9_-]))[^\s,]"
-                         r"|(?<![A-Za-z0-9_-])pause[\s,]+-*off(?![A-Za-z0-9_-])|(?<![A-Za-z0-9_-])mode[\s,]+live",
-                         re.IGNORECASE)
-_OPAQUE_HINT = "run the git, gh or notme command directly, with every word spelled out, so the guard can check it"
+_SELF_TEXT = re.compile(r"allowed-repos\.json", re.IGNORECASE)
+# interpreter code that starts a process or reaches the GitHub API (or may build a call to either): its words count
+_RUNS_SOMETHING = re.compile(r"system|exec|spawn|popen|subprocess|child_process|shell|command|process|eval|`|qx"
+                             r"|%x|run\s*\(|call\s*\(|import\s*\(|__import__|importlib|getattr|ctypes|fetch|request"
+                             r"|urlopen|http|socket|github", re.IGNORECASE)
+_OPAQUE_HINT ="run the git, gh or notme command directly, with every word spelled out, so the guard can check it"
 
 # Bash commands that cannot matter to any rule skip the full check (applied with quotes/backslashes removed).
 _PREFILTER = re.compile(
-    r"(?<![A-Za-z0-9_-])(gh|git|rm|find|xargs|parallel|sudo|doas|notme|bash|sh|zsh|dash|ksh|fish|source|exec|eval"
-    r"|script|expect|unbuffer|socat|ssh|tmux|screen|nohup|setsid|disown|daemon|at|batch|systemd-run"
-    r"|start-stop-daemon|launchctl|crontab|(?i:" + _INTERP_NAMES + r"))(?![A-Za-z0-9_-])"
-    r"|not-me|NOT_ME_|operator-token|mode-live|allowed-repos"
+    r"(?<![A-Za-z0-9_-])(gh|git|rm|find|xargs|parallel|sudo|doas|bash|sh|zsh|dash|ksh|fish|source|exec|eval"
+    r"|tar|bsdtar|gtar|unzip"  # an extract with no destination writes into the working directory
+    r"|cp|mv|ln|rsync|install|ditto"  # a relative destination (`..`) may be the not-me home or above it
+    r"|(?i:" + _INTERP_NAMES + r"))(?![A-Za-z0-9_-])"
+    r"|not-me|NOT_ME_|allowed-repos"
     r"|[$`/~*?\[\\&]|(?:^|[\s;|&(])\.(?:\s|$)|\.(?:sh|bash|zsh)\b|\.git")
 
 _SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
@@ -207,16 +251,7 @@ _PREFIX_WORDS: Dict[str, Set[str]] = {
     "nocorrect": set(),
 }
 _NOTME_PROGS = {"notme", "notme.py"}
-_PAUSE_OK = ([], ["on"], ["status"])
-_MODE_OK = ("show", "dry-run")  # `notme mode` subcommands the agent may run
 _PY_VALUE_OPTS = "WXQ"  # python short options that take a value (-W ignore, -Xutf8), skipped before -m or the script
-# wrappers that give their command a pseudo-terminal or run it outside the session's process tree, which would pass
-# the not-me CLI's human check: blocked around notme
-_PTY_PROGS = {"script", "expect", "unbuffer"}
-_ORPHAN_PREFIX = {"nohup", "setsid", "unbuffer"}
-_ORPHAN_PROGS = {"disown", "daemon", "start-stop-daemon", "systemd-run", "at", "batch"}
-# commands that copy or search a directory recursively: one that names a directory holding the not-me home reaches it
-_TOKEN_COPIERS = {"cp", "mv", "ln", "rsync", "tar", "zip", "scp", "install"}
 # git commands that are built in (git never runs an alias of these names); any other subcommand is looked up as an
 # alias, and an external git-<name> program is outside the guard's view
 _GIT_BUILTINS = set("""
@@ -260,13 +295,14 @@ _GH_GROUPS = {"pr", "issue", "repo", "release", "label", "run", "workflow", "sec
 _GH_DESTRUCTIVE: Dict[str, Optional[Set[str]]] = {
     "secret": {"set", "delete", "remove"},
     "variable": {"set", "delete", "remove"},
-    "issue": {"delete", "transfer"},
+    "issue": {"delete"},
     "repo": {"edit", "delete", "rename", "archive", "unarchive"},
     "release": {"delete", "delete-asset"},
     "label": {"delete"},
     "workflow": {"disable"},
-    "ruleset": None,
+    "ruleset": None,  # every verb but the reads in _RULESET_READS
 }
+_RULESET_READS = {"list", "ls", "view", "check"}
 # gh api flags that take a value -> what the value is (None = ignored)
 _API_VALUE_FLAGS: Dict[str, Optional[str]] = {
     "-X": "method", "--method": "method", "-f": "field", "-F": "field", "--field": "field",
@@ -278,20 +314,11 @@ _XARGS_VALUE = {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a", "--max-args", "-
 _PARALLEL_VALUE = {"-j", "-S", "-P", "-I", "-a", "--jobs", "--sshlogin", "--arg-file"}
 _SUDO_VALUE = {"-u", "-g", "-C", "-D", "-h", "-p", "-U", "-r", "-t", "--user", "--group", "--chdir"}
 _FIND_EXEC = {"-exec", "-execdir", "-ok", "-okdir"}
-_READ_MCP = {
-    "get_me", "get_file_contents", "get_commit", "list_commits", "list_branches", "list_tags", "get_tag",
-    "list_releases", "get_latest_release", "get_release_by_tag", "get_issue", "get_issue_comments", "issue_read",
-    "list_issues", "search_issues", "list_issue_types", "list_sub_issues", "get_label", "list_label",
-    "get_pull_request", "get_pull_request_files", "get_pull_request_diff", "get_pull_request_status",
-    "get_pull_request_comments", "get_pull_request_reviews", "get_pull_request_review_comments",
-    "pull_request_read", "list_pull_requests", "search_pull_requests", "search_code", "search_repositories",
-    "search_users", "search_orgs", "list_workflows", "list_workflow_runs", "get_workflow_run",
-    "get_workflow_run_logs", "list_workflow_jobs", "get_job_logs", "list_workflow_run_artifacts",
-    "get_code_scanning_alert", "list_code_scanning_alerts", "get_secret_scanning_alert",
-    "list_secret_scanning_alerts", "get_dependabot_alert", "list_dependabot_alerts", "list_discussions",
-    "get_discussion", "get_discussion_comments", "list_discussion_categories", "list_notifications",
-    "get_notification_details",
-}
+# git subcommands whose target branch the guard must know: pointed at another repository's git dir, they block
+_BRANCH_WRITES = frozenset({"commit", "push", "merge", "rebase", "cherry-pick", "am", "reset", "branch", "clean",
+                            "send-pack", "subtree"})
+# git subcommands whose check reads the branch checked out where they run
+_BRANCH_READERS = frozenset({"commit", "push", "merge", "rebase", "cherry-pick", "am", "reset"})
 
 # --- results ---------------------------------------------------------------
 
@@ -309,6 +336,7 @@ class Block:
     rules: Tuple[str, ...] = ()  # for OPAQUE: the rules it may be reported under, in order
     no_relax: bool = False  # the fix is to rewrite the command, so the message leaves out how to relax the rule
     no_checkout: bool = False  # raised because the checkout (or its push URL) could not be resolved
+    guide_only: bool = False  # logged as guided under its rule (when that rule is on), never blocked
 
 
 Decision = Optional[Block]  # None = allow
@@ -452,7 +480,7 @@ def _spellings(text: str) -> List[str]:
 
 def risky_text(text: str) -> bool:
     """text, read as opaque, holds a word that would block: used by the hook when it cannot decide a call at all."""
-    return any(_SELF_TEXT.search(v) or _NOTME_TEXT.search(v) or any(match(v) for match, _ in _DANGER)
+    return any(_SELF_TEXT.search(v) or any(match(v) for match, _ in _DANGER)
                for v in _spellings(text))
 
 
@@ -480,6 +508,9 @@ class SimpleCommand:
     bodies: List[str] = field(default_factory=list)  # here-document bodies and here-strings fed to it
     redirs: List[Tuple[str, str]] = field(default_factory=list)  # (operator, target)
     nested: bool = False  # inside $( ), backticks or <( )
+    # top-level commands only: the operators between the previous top-level command and this one (;, &&, ||, |, &,
+    # parentheses, newlines), comments and here-document bodies removed
+    before: str = ""
 
 
 @dataclass
@@ -488,6 +519,7 @@ class Parsed:
     subs: List[str]  # source of every $( ), backtick, <( ) and >( ) body, here-document bodies removed
     code: str  # the whole command without here-document bodies
     funcdef: bool  # a name() function definition
+    tail: str = ""  # the operators after the last top-level command
 
 
 _META = frozenset(" \t\n;&|()<>")
@@ -861,11 +893,20 @@ def lex(cmd: str) -> Parsed:
     lx = _Lexer(cmd)
     lx.parse(None)
     lx.read_bodies()  # a here-document opened on the last line has an empty body
+    prev = 0
     for c in lx.commands:
         c.raw = lx.without_bodies(*c.span)
+        if not c.nested:
+            c.before = _COMMENT.sub("", lx.without_bodies(prev, c.span[0]))
+            prev = c.span[1]
     subs = [lx.without_bodies(a, b) for a, b, _ in lx.sub_spans]
     subs = [_PARAM_OP.sub(" ", s, count=1) if p else s for s, (_, _, p) in zip(subs, lx.sub_spans)]
-    return Parsed(lx.commands, subs, lx.without_bodies(0, len(cmd)), lx.funcdef)
+    return Parsed(lx.commands, subs, lx.without_bodies(0, len(cmd)), lx.funcdef,
+                  _COMMENT.sub("", lx.without_bodies(prev, len(cmd))))
+
+
+# between two top-level commands there are no words, so a # always starts a comment
+_COMMENT = re.compile(r"#[^\n]*")
 
 
 # the name and operator at the start of a ${...} body, so the word after ${x:-word} reads as a word
@@ -874,10 +915,10 @@ _PARAM_OP = re.compile(r"^[#!]?[A-Za-z0-9_@*?$-]*?(?:\[[^\[\]]*\])?(?::?[-=+?]|#
 
 def needs_check(event: Mapping[str, Any]) -> bool:
     """False for calls no rule can care about (cheap, no processes): Bash commands that mention nothing the guard
-    judges, and MCP tools other than GitHub ones."""
+    judges, and MCP tools other than GitHub ones (the operator decides which MCP tools to install and allow)."""
     tool = event.get("tool_name")
     if isinstance(tool, str) and tool.startswith("mcp__"):
-        return bool(_MCP_TOOL.match(tool))
+        return bool(_MCP_GITHUB.match(tool))
     if tool != "Bash":
         return True
     tin = event.get("tool_input")
@@ -972,6 +1013,7 @@ class GuardContext:
         self.plugin_root = Path(plugin_root) if plugin_root else paths.plugin_root(self.env)
         self.git = git
         self.only_self = False
+        self.guided: List[Block] = []  # what the last decide() let through under a GUIDED rule, for the log
         if write_ctx is not None:
             self.__dict__["write_ctx"] = write_ctx  # shadows the cached property
 
@@ -1017,7 +1059,7 @@ class GuardContext:
         base = self.root or self.cwd
         cfg = config.load(project_dir=str(base), home=str(self.home), env=self.env)
         origin_url = self.git(["remote", "get-url", "origin"], base) or ""  # "" stops writes asking git again
-        return writes.GuardContext.from_config(cfg, origin_url=origin_url, checkout=base)
+        return writes.GuardContext.from_config(cfg, origin_url=origin_url, checkout=base, default_branch=False)
 
     @property
     def origin_repo(self) -> Optional[str]:
@@ -1053,21 +1095,13 @@ def render(block: Block, ctx: GuardContext) -> str:
     label = RULE_LABEL.get(block.rule, block.rule)
     head = f"not-me guard [{label}]: blocked `{block.command}`"
     lines = [head + (f": targeting {block.target}." if block.target else ".")]
-    if block.suggest_allow and block.target:
-        t = block.target
-        allowed = ", ".join(sorted(ctx.allowed_repos)) or "nothing (no origin found)"
-        lines += [f"This repo ({ctx.origin_repo or 'unknown origin'}) may write only to: {allowed}.",
-                  f"If {t} is intended, the operator runs:  /not-me:allow-repo {t}",
-                  f"  (all projects: /not-me:allow-repo {t} --everywhere; team-wide: list it under repos "
-                  f"in {CONFIG_HINT}, then each operator confirms it once with /not-me:allow-repo {t})"]
-    else:
-        lines.append(f"Why: {block.reason}.")
-        if block.hint:
-            lines.append(f"Instead: {block.hint}.")
-    lines.append("Autonomous runs: do not retry; log a QUESTION naming the operator and continue.")
+    lines.append(f"Why: {block.reason}.")
+    if block.hint:
+        lines.append(f"Instead: {block.hint}.")
+    lines.append(AUTONOMOUS_LINE)
     if block.rule in RULES and not block.no_relax:
         lines.append(f"Relax this rule (not recommended): set guard.{block.rule}: off and "
-                     f"confirm_guard_off: [{block.rule}] in {CONFIG_HINT}")
+                     f"confirm_guard_off: [{block.rule}] in {GLOBAL_CONFIG_HINT}")
     lines.append("See effective config: /not-me:config")
     return "\n".join(lines)
 
@@ -1101,27 +1135,34 @@ def _decide(event: Mapping[str, Any], ctx: GuardContext) -> Decision:
     if not isinstance(tool, str) or not isinstance(tin, dict):
         raise TypeError("tool_name must be a string and tool_input an object")
     cwd = str(event.get("cwd") or ctx.cwd)
+    ctx.guided = []
     if tool == "Bash":
         cands = _bash(str(tin.get("command") or ""), cwd, ctx)
     elif tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
         cands = _file(tool, str(tin.get("file_path") or tin.get("notebook_path") or ""), cwd, ctx, tin)
-    elif tool in _READ_TOOLS:
-        cands = _read_tool(tool, tin, cwd, ctx)
-    elif _MCP_TOOL.match(tool):
+    elif _MCP_GITHUB.match(tool):
         cands = _mcp(tool, tin, ctx)
     else:
-        return None
+        return None  # other MCP tools and every other tool: not the guard's business
     for block in cands:
         if ctx.only_self and block.rule != SELF:
             continue
         if block.rule == OPAQUE:
             enabled = [r for r in (block.rules or RULES) if ctx.rules.get(r, True)]
-            if not enabled:
+            hard = [r for r in enabled if r not in GUIDED]
+            if not hard:
+                if enabled:  # only a guided rule is left: record it, keep looking for a hard block
+                    block.rule = enabled[0]
+                    block.tool = tool
+                    ctx.guided.append(block)
                 continue
-            block.rule = enabled[0]
+            block.rule = hard[0]
         elif block.rule != SELF and not ctx.rules.get(block.rule, True):
             continue
         block.tool = tool
+        if block.rule in GUIDED or block.guide_only:
+            ctx.guided.append(block)
+            continue
         block.message = render(block, ctx)
         return block
     return None
@@ -1143,15 +1184,7 @@ def _unknown_target(blk: Blk, why: str, fix: str) -> Block:
     return b
 
 
-_READ_TOOLS = ("Read", "NotebookRead", "LS", "Grep", "Glob")
-
-
-# The not-me home's private files, as (name, why, hint). The agent may neither read nor write the secrets (the
-# operator token and the live-mode epoch); the shell checks also cover the live marker, which the agent may not
-# write (the Read tool may still read it).
-_HOME_SECRETS = ((OPERATOR_TOKEN, TOKEN_WHY, TOKEN_HINT), (LIVE_EPOCH_NAME, LIVE_EPOCH_WHY, LIVE_HINT))
-_HOME_GUARDED = _HOME_SECRETS + ((LIVE_MARKER_NAME, LIVE_MARKER_WHY, LIVE_HINT),)
-# (_norm path, plain normcased path, why, hint) of one guarded file
+# (_norm path, plain normcased path, why, hint) of one guarded file in the not-me home
 _Guarded = Tuple[str, str, str, str]
 
 
@@ -1163,57 +1196,17 @@ def _guarded(ctx: GuardContext, base: str, entries: Tuple[Tuple[str, str, str], 
     return out
 
 
-def _pattern_hit(pattern: str, base: str, guarded: List[_Guarded], recursive: bool) -> Optional[_Guarded]:
+def _pattern_hit(pattern: str, base: str, guarded: List[_Guarded]) -> Optional[_Guarded]:
     """The guarded file a shell pattern (relative to base) could name, or None. fnmatch's * also crosses "/",
     so this over-approximates: a pattern that could reach the file counts."""
     p = _path.expanduser(pattern)
     if not _path.isabs(p) and not p.startswith("*"):
         p = _path.join(base, p)
-    p = _path.normcase(_path.normpath(p))
-    pats = [p] + ([p.rstrip(_path.sep) + _path.sep + "*"] if recursive else [])
+    p = _path.normcase(_path.normpath(p)).lower()  # without case: a case-insensitive file system ignores it
     for g in guarded:
-        if any(fnmatch.fnmatchcase(c, q) for c in g[:2] for q in pats):
+        if any(fnmatch.fnmatchcase(c.lower(), p) for c in g[:2]):
             return g
     return None
-
-
-def _read_tool(tool: str, tin: Mapping[str, Any], cwd: str, ctx: GuardContext) -> Iterator[Block]:
-    """Read, NotebookRead, LS, Grep and Glob may not reach the operator token or the live-mode epoch (or list the
-    not-me home)."""
-    if tool in ("Read", "NotebookRead"):
-        yield from _token_file(tool, str(tin.get("file_path") or tin.get("notebook_path") or ""), cwd, ctx)
-        return
-    raw = str(tin.get("path") or "")
-    here = _norm(cwd, os.getcwd())
-    base = _norm(_expand_home(raw, ctx), here) if raw else here
-    home = _norm(str(ctx.home), cwd)
-    pattern = str(tin.get("pattern" if tool == "Glob" else "glob") or "")
-    blk = _blk(_short(f"{tool} {raw} {pattern}".strip()))
-    for g, (name, why, hint) in zip(_guarded(ctx, cwd, _HOME_SECRETS), _HOME_SECRETS):
-        secret = g[0]
-        hit = base in (home, secret) or _under(base, secret) or name in raw.lower() or name in pattern.lower()
-        if not hit and tool != "LS" and _under(secret, base):
-            rel = secret[len(base):].lstrip(_path.sep).replace(_path.sep, "/")
-            # a missing or matching filter reaches the secret (fnmatch's * also crosses "/": an over-approximation)
-            hit = not pattern or any(fnmatch.fnmatch(x, pattern) for x in (rel, name))
-        if not hit and tool == "Glob" and pattern:
-            full = _norm(_expand_home(pattern, ctx), base)
-            hit = (full in (home, secret) or _under(full, home)
-                   or (bool(_GLOB.search(pattern)) and _pattern_hit(full, base, [g], False) is not None))
-        if hit:
-            yield blk(SELF, why, hint)
-            return
-
-
-def _token_file(tool: str, fpath: str, cwd: str, ctx: GuardContext) -> Iterator[Block]:
-    """The operator-token and live-mode epoch files are the operator's own: the agent may not read or change them."""
-    if not fpath:
-        return
-    full = _norm(fpath, cwd)
-    for g, (name, why, hint) in zip(_guarded(ctx, cwd, _HOME_SECRETS), _HOME_SECRETS):
-        if _base(fpath).lower() == name or _under(full, g[0]):
-            yield _blk(_short(f"{tool} {fpath}"))(SELF, why, hint)
-            return
 
 
 @dataclass(frozen=True)
@@ -1306,10 +1299,10 @@ def _edit_results(tool: str, tin: Mapping[str, Any], current: Optional[str]) -> 
 
 
 def _global_mode(tool: str, tin: Mapping[str, Any], full: str, blk: Blk) -> Iterator[Block]:
-    """An early, friendly refusal (not the security boundary: live mode also needs the token-signed marker, which
-    no file edit can make). An agent Write/Edit/MultiEdit of the global project.md is allowed only when, parsed as
-    the config loader parses it, the result says `mode: dry-run`, or has no mode and had none before. Anything else
-    (live, null, any other value, a result that does not parse, an edit that cannot be worked out) is blocked."""
+    """Going live goes through `notme mode live`, which shows the change and logs it in the settings ledger. An
+    agent Write/Edit/MultiEdit of the global project.md is allowed only when, parsed as the config loader parses
+    it, the result says `mode: dry-run`, or has no mode and had none before. Anything else (live, null, any other
+    value, a result that does not parse, an edit that cannot be worked out) is blocked."""
     current = _read_text(full)
     try:
         afters = [_mode_of(text) for text in _edit_results(tool, tin, current)] or [_UNKNOWN]
@@ -1317,24 +1310,16 @@ def _global_mode(tool: str, tin: Mapping[str, Any], full: str, blk: Blk) -> Iter
         afters = [_UNKNOWN]
     if all(a == "dry-run" or (a is _ABSENT and _mode_of(current) is _ABSENT) for a in afters):
         return
-    yield blk(SELF, "only a person turns live mode on" + ("" if _UNKNOWN not in afters else
-                                                          " (this edit to the global project.md cannot be checked)"),
-              LIVE_HINT)
-
-
-def _names_live_marker(fpath: str, full: str, ctx: GuardContext, cwd: str) -> bool:
-    return _base(fpath).lower() == LIVE_MARKER_NAME or full.lower() == _norm(
-        _path.join(str(ctx.home), LIVE_MARKER_NAME), cwd).lower()
+    yield blk(SELF, "the global mode changes only through /not-me:mode, which shows and logs the change"
+              + ("" if _UNKNOWN not in afters else " (this edit to the global project.md cannot be checked)"),
+              MODE_HINT)
 
 
 def _file(tool: str, fpath: str, cwd: str, ctx: GuardContext, tin: Mapping[str, Any]) -> Iterator[Block]:
     if not fpath:
         return
-    yield from _token_file(tool, fpath, cwd, ctx)
     blk = _blk(_short(f"{tool} {fpath}"))
     full = _norm(fpath, cwd)
-    if _names_live_marker(fpath, full, ctx, cwd):
-        yield blk(SELF, LIVE_MARKER_WHY, LIVE_HINT)
     if _is_global_project(full, _global_target(ctx, cwd)):
         yield from _global_mode(tool, tin, full, blk)
     if full == _norm(str(ctx.allowlist_path), cwd) or _base(fpath) == ALLOWLIST_NAME:
@@ -1345,9 +1330,13 @@ def _file(tool: str, fpath: str, cwd: str, ctx: GuardContext, tin: Mapping[str, 
                   "describe the change in a QUESTION for the operator")
     if ctx.active_run:
         home = _norm(str(ctx.home), cwd)
-        if _under(full, _norm(str(ctx.config_dir), cwd)) or (_path.dirname(full) == home and full.endswith(".md")):
-            yield blk(SELF, "not-me config is read-only while a not-me run is active",
+        # the global layer can switch hard rules off, so it stays closed during a run; the repo layer can only
+        # tighten, so an edit there is guided (a run proposes config changes as a QUESTION instead)
+        if _path.dirname(full) == home and full.endswith(".md"):
+            yield blk(SELF, "the global not-me config is read-only while a not-me run is active",
                       "log a QUESTION proposing the config change for the operator")
+        elif _under(full, _norm(str(ctx.config_dir), cwd)):
+            yield blk(PROCESS, "a run edits the repo layer config while a not-me run is active")
     low = fpath.replace("\\", "/").lower()
     parts = low.split("/")
     if ".git" in parts or parts[-1] == ".gitconfig" or "/.config/git/" in low or low.startswith(".config/git/"):
@@ -1356,43 +1345,167 @@ def _file(tool: str, fpath: str, cwd: str, ctx: GuardContext, tin: Mapping[str, 
 
 
 def _mcp(tool: str, tin: Mapping[str, Any], ctx: GuardContext) -> Iterator[Block]:
-    """GitHub MCP tools: read-only names pass; anything else must name an allowed repo, and merging is a human
-    action. Other MCP tools are not judged."""
-    name = tool.split("__")[-1]
-    if name in _READ_MCP or (_READ_MCP_PREFIX.match(name) and not _MCP_WRITE_WORDS.search(name)):
+    """GitHub MCP tools get the hard rules only (no repo check): deletes and settings, and writes, ref updates or
+    merges without a pull request that land on a protected branch. Merging a pull request is a person's call the
+    guard does not judge (decision 11), as with gh pr merge."""
+    name = tool.split("__")[-1].lower()
+    if name.startswith(("get_", "list_", "search_")) or name.endswith("_read"):
         return
     blk = _blk(_short(tool))
-    owner, repo = tin.get("owner"), tin.get("repo")
-    if isinstance(owner, str) and owner and isinstance(repo, str) and repo:
-        target: Optional[str] = f"{owner}/{repo}"
-    else:
-        target = repo_slug(repo)
-    if target:
-        yield from _check_target(ctx, target, blk)
-    else:
-        yield _unknown_target(blk, "not a known read-only tool and names no owner/repo",
-                              "pass owner and repo naming an allowed repo")
+    deletes = (name.startswith("delete_") or "_delete_" in name) and name != "delete_file"
+    if _MCP_SETTINGS.search(name) or deletes:
+        yield blk("destructive_git", f"{name}: settings, secrets and deletion are human actions",
+                  "ask the operator to do this on GitHub")
+        return
+    writes_branch = name in _MCP_BRANCH_TOOLS or ("ref" in name.split("_") and not name.startswith("create_")) or (
+        "merge" in name and "pull_request" not in name)
+    if not writes_branch:
+        return
+    if tin.get("force") not in (None, False, "false", "False", 0):
+        yield blk("force_push", f"{name} with force rewrites published history",
+                  "push new commits on top instead; ask the operator if a rewrite is really needed")
+        return
+    raw = next((tin.get(k) for k in ("branch", "ref", "base") if isinstance(tin.get(k), str) and tin.get(k)), "")
+    if _may_be_protected(str(raw), ctx):
+        yield blk("protected_branches", f"{name} changes {raw or 'the default branch'}, which may be protected",
+                  "pass a feature branch, or push one and open a pull request")
 
 
 # --- Bash ----------------------------------------------------------------------
 
 
+_GAP_TOKEN = re.compile(r"&&|\|\||\|&|;;&?|;&|[;&|()\n]")
+_VAR_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+_ASSIGN_NAME = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\+?)=")
+# words that change the directory, or may run something that does (a sourced script, eval, a trap)
+_DIR_CHANGERS = frozenset({"cd", "pushd", "popd", "chdir", "source", ".", "eval", "trap"})
+# builtins that may set a variable by name (set -a exports, read and the like assign), and the ones that may run code
+_VAR_SETTERS = frozenset({"set", "declare", "typeset", "local", "readonly", "export", "read", "mapfile", "readarray",
+                          "printf", "getopts", "let", "unset", "source", ".", "eval", "trap"})
+_SEQ = {";", "&&", "\n"}  # operators between the plain assignments at the start of a command
+_DOT_LIKE = frozenset({".", "source", "eval", "trap"})  # count only as the command word (`git add .` sources nothing)
+
+
+def _words(c: SimpleCommand) -> Set[str]:
+    """c's words for the directory and variable checks: cd and the like count anywhere (`{ cd x; }`, `builtin cd`,
+    `function f { cd x; }`), `.`, source, eval and trap only as the command."""
+    core = _core(list(c.words))
+    out = set(c.words) - _DOT_LIKE
+    if core and core[0] in _DOT_LIKE:
+        out.add(core[0])
+    if _env_chdir(list(c.words)):
+        out.add("cd")
+    return out
+
+
+# env's options, GNU and BSD: short ones that take a value (attached or the next word), short ones that take none, and
+# the long names (GNU accepts any unambiguous prefix). An option not listed here counts as a directory change.
+_ENV_SHORT_VALUE = set("uCSP")
+_ENV_SHORT_FLAG = set("i0v")
+_ENV_LONG_VALUE = ("unset", "split-string")
+_ENV_LONG_FLAG = ("ignore-environment", "null", "debug", "help", "version", "list-signal-handling", "block-signal",
+                  "default-signal", "ignore-signal")
+
+
+def _env_chdir(words: List[str]) -> bool:
+    """env runs its command in another directory: -C dir, -Cdir, --chdir (or any prefix of it, with or without =),
+    anywhere among env's options. Fails closed: an env option the guard does not know counts as a directory change.
+    The string -S splits is read as more options."""
+    for k, w in enumerate(words):
+        if _prog(w) != "env":
+            continue
+        rest = list(words[k + 1:])
+        while rest:
+            a = rest.pop(0)
+            if a == "--":
+                break
+            if a == "-" or _ASSIGN.match(a):
+                continue
+            if not a.startswith("-"):
+                break
+            if a.startswith("--"):
+                name, eq, value = a[2:].partition("=")
+                if "chdir".startswith(name):
+                    return True
+                if any(o.startswith(name) for o in _ENV_LONG_VALUE):
+                    if not eq:
+                        value = rest.pop(0) if rest else ""
+                    if "split-string".startswith(name):
+                        rest = value.split() + rest
+                    continue
+                if not any(o.startswith(name) for o in _ENV_LONG_FLAG):
+                    return True
+                continue
+            for j, ch in enumerate(a[1:], 1):
+                if ch in _ENV_SHORT_FLAG:
+                    continue
+                if ch == "C" or ch not in _ENV_SHORT_VALUE:
+                    return True
+                value = a[j + 1:] or (rest.pop(0) if rest else "")
+                if ch == "S":
+                    rest = value.split() + rest
+                break
+    return False
+_AND_LIST = {"&&", "|", "|&"}  # the only operators allowed after a followed leading cd
+
+
 class _State:
     """Per-command state: the hook's real working directory, the command's text (code without here-document
-    bodies, and raw with them), the branch a checkout moved to, and memoised lookups."""
+    bodies, and raw with them), the branch a checkout moved to, and memoised lookups.
+
+    For git and gh it also works out (dblanken-yale/not-me#144) the directory they run in, by one fail-closed rule:
+    a command that starts with `cd <literal path> &&`, holds no other directory change (cd, pushd, popd, source,
+    eval, trap, a function definition) and joins every later command with && or a pipe runs git there (`cur`).
+    Any other directory change makes `moved` true and `cur` None: a git write that reads the branch is then blocked
+    unless an absolute `git -C` names its checkout (see _cmd_git). It also fills in variables set to a literal value
+    by plain assignments at the start of the command, until anything may set them again. Every other path check uses
+    `dir`, the hook's real working directory."""
 
     def __init__(self, cwd: str, parsed: Parsed, raw: str, depth: int = 0, parent: Optional["_State"] = None):
         self.dir = cwd
         self.depth = depth
         self.parent = parent  # the state of the command whose shell runs this one as a body (bash -c, eval)
         self.commands = parsed.commands
-        self.funcdef = parsed.funcdef
+        self.funcdef = parsed.funcdef or any(c.words[:1] == ["function"] for c in parsed.commands)
         self.subs = parsed.subs
         self.text = parsed.code + "\n" + parsed.code.replace("\\\n", "")
         self.raw = raw
-        self.background = bool(_BACKGROUND.search(parsed.code))
         self.switched: Dict[str, str] = {}  # checkout dir -> the branch a checkout in this command moved to
         self.memo: Dict[Tuple[str, ...], Any] = {}
+        # a checkout or switch in a checkout the guard could not name: no branch is known any more
+        self.blind = parent.blind if parent is not None else False
+        self.vars: Dict[str, Optional[str]] = {}  # name -> literal value, None once it cannot be known
+        self.prelude = True  # only plain assignments so far
+        # where git and gh run: a body (bash -c, eval) starts where its parent command runs; None = unknown
+        base: Optional[str] = parent.cur if parent is not None else cwd
+        self.moved = parent.moved if parent is not None else False
+        changes = [c for c in parsed.commands if _DIR_CHANGERS & _words(c)]
+        self.cur = base
+        if self.funcdef or changes:
+            follow = self._leading_cd(parsed, base) if not self.funcdef and len(changes) == 1 else None
+            self.cur = follow
+            self.moved = self.moved or follow is None
+
+    def _leading_cd(self, parsed: Parsed, base: Optional[str]) -> Optional[str]:
+        """The directory of a command that is exactly `cd <literal path> && ...` with only && and pipes after it,
+        when it can be worked out; None otherwise."""
+        top = [c for c in parsed.commands if not c.nested]
+        first = top[0] if top else None
+        if first is None or first.words[:1] != ["cd"] or len(first.words) != 2 or first.redirs or \
+                _GAP_TOKEN.findall(first.before) or any(c.nested for c in parsed.commands if c is not first and
+                                                        _DIR_CHANGERS & _words(c)):
+            return None
+        gaps = [_GAP_TOKEN.findall(c.before) for c in top[1:]] + [_GAP_TOKEN.findall(parsed.tail)]
+        if not gaps[0][:1] == ["&&"] or any(set(g) - _AND_LIST for g in gaps):
+            return None
+        arg = first.words[1]
+        path = getattr(arg, "raw", "") or arg
+        if getattr(arg, "expands", False) or "$" in path or "`" in path or getattr(arg, "glob", False) or \
+                getattr(arg, "brace", False) or path.startswith(("-", "~")) or not path:
+            return None
+        if not _path.isabs(path) and (base is None or os.environ.get("CDPATH")):
+            return None  # a relative cd goes through CDPATH
+        return _norm(path, base or self.dir)
 
     def once(self, key: Tuple[str, ...], fn: Callable[[], Any]) -> Any:
         if key not in self.memo:
@@ -1403,9 +1516,54 @@ class _State:
     def plain_text(self) -> str:
         return _unshell(self.text)
 
-    @cached_property
-    def plain_raw(self) -> str:
-        return _unshell(self.raw)
+    def literal(self, word: str, expands: bool) -> Optional[str]:
+        """word's value when the guard knows it: as written when nothing in it expands, else with $NAME and ${NAME}
+        filled in from literal assignments earlier in this command; None when any part is not known."""
+        if not expands:
+            return None if ("$" in word or "`" in word) else word
+        missing = []
+
+        def fill(m: "re.Match[str]") -> str:
+            value = self.vars.get(m.group(1) or m.group(2))
+            if value is None:
+                missing.append(m.group(0))
+                return ""
+            return value
+        out = _VAR_REF.sub(fill, word)
+        if missing or "$" in out or "`" in out or (out.startswith("~") and "HOME" in self.vars):
+            return None
+        return out
+
+    def step(self, c: SimpleCommand) -> None:
+        """Bring the variables up to date before c runs."""
+        if self.prelude and not c.nested and not self.funcdef and set(_GAP_TOKEN.findall(c.before)) <= _SEQ:
+            assigns = self._assignments(c)
+            if assigns is not None:
+                self.vars.update(assigns)
+                return
+        if not c.nested:
+            self.prelude = False
+        if self.funcdef or _VAR_SETTERS & _words(c):  # anything that may set a variable by name: forget them all
+            self.vars = dict.fromkeys(self.vars)
+        for name in list(self.vars):
+            if name in c.words or re.search(r"(?<![A-Za-z0-9_$])" + name + r"(?:\[|\+?=)", c.raw):
+                self.vars[name] = None
+
+    def _assignments(self, c: SimpleCommand) -> Optional[Dict[str, Optional[str]]]:
+        """{name: literal value or None} when c only assigns variables (`W=/x`, `export W=/x`), else None."""
+        words = list(c.words[1:] if c.words[:1] == ["export"] else c.words)
+        if not words or c.redirs:
+            return None
+        out: Dict[str, Optional[str]] = {}
+        for w in words:
+            m = _ASSIGN_NAME.match(w)
+            if not m:
+                return None
+            value = (getattr(w, "raw", "") or w)[m.end():]  # as typed, the way git -C reads a path (see _cmd_git)
+            known = None if m.group(2) or not value or _GLOB.search(value) else \
+                self.literal(value, getattr(w, "expands", False))
+            out[m.group(1)] = known
+        return out
 
 
 def _bash(cmd: str, cwd: str, ctx: GuardContext, depth: int = 0,
@@ -1424,6 +1582,7 @@ def _bash(cmd: str, cwd: str, ctx: GuardContext, depth: int = 0,
             continue
         st = _State(cwd, p, cmd, depth, parent)
         for c in p.commands:
+            st.step(c)
             yield from _command(c, st, ctx)
 
 
@@ -1442,27 +1601,39 @@ def _raw_variant(parsed: Parsed) -> Optional[Parsed]:
     if not any(getattr(w, "raw", w) != w for c in parsed.commands for w in c.words + [t for _, t in c.redirs]):
         return None
     commands = [SimpleCommand([_raw_word(w) for w in c.words], c.raw, c.span, c.bodies,
-                              [(op, _raw_word(t)) for op, t in c.redirs], c.nested) for c in parsed.commands]
-    return Parsed(commands, parsed.subs, parsed.code, parsed.funcdef)
+                              [(op, _raw_word(t)) for op, t in c.redirs], c.nested, c.before)
+                for c in parsed.commands]
+    return Parsed(commands, parsed.subs, parsed.code, parsed.funcdef, parsed.tail)
 
 
-def _opaque(text: str, blk: Blk, what: str, inline: bool = True) -> Iterator[Block]:
-    """Text the guard does not parse: allowed unless a spelling of it names a protected path (or, when it sits in
-    the command itself, a not-me switch), which is self-protection, or holds a word in _DANGER, which blocks under
-    the first of that word's rules that is on."""
+def _opaque(text: str, blk: Blk, what: str, code: bool = False) -> Iterator[Block]:
+    """Text the guard does not parse: allowed unless a spelling of it names a protected path, which is
+    self-protection, or holds a word in _DANGER, which blocks under the first of that word's rules that is on.
+
+    code: the text is interpreter code (python -c, node -e, a here-document fed to an interpreter). Code that
+    starts no process and names no git, gh, notme or GitHub API runs none of those commands, so a _DANGER word in
+    it (a string it edits, say) is guided under PROCESS, not blocked (dblanken-yale/not-me#141). rm -r .git and
+    the protected path names still block. Shell text is always judged by its words."""
     spellings = _spellings(text)
-    for v in spellings:
-        m = _SELF_TEXT.search(v) or (_NOTME_TEXT.search(v) if inline else None)
-        if m:
-            yield blk(SELF, f"{what}, and it names {_short(m.group(0), 40)}, which only the operator may touch or run",
-                      "ask the operator")
-            return
+    inert = code and not any(has_gh_git(v) or _NOTME_WORD.search(v) or _RUNS_SOMETHING.search(v) for v in spellings)
+    guided: Optional[Block] = None  # yielded last, and only when nothing blocks
+    m = next((m for m in (_SELF_TEXT.search(v) for v in spellings) if m), None)
+    if m is not None:
+        yield blk(SELF, f"{what}, and it names {_short(m.group(0), 40)}, which only the operator may change",
+                  ALLOW_HINT)
+        return
     for v in spellings:
         for match, rules in _DANGER:
             hit = match(v)
-            if hit:
+            if not hit:
+                continue
+            if not inert or match is _RM_DOT_GIT:
                 yield blk(OPAQUE, f"{what}, and it holds `{_short(hit, 40)}`", _OPAQUE_HINT, rules=rules)
                 return
+            guided = guided or blk(PROCESS, f"{what}, and it holds `{_short(hit, 40)}` but runs no git or gh "
+                                            "command")
+    if guided is not None:
+        yield guided
 
 
 def _body(text: str, st: _State, ctx: GuardContext, blk: Blk, what: str) -> Iterator[Block]:
@@ -1508,24 +1679,19 @@ def _command(c: SimpleCommand, st: _State, ctx: GuardContext) -> Iterator[Block]
     blk = _blk(_short(seg))
     yield from _path_checks(c, st, ctx, blk)
     t = list(c.words)
-    seen: Set[str] = set()
     while t:
         head = _head(t[0])
         if _ASSIGN.match(t[0]) or head in _KEYWORDS:
             t = t[1:]
         elif head in _PREFIX_WORDS:
-            seen.add(head)
             t = _drop_prefix(head, t[1:])
         else:
             break
     if not t:
         return
-    wrapper = _wrapper(t, seen, st)
-    if wrapper is not None:
-        yield from _around_notme(wrapper, t, st, blk)
-    notme_args = _notme_args(t)
-    if notme_args is not None:
-        yield from _cmd_notme(notme_args, blk)
+    if _notme_args(t) is not None:
+        # the not-me CLI: its write gate judges what it writes (decision 2), and the operator's own slash commands
+        # run allow-repo, pause and mode in the session (dblanken-yale/not-me#118)
         return
     word = t[0]
     if getattr(word, "glob", False) or getattr(word, "brace", False) or _unresolved(word) or word.startswith("="):
@@ -1559,21 +1725,18 @@ def _expand_home(arg: str, ctx: GuardContext) -> str:
     return arg
 
 
-# what a Bash word may not name: the home's private files and the allow list
-_BASH_GUARDED = _HOME_GUARDED + ((ALLOWLIST_NAME, ALLOW_WHY, ALLOW_HINT),)
+# what a Bash word may not name: the allow list (changed only through `notme allow-repo`, which logs it)
+_BASH_GUARDED = ((ALLOWLIST_NAME, ALLOW_WHY, ALLOW_HINT),)
 # shell text that leaves a path unresolved for the guard: $(...), backticks, ${...}, $VAR, {a,b} and a stray $
 _UNRESOLVED = re.compile(r"\$\([^)]*\)?|`[^`]*`?|\$\{[^}]*\}?|\$[A-Za-z0-9_@*#?!-]+|\{[^}]*\}?|\$")
 _HOME_PARAM = re.compile(r"\$\{(NOT_ME_HOME|HOME)(?![A-Za-z0-9_])[^}]*\}")
 
 
 def _path_checks(c: SimpleCommand, st: _State, ctx: GuardContext, blk: Blk) -> Iterator[Block]:
-    """Words and redirection targets that name a protected file in the not-me home (the operator token, the
-    live-mode epoch and marker, the allow list), the home itself, or for a recursive copy
-    or search a directory that holds it. Globs are matched as patterns and expanded for real."""
+    """Words and redirection targets that name the allow list in the not-me home. Globs are matched as patterns
+    and expanded for real."""
     core = _core(list(c.words))
     prog = _prog(core[0]) if core else ""
-    recursive = prog in _TOKEN_COPIERS or prog == "rg" or (prog in ("grep", "egrep", "fgrep") and (
-        "r" in _short_flags(core[1:]).lower() or "--recursive" in core[1:]))
     # a search pattern or sed script only mentions a name, it opens nothing: those words are not paths
     skip: Set[int] = set()
     spec = _PATTERN_SPECS.get(prog)
@@ -1590,9 +1753,185 @@ def _path_checks(c: SimpleCommand, st: _State, ctx: GuardContext, blk: Blk) -> I
             args.append(w.split("=", 1)[1])
     args += [target for op, target in c.redirs if op not in ("<<", "<<-", "<<<")]
     for a in args:
-        found = _protected(a, st, ctx, recursive)
+        found = _protected(a, st, ctx)
         if found:
             yield blk(SELF, found[0], found[1])
+            return
+    yield from _global_doc_checks(c, st, ctx, blk)
+    yield from _home_dest_checks(core, st, ctx, blk)
+
+
+# The global layer's project.md holds `mode`; a shell write of it would go live without /not-me:mode, so a shell
+# word or redirection naming it blocks unless the program only reads (dblanken-yale/not-me#118).
+_GLOBAL_DOC_ENTRY = ((GLOBAL_DOC, "the global not-me config changes only through /not-me:mode and the operator's "
+                                  "own editor, so the change is shown and logged", MODE_HINT),)
+# programs that only read the files named on their command line (not less or more: -o and --log-file write)
+_READERS = frozenset({"cat", "head", "tail", "grep", "egrep", "fgrep", "rg", "wc", "diff", "cmp",
+                      "file", "stat", "ls", "bat", "md5", "md5sum", "shasum", "sha1sum", "sha256sum", "od",
+                      "hexdump", "strings", "nl", "realpath", "readlink", "basename", "dirname", "test", "["})
+_READ_REDIRS = ("<", "<<", "<<-", "<<<", "<&")
+
+
+def _sed_reads(args: List[str]) -> bool:
+    """sed with these arguments only reads its files: no in-place flag, no script file, and every script (each -e
+    value, else the first operand) reads only."""
+    if any(a.startswith("--in-place") or a.startswith("--file") for a in args):
+        return False
+    if set("iIf") & set(_short_flags([a for a in args if not a.startswith("-e") or a == "-e"])):
+        return False
+    scripts: List[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-e", "--expression"):
+            scripts.append(args[i + 1] if i + 1 < len(args) else "")
+            i += 2
+            continue
+        if a.startswith("--expression="):
+            scripts.append(a.split("=", 1)[1])
+        elif a.startswith("-e") and len(a) > 2:
+            scripts.append(a[2:])
+        i += 1
+    if not scripts:
+        scripts = _positionals(args)[:1]
+    return all(_sed_reads_only(_unshell(s)) for s in scripts)
+
+
+def _global_doc_checks(c: SimpleCommand, st: _State, ctx: GuardContext, blk: Blk) -> Iterator[Block]:
+    """A shell word or output redirection that names the global project.md, unless the program only reads it."""
+    core = _core(list(c.words))
+    prog = _prog(core[0]) if core else ""
+    reads = prog in _READERS or (prog == "sed" and _sed_reads(core[1:]))
+    targets = [t for op, t in c.redirs if op not in _READ_REDIRS]
+    if prog in ("cp", "rsync", "ditto"):  # copying it somewhere reads it; only the destination is written
+        targets += _dest_dirs(prog, list(core[1:]))[0]
+    elif not reads:
+        for w in c.words:
+            if not w.startswith("-"):
+                targets.append(w)
+            if "=" in w:
+                targets.append(w.split("=", 1)[1])
+    for a in targets:
+        found = _protected(a, st, ctx, _GLOBAL_DOC_ENTRY, by_name=False)
+        if found:
+            yield blk(SELF, found[0], found[1])
+            return
+
+
+# Programs that write into a destination directory, and how to find it: a destination that is the not-me home
+# lets a copy or an extract replace the allow list. For a recursive copy or an extract, a directory above the home
+# counts too (the copy can recreate .claude/not-me/allowed-repos.json under it).
+# (None: always recursive. mv moves whole directories and ln can link one, so both count as recursive.)
+_DEST_LAST = {"cp": "rRa", "rsync": "ra", "mv": None, "ln": None, "install": "", "ditto": None}
+_TAR_PROGS = ("tar", "bsdtar", "gtar")
+_UNZIP_NO_EXTRACT = set("ltvpzZ")  # unzip options that list, test, print or show a comment instead of extracting
+
+
+def _option_letters(args: List[str], takes_value: str, old_style: bool = False) -> Set[str]:
+    """The single-letter options in args, each cluster read up to its first option that takes a value (the rest
+    of the word is that value: `-C/tmp/x`, `-fx.tar`, `-d/out`). old_style: a first word without a dash is a
+    cluster too (tar's `xzf`)."""
+    words = [a[1:] for a in args if a.startswith("-") and not a.startswith("--") and len(a) > 1]
+    if old_style and args and not args[0].startswith("-"):
+        words.append(args[0])
+    letters: Set[str] = set()
+    for w in words:
+        for ch in w:
+            letters.add(ch)
+            if ch in takes_value:
+                break
+    return letters
+
+
+_TAR_VALUE = "fCTXbHKNVgL"  # tar short options that take a value
+_UNZIP_VALUE = "dPx"  # unzip short options that take a value
+
+
+def _tar_letters(args: List[str]) -> Set[str]:
+    """The single-letter options of a tar call, old style (a first word without a dash, `xzf`) included."""
+    return _option_letters(args, _TAR_VALUE, old_style=True)
+
+
+def _dest_dirs(prog: str, args: List[str]) -> Tuple[List[str], bool]:
+    """(destination words, whether a directory above the home counts) for a write-capable command."""
+    dests: List[str] = []
+    for i, a in enumerate(args):
+        if a in ("-t", "--target-directory") and i + 1 < len(args) and prog in ("cp", "mv", "ln", "install"):
+            dests.append(args[i + 1])
+        elif a.startswith("--target-directory="):
+            dests.append(a.split("=", 1)[1])
+    if prog in _DEST_LAST:
+        flags = _DEST_LAST[prog]
+        recursive = flags is None or bool(set(flags) & set(_short_flags(args))) or any(
+            a in ("--recursive", "--archive") for a in args)
+        pos = _positionals(args)
+        if len(pos) >= 2:
+            dests.append(pos[-1])
+        return dests, recursive
+    if prog in ("tar", "bsdtar", "gtar"):
+        for i, a in enumerate(args):
+            if a in ("-C", "--directory") and i + 1 < len(args):
+                dests.append(args[i + 1])
+            elif a.startswith("--directory="):
+                dests.append(a.split("=", 1)[1])
+            elif a.startswith("-C") and len(a) > 2:
+                dests.append(a[2:])
+        return dests, True
+    if prog == "unzip":
+        for i, a in enumerate(args):
+            if a == "-d" and i + 1 < len(args):
+                dests.append(args[i + 1])
+            elif a.startswith("-d") and len(a) > 2:
+                dests.append(a[2:])
+        return dests, True
+    return dests, False
+
+
+def _home_dest_checks(core: List[str], st: _State, ctx: GuardContext, blk: Blk) -> Iterator[Block]:
+    """A copy, move, link or extract whose destination is the not-me home (or, recursive, a directory above it)."""
+    prog = _prog(core[0]) if core else ""
+    if prog not in _DEST_LAST and prog not in _TAR_PROGS and prog != "unzip":
+        return
+    args = list(core[1:])
+    dests, above = _dest_dirs(prog, args)
+    home = st.once(("home",), lambda: _norm(str(ctx.home), st.dir)).lower()
+    why = f"{prog} would write into the not-me home or a directory above it, which can replace the allow list"
+    extract = False
+    if prog in _TAR_PROGS:
+        letters = _tar_letters(args)
+        extract = "x" in letters or any(a in ("--extract", "--get") for a in args)
+        if not extract:
+            dests = []  # creating or listing an archive reads its -C directory
+        elif "P" in letters or "--absolute-names" in args:
+            yield blk(SELF, f"{prog} -P extracts to the absolute paths in the archive, which may be the not-me home",
+                      ALLOW_HINT)
+            return
+    elif prog == "unzip":
+        extract = not (_UNZIP_NO_EXTRACT & _option_letters(args, _UNZIP_VALUE))
+        if not extract:
+            dests = []
+    if extract and not dests:
+        dests = [st.dir]  # no -C or -d: it extracts into the working directory the guard tracks
+    if prog == "mv":  # moving the home, or a directory above it, away and back replaces the allow list too
+        pos = _positionals(args)
+        moved = pos if any(a == "-t" or a.startswith("--target-directory") for a in args) else pos[:-1]
+        for s in moved:
+            a = _shell_word(s, ctx)
+            if a and not _UNRESOLVED.search(a) and not _GLOB.search(a) and _under(home, _norm(a, st.dir).lower()):
+                yield blk(SELF, f"mv would move the not-me home ({_short(s, 60)}), which holds the allow list",
+                          ALLOW_HINT)
+                return
+    for d in dests:
+        a = _shell_word(d, ctx)
+        if not a or _UNRESOLVED.search(a) or _GLOB.search(a):
+            # a destination the shell fills in cannot be placed: an extract run from the home or above it blocks
+            if extract and _under(home, _norm(st.dir, st.dir).lower()):
+                yield blk(SELF, f"{why} (the destination is not known here)", ALLOW_HINT)
+                return
+            continue
+        full = _norm(a, st.dir).lower()
+        if full == home or (above and _under(home, full)):
+            yield blk(SELF, f"{why} ({_short(d, 60)})", ALLOW_HINT)
             return
 
 
@@ -1819,23 +2158,27 @@ def _sed_reads_only(script: str) -> bool:
     return True
 
 
-def _protected(arg: str, st: _State, ctx: GuardContext, recursive: bool) -> Optional[Tuple[str, str]]:
-    """(why, hint) when arg names a protected file: by its name after a path separator (in any directory), by its
-    real path, or through a glob; a part the shell fills in ($VAR, $(...), backticks, {a,b}) counts as * when the
-    rest still pins the pattern near a protected file. For a recursive copy or search, a directory that holds the
-    not-me home counts too."""
+def _shell_word(arg: str, ctx: GuardContext) -> str:
+    """arg with quotes dropped and $HOME, $NOT_ME_HOME and ${HOME...}/${NOT_ME_HOME...} filled in."""
     a = _expand_home(arg.replace('"', "").replace("'", ""), ctx)
-    a = _HOME_PARAM.sub(lambda m: str(ctx.home) if m.group(1) == "NOT_ME_HOME"
-                        else (ctx.env.get("HOME") or _path.expanduser("~")), a)
+    return _HOME_PARAM.sub(lambda m: str(ctx.home) if m.group(1) == "NOT_ME_HOME"
+                           else (ctx.env.get("HOME") or _path.expanduser("~")), a)
+
+
+def _protected(arg: str, st: _State, ctx: GuardContext, entries: Tuple[Tuple[str, str, str], ...] = _BASH_GUARDED,
+               by_name: bool = True) -> Optional[Tuple[str, str]]:
+    """(why, hint) when arg names a protected file (entries: names in the not-me home): by its name after a path
+    separator in any directory (when by_name), by its real path, or through a glob; a part the shell fills in
+    ($VAR, $(...), backticks, {a,b}) counts as * when the rest still pins the pattern near a protected file."""
+    a = _shell_word(arg, ctx)
     if not a or "\n" in a:
         return None
-    guarded = st.once(("guarded",), lambda: _guarded(ctx, st.dir, _BASH_GUARDED))
+    guarded = st.once(("guarded", entries[0][0]), lambda: _guarded(ctx, st.dir, entries))
     parts = [p.lower() for p in _PATH_SEP.split(a)]
-    if len(parts) > 1:
-        for (name, why, hint) in _BASH_GUARDED:
+    if by_name and len(parts) > 1:
+        for (name, why, hint) in entries:
             if parts[-1] == name:
                 return why, hint
-    home = st.once(("home",), lambda: _norm(str(ctx.home), st.dir))
 
     def absolute(p: str, unknown_base: bool = False) -> str:
         p = _path.expanduser(p)  # a pattern that starts with an unresolved part may be anywhere
@@ -1843,20 +2186,17 @@ def _protected(arg: str, st: _State, ctx: GuardContext, recursive: bool) -> Opti
 
     def hit(path: str) -> Optional[Tuple[str, str]]:
         full = _norm(path, st.dir)
-        g = next((g for g in guarded if _under(full, g[0])), None)
-        if g is not None:
-            return g[2], g[3]
-        if recursive and _under(home, full):
-            return HOME_WHY, TOKEN_HINT
-        return None
+        # compared without case too: a case-insensitive file system opens the file under any case
+        g = next((g for g in guarded if _under(full, g[0]) or full.lower() == g[0].lower()), None)
+        return (g[2], g[3]) if g is not None else None
     if _UNRESOLVED.search(a):
         pattern = _UNRESOLVED.sub("*", a)
-        g = _pattern_hit(absolute(pattern, True), st.dir, guarded, recursive) if pattern.strip("*/\\.") else None
+        g = _pattern_hit(absolute(pattern, True), st.dir, guarded) if pattern.strip("*/\\.") else None
         return (g[2], g[3]) if g is not None else None
     if not _GLOB.search(a):
         return hit(a)
     full = absolute(a)
-    g = _pattern_hit(full, st.dir, guarded, recursive)
+    g = _pattern_hit(full, st.dir, guarded)
     if g is not None:
         return g[2], g[3]
     try:
@@ -1869,57 +2209,6 @@ def _protected(arg: str, st: _State, ctx: GuardContext, recursive: bool) -> Opti
     except (OSError, ValueError, re.error):
         return None
     return None
-
-
-# --- wrappers around notme ----------------------------------------------------------
-
-
-def _wrapper(t: List[str], seen: Set[str], st: _State) -> Optional[str]:
-    """The name of what gives this command a pseudo-terminal or runs it outside the session's process tree, or
-    None."""
-    prog, args = _prog(t[0]), t[1:]
-    low = [a.lower() for a in args]
-    if seen & _ORPHAN_PREFIX:
-        return sorted(seen & _ORPHAN_PREFIX)[0]
-    if prog in _PTY_PROGS or prog in _ORPHAN_PROGS:
-        return prog
-    if prog == "socat" and any("pty" in a for a in low):
-        return "socat pty"
-    if prog == "tmux" and any(a in ("send-keys", "send", "send-key") for a in low):
-        return "tmux send-keys"
-    if prog == "screen" and "-x" in low and "stuff" in low:
-        return "screen -X stuff"
-    if prog == "ssh":
-        flags = _short_flags([a for a in args if a.startswith("-")])
-        dest = next((a for a in _skip_options(args, {"-p", "-l", "-i", "-o", "-F", "-J", "-L", "-R", "-D", "-E",
-                                                      "-b", "-c", "-e", "-m", "-O", "-Q", "-S", "-W", "-w"})), "")
-        if "t" in flags and _LOCALHOST.match(dest):
-            return "ssh -t to this machine"
-    if prog == "launchctl" and {"submit", "bootstrap"} & set(low):
-        return "launchctl"
-    if prog == "crontab" and [a for i, a in enumerate(low) if a != "-u" and not (i and low[i - 1] == "-u")] != ["-l"]:
-        return "crontab"
-    if st.background:
-        return "a background &"
-    return None
-
-
-def _around_notme(wrapper: str, t: List[str], st: _State, blk: Blk) -> Iterator[Block]:
-    """A wrapper that hides the caller may not run the not-me CLI: named anywhere in the command, or in a file it
-    is given."""
-    why = (f"{wrapper} would run notme in a pseudo-terminal or a detached process, which passes the not-me CLI's "
-           "human check")
-    hint = "the operator runs this not-me step in their own terminal"
-    if any(_NOTME_WORD.search(v) for v in (st.plain_raw, st.raw)):
-        yield blk(SELF, why, hint)
-        return
-    for a in t[1:]:
-        if a.startswith("-"):
-            continue
-        text = _read_script(_norm(a, st.dir), st)
-        if text is not None and _NOTME_WORD.search(text):
-            yield blk(SELF, f"{why} ({a} names it)", hint)
-            return
 
 
 def _read_script(path: str, st: Optional[_State] = None) -> Optional[str]:
@@ -1993,24 +2282,6 @@ def _is_notme_module(name: str) -> bool:
     return low == "notme" or low.startswith("notme.")
 
 
-def _cmd_notme(args: List[str], blk: Blk) -> Iterator[Block]:
-    """The not-me CLI's human switches: changing the allow list, turning a pause off, and going live."""
-    plain = [_unshell(a) for a in args]
-    pos = [a for a in plain if not a.startswith("-")]
-    helping = bool({"--help", "-h"} & set(plain))
-    if pos[:1] == ["allow-repo"] and pos[1:2] != ["list"] and not helping:
-        yield blk(SELF, ALLOW_WHY, ALLOW_HINT)
-    if "pause" in plain:
-        rest = plain[plain.index("pause") + 1:]
-        if rest not in _PAUSE_OK:
-            yield blk(SELF, "only a person turns a not-me pause off", "leave the pause for the operator")
-    if "mode" in pos and not helping:
-        # anything but `mode show` or `mode dry-run` (live, an abbreviation, a typo) is the person's switch
-        sub = pos[pos.index("mode") + 1:pos.index("mode") + 2]
-        if not sub or sub[0] not in _MODE_OK:
-            yield blk(SELF, "only a person turns live mode on", LIVE_HINT)
-
-
 # --- shells, scripts and interpreters --------------------------------------------------
 
 
@@ -2018,7 +2289,7 @@ def _script_file(path: str, st: _State, blk: Blk) -> Iterator[Block]:
     """A script file runs text the guard does not parse: judged as opaque text (a file it cannot read is allowed)."""
     text = _read_script(_norm(path, st.dir), st)
     if text is not None:
-        yield from _opaque(text, blk, f"{_short(path, 60)} is a script the guard does not parse", inline=False)
+        yield from _opaque(text, blk, f"{_short(path, 60)} is a script the guard does not parse")
 
 
 _SHELL_VALUE_OPTS = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
@@ -2061,7 +2332,7 @@ def _from_input(c: SimpleCommand, st: _State, ctx: GuardContext, blk: Blk, what:
     whole command's text to judge."""
     if c.bodies:
         for b in c.bodies:
-            yield from (_body(b, st, ctx, blk, what) if shell else _opaque(b, blk, what))
+            yield from (_body(b, st, ctx, blk, what) if shell else _opaque(b, blk, what, code=True))
         return
     files = [target for op, target in c.redirs if op == "<"]
     for f in files:
@@ -2128,7 +2399,7 @@ def _interp(prog: str, args: List[str], c: SimpleCommand, st: _State, ctx: Guard
         a in _INLINE_LONG or a.split("=", 1)[0] in _INLINE_LONG
         or (letters and a.startswith("-") and not a.startswith("--") and set(a[1:]) & set(letters)) for a in args)
     if inline:
-        yield from _opaque("\n".join([" ".join(args)] + c.bodies), blk, what)
+        yield from _opaque("\n".join([" ".join(args)] + c.bodies), blk, what, code=True)
         return
     takes_value = _INTERP_VALUE.get(family, set())
     i = 0
@@ -2212,28 +2483,41 @@ class _GitCall:
     ctx: GuardContext
     st: _State
     blk: Blk
-    d: str
+    d: Optional[str]  # the checkout git runs in; None when the guard cannot work it out
     sub: str
     args: List[str] = field(default_factory=list)
 
+    @property
+    def blind(self) -> bool:
+        """The branch git works on cannot be known: the checkout is unknown, or a checkout in an unknown one moved."""
+        return self.d is None or self.st.blind
+
+
+def _unknown_checkout(c: _GitCall) -> Block:
+    """Guided, not blocked (dblanken-yale/not-me#144): the call runs and the guard log records it."""
+    b = c.blk("protected_branches", f"the guard could not work out which checkout or branch git {c.sub} runs on, "
+                                    "so it did not check the branch")
+    b.guide_only = True
+    return b
+
 
 def _cmd_git(t, c, st, ctx, blk, depth: int = 0):
-    d = st.dir
+    d: Optional[str] = st.cur
     c_keys: List[str] = []
     redirect: Optional[str] = None
-    var_opt: Optional[str] = None  # the first -C, --git-dir or --work-tree whose path the shell fills in
     var_redirect: Optional[str] = None  # the first --git-dir or --work-tree whose path the shell fills in
     i = 1
     while i < len(t) and t[i].startswith("-"):
         a = t[i]
         name, eq, val = a.partition("=")
         nxt = t[i + 1] if i + 1 < len(t) else ""
-        if (a == "-C" or name in ("--git-dir", "--work-tree")) and _unresolved(val if eq else nxt):
-            var_opt = var_opt or name
-            if name != "-C":
-                var_redirect = var_redirect or name
+        if name in ("--git-dir", "--work-tree") and _unresolved(val if eq else nxt):
+            var_redirect = var_redirect or name
         if a == "-C":  # as typed: with unquoted backslashes bash would hand git a path that does not exist
-            d = _norm(getattr(nxt, "raw", "") or nxt or ".", d)
+            path = st.literal(getattr(nxt, "raw", "") or nxt or ".", getattr(nxt, "expands", False))
+            known = path is not None and not getattr(nxt, "glob", False) and \
+                (d is not None or _path.isabs(_path.expanduser(path)))
+            d = _norm(path, d or st.dir) if known else None
             i += 2
         elif a == "-c":
             c_keys.append(nxt.split("=", 1)[0])
@@ -2255,39 +2539,110 @@ def _cmd_git(t, c, st, ctx, blk, depth: int = 0):
         return
     key = next((k for k in c_keys if _PUSH_KEY.match(k.lower())), None)
     if key is not None:
-        yield blk("other_repo", f"git -c {_short(key, 40)} can change where or what git pushes",
-                  "run git without it; ask the operator to change git config")
-        return
+        if sub == "push" or sub in _NESTED_GIT or (sub and sub not in _GIT_BUILTINS):
+            # the push (or the alias it may hide, or a git it runs, which inherits the -c) is judged from the repo
+            # config, not this -c: what it sends to which branch cannot be checked
+            yield blk("protected_branches", f"git -c {_short(key, 40)} changes what or where this push sends, so the "
+                                            "branch it pushes to cannot be checked",
+                      "run git push without -c and name the branch: git push origin <branch>")
+            return
+        yield blk("other_repo", f"git -c {_short(key, 40)} can change where or what git pushes")
     if sub and sub not in _GIT_BUILTINS:
+        if d is None:
+            # the alias lives in a checkout the guard cannot name, so what it runs cannot be looked up
+            b = blk(OPAQUE, f"the guard could not work out which checkout this git command runs in, so it cannot "
+                            f"look up the alias git {_short(sub, 40)}",
+                    "write the path out in full (`git -C /abs/path <sub> ...`), or run the command the alias stands "
+                    "for; a rewritten command is checked afresh, so this is not a retry",
+                    rules=("other_repo", "protected_branches"))
+            b.no_relax = True
+            yield b
+            return
         alias = st.once(("alias", d, sub), lambda: ctx.git(["config", "--get", f"alias.{sub}"], d))
         if alias:
             yield from _git_alias(alias, sub, args, t[:i], c, st, ctx, blk, depth)
-        if var_opt is not None:
-            # the alias that runs lives in the repo the shell names, which may not be the one looked up here: after
-            # any rules the alias found here raises (decide takes the first enabled one), fail closed
-            yield _var_path(blk, var_opt)
         return  # an external git-<name> program is outside the guard's view
     redirect = redirect or st.once(("git-env",), lambda: (lambda m: _short(m.group(0), 40) if m else None)(
         _GIT_ENV.search(st.plain_text)))
-    if redirect and sub in _GIT_RULES and sub not in ("checkout", "switch"):
+    if redirect and (sub in _GIT_RULES or sub in _NESTED_GIT) and sub not in ("checkout", "switch"):
         if var_redirect is not None:
             yield _var_path(blk, var_redirect)
-        else:
-            yield blk("other_repo", f"{redirect} changes which repository or config git uses",
-                      "run git without it, in the checkout it should change")
-        return
+            return
+        if (sub in _BRANCH_WRITES or sub in _NESTED_GIT) and not _git_reads(sub, args):
+            # the branch this write lands on belongs to a repository the guard did not look at, and a git this one
+            # runs inherits the variables
+            yield blk("protected_branches", f"{redirect} points git at another repository or config, so the branch "
+                                            f"git {sub} changes cannot be checked",
+                      "run git without it, with `git -C /abs/path` naming the checkout")
+            return
+        # config, remote and submodule: guided, then judged below (a submodule foreach body still counts)
+        yield blk("other_repo", f"{redirect} changes which repository or config git uses")
     handler = _GIT_RULES.get(sub)
     if handler is not None:
-        for b in handler(_GitCall(ctx, st, blk, d, sub, args)):
-            # the guard looked for a checkout literally named $W: say so rather than blame the repo (blocks that do
-            # not come from the unresolved checkout keep their own message)
-            if var_opt is not None and b.no_checkout:
-                b = _var_path(blk, var_opt)
+        call = _GitCall(ctx, st, blk, d, sub, args)
+        yield from handler(call)
+        if st.moved and d is None and _reads_branch(sub, args):
+            # the command changes directory in a way the guard does not follow, so this write may land on any
+            # checkout's branch: fail closed (dblanken-yale/not-me#144)
+            b = blk("protected_branches", f"the command changes directory, so the guard cannot tell which checkout "
+                                          f"git {sub} runs in or whether its branch is protected",
+                    "write it as `git -C <path> <command>` so the guard can check the branch")
+            b.no_relax = True  # rewriting the command is the fix
             yield b
-        if var_opt is not None and not _git_reads(sub, args):
-            # the handler judged the checkout _norm made of the path ("$W" names nothing, "$W/.." names this one),
-            # not the one the shell will pick: after its own rules, fail closed on any write
-            yield _var_path(blk, var_opt)
+            return
+        # a write the guard could not place: rules it breaks on its own (a force push, a protected branch it names)
+        # have blocked above. git reads an empty or unset -C path as the current directory, so the write is also
+        # judged on the session's own branch; only when that is not protected does it run and get logged
+        if (d is None or st.blind) and _reads_branch(sub, args) and not _names_every_branch(sub, args):
+            if st.blind:
+                why = "a checkout or switch earlier in the command, in a checkout the guard cannot name, may have " \
+                      "moved this checkout's branch"
+            else:
+                here = _branch(ctx, st, st.dir)
+                why = f"git reads an empty or unset -C path as the current directory, which is on the protected " \
+                      f"branch {here}" if here in ctx.protected_branches else ""
+            if why:
+                b = blk("protected_branches", f"git {sub} may land on a protected branch: {why}",
+                        "write the checkout out in full: `git -C /abs/path <command>`")
+                b.no_relax = True
+                yield b
+                return
+        if (d is None and not _git_reads(sub, args)) or (call.blind and sub in _BRANCH_READERS):
+            yield _unknown_checkout(call)
+
+
+def _names_every_branch(sub: str, args: List[str]) -> bool:
+    """A push whose every refspec names its destination branch: where it runs does not decide what it changes."""
+    if sub != "push":
+        return False
+    refspecs = _push_positionals(args)[1:]
+    # fails closed: each refspec must name its destination after a `:`, so a word the guard took for a refspec but
+    # git reads as an option's value never makes a push of the current branch look exempt
+    return bool(refspecs) and all(":" in r and r.lstrip("+").split(":", 1)[1] not in ("", "HEAD", "@")
+                                  for r in refspecs)
+
+
+_PUSH_LONG_VALUE = ("push-option", "repo", "receive-pack", "exec")
+
+
+def _push_positionals(args: List[str]) -> List[str]:
+    """git push's remote and refspecs, without the values of options that take one (-o x, --repo x, any prefix of
+    a long one)."""
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--":
+            return out + args[i:]
+        if not a.startswith("-") or a == "-":
+            out.append(a)
+        elif a.startswith("--"):
+            name = a[2:]
+            if "=" not in name and any(o.startswith(name) for o in _PUSH_LONG_VALUE):
+                i += 1
+        elif a.endswith("o"):  # -o, or a bundle ending in it (-vo): the value is the next word; -ox has it attached
+            i += 1
+    return out
 
 
 # git branch options that only list; git accepts abbreviated long options, so anything not spelled out here is a write
@@ -2303,6 +2658,21 @@ def _branch_lists(args: List[str]) -> bool:
             any(a.startswith("--") and a.split("=", 1)[0] not in _BRANCH_READ_LONG for a in opts):
         return False
     return not _positionals(args) or "--list" in args or "l" in _short_flags(opts)
+
+
+def _reads_branch(sub: str, args: List[str]) -> bool:
+    """A git write whose check depends on the branch where it runs, or that can move or delete a protected one:
+    commit, merge, rebase, cherry-pick, am, push, reset --hard, a forced branch change and checkout -B."""
+    flags = _short_flags(args)
+    if sub in ("commit", "merge", "rebase", "cherry-pick", "am", "push"):
+        return True
+    if sub == "reset":
+        return any(_long(a, "--hard") or a == "--hard" for a in args)
+    if sub == "branch":
+        return bool(set(flags) & set("DfMC")) or any(_long(a, "--force") for a in args)
+    if sub in ("checkout", "switch"):
+        return bool(set(flags) & set("BC")) or any(_long(a, "--force-create") for a in args)
+    return False
 
 
 def _git_reads(sub: str, args: List[str]) -> bool:
@@ -2356,7 +2726,10 @@ def _git_alias(alias: str, sub: str, args: List[str], prefix: List[str], c: Simp
     yield from _cmd_git(words, c, st, ctx, blk, depth + 1)
 
 
-def _branch(ctx: GuardContext, st: _State, d: str) -> Optional[str]:
+def _branch(ctx: GuardContext, st: _State, d: Optional[str]) -> Optional[str]:
+    """The branch checked out at d; None when detached, unreadable or not known (see _GitCall.blind)."""
+    if d is None or st.blind:
+        return None
     if d in st.switched:
         return st.switched[d]
 
@@ -2372,12 +2745,18 @@ def _branch(ctx: GuardContext, st: _State, d: str) -> Optional[str]:
     return st.once(("branch", d), read)
 
 
-def _git_config(ctx: GuardContext, st: _State, d: str, key: str) -> Optional[str]:
+def _git_config(ctx: GuardContext, st: _State, d: Optional[str], key: str) -> Optional[str]:
+    if d is None:
+        return None
     return st.once(("config", d, key), lambda: ctx.git(["config", "--get", key], d))
 
 
 def _git_switch(c: _GitCall) -> Iterator[Block]:
-    """Track the branch a checkout/switch moves to; unknown outcomes fall back to reading HEAD."""
+    """Track the branch a checkout/switch moves to; unknown outcomes fall back to reading HEAD. In a checkout the
+    guard cannot name it may move any checkout's branch, the session's included: no branch is known after it."""
+    if c.d is None:
+        c.st.blind = True
+        return iter(())
     c.st.switched.pop(c.d, None)
     c.st.memo.pop(("branch", c.d), None)
     new = [c.args[k + 1] for k, a in enumerate(c.args[:-1]) if a in ("-b", "-B", "-c", "-C")]
@@ -2392,12 +2771,13 @@ def _git_switch(c: _GitCall) -> Iterator[Block]:
 
 
 def _git_send_pack(c: _GitCall) -> Iterator[Block]:
-    yield c.blk("other_repo", "git send-pack cannot be checked", "use git push")
+    yield c.blk("protected_branches", "git send-pack sends refs the guard cannot check", "use git push")
 
 
 def _git_subtree(c: _GitCall) -> Iterator[Block]:
     if "push" in c.args:
-        yield c.blk("other_repo", "git subtree push cannot be checked", "push the subtree repo from its own checkout")
+        yield c.blk("protected_branches", "the branch git subtree push lands on cannot be checked",
+                    "push the subtree repo from its own checkout")
 
 
 def _git_commit(c: _GitCall) -> Iterator[Block]:
@@ -2405,6 +2785,8 @@ def _git_commit(c: _GitCall) -> Iterator[Block]:
     if b in c.ctx.protected_branches:
         yield c.blk("protected_branches", f"commits on the protected branch {b} are not allowed",
                     "create a feature branch first (git switch -c <type>/<topic>) and commit there")
+    if c.d is None:
+        return  # _cmd_git logs the unknown checkout
     origin = c.st.once(("origin", c.d), lambda: c.ctx.git(["remote", "get-url", "origin"], c.d))
     slug = parse_origin(origin)
     if slug:
@@ -2520,6 +2902,8 @@ def _push_default_target(c: _GitCall, current: Optional[str], remote: Optional[s
     """A push with no refspec goes where the repo config says: remote.<name>.push, push.default and the
     branch's upstream. Block when that is a protected branch or cannot be told."""
     ctx, st, blk, d = c.ctx, c.st, c.blk, c.d
+    if c.blind:
+        return  # _cmd_git logs the unknown checkout
     if current is None:
         yield blk("protected_branches", "git push with no branch named, on a detached HEAD, cannot be checked",
                   "name the branch: git push origin <branch>")
@@ -2613,7 +2997,8 @@ def _git_push(c: _GitCall) -> Iterator[Block]:
         yield blk("protected_branches", "git push --all would push protected branches", "push one feature branch")
     if recurse or (_git_config(ctx, st, d, "push.recurseSubmodules") or "").strip().lower() not in (
             "", "no", "check", "false"):
-        yield blk("other_repo", "this push also pushes submodule repos", "push without recursing into submodules")
+        yield blk("protected_branches", "this push also pushes submodule repos, whose branches the guard cannot "
+                                        "check", "push without recursing into submodules")
     current = _branch(ctx, st, d)
     for r in refspecs or [""]:
         if _unresolved(r):
@@ -2645,6 +3030,10 @@ def _git_push(c: _GitCall) -> Iterator[Block]:
         remote = (b and _git_config(ctx, st, d, f"branch.{b}.pushRemote")) \
             or _git_config(ctx, st, d, "remote.pushDefault") \
             or (b and _git_config(ctx, st, d, f"branch.{b}.remote")) or "origin"
+    if d is None:
+        yield _unknown_target(blk, f"the checkout of remote '{remote}' is not known",
+                              "write the git -C path out in full")
+        return
     out = st.once(("push-urls", d, remote), lambda: ctx.git(["remote", "get-url", "--push", "--all", remote], d))
     urls = [u.strip() for u in (out or "").splitlines() if u.strip()]
     if not urls:
@@ -2691,13 +3080,14 @@ def _cmd_gh(t, c, st, ctx, blk):
     if group == "api":
         yield from _gh_api(t, c.raw, st, ctx, blk)
     elif group in _GH_GROUPS:
-        yield from _gh_write(t, ctx, blk)
+        yield from _gh_write(t, c, st, ctx, blk)
 
 
-def _gh_write(t: List[str], ctx: GuardContext, blk: Blk) -> Iterator[Block]:
+def _gh_write(t: List[str], c: SimpleCommand, st: _State, ctx: GuardContext, blk: Blk) -> Iterator[Block]:
     group, verb = t[1], (t[2] if len(t) > 2 else "")
     what = f"gh {group} {verb}".strip()
-    if group in _GH_DESTRUCTIVE and (_GH_DESTRUCTIVE[group] is None or verb in _GH_DESTRUCTIVE[group]):
+    verbs = _GH_DESTRUCTIVE.get(group, set())
+    if (verbs is None and not (group == "ruleset" and verb in _RULESET_READS)) or (verbs and verb in verbs):
         yield blk("destructive_git", f"{what} changes settings, secrets or deletes data; that is a human action",
                   "ask the operator to do this by hand")
     if group == "pr" and verb in ("merge", "close") and any(
@@ -2720,6 +3110,8 @@ def _gh_write(t: List[str], ctx: GuardContext, blk: Blk) -> Iterator[Block]:
             n_repo += 1
         elif j >= 3:
             raw = parse_origin(a, allow_path=True)
+            if raw is None and "github.com" in a.lower() and "://" in a:
+                raw = a  # a URL gh may read as the repo, which the guard cannot: not taken as gh's default
         if raw is None:
             continue
         repo = repo_slug(raw)
@@ -2740,9 +3132,91 @@ def _gh_write(t: List[str], ctx: GuardContext, blk: Blk) -> Iterator[Block]:
         if verb in ("create", "fork") and not targets:
             yield blk("other_repo", f"gh repo {verb} without an allowed owner/name", "name the repo explicitly")
             return
-    if not targets:
-        yield _unknown_target(blk, f"{what} names no repo, and gh's default repo is not always origin",
-                              f"pass --repo {ctx.origin_repo or 'owner/name'}")
+    if targets:
+        return
+    if group == "project":
+        if verb.endswith(("list", "view")):  # list, item-list, field-list, view: reads
+            return
+        # never blocked (dblanken-yale/not-me#117): a board belongs to an owner, not a repo, and the operator chose
+        # it in setup; logged so a run's board change outside the notme CLI (which uses GraphQL) shows up
+        yield blk("other_repo", f"{what} changes an owner's board, not a repo; runs change boards through the notme "
+                                "CLI", "use the notme CLI, or gh api graphql for a read")
+        return
+    repo, how = _gh_default_repo(c, st, ctx)
+    if repo:
+        yield from _check_target(ctx, repo, blk)
+        return
+    # dblanken-yale/not-me#142: not blocked; the log line records the repo the guard assumed
+    assumed = ctx.origin_repo
+    b = blk("other_repo", f"{what} names no repo, and gh's default repo could not be worked out ({how}); assumed "
+                          f"{assumed or 'none'}", f"pass --repo {assumed or 'owner/name'}", target=assumed)
+    b.no_checkout = True
+    yield b
+
+
+# gh orders remotes this way when it picks a default repo: upstream, github, origin, then the rest by name
+_GH_REMOTE_ORDER = ("upstream", "github", "origin")
+_GH_REPO_ASSIGN = re.compile(r"^GH_REPO=")
+# GH_REPO set where the guard does not read it: by assignment, ${GH_REPO:=x}, `for GH_REPO in`, or a builtin or env
+# that sets or unsets it by name (export, declare, read, unset, env -u ...). A bare mention (echo GH_REPO, $GH_REPO)
+# does not count.
+_GH_REPO_SET = re.compile(r"(?<![A-Za-z0-9_$])GH_REPO(?:\[[^\]]*\])?\s*\+?=|\$\{GH_REPO:?=|(?<![A-Za-z0-9_-])"
+                          r"(?:export|declare|typeset|local|readonly|read|mapfile|readarray|unset|printf|env|for)"
+                          r"(?![A-Za-z0-9_-])[^;&|\n]*?(?<![A-Za-z0-9_${])GH_REPO(?![A-Za-z0-9_])")
+
+
+def _gh_default_repo(c: SimpleCommand, st: _State, ctx: GuardContext) -> Tuple[Optional[str], str]:
+    """The repo a gh command with no --repo works on, found the way gh finds it (dblanken-yale/not-me#142):
+    GH_REPO (set on the command, earlier in it, or in the environment), else the remote `gh repo set-default`
+    marked (remote.<name>.gh-resolved), else the first github remote of upstream, github, origin and the rest by
+    name, read where the command runs. (owner/name, how it was found), or (None, why it could not be)."""
+    value: Optional[str] = ""
+    words = list(c.words)
+    prefix = [w for w in words[:next((k for k, w in enumerate(words) if not _ASSIGN.match(w)), len(words))]
+              if _GH_REPO_ASSIGN.match(w)]
+    if prefix:
+        value = st.literal(prefix[-1][len("GH_REPO="):], getattr(prefix[-1], "expands", False))
+    elif "GH_REPO" in st.vars:
+        value = st.vars["GH_REPO"]
+    elif _GH_REPO_SET.search(st.plain_text) or _GH_REPO_SET.search(st.text):  # raw text keeps ${GH_REPO:=x}
+        # set where the guard does not read it (export later on, env GH_REPO=..., read, declare): not the origin
+        return None, "the shell sets GH_REPO"
+    elif ctx.env.get("GH_REPO"):
+        value = ctx.env.get("GH_REPO")
+    if value is None:
+        return None, "the shell fills in GH_REPO"
+    if value:
+        repo = repo_slug(value)
+        return (repo, "GH_REPO") if repo else (None, f"GH_REPO {_short(value, 60)} is not owner/name")
+    d = st.cur
+    if d is None:
+        return None, "the directory it runs in is not known"
+    out = st.once(("gh-remotes", d), lambda: ctx.git(
+        ["config", "--get-regexp", r"^remote\..*\.(url|gh-resolved)$"], d)) or ""
+    urls: Dict[str, str] = {}
+    resolved: Dict[str, str] = {}
+    for line in out.splitlines():
+        key, _, val = line.strip().partition(" ")
+        name, _, kind = key[len("remote."):].rpartition(".")
+        if key.startswith("remote.") and name:
+            (urls if kind == "url" else resolved).setdefault(name, val.strip())
+    order = sorted(set(urls) | set(resolved), key=lambda n: (
+        _GH_REMOTE_ORDER.index(n) if n in _GH_REMOTE_ORDER else len(_GH_REMOTE_ORDER), n))
+    for name in order:
+        mark = resolved.get(name, "")
+        if mark == "base":
+            repo = parse_origin(urls.get(name) or "")
+        elif mark:
+            repo = repo_slug(mark[len("base:"):] if mark.startswith("base:") else mark)
+        else:
+            continue
+        if repo:
+            return repo, f"remote {name}, set by gh repo set-default"
+    for name in order:
+        repo = parse_origin(urls.get(name) or "")
+        if repo:
+            return repo, f"remote {name}"
+    return None, "no github remote"
 
 
 def _gh_api(t: List[str], seg: str, st: _State, ctx: GuardContext, blk: Blk) -> Iterator[Block]:
@@ -2779,28 +3253,59 @@ def _gh_api(t: List[str], seg: str, st: _State, ctx: GuardContext, blk: Blk) -> 
     if ep == "graphql":
         queries = [f.split("=", 1)[1] for f in fields if f.split("=", 1)[0] == "query" and "=" in f]
         if inputs or len(queries) != 1 or _unresolved(queries[0]) or queries[0].startswith("@"):
-            yield blk("other_repo", "gh api graphql without one literal query cannot be checked",
-                      "pass the query inline with -f query='...'")
+            # a query the guard cannot read may be a mutation that deletes or changes settings
+            b = blk("destructive_git", "gh api graphql without one literal query cannot be checked, and a mutation "
+                                       "can delete data or change settings", "pass the query inline with -f query='...'")
+            b.no_relax = True
+            yield b
             return
+        names = _gql_mutation_fields(queries[0])
+        if names is None and mutation:
+            b = blk("destructive_git", "gh api graphql: the guard cannot read this mutation, and a mutation can delete "
+                                       "data or change settings", "write the mutation out plainly, one field per line")
+            b.no_relax = True
+            yield b
+            return
+        for name in names or ():
+            low = name.lower()
+            if low in _GQL_REFS:
+                yield blk("protected_branches", f"gh api graphql {name} moves a branch without a push, so the branch "
+                                                "it changes cannot be checked",
+                          "commit on a feature branch and git push origin <branch>")
+                return
+            if _GQL_DESTRUCTIVE.match(low):
+                yield blk("destructive_git", f"gh api graphql {name}: settings, secrets, rulesets and deletion are "
+                                             "human actions", "ask the operator to do this on GitHub")
+                return
+            if low not in _GQL_SAFE:
+                yield blk("destructive_git", f"gh api graphql {name} is not a mutation the guard knows is safe",
+                          "use a gh pr, issue or project command, or ask the operator to do this on GitHub")
+                return
+        mutation = mutation or bool(names)
         atfile = any("@" in f for f in fields)
-        if (mutation or atfile or inputs) and BOARD_MARKER not in seg:
-            why = "a mutation" if mutation else ("an @file field" if atfile else "--input")
-            yield blk("other_repo", f"gh api graphql with {why} cannot be checked",
-                      "use gh pr/issue commands with --repo, or the REST API under repos/owner/name")
+        if (mutation or atfile) and BOARD_MARKER not in seg:
+            why = "a mutation" if mutation else "an @file field"
+            yield blk("other_repo", f"gh api graphql with {why} names no repo the guard can check")
         return
     method = (values["method"][-1] if values["method"] else ("POST" if fields or inputs else "GET")).upper()
     if method in ("GET", "HEAD"):
         return
+    # dot segments and encoded separators: judge the path as GitHub would resolve it, too
+    plain = posixpath.normpath(unquote(ep).replace("\\", "/")).lstrip("/") if ep else ep
+    forms = (ep, plain)
+    m = _REPO_PATH.match(plain)
+    repo_root = bool(m) and not plain[m.end():].strip("/")
+    if method == "DELETE" or (repo_root and method == "PATCH") or any(
+            p.search(f) for p in (_PROTECTION, _SECRETS, _RULESETS) for f in forms):
+        yield blk("destructive_git", f"gh api {method} {ep}: settings, secrets and deletion are human actions",
+                  "ask the operator to do this on GitHub")
+        return
+    yield from _api_branch_writes(method, plain, fields, inputs, ctx, blk)
     if ".." in ep or "//" in ep or "\\" in ep or re.search(r"%(?:2e|2f|5c)", ep, re.I):
         yield blk("other_repo", f"gh api {method} {_short(ep, 60)}: dot segments or encoded separators can reach "
-                                "another repo", "spell out repos/owner/name/... plainly")
+                                "another repo")
         return
     m = _REPO_PATH.match(ep)
-    repo_root = bool(m) and not ep[m.end():].strip("/")
-    if method == "DELETE" or (repo_root and method == "PATCH") or _PROTECTION.search(ep) or _SECRETS.search(ep) \
-            or _RULESETS.search(ep):
-        yield blk("destructive_git", f"gh api {method} {ep}: settings, secrets and deletion are human actions",
-                  "ask the operator to do this by hand")
     if not m:
         yield _unknown_target(blk, f"gh api {method} {ep or '(no endpoint)'}",
                               "use an endpoint under repos/owner/name for an allowed repo")
@@ -2811,6 +3316,111 @@ def _gh_api(t: List[str], seg: str, st: _State, ctx: GuardContext, blk: Blk) -> 
                   f"spell out repos/{ctx.origin_repo or 'owner/name'}")
         return
     yield from _check_target(ctx, repo, blk)
+
+
+def _gql_mutation_fields(query: str) -> Optional[List[str]]:
+    """The top-level field names of every mutation operation in a GraphQL document (aliases skipped, directives
+    ignored), read the way GraphQL reads it: # comments and commas do not count, strings are opaque. None when the
+    document cannot be read (an unterminated string, unbalanced brackets, a fragment spread in a mutation)."""
+    toks: List[str] = []
+    for m in _GQL_TOKEN.finditer(query):
+        t = m.group(0)
+        if t.startswith("#"):
+            continue
+        if t.startswith('"'):
+            if len(t) < 2 or not t.endswith('"') or query.startswith('"""', m.start()) and not (
+                    len(t) >= 6 and t.startswith('"""')):
+                return None  # an unterminated string or block string
+            t = '"'
+        toks.append(t)
+    fields: List[str] = []
+    depth = paren = 0
+    pending = in_mut = False
+    for i, t in enumerate(toks):
+        if t == "(":
+            paren += 1
+        elif t == ")":
+            paren -= 1
+        elif paren:
+            pass
+        elif t == "{":
+            if depth == 0:
+                in_mut, pending = pending, False
+            depth += 1
+        elif t == "}":
+            depth -= 1
+            if depth == 0:
+                in_mut = False
+        elif depth == 0 and t == "mutation":
+            pending = True
+        elif in_mut and depth == 1:
+            if t == "...":
+                return None
+            prev = toks[i - 1] if i else ""
+            nxt = toks[i + 1] if i + 1 < len(toks) else ""
+            if _GQL_NAME.match(t) and prev != "@" and nxt != ":":
+                fields.append(t)
+        if depth < 0 or paren < 0:
+            return None
+    return None if depth or paren or pending else fields
+
+
+def _branch_name(value: str) -> Optional[str]:
+    """The branch a ref names, as protected_branches spells it: without refs/heads/, heads/ or a leading refs/, and
+    without trailing slashes. None for any other ref under refs/ (a tag, a remote, a note): no branch to check."""
+    v = value.strip().rstrip("/")
+    for prefix in ("refs/heads/", "heads/"):
+        if v.startswith(prefix):
+            return v[len(prefix):].rstrip("/")
+    if v.startswith("refs/"):
+        rest = v[len("refs/"):]
+        return None if "/" in rest or not rest else rest
+    return v
+
+
+def _may_be_protected(value: str, ctx: GuardContext) -> bool:
+    """value names a protected branch, nothing (the default branch), a ref that is not a branch, or a value from a
+    file or the shell: the guard cannot rule out a protected branch."""
+    if not value.strip() or value.startswith("@") or _unresolved(value):
+        return True
+    branch = _branch_name(value)
+    return branch is None or not branch or branch in ctx.protected_branches
+
+
+def _api_branch_writes(method: str, ep: str, fields: List[str], inputs: List[str], ctx: GuardContext,
+                       blk: Blk) -> Iterator[Block]:
+    """REST writes that move a branch without a push: a ref update (which can force), a contents write (a commit
+    on the branch it names, or on the default branch when it names none) and a merge without a pull request. A
+    field value from a file (@file) or the shell cannot be read, so it counts as a protected branch."""
+    values = {k.lower(): v for k, _, v in (f.partition("=") for f in fields)}
+
+    def unreadable(v: str) -> bool:
+        return v.startswith("@") or _unresolved(v)
+
+    ref = _GIT_REF_PATH.match(ep)
+    if ref and method in ("PATCH", "POST", "PUT"):
+        if inputs or any(unreadable(v) for v in values.values()):
+            yield blk("protected_branches", f"gh api {method} {ep} with --input or an @file value cannot be checked",
+                      "pass the fields inline with -f/-F so the guard can read them")
+        elif values.get("force", "").lower() not in ("", "false", "0"):
+            yield blk("force_push", "a forced ref update rewrites published history",
+                      "push new commits on top instead; ask the operator if a rewrite is really needed")
+        elif _may_be_protected("refs/heads/" + ref.group(1), ctx):
+            yield blk("protected_branches", f"updates to the protected branch {ref.group(1)} are not allowed",
+                      "push a feature branch and open a pull request")
+    if _CONTENTS_PATH.match(ep) and method in ("PUT", "POST", "PATCH"):
+        branch = values.get("branch", "")
+        if inputs or _may_be_protected(branch, ctx):
+            yield blk("protected_branches", f"gh api {method} {ep} commits to "
+                                            f"{branch or 'the default branch'}, which may be protected",
+                      "commit on a feature branch and git push origin <branch>, or pass -f branch=<feature branch>")
+    for pattern, key in _MERGE_PATHS:
+        if pattern.match(ep) and method in ("POST", "PUT", "PATCH"):
+            branch = values.get(key, "")
+            if inputs or _may_be_protected(branch, ctx):
+                yield blk("protected_branches", f"gh api {method} {ep} merges into "
+                                                f"{branch or 'a branch the guard cannot read'}, which may be protected",
+                          "merge through a pull request, which a person merges")
 
 
 _COMMANDS: Dict[str, Callable[..., Iterator[Block]]] = {
@@ -2827,11 +3437,9 @@ _COMMANDS: Dict[str, Callable[..., Iterator[Block]]] = {
 LOG_INPUT_MAX = 2000  # characters of the blocked input kept in a guard log line
 LOG_TRUNCATED = "...[truncated]"
 REDACTED = "[redacted]"
-_SECRET_FILE_MAX = 4096  # bytes read from a secret file; the token, marker and epoch are far shorter
-_SECRET_MIN = 8  # a secret file value shorter than this is not searched for (it would redact ordinary text)
 # the one field that says what a tool call touched; Write and Edit bodies are never logged
 _LOG_FIELD = {"Bash": "command", "Write": "file_path", "Edit": "file_path", "MultiEdit": "file_path",
-              "Read": "file_path", "NotebookEdit": "notebook_path", "NotebookRead": "notebook_path"}
+              "NotebookEdit": "notebook_path"}
 _LOG_BODY_KEYS = frozenset({"content", "old_string", "new_string", "edits", "new_source", "body"})
 # The log patterns run on what the model sent, inside the hook's timeout (a hook that times out does not block), so
 # each one must be linear: a match may only start where a run of its leading characters starts (the lookbehinds),
@@ -2853,8 +3461,7 @@ _LOG_USER_FLAGS = frozenset({"-u", "--user"})
 _GH_SECRET = re.compile(r"\bsecret\b")  # gh secret [-R o/r] set: set may follow a repo flag
 _GH_SET = re.compile(r"\bset\b")
 _USER_SHORT = re.compile(r"-[A-Za-z]*u")  # -u, or combined short flags ending in it (curl -sSu user:pass)
-_SECRET_NAME = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|APIKEY|(?:^|_)KEY$|^NOT_ME_OPERATOR_CONFIRM$",
-                          re.IGNORECASE)
+_SECRET_NAME = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|APIKEY|(?:^|_)KEY$", re.IGNORECASE)
 _AUTH_HEADER = re.compile(r"(authorization:\s*(?:bearer|token|basic)\s+)[^\s\"']+", re.IGNORECASE)
 # scheme://user:password@ keeps the user; a lone user part of 16 or more characters is taken for a token
 _URL_PASSWORD = re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://[^@\s/:]+:)[^@\s/]+@")
@@ -2862,24 +3469,8 @@ _URL_TOKEN_USER = re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://)[^@\s/:
 # The input is cut before redacting so the work stays bounded: to _LOG_SCAN characters, and again to _LOG_SCAN plus
 # _LOG_SCAN_MARGIN. Only what both redacted cuts agree on is kept, so a secret no longer than the margin that one cut
 # splits (and so does not redact) never shows in part.
-_LOG_SCAN_MARGIN = _SECRET_FILE_MAX + 256
+_LOG_SCAN_MARGIN = 4096 + 256
 _LOG_SCAN = LOG_INPUT_MAX + _LOG_SCAN_MARGIN
-
-
-def _secret_values(ctx: GuardContext) -> List[str]:
-    """The operator token, live-mode marker and epoch file values; read only when a block is logged."""
-    homes = {ctx.home, ctx.allowlist_path.parent}
-    found = []
-    for home in homes:
-        for name, _why, _hint in _HOME_GUARDED:
-            try:
-                with open(home / name, "rb") as fh:
-                    value = fh.read(_SECRET_FILE_MAX).decode("utf-8", "replace").strip()
-            except OSError:
-                continue
-            if len(value) >= _SECRET_MIN:
-                found.append(value)
-    return sorted(set(found), key=len, reverse=True)
 
 
 def _secret_name(name: str) -> bool:
@@ -2917,11 +3508,8 @@ def _redact_values(text: str, names: "re.Pattern[str]", how: Callable[["re.Match
     return "".join(out)
 
 
-def _redact(text: str, secrets: List[str]) -> str:
-    """Replace known secrets, secret-named assignment values, auth header values, URL credentials and GitHub
-    token shapes."""
-    for value in secrets:
-        text = text.replace(value, REDACTED)
+def _redact(text: str) -> str:
+    """Replace secret-named assignment values, auth header values, URL credentials and GitHub token shapes."""
     text = _redact_values(text, _LOG_ASSIGN, lambda m: "all" if _secret_name(m.group(1)) else None)
     secret = _GH_SECRET.search(text)
     secret_set = bool(secret and _GH_SET.search(text, secret.end()))
@@ -2970,20 +3558,20 @@ def _logged_input(ctx: GuardContext, block: Block, tool_input: Any) -> Optional[
         text = block.command
     if text is None:
         return None
-    secrets = _secret_values(ctx)
     if len(text) <= _LOG_SCAN:
-        text = _redact(text, secrets)
+        text = _redact(text)
         return text if len(text) <= LOG_INPUT_MAX else text[:LOG_INPUT_MAX] + LOG_TRUNCATED
     # a secret the shorter cut splits ends inside the longer one and is redacted there, so the two differ from where
     # it starts; one the longer cut splits starts past the shorter one, so the agreed prefix stops before it
-    text = os.path.commonprefix([_redact(text[:_LOG_SCAN], secrets),
-                                 _redact(text[:_LOG_SCAN + _LOG_SCAN_MARGIN], secrets)])
+    text = os.path.commonprefix([_redact(text[:_LOG_SCAN]),
+                                 _redact(text[:_LOG_SCAN + _LOG_SCAN_MARGIN])])
     return text[:LOG_INPUT_MAX] + LOG_TRUNCATED
 
 
-def log_block(ctx: GuardContext, block: Block, tool_input: Any = None) -> None:
-    """Append the block to the guard log in the default run-log root (none outside git), with the blocked input
-    (the Bash command or the tool's path, else its arguments without bodies) redacted and capped."""
+def log_block(ctx: GuardContext, block: Block, tool_input: Any = None, outcome: str = "blocked") -> None:
+    """Append the block (outcome "blocked") or a guided call that ran (outcome "guided") to the guard log in the
+    default run-log root (none outside git), with the input (the Bash command or the tool's path, else its
+    arguments without bodies) redacted and capped."""
     root = log_root(ctx.common_dir)
     if root is None:
         return
@@ -2992,7 +3580,8 @@ def log_block(ctx: GuardContext, block: Block, tool_input: Any = None) -> None:
     except Exception:  # noqa: BLE001 - logging never changes the decision
         shown = None
     runlog.guard_log_append(runlog.guard_log_path(root), {
-        "tool": block.tool, "rule": block.rule, "reason": block.reason, "target": block.target, "input": shown})
+        "outcome": outcome, "tool": block.tool, "rule": block.rule, "reason": block.reason, "target": block.target,
+        "input": shown})
 
 
 # Variables a Windows child process needs to start at all: Python before 3.11 cannot seed its hash randomisation

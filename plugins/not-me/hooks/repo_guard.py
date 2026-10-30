@@ -49,6 +49,8 @@ def main(raw: "str | None" = None) -> int:
             ctx.self_only()  # outside a not-me project only self-protection applies
         block = guard.decide(event, ctx)
         if block is None:
+            if active and ctx.guided:  # a guided call runs; the log line is how the operator sees it
+                guard.log_block(ctx, ctx.guided[0], event.get("tool_input"), outcome="guided")
             return 0
         if active:  # never write a log into a repo that is not a not-me project
             guard.log_block(ctx, block, event.get("tool_input"))
@@ -63,6 +65,7 @@ def main(raw: "str | None" = None) -> int:
     finally:
         if watchdog is not None:
             watchdog.cancel()
+            watchdog.join(1.0)  # cancel only sets an event; let the thread end before we return
 
 
 def _risky(raw: str) -> bool:
@@ -76,4 +79,11 @@ def _risky(raw: str) -> bool:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # os._exit skips interpreter finalization, which has crashed at random (exit -11) after the decision was made.
+    rc = main()
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:  # noqa: BLE001 - a flush error must not change the decision
+            pass
+    os._exit(rc)

@@ -10,17 +10,6 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures" / "config"
 LAYER_CASES = FIXTURES / "layers"
 
 
-def sign_live(home) -> Path:
-    """A valid live-mode marker for home (what `notme mode live` writes), creating the operator token if missing.
-    A global `mode: live` counts only next to one."""
-    from notme import humans
-
-    Path(home).mkdir(parents=True, exist_ok=True)
-    if humans.read_token(home) is None:
-        humans.create_token(home)
-    return humans.write_live_marker(home)
-
-
 class TempCase:
     """Copy a layer fixture into a scratch project dir and home dir."""
 
@@ -46,9 +35,6 @@ class TempCase:
         path = base / f"{name}.md"
         path.write_text(text, encoding="utf-8")
         return path
-
-    def sign_live(self) -> Path:
-        return sign_live(self.home)
 
     def load(self):
         from notme import config

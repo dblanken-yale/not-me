@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from notme import humans, writes
+from notme import writes
 from notme.writes import Decision, GuardContext, WriteTarget, check_write
 from tests import TempCase
 
@@ -150,17 +153,14 @@ class FromConfigTests(unittest.TestCase):
         self.addCleanup(self.tc.cleanup)
         self.tc.write("repo", "project", PROJECT_MD)
         self.tc.write("global", "project", GLOBAL_MD)
-        self.tc.sign_live()
 
     def ctx(self, url="git@github.com:acme/app.git"):
         return GuardContext.from_config(self.tc.load(), origin_url=url)
 
-    def test_unconfirmed_live_builds_a_dry_run_context(self):
-        humans.clear_live_marker(self.tc.home)
+    def test_a_global_live_builds_a_live_context(self):
         ctx = self.ctx()
-        self.assertEqual(ctx.mode, "dry-run")
-        self.assertTrue(ctx.dry_run)
-        self.assertTrue(any("not confirmed" in w for w in ctx.warnings), ctx.warnings)
+        self.assertEqual(ctx.mode, "live")
+        self.assertFalse(ctx.dry_run)
 
     def test_allowed_set_from_config(self):
         writes.allowlist_add(self.tc.home, "acme/app", "acme/app-ui")  # confirms the repo-layer companion
@@ -190,8 +190,8 @@ class FromConfigTests(unittest.TestCase):
         d = check_write(WriteTarget.repo("acme/app-ui"), ctx)
         self.assertFalse(d.ok)
         self.assertEqual(d.allow_cmd, "/not-me:allow-repo acme/app-ui")
-        self.assertIn("acme/app-ui is listed in .claude/not-me/project.md but not confirmed; "
-                      "run /not-me:allow-repo acme/app-ui (setup does this for you)", ctx.warnings)
+        self.assertIn("acme/app-ui is listed in .claude/not-me/project.md but not confirmed: it counts once it is "
+                      "on the default branch, or run /not-me:allow-repo acme/app-ui", ctx.warnings)
         self.assertTrue(check_write(WriteTarget.repo("acme/app"), ctx).ok)
 
     def test_unconfirmed_repo_layer_tracker_is_blocked(self):
@@ -218,8 +218,8 @@ class FromConfigTests(unittest.TestCase):
     def test_unconfirmed_repo_layer_board_is_dropped_with_a_warning(self):
         ctx = self.ctx()
         self.assertIsNone(ctx.board)
-        self.assertIn("board acme/6 is listed in .claude/not-me/project.md but not confirmed; "
-                      "run /not-me:allow-repo --board acme/6", ctx.warnings)
+        self.assertIn("board acme/6 is listed in .claude/not-me/project.md but not confirmed: it counts once it is "
+                      "on the default branch, or run /not-me:allow-repo --board acme/6", ctx.warnings)
         self.assertFalse(check_write(WriteTarget.board("acme", 6), ctx).ok)
 
     def test_repo_layer_board_confirmed_per_project_or_everywhere(self):
@@ -289,6 +289,99 @@ class FromConfigTests(unittest.TestCase):
     def test_guard_off_is_read(self):
         self.tc.write("global", "project", "---\nschema: 1\nguard: {other_repo: off}\nconfirm_guard_off: [other_repo]\n---\n")
         self.assertFalse(self.ctx().rules["other_repo"])
+
+
+def _git(cwd, *args):
+    env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.test", GIT_COMMITTER_NAME="t",
+               GIT_COMMITTER_EMAIL="t@example.test", GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+    return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, env=env,
+                          check=True).stdout.strip()
+
+
+class CommittedRepoLayerTests(unittest.TestCase):
+    """Repos and the board the repo layer names count as allowed when the same names are on the default branch:
+    the commit the origin remote reports for HEAD, read from the local object store (dblanken-yale/not-me#118).
+    That copy reached it through a reviewed PR. The working tree, a feature branch, a PR head and any local ref
+    the session could move never widen anything. The remote here is a bare repository on disk."""
+
+    def setUp(self):
+        self.tc = TempCase()
+        self.addCleanup(self.tc.cleanup)
+        self.tc.write("global", "project", GLOBAL_MD)
+        self.tc.write("repo", "project", PROJECT_MD.replace("number: 6}", "number: 6}\ntracker: acme/issues"))
+        p = self.tc.project
+        self.remote = self.tc.root / "remote.git"
+        _git(self.tc.root, "init", "-q", "--bare", "-b", "main", str(self.remote))
+        _git(p, "init", "-q", "-b", "main")
+        _git(p, "add", "-f", ".claude/not-me/project.md")
+        _git(p, "commit", "-q", "-m", "config")
+        _git(p, "remote", "add", "origin", str(self.remote))
+        self.publish()
+
+    def publish(self, ref="main"):
+        """Make the project's `ref` the remote's default branch, as a reviewed merge on GitHub would."""
+        _git(self.remote, "fetch", "-q", str(self.tc.project), f"+{ref}:main")
+
+    def ctx(self):
+        return GuardContext.from_config(self.tc.load(), origin_url="git@github.com:acme/app.git")
+
+    def test_names_on_the_default_branch_are_allowed_without_the_allow_list(self):
+        ctx = self.ctx()
+        self.assertTrue(check_write(WriteTarget.repo("acme/app-ui"), ctx).ok)
+        self.assertTrue(check_write(WriteTarget.repo("acme/issues"), ctx).ok)
+        self.assertEqual(ctx.board, ("acme", 6))
+        self.assertFalse(any("not confirmed" in w for w in ctx.warnings), ctx.warnings)
+
+    def test_a_name_only_in_the_working_tree_is_not(self):
+        self.tc.write("repo", "project", PROJECT_MD.replace("acme/app-ui", "acme/evil").replace("number: 6", "number: 7"))
+        ctx = self.ctx()
+        self.assertFalse(check_write(WriteTarget.repo("acme/evil"), ctx).ok)
+        self.assertIsNone(ctx.board)
+        self.assertTrue(any(w.startswith("acme/evil is listed in") for w in ctx.warnings), ctx.warnings)
+
+    def test_a_commit_on_a_checked_out_branch_is_not(self):
+        p = self.tc.project
+        _git(p, "checkout", "-q", "-b", "feature/x")
+        self.tc.write("repo", "project", PROJECT_MD.replace("acme/app-ui", "acme/evil"))
+        _git(p, "commit", "-q", "-am", "widen")
+        self.assertFalse(check_write(WriteTarget.repo("acme/evil"), self.ctx()).ok)
+
+    def test_moved_local_refs_do_not_widen(self):
+        """A forged local commit behind origin/HEAD, origin/main or main changes nothing: the remote is asked."""
+        p = self.tc.project
+        _git(p, "checkout", "-q", "-b", "forged")
+        self.tc.write("repo", "project", PROJECT_MD.replace("acme/app-ui", "acme/evil"))
+        _git(p, "commit", "-q", "-am", "widen")
+        _git(p, "update-ref", "refs/remotes/origin/main", "forged")
+        _git(p, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        _git(p, "update-ref", "refs/heads/main", "forged")
+        _git(p, "remote", "set-head", "origin", "main")
+        ctx = self.ctx()
+        self.assertFalse(check_write(WriteTarget.repo("acme/evil"), ctx).ok)
+        self.publish("forged")  # once the remote's default branch really has it, it counts
+        self.assertTrue(check_write(WriteTarget.repo("acme/evil"), self.ctx()).ok)
+
+    def test_a_default_branch_commit_not_fetched_yet_counts_for_nothing(self):
+        self.assertEqual(writes.default_branch_names(self.tc.project, sha_of=lambda _d: "0" * 40)["repos"],
+                         frozenset())
+
+    def test_without_a_reachable_remote_nothing_counts(self):
+        _git(self.tc.project, "remote", "set-url", "origin", str(self.tc.root / "nowhere.git"))
+        ctx = self.ctx()
+        self.assertFalse(check_write(WriteTarget.repo("acme/app-ui"), ctx).ok)
+        self.assertIsNone(ctx.board)
+
+    def test_the_hook_never_asks_the_remote(self):
+        with mock.patch.object(writes, "_git", side_effect=AssertionError("ran git for the default branch")):
+            ctx = GuardContext.from_config(self.tc.load(), origin_url="git@github.com:acme/app.git",
+                                           default_branch=False)
+        self.assertFalse(check_write(WriteTarget.repo("acme/app-ui"), ctx).ok)
+
+    def test_allow_repos_in_the_repo_layer_never_counts(self):
+        self.tc.write("repo", "project", "---\nschema: 1\nallow_repos: [acme/evil]\n---\n")
+        _git(self.tc.project, "commit", "-q", "-am", "allow")
+        self.publish()
+        self.assertFalse(check_write(WriteTarget.repo("acme/evil"), self.ctx()).ok)
 
 
 class AllowlistTests(unittest.TestCase):
