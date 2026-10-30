@@ -93,7 +93,7 @@ flowchart TD
     ⚙ review.md, role.md, add review to router"]
     prove["prove: run testing steps on the preview,
     post a proof comment, fail sends PR to 'needs work'
-    ⚙ prove.md"]
+    ⚙ prove.md, prove.auto"]
     retro["retro, after a router leg that did work:
     up to three edits to .claude/not-me/ docs, never commits"]
     notify["notify.command"]
@@ -105,7 +105,7 @@ flowchart TD
     merge(["A person approves, if review did not, and merges"])
 
     router -.-> review
-    n6 -. "preview URL found; under --bg the router proves after a PR or PUSHED leg" .-> prove
+    n6 -. "preview URL found and prove.auto on; under --bg the router proves after a PR or PUSHED leg" .-> prove
     u5 --> retro
     n6 --> retro
     review --> retro

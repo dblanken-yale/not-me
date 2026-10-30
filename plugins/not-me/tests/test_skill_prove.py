@@ -174,6 +174,13 @@ class SkillProveTest(unittest.TestCase):
         for key in ("give_up_after", "steps_heading", "fail_label", "screenshots"):
             self.assertIn(key, meta)
 
+    def test_automatic_proof_obeys_prove_auto(self):
+        self.assertIs(default_meta()["prove"]["auto"], True)
+        starters = [PLUGIN / "skills" / name / "SKILL.md" for name in ("new", "update", "not-me")]
+        for path in starters + [PLUGIN / "references" / "bg-mode.md"]:
+            with self.subTest(str(path.relative_to(PLUGIN))):
+                self.assertIn("`prove.auto`", text(path))
+
     def test_result_lines(self):
         for line in ("PROVED <ref> pass n/m", "PROVED <ref> fail n/m", "NONE <ref> no deploy target",
                      "NONE <ref> no testing steps", "NONE <ref> no browser tool"):
