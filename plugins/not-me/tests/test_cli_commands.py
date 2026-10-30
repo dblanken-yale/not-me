@@ -1282,17 +1282,20 @@ class QueueDriftCliTests(base.CliCase):
         self.assertEqual([c for c in self.fake.calls if "graphql" in c], [])
         self.assertEqual(self.fake.writes_made(), [])
 
-    def test_queue_resync_of_a_label_says_why_on_the_issue(self):
+    def test_queue_resync_of_a_label_logs_why_and_posts_nothing(self):
+        # matching the board is mechanical: the timeline shows the label change, the run log has the reason
         self.tc.write("repo", "project", "---\nschema: 1\nqueue: {source: board, board: {owner: acme, number: 6}}"
                                          "\n---\n# Project\n")
         things(self.fake)["1"]["labels"] = ["to do"]
         self.fake.state["board"]["items"][0]["status"] = "In progress"
-        out = self.ok("queue-resync")
+        log = self.ok("log", "start", "--skill", "new", "--ref", "1")["path"]
+        out = self.ok("queue-resync", "--log", log)
         self.assertEqual([(c["side"], c["result"], c["commented"]) for c in out["changes"]],
-                         [("labels", "changed", True)])
+                         [("labels", "changed", False)])
         self.assertEqual(things(self.fake)["1"]["labels"], ["in progress"])
-        bodies = [c["body"] for c in things(self.fake)["1"]["comments"]]
-        self.assertTrue(any("State label changed from `to do` to `in progress`" in b for b in bodies), bodies)
+        self.assertEqual(things(self.fake)["1"]["comments"], [])
+        self.assertIn("State label changed from `to do` to `in progress`",
+                      Path(log).read_text(encoding="utf-8"))
 
     def test_queue_resync_of_a_status_posts_no_comment(self):
         self.ok("queue-resync")

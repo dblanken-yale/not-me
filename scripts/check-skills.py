@@ -35,15 +35,16 @@ RULES = {
     "R12": "CLAUDE_PLUGIN_ROOT usage",
     "R13": "--bg verb list",
     "R14": "no em dashes",
-    "R15": "state changes say why",
+    "R15": "state changes log why",
 }
 
 ALLOW_MARKER = "<!-- allowed-raw-write -->"
 # A notme call as skill prose writes it: notme, "${CLAUDE_PLUGIN_ROOT}/bin/notme" or "$NOTME", then the command.
 _CALL = r"(?:\bnotme\b\"?|\$\{?NOTME\}?\"?)\s+(?P<cmd>[a-z][a-z-]*)"
 CALL_RE = re.compile(_CALL)
-# Commands whose every call must say why. labels-sync is exempt with --check, which writes nothing, and
-# release-issue with --no-comment, which a failure on not-me's own side uses.
+# Commands whose every call must give a reason: the run log always gets it, and the CLI decides whether to post it.
+# labels-sync is exempt with --check, which writes nothing, and release-issue with --no-comment, which a failure on
+# not-me's own side uses.
 REASON_COMMANDS = {"move-issue", "release-issue", "transition", "labels-sync"}
 
 
@@ -374,7 +375,7 @@ class Linter:
         """Every call that changes a state passes --reason-file (see reason_violations)."""
         for path in self.skill_docs + self.ref_docs:
             for no, found in reason_violations(self.text(path)):
-                self.add(path, no, "R15", f"'{found}' without --reason-file: every state change says why")
+                self.add(path, no, "R15", f"'{found}' without --reason-file: every state change logs why")
 
     def run(self, only: Set[str]) -> None:
         if "R1" in only:

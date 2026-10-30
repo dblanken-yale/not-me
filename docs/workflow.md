@@ -42,6 +42,8 @@ Six more states sit next to the main flow. They do not replace the state above.
 
 That makes eleven: `to do`, `in progress`, `needs review`, `needs work`, `ready to merge`, `question`, `blocked`, `epic`, `needs help`, `needs human`, `paused`.
 
+**When a state change gets a comment.** GitHub's timeline already shows every label change, so not-me posts a one-line "why" comment only when an item moves to `blocked`, `question`, `needs help`, `needs human` or `paused`. Every other change (opening a PR, a review, a release to `to do`, a label matched to the board) posts nothing; its reason goes to the run log. See "Saying why on every state change" in [config.md](config.md).
+
 ### Approval with reviewer roles
 
 By default one approval moves a PR from `needs review` to `ready to merge`. When `role.md` lists reviewer roles (see "Reviewer roles" in [config.md](config.md)), every roster reviewer except the author must approve first:

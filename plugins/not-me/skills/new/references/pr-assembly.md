@@ -48,9 +48,9 @@ notme pr-open --head <branch> --base <base> --title-file title.txt \
   --assignee <operator> --log <path>
 ```
 
-1. `<needs_review name>` is the repo label for `needs_review` from `labels`. The CLI then posts
-   one comment on the new PR saying the state label was set ("pull request opened"); add
-   `--reason-file <f>` only to say something more specific.
+1. `<needs_review name>` is the repo label for `needs_review` from `labels`. The CLI logs that
+   the state label was set ("pull request opened") and posts no comment; add `--reason-file <f>`
+   only to log something more specific.
 2. Reviewers come from `reviewers`: the entry for this repo name, else `default`.
    An empty list: leave out `--reviewers`.
 3. `<operator>` is `operator` from the config, or the login `notme me` prints.

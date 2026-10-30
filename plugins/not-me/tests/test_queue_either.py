@@ -1,9 +1,10 @@
 """queue.source: either picks from the to-do label or the board's To Do column, claims on the label side, writes both
-sides on every state change, and says why in one comment per move."""
+sides on every state change, logs why, and comments only on a move the timeline cannot explain."""
 from __future__ import annotations
 
 import copy
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from notme import claims, doctor
@@ -293,7 +294,8 @@ class ConfigTests(base.CliCase):
 
 
 class ReasonCommentTests(base.CliCase):
-    """Every move, release and transition says why in one comment, with the label and the board column."""
+    """Every move, release and transition logs why; one to a state that needs a person or stops work also says
+    why in one comment, with the label and the board column."""
     global_project = EITHER_GLOBAL
 
     def setUp(self):
@@ -318,20 +320,39 @@ class ReasonCommentTests(base.CliCase):
         self.assertEqual(code, 2, payload)
         self.assertEqual(cli_things(self.fake)["1"]["labels"], ["to do"])
 
-    def test_a_move_posts_one_comment_naming_both_sides_and_the_reason(self):
+    def test_a_move_the_timeline_explains_posts_nothing_and_logs_the_reason(self):
         self.ok("claim-issue", "1")
+        start = self.ok("log", "start", "--skill", "new", "--ref", "1")
         before = len(self.comments())
         moved = self.ok("move-issue", "1", "--to", "needs_review", "--require-current", "in_progress",
-                        "--reason-file", self.reason)
+                        "--reason-file", self.reason, "--log", start["path"])
+        self.assertFalse(moved["commented"])
+        self.assertEqual(self.comments()[before:], [])
+        self.assertEqual(self.fake.state["board"]["items"][0]["status"], "In review")
+        self.assertEqual(moved.get("warnings", []), [])
+        self.assertIn("Moved from `in progress` to `needs review` (board column `In review`): "
+                      "Because the test says so", Path(start["path"]).read_text(encoding="utf-8"))
+
+    def test_a_release_to_todo_posts_nothing(self):
+        self.ok("claim-issue", "1")
+        before = len(self.comments())
+        released = self.ok("release-issue", "1", "--reason-file", self.reason)
+        self.assertFalse(released["commented"])
+        self.assertEqual([c for c in self.comments()[before:] if c.startswith("Moved from")], [])
+
+    def test_a_move_to_blocked_posts_one_comment_naming_both_sides_and_the_reason(self):
+        self.ok("claim-issue", "1")
+        start = self.ok("log", "start", "--skill", "new", "--ref", "1")
+        before = len(self.comments())
+        moved = self.ok("move-issue", "1", "--to", "blocked", "--reason-file", self.reason, "--log", start["path"])
         self.assertTrue(moved["commented"])
         new = self.comments()[before:]
         self.assertEqual(len(new), 1, new)
-        self.assertIn("Moved from `in progress` to `needs review` (board column `In review`): "
-                      "Because the test says so", new[0])
-        self.assertEqual(self.fake.state["board"]["items"][0]["status"], "In review")
-        self.assertEqual(moved.get("warnings", []), [])
+        self.assertIn("Moved from `in progress` to `blocked` (board column `Blocked`): Because the test says so",
+                      new[0])
+        self.assertIn("Because the test says so", Path(start["path"]).read_text(encoding="utf-8"))
 
-    def test_a_release_posts_one_comment(self):
+    def test_a_release_to_blocked_posts_one_comment(self):
         self.ok("claim-issue", "1")
         before = len(self.comments())
         released = self.ok("release-issue", "1", "--to", "blocked", "--reason-file", self.reason)
@@ -355,6 +376,17 @@ class ReasonCommentTests(base.CliCase):
         self.assertEqual(len(claim), 1, claim)
         self.assertIn("state=released", claim[0])
 
+    def test_a_release_to_blocked_with_no_comment_logs_the_reason_and_posts_nothing(self):
+        self.ok("claim-issue", "1")
+        start = self.ok("log", "start", "--skill", "new", "--ref", "1")
+        before = len(self.comments())
+        released = self.ok("release-issue", "1", "--to", "blocked", "--no-comment", "--reason-file", self.reason,
+                           "--log", start["path"])
+        self.assertFalse(released["commented"])
+        self.assertEqual(len(self.comments()), before)
+        self.assertIn("to `blocked` (board column `Blocked`): Because the test says so",
+                      Path(start["path"]).read_text(encoding="utf-8"))
+
     def test_a_release_with_no_comment_still_checks_a_reason_file_it_is_given(self):
         self.ok("claim-issue", "1")
         empty = self.write_file("empty.txt", "\n")
@@ -362,24 +394,31 @@ class ReasonCommentTests(base.CliCase):
         self.assertEqual(code, 2, payload)
         self.assertEqual(cli_things(self.fake)["1"]["labels"], ["in progress"])
 
-    def test_a_transition_posts_one_comment(self):
+    def test_a_transition_the_timeline_explains_posts_nothing(self):
         payload = self.ok("transition", "3", "--kind", "pr", "--from", "needs_review", "--to", "needs_work",
                           "--reason-file", self.reason)
+        self.assertFalse(payload["commented"])
+        self.assertEqual([c for c in cli_things(self.fake)["3"]["comments"] if c["body"].startswith("Moved from")],
+                         [])
+
+    def test_a_transition_to_needs_human_posts_one_comment(self):
+        self.ok("claim-issue", "1")
+        payload = self.ok("transition", "1", "--from", "in_progress", "--to", "needs_human",
+                          "--reason-file", self.reason)
         self.assertTrue(payload["commented"])
-        bodies = [c["body"] for c in cli_things(self.fake)["3"]["comments"] if c["body"].startswith("Moved from")]
-        self.assertEqual(len(bodies), 1)
-        self.assertIn("Moved from `needs review` to `needs work`: Because the test says so", bodies[0])
+        bodies = [c for c in self.comments() if c.startswith("Moved from")]
+        self.assertEqual(len(bodies), 1, bodies)
+        self.assertIn("Moved from `in progress` to `needs human`: Because the test says so", bodies[0])
 
     def test_a_failed_comment_is_a_warning_and_the_move_stands(self):
         self.ok("claim-issue", "1")
         start = self.ok("log", "start", "--skill", "new", "--ref", "1")
         with mock.patch.object(GhClient, "comment_create", side_effect=GhError(["issue", "comment"], 1, "boom")):
-            moved = self.ok("move-issue", "1", "--to", "needs_review", "--reason-file", self.reason,
+            moved = self.ok("move-issue", "1", "--to", "blocked", "--reason-file", self.reason,
                             "--log", start["path"])
         self.assertFalse(moved["commented"])
-        self.assertEqual(cli_things(self.fake)["1"]["labels"], ["needs review"])
+        self.assertEqual(cli_things(self.fake)["1"]["labels"], ["blocked"])
         self.assertEqual(len([w for w in moved["warnings"] if "reason comment" in w]), 1, moved)
-        from pathlib import Path
         self.assertIn("WARN  the reason comment", Path(start["path"]).read_text(encoding="utf-8"))
 
 
@@ -407,7 +446,7 @@ class ReasonRulesTests(base.CliCase):
     def test_a_multi_line_reason_is_folded_to_one_line(self):
         path = self.write_file("r.txt", "first part\nsecond part\n")
         self.ok("claim-issue", "1")
-        self.ok("move-issue", "1", "--to", "needs_review", "--reason-file", path)
+        self.ok("move-issue", "1", "--to", "blocked", "--reason-file", path)
         self.assertTrue(any("first part second part" in b for b in self.bodies(1)))
 
     def test_a_reason_naming_an_assistant_is_refused(self):
@@ -427,10 +466,17 @@ class ReasonRulesTests(base.CliCase):
         self.assertIn("added `needs human`", new[0])
         self.assertIn("Because the test says so", new[0])
 
-    def test_labels_sync_removing_a_state_label_names_it(self):
-        out = self.ok("labels-sync", "1", "--set", "extra", "--reason-file", self.reason)
-        self.assertTrue(out["commented"])
-        self.assertIn("removed `to do`", [b for b in self.bodies(1) if b.startswith("State labels")][0])
+    def test_labels_sync_that_only_removes_or_restores_a_state_label_posts_nothing(self):
+        # mechanical: the timeline shows the change and the run log has the reason
+        start = self.ok("log", "start", "--skill", "new", "--ref", "1")
+        out = self.ok("labels-sync", "1", "--set", "extra", "--reason-file", self.reason, "--log", start["path"])
+        self.assertFalse(out["commented"])
+        out = self.ok("labels-sync", "1", "--add", "to do", "--reason-file", self.reason, "--log", start["path"])
+        self.assertFalse(out["commented"])
+        self.assertEqual(self.bodies(1), [])
+        text = Path(start["path"]).read_text(encoding="utf-8")
+        self.assertIn("State labels changed (removed `to do`): Because the test says so", text)
+        self.assertIn("State labels changed (added `to do`): Because the test says so", text)
 
     def test_labels_sync_of_other_labels_needs_no_reason_and_posts_nothing(self):
         out = self.ok("labels-sync", "1", "--add", "extra")
@@ -450,16 +496,16 @@ class ReasonRulesTests(base.CliCase):
         self.assertEqual(cli_things(self.fake)["1"]["labels"], ["to do", "needs human"])
         self.assertEqual(len([w for w in out["warnings"] if "reason comment" in w]), 1)
 
-    def test_review_post_that_changes_a_state_label_comments_once(self):
+    def test_review_post_that_changes_a_state_label_logs_why_and_posts_no_comment(self):
+        # the review is the reason, and it shows in the timeline next to the label change
         body = self.write_file("review.md", "Please rename this.\n")
+        start = self.ok("log", "start", "--skill", "review", "--ref", "3")
         out = self.ok("review-post", "3", "--event", "REQUEST_CHANGES", "--body-file", body,
-                      "--labels-set", "needs work")
-        self.assertTrue(out["commented"])
-        new = [b for b in self.bodies(3) if b.startswith("State labels changed")]
-        self.assertEqual(len(new), 1, new)
-        self.assertIn("added `needs work`", new[0])
-        self.assertIn("removed `needs review`", new[0])
-        self.assertIn("a REQUEST_CHANGES review was posted", new[0])
+                      "--labels-set", "needs work", "--log", start["path"])
+        self.assertFalse(out["commented"])
+        self.assertEqual([b for b in self.bodies(3) if b.startswith("State labels")], [])
+        self.assertIn("State labels changed (added `needs work`; removed `needs review`): "
+                      "a REQUEST_CHANGES review was posted", Path(start["path"]).read_text(encoding="utf-8"))
 
     def test_review_post_that_changes_no_state_label_does_not_comment(self):
         body = self.write_file("review.md", "Looks fine.\n")
@@ -468,15 +514,15 @@ class ReasonRulesTests(base.CliCase):
         self.assertNotIn("commented", out)
         self.assertEqual([b for b in self.bodies(3) if b.startswith("State labels")], [])
 
-    def test_pr_open_with_a_state_label_comments_once(self):
+    def test_pr_open_with_a_state_label_logs_why_and_posts_no_comment(self):
         body = self.write_file("body.md", "Body text\n")
         title = self.write_file("title.txt", "A title\n")
+        start = self.ok("log", "start", "--skill", "new", "--ref", "1")
         out = self.ok("pr-open", "--head", "feat/x", "--base", "main", "--title-file", title, "--body-file", body,
-                      "--labels", "needs review")
-        self.assertTrue(out["commented"])
-        bodies = self.bodies(out["number"])
-        self.assertEqual(len(bodies), 1, bodies)
-        self.assertIn("(added `needs review`): pull request opened", bodies[0])
+                      "--labels", "needs review", "--log", start["path"])
+        self.assertFalse(out["commented"])
+        self.assertEqual(self.bodies(out["number"]), [])
+        self.assertIn("(added `needs review`): pull request opened", Path(start["path"]).read_text(encoding="utf-8"))
 
 
 class DryRunReleaseTests(EitherTestCase):

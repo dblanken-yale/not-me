@@ -174,7 +174,7 @@ Output: number, previous, now, marker_comment_id, run_id; warnings when a queue.
 
 ### `notme release-issue`
 
-Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released, then post one comment with the old state, the new state (and the board column when the board follows) and the text of --reason-file. A comment that fails is a warning; the release stands. With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning. --no-comment releases the same way and posts nothing (the timeline already shows the unassign and the label change); --reason-file is then optional.
+Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released. The old state, the new state (and the board column when the board follows) and the text of --reason-file go to the run log; a release to blocked also posts them as one comment, since the timeline cannot say why. A release to todo posts nothing. A comment that fails is a warning; the release stands. With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning. --no-comment releases the same way and posts nothing, even to blocked; --reason-file is then optional.
 
 ```
 notme release-issue N [--to TO] [--reason-file F] [--no-comment]
@@ -184,7 +184,7 @@ notme release-issue N [--to TO] [--reason-file F] [--no-comment]
 |----------|----------|---------|
 | `N` | required |  |
 | `--to TO {todo|blocked}` | optional | (default todo) |
-| `--reason-file F` | optional | file holding one line that says why; posted as one comment on the item; required unless --no-comment |
+| `--reason-file F` | optional | file holding one line that says why; goes to the run log, and to one comment on a release to blocked; required unless --no-comment |
 | `--no-comment` | optional | post no comment: for a run that stops on a failure on not-me's own side |
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
@@ -193,7 +193,7 @@ Output: number, to, released, commented; warnings when a queue.sync mirror write
 
 ### `notme move-issue`
 
-Move an issue to a state, optionally only when it is currently in another one, then post one comment with the old state, the new state (and the label and board column the move also wrote) and the text of --reason-file. A comment that fails is a warning; the move stands. With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
+Move an issue to a state, optionally only when it is currently in another one. The old state, the new state (and the label and board column the move also wrote) and the text of --reason-file go to the run log, and to one comment when the new state is blocked, question, needs help, needs human or paused, which the timeline cannot explain. A comment that fails is a warning; the move stands. With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
 
 ```
 notme move-issue N --to STATE [--require-current STATE] --reason-file F
@@ -204,7 +204,7 @@ notme move-issue N --to STATE [--require-current STATE] --reason-file F
 | `N` | required |  |
 | `--to STATE` | required |  |
 | `--require-current STATE` | optional |  |
-| `--reason-file F` | required | file holding one line that says why; posted as one comment on the item |
+| `--reason-file F` | required | file holding one line that says why; goes to the run log, and to one comment on the item when the new state needs a person or stops work |
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
@@ -385,7 +385,7 @@ Output: url, strategy, head_sha, tried, skipped (when any); or none (with tried,
 
 ### `notme transition`
 
-Change an item's state label along a legal edge (reads the labels, replaces the set, reads it back), then post one comment with the old state, the new state and the text of --reason-file. A comment that fails is a warning; the change stands.
+Change an item's state label along a legal edge (reads the labels, replaces the set, reads it back). The old state, the new state and the text of --reason-file go to the run log, and to one comment when the new state is blocked, question, needs help, needs human or paused. A comment that fails is a warning; the change stands.
 
 ```
 notme transition N --from STATE --to STATE [--kind KIND] --reason-file F
@@ -397,7 +397,7 @@ notme transition N --from STATE --to STATE [--kind KIND] --reason-file F
 | `--from STATE` | required |  |
 | `--to STATE` | required |  |
 | `--kind KIND {issue|pr}` | optional | (default issue) |
-| `--reason-file F` | required | file holding one line that says why; posted as one comment on the item |
+| `--reason-file F` | required | file holding one line that says why; goes to the run log, and to one comment on the item when the new state needs a person or stops work |
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
@@ -405,7 +405,7 @@ Output: repo, number, kind, from, to, labels, commented
 
 ### `notme labels-sync`
 
-Make an item's labels match: --set replaces the whole set, --add and --remove edit it. --check only reports. A bare number is an item in the tracker; owner/name#N or a URL names an item in another allowed repository (a companion PR). A change that adds or removes a state label (needs human, blocked, question, paused, ...) needs --reason-file and posts one comment naming the labels and the reason; a failed comment is a warning and the change stands. Pass labels and other labels need no reason.
+Make an item's labels match: --set replaces the whole set, --add and --remove edit it. --check only reports. A bare number is an item in the tracker; owner/name#N or a URL names an item in another allowed repository (a companion PR). A change that adds or removes a state label needs --reason-file; the labels and the reason go to the run log. One comment names them only when the change adds blocked, question, needs help, needs human or paused; removing a state label or putting one back posts nothing. A failed comment is a warning and the change stands. Pass labels and other labels need no reason.
 
 ```
 notme labels-sync N|REF [--set a,b] [--add a,b] [--remove a,b] [--check] [--reason-file F]
@@ -422,11 +422,11 @@ notme labels-sync N|REF [--set a,b] [--add a,b] [--remove a,b] [--check] [--reas
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: repo, number, in_sync, changed, labels (current, or the new set); commented when a reason was posted
+Output: repo, number, in_sync, changed, labels (current, or the new set); commented (true when posted) when a state label changed
 
 ### `notme queue-resync`
 
-Set the side queue.source does not read to match the side it does, for each open issue on queue.board whose state label and board Status disagree (the issues `doctor` and `status` list): the board Status for a labels source, the labels (one full-set write, read back) for a board source. It follows the effective mode: in dry-run the writes reach only the ledger. A board the global allow list does not confirm is refused before anything is read. Issues not on the board are skipped and reported, never added; closed issues are never touched; neither are issues whose state has no column. A changed state label gets one comment saying why, as every other state-label change does (commented). The board Status change is not commented on.
+Set the side queue.source does not read to match the side it does, for each open issue on queue.board whose state label and board Status disagree (the issues `doctor` and `status` list): the board Status for a labels source, the labels (one full-set write, read back) for a board source. It follows the effective mode: in dry-run the writes reach only the ledger. A board the global allow list does not confirm is refused before anything is read. Issues not on the board are skipped and reported, never added; closed issues are never touched; neither are issues whose state has no column. Nothing is posted on GitHub: matching the other side is mechanical and the timeline shows the label change. Why each state label changed goes to the run log (--log).
 
 ```
 notme queue-resync
@@ -434,7 +434,7 @@ notme queue-resync
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: board, changes ([{number, url, side, from, to, result (changed, planned or failed), reason, commented (label changes only)}]), skipped ([{number, url, reason}]), truncated (the board has more items than the `read` count read; issues past them are reported as not among the items read, never as off the board), issues_truncated; dry_run when the writes were only recorded. Exits 1 when paused or disabled.
+Output: board, changes ([{number, url, side, from, to, result (changed, planned or failed), reason, commented (label changes only; always false)}]), skipped ([{number, url, reason}]), truncated (the board has more items than the `read` count read; issues past them are reported as not among the items read, never as off the board), issues_truncated; dry_run when the writes were only recorded. Exits 1 when paused or disabled.
 
 ### `notme labels-ensure`
 
@@ -524,7 +524,7 @@ Output: repo, number, updated
 
 ### `notme pr-open`
 
-Open a PR, set its labels, request review. The head branch may not be a protected branch. When --labels names a state label (needs review, ...), one comment on the new PR names it and the reason (the first line of --reason-file, else "pull request opened"); a failed comment is a warning and the PR stands. No comment in a dry run, which has no PR number.
+Open a PR, set its labels, request review. The head branch may not be a protected branch. When --labels names a state label (needs review, ...), the run log records it and the reason (the first line of --reason-file, else "pull request opened"). No comment is posted: opening the PR is the reason, and the timeline shows the labels.
 
 ```
 notme pr-open --head H --base B --title-file F --body-file F [--labels a,b] [--reviewers a,b] [--assignee L] [--draft] [--reason-file F]
@@ -540,11 +540,11 @@ notme pr-open --head H --base B --title-file F --body-file F [--labels a,b] [--r
 | `--reviewers a,b` | optional |  |
 | `--assignee L` | optional |  |
 | `--draft` | optional |  |
-| `--reason-file F` | optional | one line saying why the state labels are set; default: "pull request opened" |
+| `--reason-file F` | optional | one line for the run log saying why the state labels are set; default: "pull request opened" |
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: repo, number, url (both null in a dry run), head, base; commented when a state label was set
+Output: repo, number, url (both null in a dry run), head, base; commented (false) when a state label was set
 
 ### `notme companion-prs`
 
@@ -582,7 +582,7 @@ Output: repo, number, updated or unchanged
 
 ### `notme review-post`
 
-Post a review, optionally set labels, and read both back. APPROVE is refused unless review.auto_approve is true in the global (or default) layer; the repo layer cannot turn it on. --labels-auto reads the PR's reviews after posting and sets the full label set itself. With no rows in role.md, APPROVE moves the PR to review.approve_label and REQUEST_CHANGES to review.changes_label, as one approval did before. With rows, every roster reviewer except the author must approve (latest review that is not a comment; a dismissed review is not an approval): until then APPROVE keeps needs_review. Each role with an approving reviewer gets its pass label and a role with none loses it; REQUEST_CHANGES moves the PR to review.changes_label. COMMENT only updates the pass labels. A pass label missing from the repo is skipped with one warning. When the labels set change a state label (needs review, needs work, ready to merge, ...), one comment follows the review naming what was added and removed and the reason: the first line of --reason-file, else "a <EVENT> review was posted". A failed comment is a warning and the review and labels stand.
+Post a review, optionally set labels, and read both back. APPROVE is refused unless review.auto_approve is true in the global (or default) layer; the repo layer cannot turn it on. --labels-auto reads the PR's reviews after posting and sets the full label set itself. With no rows in role.md, APPROVE moves the PR to review.approve_label and REQUEST_CHANGES to review.changes_label, as one approval did before. With rows, every roster reviewer except the author must approve (latest review that is not a comment; a dismissed review is not an approval): until then APPROVE keeps needs_review. Each role with an approving reviewer gets its pass label and a role with none loses it; REQUEST_CHANGES moves the PR to review.changes_label. COMMENT only updates the pass labels. A pass label missing from the repo is skipped with one warning. When the labels set change a state label (needs review, needs work, ready to merge, ...), the run log records what was added and removed and the reason: the first line of --reason-file, else "a <EVENT> review was posted". No comment is posted: the review is the reason, and the timeline shows it next to the label change.
 
 ```
 notme review-post REF --event EVENT --body-file F [--comments-file J] [--reason-file F] [--labels-set a,b] [--labels-auto]
@@ -594,13 +594,13 @@ notme review-post REF --event EVENT --body-file F [--comments-file J] [--reason-
 | `--event EVENT {APPROVE|REQUEST_CHANGES|COMMENT}` | required |  |
 | `--body-file F` | required |  |
 | `--comments-file J` | optional |  |
-| `--reason-file F` | optional | one line saying why the state labels changed; default: the review's own verdict |
+| `--reason-file F` | optional | one line for the run log saying why the state labels changed; default: the review's own verdict |
 | `--labels-set a,b` | optional | set the full label set after posting |
 | `--labels-auto` | optional | work out the label set from the PR's reviews, role.md and the roster, then set it |
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: repo, number, event, state (event only in a dry run); with --labels-auto labels and approval (null with no roles; else required, approved, waiting, all_approved, pass_labels); commented when a state label changed
+Output: repo, number, event, state (event only in a dry run); with --labels-auto labels and approval (null with no roles; else required, approved, waiting, all_approved, pass_labels); commented (false) when a state label changed
 
 ### `notme resolve-threads`
 

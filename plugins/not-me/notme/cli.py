@@ -271,6 +271,7 @@ class Context:
         self.args, self.deps = args, deps
         self.warnings: List[str] = []
         self.log_warnings: List[str] = []  # warnings that also go to the run log as WARN lines (see main)
+        self.log_reasons: List[str] = []  # why each state changed, for the run log as ACTION lines (see main)
         # Restricted is the default. A tty alone proves nothing (a pty wrapper fakes one), so a person also needs no
         # Claude Code variable and no Claude Code ancestor process; an unreadable ancestry counts as Claude Code.
         self.restricted = (any(deps.env.get(k) for k in CLAUDE_ENV) or not deps.isatty()
@@ -355,10 +356,11 @@ class Context:
             raise fail(ExitCode.USAGE, "usage", "--reason-file text is not clean: " + "; ".join(problems))
         return text
 
-    def say_why(self, repo: str, n: int, change: Dict[str, Any], reason: str) -> bool:
-        """After a state change succeeded: one comment naming the old state, the new state (with the label and
-        board column written alongside, when there are any) and the reason, with the run marker. A comment that
-        fails is a warning, also in the run log, and never undoes the change. True when it was posted."""
+    def say_why(self, repo: str, n: int, change: Dict[str, Any], reason: str, post: bool = True) -> bool:
+        """After a state change succeeded: the old state, the new state (with the label and board column written
+        alongside, when there are any) and the reason go to the run log, and, when the new state is one the
+        timeline cannot explain (states.EXPLAINED), to one comment with the run marker. A comment that fails is a
+        warning, also in the run log, and never undoes the change. True when it was posted."""
         def shown(state: Any) -> str:
             try:
                 return self.labels.name(state)
@@ -368,11 +370,15 @@ class Context:
                  if change.get(key)]
         text = (f"Moved from `{shown(change.get('from'))}` to `{shown(change.get('to'))}`"
                 + (f" ({', '.join(sides)})" if sides else "") + f": {reason}")
-        return self.post_reason(repo, n, text)
+        return self.post_reason(repo, n, text, post and change.get("to") in states.EXPLAINED)
 
-    def post_reason(self, repo: str, n: int, text: str) -> bool:
-        """Post a reason comment (with the run marker). A failure is a warning, also in the run log; it never
-        undoes the state change it explains. True when it was posted."""
+    def post_reason(self, repo: str, n: int, text: str, post: bool = True) -> bool:
+        """Log a reason for the run log and, when `post`, post it as a comment (with the run marker). A failed
+        comment is a warning, also in the run log; it never undoes the state change it explains. True when it was
+        posted."""
+        self.log_reasons.append(f"{repo}#{n} {text}")
+        if not post:
+            return False
         try:
             writeback.state_change_comment(self.gh, repo, n, text, self.run_id)
             return True
@@ -387,11 +393,15 @@ class Context:
         """The names among `names` that are state labels (labels.* in project.md); pass labels and others are not."""
         return [x for x in names if self.labels.knows(x)]
 
-    def say_labels(self, repo: str, n: int, added: Sequence[str], removed: Sequence[str], reason: str) -> bool:
-        """One comment for a change of state labels made outside a move: which were added, which removed, why."""
+    def say_labels(self, repo: str, n: int, added: Sequence[str], removed: Sequence[str], reason: str,
+                   post: bool = True) -> bool:
+        """A change of state labels made outside a move: which were added, which removed, why. Always logged;
+        posted as one comment only when `post` and an added label is a state the timeline cannot explain
+        (states.EXPLAINED). Removing a label or putting one back is mechanical and only logged."""
         parts = [f"{verb} " + ", ".join(f"`{x}`" for x in names)
                  for verb, names in (("added", added), ("removed", removed)) if names]
-        return self.post_reason(repo, n, f"State labels changed ({'; '.join(parts)}): {reason}")
+        explained = any(self.labels.abstract(x) in states.EXPLAINED for x in added)
+        return self.post_reason(repo, n, f"State labels changed ({'; '.join(parts)}): {reason}", post and explained)
 
     def need_work_dir(self) -> Path:
         if self.work_dir is None:
@@ -673,7 +683,8 @@ number_arg = arg("number", metavar="N")
 body_file_arg = arg("--body-file", required=True, metavar="F")
 REASON_MAX_CHARS = 500  # the longest reason a state-change comment carries
 reason_file_arg = arg("--reason-file", required=True, metavar="F",
-                      help="file holding one line that says why; posted as one comment on the item")
+                      help="file holding one line that says why; goes to the run log, and to one comment on the "
+                           "item when the new state needs a person or stops work")
 title_file_arg = arg("--title-file", required=True, metavar="F")
 labels_arg = arg("--labels", metavar="a,b")
 
@@ -1071,18 +1082,18 @@ def cmd_claim_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -
 
 @command("release-issue", "give a claimed issue back", writes=True, ref="tracker", args=[
     number_arg, arg("--to", choices=("todo", "blocked"), default="todo"),
-    arg("--reason-file", metavar="F", help="file holding one line that says why; posted as one comment on the item; "
-                                           "required unless --no-comment"),
+    arg("--reason-file", metavar="F", help="file holding one line that says why; goes to the run log, and to one "
+                                           "comment on a release to blocked; required unless --no-comment"),
     arg("--no-comment", action="store_true", help="post no comment: for a run that stops on a failure on not-me's "
                                                   "own side")])
 def cmd_release_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
-    """Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released, then post
-    one comment with the old state, the new state (and the board column when the board follows) and the text of
-    --reason-file. A comment that fails is a warning; the release stands. With queue.sync, the side queue.source
+    """Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released. The old
+    state, the new state (and the board column when the board follows) and the text of --reason-file go to the run
+    log; a release to blocked also posts them as one comment, since the timeline cannot say why. A release to todo
+    posts nothing. A comment that fails is a warning; the release stands. With queue.sync, the side queue.source
     does not read follows; a failed mirror write is a warning.
 
-    --no-comment releases the same way and posts nothing (the timeline already shows the unassign and the label
-    change); --reason-file is then optional.
+    --no-comment releases the same way and posts nothing, even to blocked; --reason-file is then optional.
 
     Output: number, to, released, commented; warnings when a queue.sync mirror write or the comment failed
     """
@@ -1094,7 +1105,7 @@ def cmd_release_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int)
         queue.release(n, args.to)
     finally:  # a mirror warning stands even when a later step failed
         ctx.sync_warnings(queue)
-    commented = ctx.say_why(repo, n, queue.change, reason) if queue.change and reason and not args.no_comment \
+    commented = ctx.say_why(repo, n, queue.change, reason, not args.no_comment) if queue.change and reason \
         else False
     return {"number": n, "to": args.to, "released": True, "commented": commented}
 
@@ -1103,10 +1114,11 @@ def cmd_release_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int)
     number_arg, arg("--to", required=True, choices=states.STATES, metavar="STATE"),
     arg("--require-current", choices=states.STATES, metavar="STATE"), reason_file_arg])
 def cmd_move_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
-    """Move an issue to a state, optionally only when it is currently in another one, then post one comment with
-    the old state, the new state (and the label and board column the move also wrote) and the text of
-    --reason-file. A comment that fails is a warning; the move stands. With queue.sync, the side queue.source does
-    not read follows; a failed mirror write is a warning.
+    """Move an issue to a state, optionally only when it is currently in another one. The old state, the new state
+    (and the label and board column the move also wrote) and the text of --reason-file go to the run log, and to
+    one comment when the new state is blocked, question, needs help, needs human or paused, which the timeline
+    cannot explain. A comment that fails is a warning; the move stands. With queue.sync, the side queue.source
+    does not read follows; a failed mirror write is a warning.
 
     Output: number, to, require_current, commented; warnings when a queue.sync mirror write or the comment failed
     """
@@ -1360,9 +1372,10 @@ def cmd_prove_target(ctx: Context, args: argparse.Namespace, repo: str, n: int) 
     arg("--to", required=True, choices=states.STATES, metavar="STATE"),
     arg("--kind", choices=("issue", "pr"), default="issue"), reason_file_arg])
 def cmd_transition(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Change an item's state label along a legal edge (reads the labels, replaces the set, reads it back), then
-    post one comment with the old state, the new state and the text of --reason-file. A comment that fails is a
-    warning; the change stands.
+    """Change an item's state label along a legal edge (reads the labels, replaces the set, reads it back). The
+    old state, the new state and the text of --reason-file go to the run log, and to one comment when the new
+    state is blocked, question, needs help, needs human or paused. A comment that fails is a warning; the change
+    stands.
 
     Output: repo, number, kind, from, to, labels, commented
     """
@@ -1385,11 +1398,13 @@ def cmd_transition(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
 def cmd_labels_sync(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
     """Make an item's labels match: --set replaces the whole set, --add and --remove edit it. --check only reports. A bare number
     is an item in the tracker; owner/name#N or a URL names an item in another allowed repository (a companion PR).
-    A change that adds or removes a state label (needs human, blocked, question, paused, ...) needs --reason-file
-    and posts one comment naming the labels and the reason; a failed comment is a warning and the change stands.
+    A change that adds or removes a state label needs --reason-file; the labels and the reason go to the run log.
+    One comment names them only when the change adds blocked, question, needs help, needs human or paused;
+    removing a state label or putting one back posts nothing. A failed comment is a warning and the change stands.
     Pass labels and other labels need no reason.
 
-    Output: repo, number, in_sync, changed, labels (current, or the new set); commented when a reason was posted
+    Output: repo, number, in_sync, changed, labels (current, or the new set); commented (true when posted) when a
+    state label changed
     """
     if (args.set is None) == (args.add is None and args.remove is None) or \
             (args.set is not None and args.remove is not None):
@@ -1430,11 +1445,11 @@ def cmd_queue_resync(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     anything is read. Issues not on the board are skipped and reported, never added; closed issues are never
     touched; neither are issues whose state has no column.
 
-    A changed state label gets one comment saying why, as every other state-label change does (commented). The
-    board Status change is not commented on.
+    Nothing is posted on GitHub: matching the other side is mechanical and the timeline shows the label change.
+    Why each state label changed goes to the run log (--log).
 
     Output: board, changes ([{number, url, side, from, to, result (changed, planned or failed), reason,
-    commented (label changes only)}]),
+    commented (label changes only; always false)}]),
     skipped ([{number, url, reason}]), truncated (the board has more items than the `read` count read; issues past
     them are reported as not among the items read, never as off the board), issues_truncated; dry_run when the
     writes were only recorded. Exits 1 when paused or disabled.
@@ -1444,11 +1459,11 @@ def cmd_queue_resync(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     except LookupError as exc:  # a MirrorFailed (board not set or not allowed) has its own kind, sync_failed
         raise fail(ExitCode.ERROR, "board_not_found", f"{exc}; check queue.board and that the token has the "
                                                       "project scope") from None
-    for change in out["changes"]:  # a state label that changed is explained, as for every other state-label change
+    for change in out["changes"]:  # a state label that changed is logged, never posted: it only matches the board
         if change["side"] == "labels" and change["result"] in ("changed", "planned"):
             change["commented"] = ctx.post_reason(ctx.tracker, change["number"],
                                                   f"State label changed from `{change['from']}` to `{change['to']}`: "
-                                                  "set to match the board Status by notme queue-resync")
+                                                  "set to match the board Status by notme queue-resync", post=False)
     return out
 
 
@@ -1542,15 +1557,15 @@ def cmd_pr_body(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Di
     arg("--head", required=True, metavar="H"), arg("--base", required=True, metavar="B"), title_file_arg,
     body_file_arg, labels_arg, arg("--reviewers", metavar="a,b"), arg("--assignee", metavar="L"),
     arg("--draft", action="store_true"),
-    arg("--reason-file", metavar="F", help="one line saying why the state labels are set; default: \"pull request "
-                                           "opened\"")])
+    arg("--reason-file", metavar="F", help="one line for the run log saying why the state labels are set; default: "
+                                           "\"pull request opened\"")])
 def cmd_pr_open(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """Open a PR, set its labels, request review. The head branch may not be a protected branch. When --labels
-    names a state label (needs review, ...), one comment on the new PR names it and the reason (the first line of
-    --reason-file, else "pull request opened"); a failed comment is a warning and the PR stands. No comment in a
-    dry run, which has no PR number.
+    names a state label (needs review, ...), the run log records it and the reason (the first line of
+    --reason-file, else "pull request opened"). No comment is posted: opening the PR is the reason, and the
+    timeline shows the labels.
 
-    Output: repo, number, url (both null in a dry run), head, base; commented when a state label was set
+    Output: repo, number, url (both null in a dry run), head, base; commented (false) when a state label was set
     """
     repo = ctx.repo
     if ctx.protected(args.head):
@@ -1562,7 +1577,7 @@ def cmd_pr_open(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     result = {"repo": repo, "number": out.get("number"), "url": out.get("url"), "head": args.head, "base": args.base}
     state = ctx.state_labels(csv(args.labels))
     if state and out.get("number") is not None:
-        result["commented"] = ctx.say_labels(repo, out["number"], state, [], reason)
+        result["commented"] = ctx.say_labels(repo, out["number"], state, [], reason, post=False)
     return result
 
 
@@ -1601,8 +1616,8 @@ def cmd_testing_steps(ctx: Context, args: argparse.Namespace, repo: str, n: int)
 @command("review-post", "post a review", writes=True, ref="repo", args=[
     ref_arg, arg("--event", required=True, choices=("APPROVE", "REQUEST_CHANGES", "COMMENT")), body_file_arg,
     arg("--comments-file", metavar="J"),
-    arg("--reason-file", metavar="F", help="one line saying why the state labels changed; default: the review's "
-                                           "own verdict"),
+    arg("--reason-file", metavar="F", help="one line for the run log saying why the state labels changed; default: "
+                                           "the review's own verdict"),
     OneOf(arg("--labels-set", metavar="a,b", help="set the full label set after posting"),
           arg("--labels-auto", action="store_true",
               help="work out the label set from the PR's reviews, role.md and the roster, then set it"))])
@@ -1618,12 +1633,13 @@ def cmd_review_post(ctx: Context, args: argparse.Namespace, repo: str, n: int) -
     review.changes_label. COMMENT only updates the pass labels. A pass label missing from the repo is skipped with
     one warning.
 
-    When the labels set change a state label (needs review, needs work, ready to merge, ...), one comment follows
-    the review naming what was added and removed and the reason: the first line of --reason-file, else "a <EVENT>
-    review was posted". A failed comment is a warning and the review and labels stand.
+    When the labels set change a state label (needs review, needs work, ready to merge, ...), the run log records
+    what was added and removed and the reason: the first line of --reason-file, else "a <EVENT> review was
+    posted". No comment is posted: the review is the reason, and the timeline shows it next to the label change.
 
     Output: repo, number, event, state (event only in a dry run); with --labels-auto labels and approval (null with
-    no roles; else required, approved, waiting, all_approved, pass_labels); commented when a state label changed
+    no roles; else required, approved, waiting, all_approved, pass_labels); commented (false) when a state label
+    changed
     """
     if args.event == "APPROVE" and ctx.trusted_meta("review").get("auto_approve") is not True:
         raise fail(ExitCode.ERROR, "approve_refused", "APPROVE needs review.auto_approve: true in the global layer")
@@ -1646,7 +1662,7 @@ def cmd_review_post(ctx: Context, args: argparse.Namespace, repo: str, n: int) -
         added = [x for x in ctx.state_labels(after) if x.lower() not in held]
         removed = [x for x in ctx.state_labels(before) if x.lower() not in kept]
         if added or removed:
-            out["commented"] = ctx.say_labels(repo, n, added, removed, reason)
+            out["commented"] = ctx.say_labels(repo, n, added, removed, reason, post=False)
     return {"repo": repo, "number": n, **out, **report}
 
 
@@ -2728,6 +2744,8 @@ def main(argv: Optional[Sequence[str]] = None, *, runner: Optional[gh_mod.Runner
         if log is not None:
             try:
                 log.action(_log_line(args.cmd, args, dry))
+                for text in ctx.log_reasons:
+                    log.action(f"why: {text}")
                 for text in ctx.log_warnings:
                     log.action(text, kind="WARN")
             except (OSError, ValueError) as exc:
