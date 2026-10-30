@@ -8,9 +8,9 @@ Run these from the repo root. CI runs the same things on macOS, Linux and Window
 
 | Check | Command | What it covers |
 | --- | --- | --- |
-| Unit tests | `python3 scripts/run-tests.py` | Four suites in one run: the plugin (`plugins/not-me/tests/`), the scripts (`scripts/tests/`), these docs (`docs/tests/`) and the fixture seeder (`fixture/tests/`). Exits 1 on a failure or when zero tests ran |
+| Unit tests | `python3 scripts/run-tests.py` | Five suites in one run, spread over parallel worker processes: the plugin (`plugins/not-me/tests/`), the scripts (`scripts/tests/`), these docs (`docs/tests/`), the fixture seeder (`fixture/tests/`) and the eval harness (`evals-harness/tests/`). Exits 1 on a failure, an error, a crashed worker, or when zero tests ran. Options are below |
 | Hook cases | `python3 plugins/not-me/tests/run_guard_cases.py` (add `-v` for each case) | Pipes every guard case through the real hook entry point as a subprocess, in throwaway git repos, and checks the exit code (2 blocks, 0 allows) and the rule named on stderr |
-| Skill lint | `python3 scripts/check-skills.py` | Static rules R1 to R15 on skills, references, defaults, docs and the README: frontmatter, references that resolve, CLI commands that exist, no personal paths, the name denylist, no raw GitHub writes, no em dashes, a `--reason-file` on every move, release and transition call |
+| Skill lint | `python3 scripts/check-skills.py` | Static rules R1 to R15 on skills, references, defaults, docs and the README: frontmatter, references that resolve, CLI commands that exist, no personal paths, the name denylist, no raw GitHub writes, no em dashes, a `--reason-file` on every move, release and transition call (except `release-issue --no-comment`) |
 | Eval lint | `python3 scripts/lint-evals.py` | Rules E1 to E6 on `evals-harness/cases/*/prompt.md` and their graders, and whether a live case can be graded (`--only E1,E4` picks rules, `--json` for machines) |
 | CLI docs sync | `python3 scripts/gen-cli-docs.py --check` | `docs/cli.md` and `scripts/known-commands.txt` match the `notme` command registry. Run without `--check` to regenerate. Never edit `docs/cli.md` by hand |
 | Plugin validation | `claude plugin validate --strict plugins/not-me` | The manifest and layout, with Claude Code's own validator |
@@ -23,11 +23,28 @@ Two rules that bite:
 - Lint green for one file is not lint green in CI. Run the command CI runs, on the whole tree.
 - Output can be long. Pipe it through `tail -40` or into a file and read the failures.
 
+### Running the unit tests
+
+`run-tests.py` splits the work by test class: each class is one unit, handed to the next free worker process, longest first (by the time each class took on the last run on this machine, kept in a small file in the temp directory). Every worker sets up `sys.path` and discovers the suites the same way a single-process run does, so a test imports the same modules either way. At the end it prints each failing class with its tracebacks, the slowest classes, a `ran N tests in S wall` line and `OK` or `FAILED (...)`.
+
+| Option | Effect |
+| --- | --- |
+| `--jobs N`, `-j N` | Worker processes. The default is the CPU count, at most 8. `--jobs 1` runs every class one after another in one worker |
+| `--suite NAME` | Run only that suite: `plugin`, `scripts`, `docs`, `fixture` or `harness`. Repeat for more |
+| `-k PATTERN` | Run only tests whose id matches, as `unittest -k` does: a plain word matches anywhere in the id, `*` is a wildcard. Repeat for more. A module that fails to import is always reported |
+| `--suite-dir DIR` | Run the tests under `DIR` instead of the built-in suites (the runner's own tests use this) |
+
+For example, `python3 scripts/run-tests.py --suite plugin -k tests.test_guard.` runs one test file.
+
+When a worker process dies (a test that calls `os._exit`, say), the classes it had not finished are run again, each in a fresh worker of its own, so the others still report and the run names the class that killed its worker. Those are listed under `CRASH` and the run exits 1.
+
+The guard table (`tests/guard_cases.py`) is checked by shard classes in `test_guard.py` (`GuardTableShard0Tests` and so on), so its cases spread over workers; a test checks that the shards cover every case exactly once.
+
 ### Scripts in `scripts/`
 
 | Script | Job |
 | --- | --- |
-| `run-tests.py` | Discovers and runs all four unit-test suites |
+| `run-tests.py` | Discovers and runs the unit-test suites in parallel worker processes |
 | `check-skills.py` | The skill, reference, default and docs lint (R1 to R15) |
 | `lint-evals.py` | The eval case lint (E1 to E6) |
 | `gen-cli-docs.py` | Generates `docs/cli.md` and `scripts/known-commands.txt` |

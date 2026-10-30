@@ -48,8 +48,8 @@ release the claim, post nothing, add no label, and stop the run.
 | CI wait times out | issue `needs_review` | none | `PR <ref> opened - ci pending` with a `WARN` |
 
 "Release" means `notme release-issue N --reason-file <reason> --log <path>` (the reason file holds one line on why the run gave up), then the `needs_human` add.
-On a failure on our side, "released" means the release alone: no `needs_human`,
-and the neutral reason line from `autonomy-and-logging.md`.
+On a failure on our side, "released" means `notme release-issue N --no-comment
+--log <path>` alone: no reason file, no comment, no `needs_human`.
 For HELD, the issue keeps `in_progress` so loops skip it; add the extra labels
 with `labels-sync` and do not call `release-issue`.
 

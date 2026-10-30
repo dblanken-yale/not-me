@@ -17,6 +17,7 @@ claim-pr
 release-pr
 bundle
 wait-checks
+verify-plan
 feedback
 pick-reviews
 prove-target
@@ -34,6 +35,7 @@ testing-steps
 review-post
 resolve-threads
 issue-body
+issue-stack-on
 followup
 check-text
 log start
@@ -42,6 +44,8 @@ log question
 log finish
 log last
 log list
+verify-lock acquire
+verify-lock release
 retro save
 retro reviewed
 retro is-reviewed

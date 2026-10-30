@@ -34,8 +34,8 @@ Arguments: `$ARGUMENTS`. An optional run log path, and `--bg`.
 1. `notme config --explain` once. Keep it for the whole run. Note `mode`,
    `retro.file_upstream`, `labels`, `models.bg` and every repo-layer file listed.
    Exit 4: `FAILED - config invalid`.
-2. `notme status`. An `active_run`: stop with `STOP - active run`. The guard keeps
-   the config read-only during a run, so retro runs only after the leg it reviews
+2. `notme status`. A non-empty `active_runs` (a run in any worktree): stop with
+   `STOP - active run`. The guard keeps the config read-only during a run, so retro runs only after the leg it reviews
    called `notme log finish`. Retro starts no run log of its own.
 3. `--bg`: read `${CLAUDE_PLUGIN_ROOT}/references/bg-mode.md`. Strip `--bg`,
    dispatch one foreground subagent on `models.bg` with this skill and the other

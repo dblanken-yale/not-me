@@ -42,7 +42,11 @@ Solid boxes always run. Dashed boxes are optional: they run only when you call t
 ```mermaid
 flowchart TD
     trigger(["/not-me, a single leg, or /loop 2h /not-me --bg"])
-    gate["Gate: enabled, not paused, no active run, guard self-test passes"]
+    parallel["/not-me --parallel N: up to N new runs at once,
+    one issue and one worktree each, one subagent per run
+    ⚙ limits.parallel_runs, workspace.new: worktree"]
+    gate["Gate: enabled, not paused, no active run in this worktree
+    (runs in other worktrees go in parallel), guard self-test passes"]
     stopped["STOP, nothing written"]
     router["Router runs the legs in order, stops at the first that does work
     ⚙ router (default: update, then new)"]
@@ -57,32 +61,47 @@ flowchart TD
         refuse, defer, implement, or disagree"]
         u3["Implement through a delegated subagent
         ⚙ models, standards.md Delegation"]
-        u4["Verify and gate
-        ⚙ verify.md"]
+        u4["Verify and gate: targeted tests during the work,
+        the full set once before the branch goes up; a shared
+        test environment is locked for the verify step only
+        ⚙ verify.md, Targeted tests, verify.md shared_env"]
         u5["Merge base in (the predecessor's branch on a stacked PR),
         send the branch up, reply on every thread, swap to 'needs review'"]
-        u1 --> u2 --> u3 --> u4 --> u5
+        u3b["Baseline, skipped when the base CI is green
+        ⚙ verify.md baseline: auto"]
+        u5b["Wait for CI
+        ⚙ limits.ci_wait_minutes, 0 skips it"]
+        u1 --> u2 --> u3b --> u3 --> u4 --> u5 --> u5b
     end
 
     subgraph new ["new leg: implement an issue"]
         n1["Pick a ready issue and claim it; an issue that waits on one open PR
-        is ready when its trusted 'Stack on:' line names it
+        is ready when its trusted 'Stack on:' line names it, or, with
+        queue.stacking auto, when its open blockers all lead to that PR
         ⚙ queue, queue.stacking, picking, Picking work rules"]
         n2["Branch from the base: the default branch, an epic's branch,
-        or the open PR's branch for a stacked issue
-        ⚙ standards.md branch, protected_branches, queue.stacking"]
+        or the open PR's branch for a stacked issue; in a worktree of
+        its own when workspace.new is worktree
+        ⚙ standards.md branch, protected_branches, queue.stacking, workspace.new"]
         n3["Implement through a delegated subagent, failing test first
         ⚙ models, standards.md Delegation"]
-        n4["Verify and gate: baseline, tests, simplify, code review,
-        security review, CI-parity lint
-        ⚙ verify.md, limits.fix_loop"]
+        n3b["Baseline, skipped when the base CI is green
+        ⚙ verify.md baseline: auto"]
+        n4["Verify and gate: targeted tests during the work, simplify,
+        code review, security review, then the full tests, lint
+        and build once (CI parity); a shared test environment
+        is locked while the checks use it
+        ⚙ verify.md, Targeted tests, verify.md shared_env, limits.fix_loop"]
         n4b["Gate additions and cross-model check
         ⚙ verify.md Gate additions, models.verifier"]
         n5["Commit and push through the CLI
         ⚙ standards.md commit, attribution"]
-        n6["Open PR, move issue to 'needs review'
-        ⚙ standards.md pr_title, pr_template, reviewers"]
-        n1 --> n2 --> n3 --> n4 --> n4b --> n5 --> n6
+        n6["Open PR, move issue to 'needs review'; add a 'Stack on:'
+        line to issues blocked by this one, unblock them
+        ⚙ standards.md pr_title, pr_template, reviewers, queue.stacking"]
+        n7["Wait for CI on the PR
+        ⚙ limits.ci_wait_minutes, 0 skips it"]
+        n1 --> n2 --> n3b --> n3 --> n4 --> n4b --> n5 --> n6 --> n7
     end
 
     router -- "first" --> update
@@ -105,9 +124,11 @@ flowchart TD
     merge(["A person approves, if review did not, and merges"])
 
     router -.-> review
+    gate -. "--parallel N" .-> parallel
+    parallel -. "one per issue" .-> new
     n6 -. "preview URL found" .-> prove
-    u5 --> retro
-    n6 --> retro
+    u5b --> retro
+    n7 --> retro
     review --> retro
     retro -.-> notify
     update --> writes
@@ -117,7 +138,7 @@ flowchart TD
 
     classDef optional stroke-dasharray: 5 5
     classDef person fill:#fde7c8,stroke:#c77700,color:#000
-    class review,prove,notify,n4b optional
+    class review,prove,notify,n4b,n3b,u3b,n7,u5b,parallel optional
     class live,merge person
 ```
 
@@ -125,7 +146,7 @@ flowchart TD
 
 | Command | What it does |
 | --- | --- |
-| `/not-me [--dry-run] [--bg]` | Router: runs the legs in `router` order (default `update`, then `new`) and stops at the first that does work |
+| `/not-me [--dry-run] [--bg] [--parallel N]` | Router: runs the legs in `router` order (default `update`, then `new`) and stops at the first that does work. `--parallel N` starts up to N new-issue runs at once, each in its own worktree |
 | `/not-me:new [issue#] [--base B] [--dry-run] [--bg]` | Pick up a ready issue, implement it through a delegated implementer, gate it, open a PR |
 | `/not-me:update [PR ref] [--dry-run] [--bg]` | Decide each review finding on a `needs work` PR, fix, push, reply, swap to `needs review` |
 | `/not-me:review [owner/repo#N ...] [--dry-run] [--bg]` | Review `needs review` PRs where you are a reviewer: approve, request changes, or ask a person. Never merges |
@@ -161,6 +182,7 @@ docs/                             documentation
 - [Configuration](docs/config.md)
 - [Guards](docs/guards.md)
 - [Workflow](docs/workflow.md)
+- [Parallel runs](docs/parallel-runs.md)
 - [CLI](docs/cli.md)
 - [Testing](docs/testing.md)
 - [Releases](docs/release.md)

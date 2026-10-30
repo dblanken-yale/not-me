@@ -324,6 +324,8 @@ class FakeGitHub:
             ("POST", r + r"/pulls/(\d+)/requested_reviewers", self._r_request_review),
             ("GET", r + r"/deployments", self._r_deployments),
             ("GET", r + r"/deployments/(\d+)/statuses", self._r_deployment_statuses),
+            ("GET", r + r"/commits/([0-9a-f]{40})/check-runs", self._r_check_runs),
+            ("GET", r + r"/commits/([0-9a-f]{40})/status", self._r_commit_status),
         ]
 
     def _api(self, pos: List[str], flags: Dict[str, List[str]]) -> Any:
@@ -439,6 +441,22 @@ class FakeGitHub:
             if d["repo"] == g[0] and d["id"] == int(g[1]):
                 return list(d["statuses"])
         return []
+
+    def _commit_checks(self, g) -> Dict[str, Any]:
+        """state["commit_checks"]["<repo>@<sha>"] = {"check_runs": [...], "statuses": [...]}; none when unset.
+        Optional "runs_total" / "statuses_total" override total_count to fake a list cut by paging."""
+        return self.state.get("commit_checks", {}).get(f"{g[0]}@{g[1]}") or {}
+
+    def _r_check_runs(self, g, flags):
+        entry = self._commit_checks(g)
+        runs = list(entry.get("check_runs") or [])
+        return {"total_count": entry.get("runs_total", len(runs)), "check_runs": runs}
+
+    def _r_commit_status(self, g, flags):
+        entry = self._commit_checks(g)
+        statuses = list(entry.get("statuses") or [])
+        return {"state": "pending" if not statuses else statuses[0].get("state"), "statuses": statuses,
+                "total_count": entry.get("statuses_total", len(statuses))}
 
     def _r_request_review(self, g, flags):
         pr = self._thing(*g)

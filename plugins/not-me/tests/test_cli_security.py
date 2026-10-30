@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import subprocess
 import unittest
 from pathlib import Path
@@ -28,9 +29,14 @@ def git(cwd, *args):
     return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, env=env, check=True).stdout
 
 
+_NO_LOCKS = shutil.ignore_patterns("*.lock")
+
+
 def init_repo(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     git(path, "init", "-q", "-b", "main")
+    git(path, "config", "maintenance.auto", "false")  # no detached maintenance holding locks while setUp copies it
+    git(path, "config", "gc.auto", "0")
     (path / "a.txt").write_text("one\n", encoding="utf-8")
     git(path, "add", "a.txt")
     git(path, "commit", "-q", "-m", "init")
@@ -41,13 +47,23 @@ from tests.test_cli_contract import TtyIO  # noqa: E402
 
 
 class UnderClaudeCase(unittest.TestCase):
-    """A session project and a second checkout, a default global layer under a scratch HOME, CLAUDECODE=1."""
+    """A session project and a second checkout, a default global layer under a scratch HOME, CLAUDECODE=1.
+
+    Both checkouts are copies of one repo built per class by init_repo (a fresh repo holds no absolute path, so a
+    copy is the same repo a fresh init_repo makes, without four git processes per checkout per test)."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        template = TempCase()
+        cls.addClassCleanup(template.cleanup)
+        cls._template_repo = init_repo(template.root / "repo")
 
     def setUp(self):
         self.tc = TempCase()
         self.addCleanup(self.tc.cleanup)
-        self.session = init_repo(self.tc.root / "session")
-        self.other = init_repo(self.tc.root / "other")
+        self.session = Path(shutil.copytree(str(self._template_repo), str(self.tc.root / "session"), symlinks=True, ignore=_NO_LOCKS))
+        self.other = Path(shutil.copytree(str(self._template_repo), str(self.tc.root / "other"), symlinks=True, ignore=_NO_LOCKS))
         user = self.tc.root / "user"
         patcher = mock.patch.dict(os.environ, {"HOME": str(user), "USERPROFILE": str(user)})
         patcher.start()
@@ -272,10 +288,23 @@ class PathTests(UnderClaudeCase):
         self.assertEqual(payload["path"], str(self._root() / "review-3-abc.1_x"))
         self.assertTrue(Path(payload["path"], "a.txt").is_file())
 
+    def test_worktree_add_takes_new_and_update_names_for_runs_in_their_own_worktree(self):
+        sha = self._sha()
+        for name in ("notme-new-139", "notme-update-42-2", "notme-new-" + "x" * 57, "notme-update-" + "x" * 57):
+            with self.subTest(name=name):
+                payload = self.ok("git", "worktree-add", sha, "--name", name)
+                self.assertEqual(payload["path"], str(self._root() / name))
+        removed = self.ok("git", "worktree-remove", str(self._root() / "notme-new-139"))
+        self.assertTrue(removed["removed"])
+        self.assertFalse((self._root() / "notme-new-139").exists())
+
     def test_worktree_add_refuses_a_bad_name(self):
         sha = self._sha()
         for name in ("../x", "a/b", ".hidden", "", "..", "a..b", "-x", "a\\b", "x" * 65, "feat-x", "worktree-foo",
-                     "review-", "review", "Review-x", "review-a..b", "review-a/b", "review-" + "x" * 58):
+                     "review-", "review", "Review-x", "review-a..b", "review-a/b", "review-" + "x" * 58,
+                     "new-1", "update-1", "notme-new-", "Notme-new-1", "notme-news-1", "notme-update",
+                     "notme-new-a..b", "notme-new-a/b", "notme-new-" + "x" * 58, "notme-update-" + "x" * 58,
+                     "notme-1", "prove-1"):
             with self.subTest(name=name):
                 code, payload, _ = self.cli("git", "worktree-add", sha, f"--name={name}")
                 self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))

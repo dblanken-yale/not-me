@@ -1,15 +1,16 @@
 ---
 name: not-me
-description: "Router: pick the most valuable work on its own by running the configured legs in order (default update, then new) and stop at the first leg that does something. Use when the operator runs /not-me with no arguments, with --dry-run or --bg, or on a schedule such as /loop 2h /not-me --bg. NOT for a known PR (use /not-me:update), NOT for a known issue (use /not-me:new), NOT for reviewing a PR (use /not-me:review)."
-argument-hint: "[--dry-run] [--bg]"
+description: "Router: pick the most valuable work on its own by running the configured legs in order (default update, then new) and stop at the first leg that does something. Use when the operator runs /not-me with no arguments, with --dry-run or --bg, with --parallel N to start several new-issue runs at once, or on a schedule such as /loop 2h /not-me --bg. NOT for a known PR (use /not-me:update), NOT for a known issue (use /not-me:new), NOT for reviewing a PR (use /not-me:review)."
+argument-hint: "[--dry-run] [--bg] [--parallel N]"
 ---
 
 # /not-me
 
 Thin router. It does no work itself and posts nothing (it owns no marker, so
-`<!-- not-me:not-me -->` never appears on GitHub). One unit of work per run.
+`<!-- not-me:not-me -->` never appears on GitHub). One unit of work per run,
+except with `--parallel N` (Parallel runs, below).
 
-Arguments: `$ARGUMENTS`. Only `--dry-run` and `--bg` are accepted.
+Arguments: `$ARGUMENTS`. Only `--dry-run`, `--bg` and `--parallel N` are accepted.
 
 ## Ground rules
 
@@ -49,6 +50,28 @@ unchanged.
 5. Every leg returned `NONE`: print `NONE - nothing to do` and finish. That is a
    success, not a failure.
 
+## Parallel runs
+
+`--parallel N` starts up to N `/not-me:new` runs at once, one issue each, each in
+its own worktree. After Step 1 it runs instead of Steps 2 to 4.
+
+1. Refuse it with `--bg` (a `--bg` result is one line) and when N is not a whole
+   number of 1 or more. Lower N to `limits.parallel_runs` (default 3) with a note.
+2. `workspace.new` must be `worktree` in `notme config`; otherwise every run would
+   switch the one main checkout. Print `STOP - parallel needs workspace.new: worktree`.
+3. `notme pick-issue`. `{"none": true}`: print `NONE - nothing to do`. Otherwise
+   choose up to N distinct issues from `issues` by the `picking` rules, as
+   `/not-me:new` would; never a `held_back` one. Fewer ready issues: fewer runs.
+4. Dispatch one subagent per issue, all in one message so they run together.
+   Start each in this checkout without worktree isolation (the session harness
+   refuses `notme git` calls from an isolated worktree) and have it run
+   `/not-me:new <issue>`, plus `--dry-run` when given, and return its result line.
+5. Each run claims its own issue (compare-and-set), so two runs never take one
+   issue: a lost claim ends that run with `STOP <ref> claimed elsewhere` and the
+   others go on. Never retry a run or reuse an issue another run took.
+6. Print each run's result line exactly, in issue order. Skip the retro;
+   `/not-me:retro <log>` on each log afterwards is the operator's call.
+
 ## Step 4: Retro
 
 After a leg that did work (any VERB other than `NONE`, `STOP`), run `/not-me:retro`
@@ -62,3 +85,5 @@ when available. If that skill is not installed, skip it silently.
 - [ ] Forwarded `$ARGUMENTS`; under `--bg` each leg was its own subagent.
 - [ ] Stopped at the first non-`NONE` result and printed it exactly.
 - [ ] Printed `NONE - nothing to do` only when every leg was `NONE`.
+- [ ] `--parallel N`: capped at `limits.parallel_runs`, needed `workspace.new: worktree`,
+  one unisolated subagent per distinct issue, printed every run's line.

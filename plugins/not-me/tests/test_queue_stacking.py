@@ -218,6 +218,130 @@ class StackTests(QueueTestCase):
         self.assertEqual(parse_refs("```\nunclosed\nStack on: a/b#3"), {"refs": [], "lines": 0})
 
 
+class AutoStackTests(QueueTestCase):
+    """queue.stacking: auto. With no declared line, an issue whose open blockers all resolve to one ready PR
+    stacks on it; any other open blocker holds it."""
+
+    cfg_overrides = {"include_unassigned": True, "stacking": "auto"}
+
+    def setUp(self):
+        super().setUp()
+        things = self.fake.state["repos"][REPO]["things"]
+        for n in ("1", "2", "3"):
+            things.pop(n)
+        self.blocker(40, 20)
+
+    def blocker(self, number, pr=None, **pr_kwargs):
+        """Issue `number`, and when pr is given an open PR that closes it."""
+        add_issue(self.fake, number, labels=[], title=f"Earlier work {number}")
+        if pr is not None:
+            add_pr(self.fake, pr, closes=(number,), **pr_kwargs)
+            self.thing(number)["linked_prs"] = [ref(pr)]
+
+    def dependent(self, number=5, blocked_by=(40,), body="Goal.\n", author="octocat"):
+        add_issue(self.fake, number, author=author, body=body)
+        self.thing(number)["blocked_by"] = list(blocked_by)
+        return self.q.stack_on(number, author)
+
+    def test_the_only_blocker_with_an_open_pr_stacks_without_a_line(self):
+        fact = self.dependent()
+        self.assertTrue(fact["ready"] and fact["stacks"])
+        self.assertEqual((fact["ref"], fact["pr"], fact["head"], fact["via"]),
+                         (f"{REPO}#40", f"{REPO}#20", "feat/first", "blockers"))
+        self.assertIsNone(fact["reason"])
+
+    def test_a_declared_line_still_wins_and_says_so(self):
+        fact = self.dependent(body=f"Stack on: {REPO}#20\n")
+        self.assertTrue(fact["stacks"])
+        self.assertEqual(fact["via"], "declared")
+
+    def test_no_open_blocker_is_a_normal_issue(self):
+        self.assertIsNone(self.dependent(blocked_by=()))
+        add_issue(self.fake, 41, state="CLOSED")
+        self.assertIsNone(self.dependent(number=6, blocked_by=(41,)))
+
+    def test_a_blocker_with_no_open_pr_still_waits(self):
+        self.blocker(41)
+        fact = self.dependent(blocked_by=(41,))
+        self.assertFalse(fact["ready"] or fact["stacks"])
+        self.assertIn(f"{REPO}#41 has no open PR", fact["reason"])
+
+    def test_a_draft_fork_or_untrusted_pr_is_refused(self):
+        for number, pr, kwargs, words in ((41, 21, {"draft": True}, "draft"), (42, 22, {"fork": True}, "fork"),
+                                          (43, 23, {"author": "mallory"}, "not on the roster")):
+            with self.subTest(words):
+                self.blocker(number, pr, **kwargs)
+                fact = self.dependent(number=number + 10, blocked_by=(number,))
+                self.assertFalse(fact["ready"] or fact["stacks"])
+                self.assertIn(words, fact["reason"])
+
+    def test_two_open_blockers_wait_unless_one_pr_closes_both(self):
+        self.blocker(41, 21)
+        fact = self.dependent(blocked_by=(40, 41))
+        self.assertFalse(fact["ready"])
+        self.assertIn("more than one open PR", fact["reason"])
+        add_issue(self.fake, 42)
+        self.thing(20)["closes"] = [ref(40), ref(42)]
+        self.thing(42)["linked_prs"] = [ref(20)]
+        fact = self.dependent(number=6, blocked_by=(40, 42))
+        self.assertTrue(fact["ready"] and fact["stacks"])
+        self.assertEqual(fact["pr"], f"{REPO}#20")
+
+    def test_one_blocker_with_a_pr_and_one_without_waits(self):
+        self.blocker(41)
+        fact = self.dependent(blocked_by=(40, 41))
+        self.assertFalse(fact["ready"])
+        self.assertIn(f"{REPO}#41 has no open PR", fact["reason"])
+
+    def test_a_trusted_body_line_names_the_blocker(self):
+        for n, line in ((61, f"Blocked by: {REPO}#40"), (62, f"Depends on: https://github.com/{REPO}/issues/40"),
+                        (63, f"depends on: {REPO}#20")):
+            with self.subTest(line):
+                fact = self.dependent(number=n, blocked_by=(), body=f"Goal.\n\n{line}\n")
+                self.assertTrue(fact["ready"] and fact["stacks"])
+                self.assertEqual(fact["pr"], f"{REPO}#20")
+
+    def test_body_lines_count_only_from_a_trusted_author_and_editor(self):
+        self.assertIsNone(self.dependent(blocked_by=(), body=f"Blocked by: {REPO}#40\n", author="mallory"))
+        add_issue(self.fake, 6, body=f"Blocked by: {REPO}#40\n")
+        self.thing(6)["blocked_by"] = []
+        self.thing(6)["editor"] = "mallory"
+        fact = self.q.stack_on(6, "octocat")
+        self.assertFalse(fact["ready"])
+        self.assertIn("last edited by mallory", fact["reason"])
+
+    def test_a_blocker_in_another_repo_waits(self):
+        fact = self.dependent(blocked_by=(), body="Blocked by: acme/app-ui#3\n")
+        self.assertFalse(fact["ready"])
+        self.assertIn("acme/app-ui", fact["reason"])
+
+    def test_unreadable_blockers_give_no_fact(self):
+        add_issue(self.fake, 5, body="Goal.\n")
+        self.thing(5)["deps_fail"] = True
+        self.assertIsNone(self.q.stack_on(5, "octocat"))
+
+    def test_a_declared_line_still_waits_on_a_body_blocker_without_a_pr(self):
+        self.blocker(41)
+        fact = self.dependent(body=f"Stack on: {REPO}#20\nBlocked by: {REPO}#41\n")
+        self.assertFalse(fact["ready"])
+        self.assertIn(f"{REPO}#41", fact["reason"])
+        fact = self.dependent(number=6, body=f"Stack on: {REPO}#20\nBlocked by: {REPO}#40\n")
+        self.assertTrue(fact["ready"])  # the issue the named PR closes is not another blocker
+
+    def test_declared_mode_ignores_blockers_without_a_line(self):
+        self.q.queue_cfg["stacking"] = "declared"
+        self.assertIsNone(self.dependent())
+
+    def test_pick_filter_holds_back_a_blocker_without_a_pr(self):
+        self.blocker(41)
+        self.dependent(number=5)
+        self.dependent(number=6, blocked_by=(41,))
+        kept, held = self.q.stack_filter(self.q.candidates(), None)
+        self.assertNotIn(6, [c.number for c in kept])
+        self.assertIn(5, [c.number for c in kept])
+        self.assertEqual([(h["number"], h["ref"]) for h in held], [(6, f"{REPO}#41")])
+
+
 class EitherStackTests(EitherTestCase):
     """The either queue shares the stack_on, stack_filter and blocked_by logic of the base queue."""
 

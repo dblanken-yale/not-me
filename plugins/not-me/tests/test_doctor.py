@@ -242,5 +242,78 @@ class SyncQueueCheckTests(unittest.TestCase):
         self.assertTrue(c["ok"], c)
 
 
+class PermissionsTests(unittest.TestCase):
+    """The recommended permissions.allow rules: reported when missing, with the JSON to add; never written."""
+
+    LAUNCHER = "/plugins/not-me/bin/notme"
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def settings(self, name, allow=None, raw=None):
+        import json
+        path = self.dir / name
+        path.write_text(raw if raw is not None else json.dumps({"permissions": {"allow": allow or []}}),
+                        encoding="utf-8")
+        return path
+
+    def wanted(self):
+        return list(doctor.permission_rules(self.LAUNCHER))
+
+    def test_the_rules_include_the_issue_and_pr_housekeeping_and_the_launcher(self):
+        rules = self.wanted()
+        for rule in ("Bash(gh issue close:*)", "Bash(gh issue comment:*)", "Bash(gh issue edit:*)",
+                     "Bash(gh pr comment:*)", "Bash(notme:*)", f"Bash({self.LAUNCHER}:*)"):
+            self.assertIn(rule, rules)
+        self.assertNotIn("Bash(gh:*)", rules)
+
+    def test_missing_rules_are_listed_with_the_json_to_add_and_no_fix(self):
+        import json
+        path = self.settings("settings.json", ["Bash(gh issue close:*)"])
+        before = path.read_text(encoding="utf-8")
+        c = doctor.permissions_check([path, self.dir / "absent.json"], self.LAUNCHER)
+        self.assertFalse(c["ok"])
+        self.assertFalse(c["required"])
+        self.assertIsNone(c["fix"], "doctor never edits settings")
+        missing = [r for r in self.wanted() if r != "Bash(gh issue close:*)"]
+        start = c["hint"].index("{")
+        self.assertEqual(json.loads(c["hint"][start:]), {"permissions": {"allow": missing}})
+        self.assertIn("docs/permissions.md", c["hint"])
+        self.assertEqual(path.read_text(encoding="utf-8"), before)
+
+    def test_rules_across_files_and_broader_prefixes_count(self):
+        a = self.settings("settings.json", ["Bash(gh issue:*)", "Bash(gh pr comment:*)"])
+        b = self.settings("settings.local.json", ["Bash(notme:*)", f"Bash({self.LAUNCHER}:*)"])
+        self.assertTrue(doctor.permissions_check([a, b], self.LAUNCHER)["ok"])
+
+    def test_a_blanket_gh_rule_counts_but_is_called_out(self):
+        a = self.settings("settings.json", ["Bash(gh:*)", "Bash(notme:*)", f"Bash({self.LAUNCHER}:*)"])
+        c = doctor.permissions_check([a], self.LAUNCHER)
+        self.assertTrue(c["ok"])
+        self.assertIn("Bash(gh:*)", c["detail"])
+
+    def test_an_unreadable_settings_file_is_named_and_treated_as_empty(self):
+        bad = self.settings("settings.json", raw="{not json")
+        c = doctor.permissions_check([bad], self.LAUNCHER)
+        self.assertFalse(c["ok"])
+        self.assertIn("could not be read", c["detail"])
+
+    def test_the_doc_lists_every_rule_doctor_checks(self):
+        from pathlib import Path
+        doc = (Path(__file__).resolve().parents[3] / "docs" / "permissions.md").read_text(encoding="utf-8")
+        for rule in doctor.permission_rules("<launcher>"):
+            self.assertIn(rule, doc)
+        self.assertIn("Bash(gh:*)", doc)
+
+    def test_run_adds_the_check_when_asked(self):
+        checks = doctor.run(ok_runner, [], lambda: StubGh(), lambda: {}, {},
+                            permissions=lambda: doctor.check("permissions", True, "all there", required=False))
+        self.assertIn("permissions", by_name(checks))
+
+
 if __name__ == "__main__":
     unittest.main()

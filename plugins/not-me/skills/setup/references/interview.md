@@ -19,6 +19,7 @@ doc is not in scope for this run.
 | 7 | Which branches beyond main, master and develop are protected? | `protected_branches` (add only) | project |
 | 8 | Orchestrate across models, or one model for everything? | `models.strategy`, `models.single_model` | project |
 | 9 | Are these the test, lint and build commands? | verify sections | verify |
+| 9a | Do the checks need one test environment every worktree shares? Ask only when detection was unsure | `shared_env` | verify |
 | 10 | Which units need the most capable model? (paths or kinds) | `## Delegation` | standards |
 | 11 | Is this the ticket format and the readiness bar? | `## Ticket format`, `## Issue readiness` | standards |
 | 12 | Extra checks before review? | `## Gate additions` | verify |
@@ -68,7 +69,7 @@ nothing, treats every confirmation as given except `create_labels` and
   "create_labels": false,
   "protected_branches": ["release"],
   "models": {"strategy": "orchestrate"},
-  "verify": {"tests": "make test", "lint": "make lint", "build": null, "gate_additions": []},
+  "verify": {"tests": "make test", "lint": "make lint", "build": null, "gate_additions": [], "shared_env": false},
   "delegation": ["src/auth/", "database migrations"],
   "ticket_format": "keep",
   "prove": {"strategy": ["deployments", "local"]},

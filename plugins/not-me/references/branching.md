@@ -53,7 +53,10 @@ exist. Result line: `STOP acme/app#88 blocked - base release-2.4 not found`.
 ## Checkpoint B: before push
 
 1. Fetch again. Merge the base in again.
-2. If the merge brought in commits, run the final tests again before the push.
+2. If the merge brought in commits, run the targeted tests again before the push
+   (the final tests when no targeted command is configured), and the full set
+   only when the targeted tests cannot cover what came in (`verification.md`,
+   "Targeted tests").
 3. Then push the branch to its own name on origin.
 
 ## Merge, never rebase
@@ -90,6 +93,30 @@ When you must set aside local changes:
 2. Never commit in a review worktree.
 3. Remove only the worktree you created, at the end of the run.
 
+## Worktrees for new and update work
+
+`workspace.new` (or `workspace.update`) set to `worktree` runs the work in a worktree
+of its own, so several runs can start from one main checkout and none of them
+changes its branch or files. Inside a linked worktree already, work in place.
+
+1. Make it once the target is known, before `notme log start`: read the sha with
+   `git rev-parse HEAD`, then `notme git worktree-add <sha> --name notme-new-<N>`
+   (`notme-update-<N>` for rework). `path_exists`: add `-2`, `-3`. Keep the
+   returned `path`. A resumed run whose log names a path uses that path instead.
+   A lost claim keeps the worktree, its log and run marker: still detached with
+   nothing done, it serves the next pick as is. Never remove it mid-run, since
+   that deletes the marker with it; make no second one.
+2. From then on pass `--project-dir <path>` to every `notme` call, so the run
+   marker, branch, checkpoints and push all land in that worktree. Run local git
+   as `git -C <path> ...`, never `cd <path> && git ...` (the guard does not follow
+   `cd`). Run each check with the worktree as its directory, and brief the
+   implementer with the absolute path.
+3. The worktree starts detached: there is nothing to stash. Branch with
+   `notme --project-dir <path> git branch-create <name> --base origin/<base>`.
+4. Only when the run ends, after `notme log finish`, run `notme git worktree-remove <path>`
+   without `--project-dir`. Remove only the worktree this run made. A tree that will not come off clean stays: a `WARN` naming it.
+   "committed but NOT PUSHED": keep it and name the path in the log summary.
+
 ## Epics
 
 1. Work sub-issues in their listed order. Each sub-issue is its own branch and PR.
@@ -105,7 +132,10 @@ An issue may declare one line, `Stack on: <owner/repo#PR>`, `Based on: <owner/re
 or `On top of: <owner/repo#PR>` (a PR, or an issue whose single open PR is used).
 It counts only from a trusted author, and only the CLI reads it: `notme issue N`
 returns `stack_on`, and `notme pick-issue` leaves out an issue whose `stack_on` has
-`ready` false (it lists them in `stack_held` with the reason).
+`ready` false (it lists them in `stack_held` with the reason). With
+`queue.stacking: auto`, an issue with no line gets a `stack_on` from its open
+blockers (`via` is `blockers`): ready when they all resolve to one open PR that
+passes the same checks, held when a blocker has no open PR yet. Treat it the same.
 
 1. `stacks` true: branch from `origin/<head>`, the `head` field of `stack_on`, and
    open the PR against that branch with `Builds on <pr>`, the `pr` field (see
@@ -133,3 +163,5 @@ returns `stack_on`, and `notme pick-issue` leaves out an issue whose `stack_on` 
 - [ ] Never force-pushed or amended a pushed commit.
 - [ ] Stashed with a unique message and restored by SHA.
 - [ ] Left the checkout clean on the branch it started on.
+- [ ] With `workspace` `worktree`: worked only in my own worktree, `--project-dir` on every `notme` call.
+- [ ] Kept that one worktree through a lost claim; removed it only after `notme log finish`.

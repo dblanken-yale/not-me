@@ -124,7 +124,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual({" ".join(path) for path in cli.leaf_parsers(parser)}, known)
         self.assertEqual({k.split()[0] for k in known}, found)
         for name in ("me", "config", "preflight", "pick-issue", "claim-issue", "release-issue", "move-issue", "issue",
-                     "pick-needs-work", "pr-children", "pr-by-head", "wait-checks", "issue-body", "retro", "claim-pr", "release-pr", "bundle", "feedback", "transition", "labels-sync",
+                     "pick-needs-work", "pr-children", "pr-by-head", "wait-checks", "verify-plan", "issue-body", "retro", "claim-pr", "release-pr", "bundle", "feedback", "transition", "labels-sync",
                      "labels-ensure", "reply-thread", "comment-upsert", "request-review", "pr-body", "pr-open",
                      "companion-prs", "testing-steps", "review-post", "resolve-threads", "pick-reviews",
                      "prove-target", "followup", "check-text", "log", "allow-repo", "guard", "git", "status",
@@ -160,6 +160,7 @@ class OutputShapeTests(CliCase):
         cases = [["me"], ["config"], ["config", "--explain"], ["config", "--check"], ["pick-issue"],
                  ["issue", "1"], ["pick-needs-work"], ["pick-needs-work", "--include-answered", "--exclude", "3"], ["bundle", "3"],
                  ["pr-children", "3"], ["pr-by-head", "feat/widget"], ["wait-checks", "3", "--minutes", "0"],
+                 ["verify-plan"], ["verify-plan", "--base", "main"],
                  ["feedback", "3"], ["pick-reviews"],
                  ["prove-target", "3"], ["labels-ensure", "--check"], ["labels-sync", "1", "--set", "to do", "--check"],
                  ["check-text", "--file", self.write_file("t.md", "fine\n")], ["status"], ["allow-repo", "list"],
@@ -362,6 +363,7 @@ class DryRunTests(CliCase):
             "resolve-threads": ["resolve-threads", "3", "--ids-file", str(self.project / "ids.json")],
             "followup": ["followup", "--title-file", title, "--body-file", body, "--parent", "1"],
             "issue-body": ["issue-body", "1", "--body-file", body],
+            "issue-stack-on": ["issue-stack-on", "1", "--pr", "acme/app#3"],
             "claim-pr": ["claim-pr", "3"],
             "release-pr": ["release-pr", "3"],
         }
@@ -378,16 +380,18 @@ class DryRunTests(CliCase):
         self.assertEqual(writers - {"git"}, set(self.cases))
 
     def test_dry_run_flag_records_to_the_ledger_and_writes_nothing(self):
+        from notme.dryrun import Ledger
+        ledger = Ledger.default_for(self.project)  # found once (a git lookup): the project stays put for the loop
         for name, argv in self.cases.items():
             with self.subTest(name):
-                before = len(self.ledger())
+                before = len(ledger.read())
                 self.fake.calls.clear()
                 before_state = self.fake.snapshot()
                 payload = self.ok(*argv, "--dry-run")
                 self.assertTrue(payload.get("dry_run"), payload)
                 self.assertEqual(self.fake.writes_made(), [])
                 self.assertEqual(self.fake.snapshot(), before_state)
-                self.assertGreater(len(self.ledger()), before, f"{name} left no ledger entry")
+                self.assertGreater(len(ledger.read()), before, f"{name} left no ledger entry")
 
     def test_mode_dry_run_and_env_do_the_same(self):
         self.tc.write("global", "project", GLOBAL_PROJECT.replace("mode: live", "mode: dry-run"))

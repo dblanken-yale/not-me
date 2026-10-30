@@ -49,7 +49,7 @@ if _PLUGIN_DIR not in sys.path:  # lets scripts load this file by path (the docs
 
 from notme import claims, config as config_mod, doctor as doctor_mod, feedback as feedback_mod  # noqa: E402
 from notme import gh as gh_mod, git as git_mod, guard as guard_mod, paths, prove, runlog, states  # noqa: E402
-from notme import humans, modeswitch, roles as roles_mod, writeback, writes  # noqa: E402
+from notme import humans, modeswitch, roles as roles_mod, verifyplan, writeback, writes  # noqa: E402
 from notme.dryrun import LedgerError  # noqa: E402
 from notme.gh import csv, names_of, login_of  # noqa: E402
 from notme.queue import NotOpen, board_ref, describe as describe_queue, make_queue, stale_claims  # noqa: E402
@@ -57,6 +57,7 @@ from notme.queue import resync as resync_mod  # noqa: E402
 from notme.queue.signals import picking_signals  # noqa: E402
 from notme.queue.sync import MirrorFailed  # noqa: E402
 from notme.redact import redact, redact_obj  # noqa: E402
+from notme.stacking import last_editor, parse_refs  # noqa: E402
 
 
 def launcher_path() -> str:
@@ -260,6 +261,10 @@ def _toplevel(path: Any) -> Optional[Path]:
     return Path(top).resolve() if top else None
 
 
+def _run_fields(marker: Mapping[str, Any]) -> Dict[str, Any]:
+    return {k: marker.get(k) for k in ("run_id", "skill", "ref", "started")}
+
+
 class Context:
     """Trust anchor, config, write gate and GitHub client for one invocation (the last three built on use)."""
 
@@ -267,6 +272,7 @@ class Context:
         self.args, self.deps = args, deps
         self.warnings: List[str] = []
         self.log_warnings: List[str] = []  # warnings that also go to the run log as WARN lines (see main)
+        self.log_reasons: List[str] = []  # why each state changed, for the run log as ACTION lines (see main)
         # Restricted is the default. A tty alone proves nothing (a pty wrapper fakes one), so a person also needs no
         # Claude Code variable and no Claude Code ancestor process; an unreadable ancestry counts as Claude Code.
         self.restricted = (any(deps.env.get(k) for k in CLAUDE_ENV) or not deps.isatty()
@@ -351,10 +357,11 @@ class Context:
             raise fail(ExitCode.USAGE, "usage", "--reason-file text is not clean: " + "; ".join(problems))
         return text
 
-    def say_why(self, repo: str, n: int, change: Dict[str, Any], reason: str) -> bool:
-        """After a state change succeeded: one comment naming the old state, the new state (with the label and
-        board column written alongside, when there are any) and the reason, with the run marker. A comment that
-        fails is a warning, also in the run log, and never undoes the change. True when it was posted."""
+    def say_why(self, repo: str, n: int, change: Dict[str, Any], reason: str, post: bool = True) -> bool:
+        """After a state change succeeded: the old state, the new state (with the label and board column written
+        alongside, when there are any) and the reason go to the run log, and, when the new state is one the
+        timeline cannot explain (states.EXPLAINED), to one comment with the run marker. A comment that fails is a
+        warning, also in the run log, and never undoes the change. True when it was posted."""
         def shown(state: Any) -> str:
             try:
                 return self.labels.name(state)
@@ -364,11 +371,15 @@ class Context:
                  if change.get(key)]
         text = (f"Moved from `{shown(change.get('from'))}` to `{shown(change.get('to'))}`"
                 + (f" ({', '.join(sides)})" if sides else "") + f": {reason}")
-        return self.post_reason(repo, n, text)
+        return self.post_reason(repo, n, text, post and change.get("to") in states.EXPLAINED)
 
-    def post_reason(self, repo: str, n: int, text: str) -> bool:
-        """Post a reason comment (with the run marker). A failure is a warning, also in the run log; it never
-        undoes the state change it explains. True when it was posted."""
+    def post_reason(self, repo: str, n: int, text: str, post: bool = True) -> bool:
+        """Log a reason for the run log and, when `post`, post it as a comment (with the run marker). A failed
+        comment is a warning, also in the run log; it never undoes the state change it explains. True when it was
+        posted."""
+        self.log_reasons.append(f"{repo}#{n} {text}")
+        if not post:
+            return False
         try:
             writeback.state_change_comment(self.gh, repo, n, text, self.run_id)
             return True
@@ -383,11 +394,15 @@ class Context:
         """The names among `names` that are state labels (labels.* in project.md); pass labels and others are not."""
         return [x for x in names if self.labels.knows(x)]
 
-    def say_labels(self, repo: str, n: int, added: Sequence[str], removed: Sequence[str], reason: str) -> bool:
-        """One comment for a change of state labels made outside a move: which were added, which removed, why."""
+    def say_labels(self, repo: str, n: int, added: Sequence[str], removed: Sequence[str], reason: str,
+                   post: bool = True) -> bool:
+        """A change of state labels made outside a move: which were added, which removed, why. Always logged;
+        posted as one comment only when `post` and an added label is a state the timeline cannot explain
+        (states.EXPLAINED). Removing a label or putting one back is mechanical and only logged."""
         parts = [f"{verb} " + ", ".join(f"`{x}`" for x in names)
                  for verb, names in (("added", added), ("removed", removed)) if names]
-        return self.post_reason(repo, n, f"State labels changed ({'; '.join(parts)}): {reason}")
+        explained = any(self.labels.abstract(x) in states.EXPLAINED for x in added)
+        return self.post_reason(repo, n, f"State labels changed ({'; '.join(parts)}): {reason}", post and explained)
 
     def need_work_dir(self) -> Path:
         if self.work_dir is None:
@@ -597,7 +612,7 @@ class Context:
         if root is None or root not in real.parents or real.suffix != ".md" or not real.is_file() \
                 or not runlog.is_run_log(real):
             raise fail(ExitCode.USAGE, "usage", "the log path must be an existing run log under the log root")
-        return runlog.RunLog.open(real, marker_path=runlog.default_marker_path(self.work_dir))
+        return runlog.RunLog.open(real, project_dir=self.work_dir)
 
     @property
     def run_id(self) -> str:
@@ -614,11 +629,21 @@ class Context:
         return self._run_id
 
     def active_run(self) -> Optional[Dict[str, Any]]:
+        """The run active in this worktree, or None."""
         try:
             marker = runlog.active_run(runlog.default_marker_path(self.work_dir))
         except (ValueError, OSError):
             return None
-        return {k: marker.get(k) for k in ("run_id", "skill", "ref", "started")} if marker else None
+        return _run_fields(marker) if marker else None
+
+    def active_runs(self) -> List[Dict[str, Any]]:
+        """Every run active in any worktree of this checkout, main worktree first."""
+        if self.work_dir is None:
+            return []
+        try:
+            return [_run_fields(m) for m in runlog.checkout_active_runs(self.work_dir)]
+        except (ValueError, OSError):
+            return []
 
     # --- input files ---
 
@@ -659,7 +684,8 @@ number_arg = arg("number", metavar="N")
 body_file_arg = arg("--body-file", required=True, metavar="F")
 REASON_MAX_CHARS = 500  # the longest reason a state-change comment carries
 reason_file_arg = arg("--reason-file", required=True, metavar="F",
-                      help="file holding one line that says why; posted as one comment on the item")
+                      help="file holding one line that says why; goes to the run log, and to one comment on the "
+                           "item when the new state needs a person or stops work")
 title_file_arg = arg("--title-file", required=True, metavar="F")
 labels_arg = arg("--labels", metavar="a,b")
 
@@ -697,7 +723,7 @@ class Command:
 
 
 COMMANDS: List[Command] = []
-GROUPS = {"log": "run logs", "retro": "retro audits kept in the git directory", "allow-repo": "the global allow list of repos and boards", "guard": "the write guard",
+GROUPS = {"log": "run logs", "verify-lock": "the shared test environment lock (verify.md shared_env)", "retro": "retro audits kept in the git directory", "allow-repo": "the global allow list of repos and boards", "guard": "the write guard",
           "mode": "dry-run or live", "git": "git operations behind the write gate"}
 GLOBAL_FLAGS: List[Arg] = [
     arg("--project-dir", metavar="P", help="project directory (default: the git toplevel of the working "
@@ -993,8 +1019,9 @@ def cmd_suggest_issues(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]
 def cmd_assign_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
     """Add the operator, and only the operator, as the assignee of one tracker issue, so the queue picks it. For
     /not-me:suggest, after a person said yes to that issue. It takes no login, never removes an assignee and never
-    touches labels, the board or a comment. Refused with no read and no write while a not-me run is active (kind
-    active_run, with active_run {run_id, skill, ref, started}): autonomous runs never assign; only a person running
+    touches labels, the board or a comment. Refused with no read and no write while a not-me run is active in any
+    worktree of the checkout (kind active_run, with active_run {run_id, skill, ref, started}): autonomous runs never
+    assign; only a person running
     /not-me:suggest does. Refused with no write: an issue outside the tracker (kind not_tracker), assigned to anyone
     else (kind assigned_to_other), or not among the issues suggest-issues lists now (kind not_eligible: closed, not
     to do, held back in an epic, by an untrusted author...). The write goes through the write gate; a dry run records
@@ -1005,7 +1032,7 @@ def cmd_assign_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) 
     Output: repo, number, assignee (the operator), assigned (true when it added the assignment), already (true when
     the operator was the assignee before; nothing written)
     """
-    active = ctx.active_run()
+    active = ctx.active_run() or next(iter(ctx.active_runs()), None)
     if active:
         raise fail(ExitCode.ERROR, "active_run",
                    f"a not-me run is active ({active.get('skill')} on {active.get('ref')}); runs never assign "
@@ -1055,22 +1082,32 @@ def cmd_claim_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -
 
 
 @command("release-issue", "give a claimed issue back", writes=True, ref="tracker", args=[
-    number_arg, arg("--to", choices=("todo", "blocked"), default="todo"), reason_file_arg])
+    number_arg, arg("--to", choices=("todo", "blocked"), default="todo"),
+    arg("--reason-file", metavar="F", help="file holding one line that says why; goes to the run log, and to one "
+                                           "comment on a release to blocked; required unless --no-comment"),
+    arg("--no-comment", action="store_true", help="post no comment: for a run that stops on a failure on not-me's "
+                                                  "own side")])
 def cmd_release_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
-    """Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released, then post
-    one comment with the old state, the new state (and the board column when the board follows) and the text of
-    --reason-file. A comment that fails is a warning; the release stands. With queue.sync, the side queue.source
+    """Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released. The old
+    state, the new state (and the board column when the board follows) and the text of --reason-file go to the run
+    log; a release to blocked also posts them as one comment, since the timeline cannot say why. A release to todo
+    posts nothing. A comment that fails is a warning; the release stands. With queue.sync, the side queue.source
     does not read follows; a failed mirror write is a warning.
+
+    --no-comment releases the same way and posts nothing, even to blocked; --reason-file is then optional.
 
     Output: number, to, released, commented; warnings when a queue.sync mirror write or the comment failed
     """
-    reason = ctx.read_reason(args.reason_file, repo)
+    if not args.reason_file and not args.no_comment:
+        raise fail(ExitCode.USAGE, "usage", "pass --reason-file with one line saying why, or --no-comment")
+    reason = ctx.read_reason(args.reason_file, repo) if args.reason_file else None
     queue = ctx.queue()
     try:
         queue.release(n, args.to)
     finally:  # a mirror warning stands even when a later step failed
         ctx.sync_warnings(queue)
-    commented = ctx.say_why(repo, n, queue.change, reason) if queue.change else False
+    commented = ctx.say_why(repo, n, queue.change, reason, not args.no_comment) if queue.change and reason \
+        else False
     return {"number": n, "to": args.to, "released": True, "commented": commented}
 
 
@@ -1078,10 +1115,11 @@ def cmd_release_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int)
     number_arg, arg("--to", required=True, choices=states.STATES, metavar="STATE"),
     arg("--require-current", choices=states.STATES, metavar="STATE"), reason_file_arg])
 def cmd_move_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
-    """Move an issue to a state, optionally only when it is currently in another one, then post one comment with
-    the old state, the new state (and the label and board column the move also wrote) and the text of
-    --reason-file. A comment that fails is a warning; the move stands. With queue.sync, the side queue.source does
-    not read follows; a failed mirror write is a warning.
+    """Move an issue to a state, optionally only when it is currently in another one. The old state, the new state
+    (and the label and board column the move also wrote) and the text of --reason-file go to the run log, and to
+    one comment when the new state is blocked, question, needs help, needs human or paused, which the timeline
+    cannot explain. A comment that fails is a warning; the move stands. With queue.sync, the side queue.source
+    does not read follows; a failed mirror write is a warning.
 
     Output: number, to, require_current, commented; warnings when a queue.sync mirror write or the comment failed
     """
@@ -1097,26 +1135,31 @@ def cmd_move_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) ->
 
 @command("issue", "an issue's facts", ref="tracker", args=[number_arg])
 def cmd_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
-    """An issue's facts. The body and comments of an author the roster does not trust are withheld.
+    """An issue's facts. The body and comments of an author the roster does not trust are withheld, and so are the
+    title and body when whoever last edited the body is not trusted or cannot be read.
 
-    Output: repo, number, title, state, url, author, author_trusted, labels, status, assignees, body, comments,
+    Output: repo, number, title, state, url, author, author_trusted, labels, status, assignees, body, body_withheld
+    (null, untrusted_author or untrusted_editor), comments,
     comments_ignored, blocked_by ([{repo, number, state}] from GitHub issue dependencies; null when unknown),
-    stack_on. stack_on is null unless a trusted author's body has one `Stack on:`, `Based on:` or `On top of:`
-    owner/repo#N line (null too when the queue config is invalid: see warnings);
+    blocking (the issues GitHub records as blocked by this one, same shape), stack_on. stack_on is null unless a
+    trusted author's body has one `Stack on:`, `Based on:` or `On top of:` owner/repo#N line, or queue.stacking is
+    auto and the issue has an open blocker (null too when the queue config is invalid: see warnings);
     then {ref, pr, head, base, state, draft, author, author_trusted (of the PR), stacks (branch from head and
-    target it), ready, reason}. Read it here, never from the body: the line counts only from a trusted author, and
-    the PR must be open, not a draft, from a trusted author and in this checkout's repo. A merged PR gives ready true
-    and stacks false (a normal issue); queue.stacking off, another open blocker or a closed PR gives ready false
+    target it), ready, reason, via (declared: the line; blockers: auto, from the open blockers)}. Read it here,
+    never from the body: the line counts only from a trusted author, and the PR must be open, not a draft, from a
+    trusted author and in this checkout's repo. A merged PR gives ready true and stacks false (a normal issue);
+    queue.stacking off, another open blocker, a blocker with no open PR or a closed PR gives ready false
     """
     out = feedback_mod.issue_view(ctx.gh, repo, n, ctx.roster, ctx.operator, ctx.labels)
-    out["stack_on"] = out["blocked_by"] = None
+    out["stack_on"] = out["blocked_by"] = out["blocking"] = None
     if out["author_trusted"] and repo.lower() == ctx.tracker.lower():
         try:  # a queue or picking config error must not stop the read of the issue itself
             queue = ctx.queue()
             out["stack_on"] = queue.stack_on(n, out["author"], out["body"])
             out["blocked_by"] = queue.blocked_by(n)
+            out["blocking"] = queue.blocking(n)
         except ValueError as exc:
-            ctx.warn(f"stack_on and blocked_by are null: {exc}")
+            ctx.warn(f"stack_on, blocked_by and blocking are null: {exc}")
     return out
 
 
@@ -1234,6 +1277,55 @@ def cmd_wait_checks(ctx: Context, args: argparse.Namespace, repo: str, n: int) -
     return feedback_mod.wait_checks(fetch, minutes, sleep=ctx.deps.sleep, clock=ctx.deps.clock)
 
 
+SHA40_RE = re.compile(r"[0-9a-f]{40}")  # a full commit hash, as GitHub reports it
+
+
+@command("verify-plan", "what to verify and when: baseline, targeted tests, CI wait", args=[
+    arg("--base", metavar="B", help="the base branch (default: the repo default branch)"),
+    arg("--sha", metavar="SHA", help="read the CI result of this commit (40 hex, e.g. the PR head) instead of "
+                                     "origin/<base>")])
+def cmd_verify_plan(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """The verify plan for a run, from the effective verify doc, limits.ci_wait_minutes and a commit's CI.
+    Reads only: the local origin/<base> ref (no fetch) and the check runs and statuses on GitHub of the checked
+    commit: --sha when given (a rework run passes the PR head), else origin/<base>. The baseline is skipped only
+    when verify.baseline is auto and that CI is green; a gh error, or more check runs or statuses than one page
+    holds, makes base_ci unknown and the baseline runs. Targeted test commands are the lines of the fenced block
+    in the verify doc's Targeted tests section (none when it is left as is). ci_wait is false when
+    limits.ci_wait_minutes is 0.
+
+    Output: base, base_sha, checked_sha (the commit whose CI was read), base_ci (success, failure, pending, none
+    or unknown: the CI of checked_sha), baseline (setting, run, reason), targeted (configured, commands),
+    ci_wait_minutes, ci_wait
+    """
+    if args.sha is not None and not SHA40_RE.fullmatch(args.sha):
+        raise fail(ExitCode.USAGE, "usage", f"invalid sha {args.sha!r}: use the full 40-character commit hash")
+    repo = _code_repo(ctx)
+    cwd = ctx.work_dir
+    base = git_mod.valid_branch(args.base) if args.base else None
+    if base is None:
+        base = git_mod.default_branch(ctx.gh, repo, cwd) if cwd is not None else ctx.gh.repo_default_branch(repo)
+    base_sha = git_mod.remote_tracking_sha(base, cwd) if cwd is not None else None
+    checked = args.sha or base_sha
+    state = "unknown"
+    if checked:
+        try:
+            runs = ctx.gh.read(["api", f"repos/{repo}/commits/{checked}/check-runs?per_page=100"])
+            combined = ctx.gh.read(["api", f"repos/{repo}/commits/{checked}/status?per_page=100"])
+        except gh_mod.GhError as exc:
+            ctx.warn(f"could not read the CI result at {checked}: {exc}")
+        else:
+            runs_doc = runs if isinstance(runs, dict) else {}
+            status_doc = combined if isinstance(combined, dict) else {}
+            state = verifyplan.ci_state(runs_doc.get("check_runs") or [], status_doc.get("statuses") or [],
+                                        runs_total=runs_doc.get("total_count"),
+                                        statuses_total=status_doc.get("total_count"))
+    # always or auto; the value comes from the config layers (defaults/verify.md), never from here
+    baseline_setting = (ctx.cfg.meta.get("verify") or {}).get("baseline")
+    return verifyplan.plan(setting=baseline_setting, base=base, base_sha=base_sha, checked_sha=checked,
+                           base_ci=state, verify_body=ctx.cfg.bodies.get("verify", ""),
+                           ci_wait_minutes=(ctx.meta.get("limits") or {}).get("ci_wait_minutes"))
+
+
 @command("feedback", "trusted review findings on a PR", ref="repo", args=[
     ref_arg, arg("--since-marker", metavar="ISO", help="count answers after this time instead of our last marker")])
 def cmd_feedback(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
@@ -1286,9 +1378,10 @@ def cmd_prove_target(ctx: Context, args: argparse.Namespace, repo: str, n: int) 
     arg("--to", required=True, choices=states.STATES, metavar="STATE"),
     arg("--kind", choices=("issue", "pr"), default="issue"), reason_file_arg])
 def cmd_transition(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Change an item's state label along a legal edge (reads the labels, replaces the set, reads it back), then
-    post one comment with the old state, the new state and the text of --reason-file. A comment that fails is a
-    warning; the change stands.
+    """Change an item's state label along a legal edge (reads the labels, replaces the set, reads it back). The
+    old state, the new state and the text of --reason-file go to the run log, and to one comment when the new
+    state is blocked, question, needs help, needs human or paused. A comment that fails is a warning; the change
+    stands.
 
     Output: repo, number, kind, from, to, labels, commented
     """
@@ -1311,11 +1404,13 @@ def cmd_transition(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
 def cmd_labels_sync(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
     """Make an item's labels match: --set replaces the whole set, --add and --remove edit it. --check only reports. A bare number
     is an item in the tracker; owner/name#N or a URL names an item in another allowed repository (a companion PR).
-    A change that adds or removes a state label (needs human, blocked, question, paused, ...) needs --reason-file
-    and posts one comment naming the labels and the reason; a failed comment is a warning and the change stands.
+    A change that adds or removes a state label needs --reason-file; the labels and the reason go to the run log.
+    One comment names them only when the change adds blocked, question, needs help, needs human or paused;
+    removing a state label or putting one back posts nothing. A failed comment is a warning and the change stands.
     Pass labels and other labels need no reason.
 
-    Output: repo, number, in_sync, changed, labels (current, or the new set); commented when a reason was posted
+    Output: repo, number, in_sync, changed, labels (current, or the new set); commented (true when posted) when a
+    state label changed
     """
     if (args.set is None) == (args.add is None and args.remove is None) or \
             (args.set is not None and args.remove is not None):
@@ -1356,11 +1451,11 @@ def cmd_queue_resync(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     anything is read. Issues not on the board are skipped and reported, never added; closed issues are never
     touched; neither are issues whose state has no column.
 
-    A changed state label gets one comment saying why, as every other state-label change does (commented). The
-    board Status change is not commented on.
+    Nothing is posted on GitHub: matching the other side is mechanical and the timeline shows the label change.
+    Why each state label changed goes to the run log (--log).
 
     Output: board, changes ([{number, url, side, from, to, result (changed, planned or failed), reason,
-    commented (label changes only)}]),
+    commented (label changes only; always false)}]),
     skipped ([{number, url, reason}]), truncated (the board has more items than the `read` count read; issues past
     them are reported as not among the items read, never as off the board), issues_truncated; dry_run when the
     writes were only recorded. Exits 1 when paused or disabled.
@@ -1370,11 +1465,11 @@ def cmd_queue_resync(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     except LookupError as exc:  # a MirrorFailed (board not set or not allowed) has its own kind, sync_failed
         raise fail(ExitCode.ERROR, "board_not_found", f"{exc}; check queue.board and that the token has the "
                                                       "project scope") from None
-    for change in out["changes"]:  # a state label that changed is explained, as for every other state-label change
+    for change in out["changes"]:  # a state label that changed is logged, never posted: it only matches the board
         if change["side"] == "labels" and change["result"] in ("changed", "planned"):
             change["commented"] = ctx.post_reason(ctx.tracker, change["number"],
                                                   f"State label changed from `{change['from']}` to `{change['to']}`: "
-                                                  "set to match the board Status by notme queue-resync")
+                                                  "set to match the board Status by notme queue-resync", post=False)
     return out
 
 
@@ -1468,15 +1563,15 @@ def cmd_pr_body(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Di
     arg("--head", required=True, metavar="H"), arg("--base", required=True, metavar="B"), title_file_arg,
     body_file_arg, labels_arg, arg("--reviewers", metavar="a,b"), arg("--assignee", metavar="L"),
     arg("--draft", action="store_true"),
-    arg("--reason-file", metavar="F", help="one line saying why the state labels are set; default: \"pull request "
-                                           "opened\"")])
+    arg("--reason-file", metavar="F", help="one line for the run log saying why the state labels are set; default: "
+                                           "\"pull request opened\"")])
 def cmd_pr_open(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """Open a PR, set its labels, request review. The head branch may not be a protected branch. When --labels
-    names a state label (needs review, ...), one comment on the new PR names it and the reason (the first line of
-    --reason-file, else "pull request opened"); a failed comment is a warning and the PR stands. No comment in a
-    dry run, which has no PR number.
+    names a state label (needs review, ...), the run log records it and the reason (the first line of
+    --reason-file, else "pull request opened"). No comment is posted: opening the PR is the reason, and the
+    timeline shows the labels.
 
-    Output: repo, number, url (both null in a dry run), head, base; commented when a state label was set
+    Output: repo, number, url (both null in a dry run), head, base; commented (false) when a state label was set
     """
     repo = ctx.repo
     if ctx.protected(args.head):
@@ -1488,7 +1583,7 @@ def cmd_pr_open(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     result = {"repo": repo, "number": out.get("number"), "url": out.get("url"), "head": args.head, "base": args.base}
     state = ctx.state_labels(csv(args.labels))
     if state and out.get("number") is not None:
-        result["commented"] = ctx.say_labels(repo, out["number"], state, [], reason)
+        result["commented"] = ctx.say_labels(repo, out["number"], state, [], reason, post=False)
     return result
 
 
@@ -1527,8 +1622,8 @@ def cmd_testing_steps(ctx: Context, args: argparse.Namespace, repo: str, n: int)
 @command("review-post", "post a review", writes=True, ref="repo", args=[
     ref_arg, arg("--event", required=True, choices=("APPROVE", "REQUEST_CHANGES", "COMMENT")), body_file_arg,
     arg("--comments-file", metavar="J"),
-    arg("--reason-file", metavar="F", help="one line saying why the state labels changed; default: the review's "
-                                           "own verdict"),
+    arg("--reason-file", metavar="F", help="one line for the run log saying why the state labels changed; default: "
+                                           "the review's own verdict"),
     OneOf(arg("--labels-set", metavar="a,b", help="set the full label set after posting"),
           arg("--labels-auto", action="store_true",
               help="work out the label set from the PR's reviews, role.md and the roster, then set it"))])
@@ -1544,12 +1639,13 @@ def cmd_review_post(ctx: Context, args: argparse.Namespace, repo: str, n: int) -
     review.changes_label. COMMENT only updates the pass labels. A pass label missing from the repo is skipped with
     one warning.
 
-    When the labels set change a state label (needs review, needs work, ready to merge, ...), one comment follows
-    the review naming what was added and removed and the reason: the first line of --reason-file, else "a <EVENT>
-    review was posted". A failed comment is a warning and the review and labels stand.
+    When the labels set change a state label (needs review, needs work, ready to merge, ...), the run log records
+    what was added and removed and the reason: the first line of --reason-file, else "a <EVENT> review was
+    posted". No comment is posted: the review is the reason, and the timeline shows it next to the label change.
 
     Output: repo, number, event, state (event only in a dry run); with --labels-auto labels and approval (null with
-    no roles; else required, approved, waiting, all_approved, pass_labels); commented when a state label changed
+    no roles; else required, approved, waiting, all_approved, pass_labels); commented (false) when a state label
+    changed
     """
     if args.event == "APPROVE" and ctx.trusted_meta("review").get("auto_approve") is not True:
         raise fail(ExitCode.ERROR, "approve_refused", "APPROVE needs review.auto_approve: true in the global layer")
@@ -1572,7 +1668,7 @@ def cmd_review_post(ctx: Context, args: argparse.Namespace, repo: str, n: int) -
         added = [x for x in ctx.state_labels(after) if x.lower() not in held]
         removed = [x for x in ctx.state_labels(before) if x.lower() not in kept]
         if added or removed:
-            out["commented"] = ctx.say_labels(repo, n, added, removed, reason)
+            out["commented"] = ctx.say_labels(repo, n, added, removed, reason, post=False)
     return {"repo": repo, "number": n, **out, **report}
 
 
@@ -1659,7 +1755,8 @@ def _same_body(a: str, b: str) -> bool:
 def cmd_issue_body(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
     """Replace an issue's body with a file's text. The text must pass `check-text` (exit 1, kind text_lint, and no
     write otherwise), and the issue's author must be trusted by the rule `issue` uses (otherwise exit 1, kind
-    untrusted_author, and no write). Every not-me marker in the current body that the new text lacks is appended
+    untrusted_author, and no write), and so must whoever last edited the body (otherwise, or when that cannot be
+    read, exit 1, kind untrusted_editor, and no write). Every not-me marker in the current body that the new text lacks is appended
     back, and the configured attribution is added when missing. The issue is read back after the write (exit 5
     when the body differs; skipped in a dry run).
 
@@ -1675,6 +1772,11 @@ def cmd_issue_body(ctx: Context, args: argparse.Namespace, repo: str, n: int) ->
     if not feedback_mod.author_trusted(ctx.roster, author, ctx.operator):
         raise fail(ExitCode.ERROR, "untrusted_author",
                    f"{repo}#{n} is by {author or 'an unknown author'}, who is not trusted; its body is not replaced")
+    ok, editor = last_editor(ctx.gh, repo, n)  # a rewrite would make an untrusted editor's text ours
+    if not ok or (editor and not feedback_mod.author_trusted(ctx.roster, editor, ctx.operator)):
+        raise fail(ExitCode.ERROR, "untrusted_editor",
+                   f"{repo}#{n} was last edited by {editor or 'someone who could not be read'}, who is not trusted; "
+                   "its body is not replaced")
     body = with_attribution(ctx, text)
     missing = [m for m in _MARKER_RE.findall(issue.get("body") or "") if m not in body]
     if missing:
@@ -1686,6 +1788,54 @@ def cmd_issue_body(ctx: Context, args: argparse.Namespace, repo: str, n: int) ->
         if not _same_body(found, body):
             raise writeback.WritebackMismatch(f"{repo}#{n} body differs from what was written")
     return {"repo": repo, "number": n, "updated": True}
+
+
+_PR_REF_RE = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+#[0-9]+")
+_TRAILING_MARKERS_RE = re.compile(r"(?:\s*<!--\s*not-me:(?:(?!-->).)*-->)+\s*\Z", re.S)  # the markers that end a body
+
+
+@command("issue-stack-on", "add a Stack on: line to a trusted issue", writes=True, ref="tracker", args=[
+    arg("number", metavar="N|REF", help="a number (in the tracker), #N, owner/name#N or a URL"),
+    arg("--pr", required=True, metavar="OWNER/NAME#N", help="the pull request the issue may stack on")])
+def cmd_issue_stack_on(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
+    """Add one line, `Stack on: OWNER/NAME#N`, to an issue's body, so the caller never reads or rewrites the body.
+
+    The issue's author must be trusted by the rule `issue` uses (otherwise exit 1, kind untrusted_author), and so
+    must whoever last edited the body (otherwise, or when that cannot be read, exit 1, kind untrusted_editor);
+    neither writes anything. A body that already has a `Stack on:`, `Based on:` or `On top of:` line is left as it
+    is (updated false). The line goes after the text and before any not-me markers at the end, which are kept.
+    The issue is read back after the write (exit 5 when the body differs; skipped in a dry run).
+
+    Output: repo, number, updated, line
+    """
+    if not _PR_REF_RE.fullmatch(args.pr or ""):
+        raise fail(ExitCode.USAGE, "usage", f"--pr must be owner/name#N, not {args.pr!r}")
+    line = f"Stack on: {args.pr}"
+    issue = ctx.gh.issue(repo, n)
+    author = gh_mod.login_of(issue.get("author"))
+    if not feedback_mod.author_trusted(ctx.roster, author, ctx.operator):
+        raise fail(ExitCode.ERROR, "untrusted_author",
+                   f"{repo}#{n} is by {author or 'an unknown author'}, who is not trusted; its body is not changed")
+    ok, editor = last_editor(ctx.gh, repo, n)
+    if not ok or (editor and not feedback_mod.author_trusted(ctx.roster, editor, ctx.operator)):
+        raise fail(ExitCode.ERROR, "untrusted_editor",
+                   f"{repo}#{n} was last edited by {editor or 'someone who could not be read'}, who is not trusted; "
+                   "its body is not changed")
+    old = issue.get("body") or ""
+    if parse_refs(old)["lines"]:
+        return {"repo": repo, "number": n, "updated": False, "line": line}
+    tail = _TRAILING_MARKERS_RE.search(old)
+    text, markers = (old[:tail.start()], old[tail.start():].strip()) if tail else (old, "")
+    body = (text.rstrip() + "\n\n" if text.strip() else "") + line + "\n"
+    if markers:
+        body += "\n" + markers + "\n"
+    with gh_mod.tmp_text_file(body, prefix="not-me-cli-") as path:
+        ctx.gh.issue_edit_body(repo, n, path)
+    if not ctx.mode_is_dry:
+        found = ctx.gh.issue(repo, n).get("body") or ""
+        if not _same_body(found, body):
+            raise writeback.WritebackMismatch(f"{repo}#{n} body differs from what was written")
+    return {"repo": repo, "number": n, "updated": True, "line": line}
 
 
 @command("followup", "create a follow-up issue", writes=True, args=[
@@ -1706,8 +1856,8 @@ def cmd_followup(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     arg("--file", required=True, metavar="F"),
     arg("--summary", action="store_true", help="the text is a run summary (needs a TL;DR line)")])
 def cmd_check_text(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Lint a text bound for GitHub (bare #N, local paths, assistant mentions, TL;DR line). Exit 1 when it finds
-    problems.
+    """Lint a text bound for GitHub (bare #N, local paths, assistant mentions, TL;DR line, an account of local trouble
+    the run worked around). Exit 1 when it finds problems.
 
     Output: ok, problems
     """
@@ -1732,7 +1882,8 @@ def cmd_check_text(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     arg("--skill", required=True, metavar="S"), arg("--ref", required=True, metavar="R"),
     arg("--force", action="store_true", help="start even when another run looks active")])
 def cmd_log_start(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Start a run log and the active-run marker. Exit 1 (kind active_run) when another run is active.
+    """Start a run log and this worktree's active-run marker. Exit 1 (kind active_run) when another run is active
+    in this worktree; runs in other worktrees of the checkout do not block it.
 
     Output: path, run_id, skill, ref
     """
@@ -1776,7 +1927,8 @@ def cmd_log_question(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
 @command("log finish", "finish a run log", args=[
     arg("path", metavar="PATH"), arg("--status", required=True, metavar="S"), arg("--failures-file", metavar="F")])
 def cmd_log_finish(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Finish a run log: write its summary and clear the active-run marker.
+    """Finish a run log: write its summary, clear the run's active-run marker (in whichever worktree holds it) and
+    drop the shared test environment lock when this run holds it.
 
     Output: path, status, summary
     """
@@ -1786,7 +1938,10 @@ def cmd_log_finish(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
         text = ctx.read_input(args.failures_file)
         failures = [str(x) for x in json.loads(text)] if text.lstrip().startswith("[") \
             else [ln.strip() for ln in text.splitlines() if ln.strip()]
-    return {"path": args.path, "status": args.status, "summary": log.finish(args.status, failures=failures)}
+    summary = log.finish(args.status, failures=failures)
+    if ctx.work_dir is not None:
+        _drop_verify_lock(ctx, log.run_id)
+    return {"path": args.path, "status": args.status, "summary": summary}
 
 
 @command("log last", "the newest run log", args=[arg("--skill", metavar="S")])
@@ -1829,6 +1984,82 @@ def cmd_log_list(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
         out.append({"path": str(file), "run_id": log.run_id, "skill": log.skill, "ref": log.ref,
                     "status": log.status})
     return {"logs": out}
+
+
+# --- handlers: shared test environment lock ------------------------------------------
+
+VERIFY_LOCK_FILE = "verify.lock"
+MAX_LOCK_WAIT_SECONDS = 540  # under the 10-minute cap on one shell call; wait longer by calling again
+LOCK_POLL_SECONDS = 15
+
+
+def _verify_lock_path(ctx: Context) -> Path:
+    """<git-common-dir>/not-me/verify.lock: one lock for every worktree of the checkout."""
+    work = ctx.need_work_dir()
+    common = paths.git_common_dir(work)
+    return (common / "not-me" if common else work / ".not-me") / VERIFY_LOCK_FILE
+
+
+def _drop_verify_lock(ctx: Context, run_id: str) -> bool:
+    """Remove the lock only when run_id holds it. True when removed."""
+    path = _verify_lock_path(ctx)
+    held = claims.read_lock(path)
+    return held is not None and held.get("run_id") == run_id and claims.release_lock(path, run_id)
+
+
+@command("verify-lock acquire", "take the shared test environment for the verify step", args=[
+    arg("--log", required=True, metavar="PATH", help="this run's log"),
+    arg("--wait-seconds", type=int, default=0, metavar="N",
+        help=f"wait up to N seconds for it (at most {MAX_LOCK_WAIT_SECONDS}; default 0, try once)")])
+def cmd_verify_lock_acquire(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """Take the lock on the shared test environment for this run, when verify.md sets `shared_env: true`. One lock
+    covers every worktree of the checkout (<git-common-dir>/not-me/verify.lock). Hold it from environment start
+    through the last check, and only then; release it with `verify-lock release`. With `shared_env` false (the
+    default) it takes nothing and returns locked false: each worktree verifies on its own. Taking it again while
+    holding it is fine. A lock whose run is no longer active in any worktree, or older than
+    `limits.claim_stale_hours`, is taken over. Held by another active run: polls every 15 seconds for up to
+    --wait-seconds, then exits 1 (kind verify_locked, holder {run_id, since}, waited_seconds). Waiting never
+    means skipping verification. Local only: nothing is sent to GitHub.
+
+    Output: shared_env, locked, waited_seconds (when shared_env)
+    """
+    if not 0 <= args.wait_seconds <= MAX_LOCK_WAIT_SECONDS:
+        raise fail(ExitCode.USAGE, "usage", f"--wait-seconds must be between 0 and {MAX_LOCK_WAIT_SECONDS}")
+    log = ctx.open_log(args.log)
+    if (ctx.cfg.meta.get("verify") or {}).get("shared_env") is not True:
+        return {"shared_env": False, "locked": False}
+    path = _verify_lock_path(ctx)
+    stale_hours = float((ctx.meta.get("limits") or {}).get("claim_stale_hours", 8))
+    started = time.monotonic()
+    while True:
+        holder = (claims.read_lock(path) or {}).get("run_id")
+        if holder and holder != log.run_id and holder not in {r["run_id"] for r in ctx.active_runs()}:
+            claims.release_lock(path, str(holder))  # its run is over: free, unless someone took it meanwhile
+        try:
+            claims.acquire_lock(path, log.run_id, stale_hours)
+            return {"shared_env": True, "locked": True, "waited_seconds": round(time.monotonic() - started)}
+        except claims.ClaimLost:
+            pass
+        waited = time.monotonic() - started
+        if waited >= args.wait_seconds:
+            held = claims.read_lock(path) or {}
+            raise fail(ExitCode.ERROR, "verify_locked",
+                       f"the shared test environment is in use by run {held.get('run_id')}; wait and try again, "
+                       "never skip verification", holder={"run_id": held.get("run_id"), "since": held.get("ts")},
+                       waited_seconds=round(waited))
+        time.sleep(min(LOCK_POLL_SECONDS, max(args.wait_seconds - waited, 0)))
+
+
+@command("verify-lock release", "give the shared test environment back", args=[
+    arg("--log", required=True, metavar="PATH", help="this run's log")])
+def cmd_verify_lock_release(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """Release the shared test environment lock when this run holds it; another run's lock is left alone.
+    `log finish` releases it too. Local only.
+
+    Output: released
+    """
+    log = ctx.open_log(args.log)
+    return {"released": _drop_verify_lock(ctx, log.run_id)}
 
 
 # --- handlers: retro audits -------------------------------------------------------
@@ -2067,8 +2298,10 @@ def cmd_git_unstash(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
 
 
 WORKTREES_EXCLUDE = "/.claude/worktrees/"
-# review- keeps notme off the other worktrees in the same dir (Claude Code keeps its session worktrees there)
-WORKTREE_NAME_RE = re.compile(r"review-[A-Za-z0-9._-]{1,57}")
+# The review-, notme-new- and notme-update- prefixes keep notme off the other worktrees in the same dir (Claude Code
+# keeps its session worktrees there, under names a person picks)
+WORKTREE_NAME_RE = re.compile(r"(?:review|notme-new|notme-update)-[A-Za-z0-9._-]{1,57}")
+WORKTREE_NAME_HINT = "review-, notme-new- or notme-update- then [A-Za-z0-9._-]{1,57}"
 
 
 def worktrees_root(ctx: Context) -> Path:
@@ -2091,10 +2324,12 @@ def worktrees_root(ctx: Context) -> Path:
 
 
 def worktree_path(root: Path, path: Union[str, Path]) -> Path:
-    """`path` realpath'd when it is a review-* dir directly under `root` with no symlink on the way; else unsafe_path."""
+    """`path` realpath'd when it is a review-*, notme-new-* or notme-update-* dir directly under `root` with no symlink on the
+    way; else unsafe_path."""
     real = Path(os.path.realpath(str(path)))
     if real.parent != root or not WORKTREE_NAME_RE.fullmatch(real.name) or ".." in real.name:
-        raise fail(ExitCode.ERROR, "unsafe_path", "worktree path must be a review-* dir directly under <main checkout>/.claude/worktrees/")
+        raise fail(ExitCode.ERROR, "unsafe_path", "worktree path must be a review-*, notme-new-* or notme-update-* dir directly under "
+                   "<main checkout>/.claude/worktrees/")
     return real
 
 
@@ -2122,7 +2357,9 @@ def exclude_worktrees_root(ctx: Context) -> None:
 def cmd_git_worktree_add(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """Add a detached worktree at a sha at <main checkout>/.claude/worktrees/NAME; the CLI picks the path.
 
-    NAME defaults to review-<first 12 chars of SHA> and must match review-[A-Za-z0-9._-]{1,57} with no "..";
+    NAME defaults to review-<first 12 chars of SHA> and must be review-, notme-new- or notme-update- followed
+    by [A-Za-z0-9._-]{1,57} with no ".." (notme-new- and notme-update- name the worktree a run works in when
+    workspace is worktree);
     anything else, a symlinked .claude, .claude/worktrees, info or info/exclude, or a main checkout (via
     core.worktree) that does not share this repository's git dir, is refused as unsafe_path. An existing path is
     refused as path_exists. The git common dir's info/exclude gets /.claude/worktrees/ so the worktree never shows
@@ -2134,7 +2371,7 @@ def cmd_git_worktree_add(ctx: Context, args: argparse.Namespace) -> Dict[str, An
         raise fail(ExitCode.USAGE, "usage", f"invalid sha {args.sha!r}")
     name = f"review-{args.sha[:12]}" if args.name is None else args.name
     if not WORKTREE_NAME_RE.fullmatch(name) or ".." in name:
-        raise fail(ExitCode.ERROR, "unsafe_path", f"bad worktree name {name!r}: use review-[A-Za-z0-9._-]{{1,57}}")
+        raise fail(ExitCode.ERROR, "unsafe_path", f"bad worktree name {name!r}: use {WORKTREE_NAME_HINT}")
     root = worktrees_root(ctx)
     real = worktree_path(root, root / name)
     if os.path.lexists(str(real)):
@@ -2148,7 +2385,7 @@ def cmd_git_worktree_add(ctx: Context, args: argparse.Namespace) -> Dict[str, An
 
 @command("git worktree-remove", "remove a worktree notme made", args=[arg("path", metavar="PATH")])
 def cmd_git_worktree_remove(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Remove a worktree made by `git worktree-add`. PATH must be a review-* dir directly under
+    """Remove a worktree made by `git worktree-add`. PATH must be a review-*, notme-new-* or notme-update-* dir directly under
     <main checkout>/.claude/worktrees/; anything else, including Claude Code's own session worktrees there, is refused
     as unsafe_path.
 
@@ -2187,7 +2424,8 @@ def cmd_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     died before they finished, and the last run of each skill, and one line on how issues are picked. When GitHub
     cannot be read the items are left out with a warning. Creates nothing.
 
-    Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, queue (where the issue
+    Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run (the run in this worktree),
+    active_runs (every fresh run in any worktree of the checkout: [{run_id, skill, ref, started}]), queue (where the issue
     queue looks, as in config --explain), items, stale_claims, interrupted_runs (skill, run_id, ref, file), last_runs,
     picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and "; target epics:
     #N, ..." when set), queue_drift (when queue.board is set: [{number, url, label, status, skip}] of open issues
@@ -2200,18 +2438,19 @@ def cmd_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
         "enabled": ctx.meta.get("enabled") is not False,
         "paused": {"global": pauses.get("global", False), "project": pauses.get("project", False)},
         "mode": str(ctx.meta.get("mode") or "dry-run"), "repo": None, "tracker": None, "operator": None,
-        "active_run": ctx.active_run(), "queue": describe_queue(ctx.meta), "items": [], "stale_claims": [],
+        "active_run": ctx.active_run(), "active_runs": ctx.active_runs(), "queue": describe_queue(ctx.meta),
+        "items": [], "stale_claims": [],
         "interrupted_runs": [], "last_runs": {}, "picking": config_mod.picking_summary(ctx.cfg.picking()),
         "warnings": list(ctx.guard.warnings)}
     if board_ref(ctx.meta.get("queue") or {}) is not None:
         out["queue_drift"], out["queue_drift_truncated"] = [], False
     try:
         root = ctx.log_root()
-        active_id = (out["active_run"] or {}).get("run_id")
+        active_ids = {r["run_id"] for r in out["active_runs"]}
         for folder in sorted(p for p in root.iterdir() if p.is_dir()):
             log = runlog.last(root, folder.name)
             if log is not None:
-                if log.status is None and log.run_id != active_id and runlog.is_run_log(log.path):  # never finished
+                if log.status is None and log.run_id not in active_ids and runlog.is_run_log(log.path):  # died
                     out["interrupted_runs"].append({"skill": folder.name, "run_id": log.run_id, "ref": log.ref,
                                                     "file": log.path.name})
                 out["last_runs"][folder.name] = {"run_id": log.run_id, "ref": log.ref, "status": log.status,
@@ -2383,7 +2622,9 @@ def cmd_doctor(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     not confirmed by `notme mode live`), config files (a warning when neither the global nor the repo layer holds a not-me config file), gh auth
     and scopes, pass labels (advice when role.md names any: the missing ones, for `labels-ensure`), the queue
     source (a warning when the pick label is missing, the board is not confirmed or not found, or a
-    board_states column is not a status option; not run without gh), guard self-test, spawn depth.
+    board_states column is not a status option; not run without gh), guard self-test, spawn depth, permissions
+    (advice: the recommended permissions.allow rules missing from the user and project settings files, with the JSON
+    to add in its hint; doctor never writes settings).
     Exit 7 when the only failed required checks are gh, gh auth or gh scopes; exit 1 when another
     required check fails. --init-token instead creates <not-me home>/operator-token (random, mode 0600) and shows
     it once; only a person may run it (kind human_only otherwise), and an existing token is never replaced
@@ -2397,12 +2638,23 @@ def cmd_doctor(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
                             ctx.guard_state, ctx.env,
                             doctor_mod.mode_check(ctx.meta.get("mode"), ctx.cfg.live_unconfirmed),
                             config_files=ctx.cfg.layers.files, pass_labels=lambda: _pass_label_check(ctx),
-                            queue=lambda: _doctor_queue(ctx), drift=lambda: _doctor_drift(ctx))
+                            queue=lambda: _doctor_queue(ctx), drift=lambda: _doctor_drift(ctx),
+                            permissions=lambda: doctor_mod.permissions_check(_settings_files(ctx), launcher_path()))
     verdict = doctor_mod.exit_kind(checks)
     if verdict:
         code = ExitCode.DEPENDENCY if verdict == "dependency" else ExitCode.ERROR
         raise CliExit(code, {"error": "a required check failed", "kind": "doctor", "ok": False, "checks": checks})
     return {"ok": True, "checks": checks}
+
+
+def _settings_files(ctx: Context) -> List[Path]:
+    """The Claude Code settings files whose permissions.allow doctor reads: the user's settings.json
+    (CLAUDE_CONFIG_DIR, else ~/.claude) and this checkout's .claude/settings.json and settings.local.json."""
+    user = Path(ctx.env.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    files = [user / "settings.json"]
+    if ctx.work_dir:
+        files += [Path(ctx.work_dir) / ".claude" / "settings.json", Path(ctx.work_dir) / ".claude" / "settings.local.json"]
+    return files
 
 
 def _pass_label_check(ctx: Context) -> Optional[Dict[str, Any]]:
@@ -2571,6 +2823,8 @@ def main(argv: Optional[Sequence[str]] = None, *, runner: Optional[gh_mod.Runner
         if log is not None:
             try:
                 log.action(_log_line(args.cmd, args, dry))
+                for text in ctx.log_reasons:
+                    log.action(f"why: {text}")
                 for text in ctx.log_warnings:
                     log.action(text, kind="WARN")
             except (OSError, ValueError) as exc:

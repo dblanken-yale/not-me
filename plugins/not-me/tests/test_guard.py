@@ -7,12 +7,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from notme import guard, runlog, writes
+from notme import guard, paths, runlog, writes
 from notme.guard import Block, GuardContext
 from tests import PLUGIN_ROOT
 from tests import guard_cases as gc
@@ -37,9 +38,9 @@ class _Fixtures(unittest.TestCase):
         cls._patch.stop()
         shutil.rmtree(cls.root, ignore_errors=True)
 
-    def ctx(self, variant: str = "app") -> GuardContext:
+    def ctx(self, variant: str = "app", git=paths.run_git) -> GuardContext:
         cwd, home = gc.variant_paths(self.root, variant)
-        return GuardContext.from_project(cwd, home=home, env=dict(self.env, NOT_ME_HOME=str(home)))
+        return GuardContext.from_project(cwd, home=home, env=dict(self.env, NOT_ME_HOME=str(home)), git=git)
 
     def hook(self, stdin: str, variant: str = "app") -> subprocess.CompletedProcess:
         _, home = gc.variant_paths(self.root, variant)
@@ -47,17 +48,53 @@ class _Fixtures(unittest.TestCase):
                               env=dict(self.env, NOT_ME_HOME=str(home)), timeout=60)
 
 
-class GuardTableTests(_Fixtures):
-    """Every case in guard_cases, in-process through decide()."""
+# The two table tests below are the slowest in the suite, so their cases are split over several classes (shards) that a
+# parallel runner can spread over workers. Each shard owns gc.CASES[shard::TABLE_SHARDS]; TableShardTests checks that
+# the shards together cover every case exactly once.
+TABLE_SHARDS = 2
+
+
+def _shard(shard: int) -> list:
+    return gc.CASES[shard::TABLE_SHARDS]
+
+
+def _memo_git(git):
+    """git with every answer cached by (args, cwd). The guard only reads git (config, remotes, branch) and the table
+    never changes the fixture tree, so each answer is the one real git gives; it just forks once instead of per case."""
+    cache = {}
+
+    def run(args, cwd):
+        key = (tuple(args), str(cwd))
+        if key not in cache:
+            cache[key] = git(args, cwd)
+        return cache[key]
+    return run
+
+
+class TableShardTests(unittest.TestCase):
+    def test_shards_cover_every_case_once(self):
+        self.assertGreaterEqual(len(gc.CASES), 110)
+        shards = [_shard(i) for i in range(TABLE_SHARDS)]
+        self.assertEqual(sum(len(s) for s in shards), len(gc.CASES))
+        self.assertEqual(sorted(c[0] for s in shards for c in s), sorted(c[0] for c in gc.CASES))
+        for name, base in (("GuardTableShard", _GuardTable), ("WindowsTypedPathTableShard", _WindowsTypedPathTable)):
+            found = sorted(cls.shard for cls in globals().values()
+                           if isinstance(cls, type) and issubclass(cls, base) and cls.__name__.startswith(name))
+            self.assertEqual(found, list(range(TABLE_SHARDS)), name)
+
+
+class _GuardTable:
+    """Every case in guard_cases, in-process through decide() (mixed into one class per shard)."""
+    shard: int
 
     def test_cases(self):
-        self.assertGreaterEqual(len(gc.CASES), 110)
         ctxs = {}
-        for case in gc.CASES:
+        git = _memo_git(paths.run_git)
+        for case in _shard(self.shard):
             cid, want, rule, tool, tin, variant = case
             with self.subTest(cid=cid, tool=tool, input=tin, variant=variant):
                 if variant not in ctxs:
-                    ctxs[variant] = self.ctx(variant)
+                    ctxs[variant] = self.ctx(variant, git=git)
                     if not guard.is_active(ctxs[variant]):
                         ctxs[variant].self_only()  # as the hook does
                 ctx = ctxs[variant]
@@ -70,12 +107,22 @@ class GuardTableTests(_Fixtures):
                         self.assertIn(text, result.message)
 
 
-class WindowsTypedPathTableTests(_Fixtures):
+class GuardTableShard0Tests(_GuardTable, _Fixtures):
+    shard = 0
+
+
+class GuardTableShard1Tests(_GuardTable, _Fixtures):
+    shard = 1
+
+
+class _WindowsTypedPathTable:
     """Table cases that name a fixture path, with the path typed the Windows way (C:\\Users\\x\\home). Bash drops
     unquoted backslashes, so before the guard judged words in both spellings these self-protection blocks came back
     allowed on Windows (fail open). Each case must decide as the table says both as written and, where it holds no
     quotes, with every path quoted (the shell keeps the backslashes). On Windows this runs on the real disk; elsewhere
-    tests/winsim.py shows the fixture tree to the guard under Windows names with ntpath as its path module."""
+    tests/winsim.py shows the fixture tree to the guard under Windows names with ntpath as its path module.
+    Mixed into one class per shard."""
+    shard: int
 
     def setUp(self):
         self.ctxs = {}
@@ -108,15 +155,21 @@ class WindowsTypedPathTableTests(_Fixtures):
             if self.sim is not None:
                 self.sim.start()
                 ctx = self.sim.context(ctx)
+            if not ctx.only_self:
+                ctx.git = _memo_git(ctx.git)
             self.ctxs[variant] = ctx
         cwd, _ = gc.variant_paths(self.root, variant)
         return guard.decide({"tool_name": tool, "tool_input": tin, "cwd": self.win(cwd), "session_id": gc.SESSION},
                             self.ctxs[variant])
 
+    @staticmethod
+    def names_a_path(tin) -> bool:
+        return any(k in json.dumps(tin) for k in ("{F}", "{H}", "{P}"))
+
     def test_cases_with_backslash_paths(self):
         checked = 0
-        for cid, want, rule, tool, tin, variant in gc.CASES:
-            if not any(k in json.dumps(tin) for k in ("{F}", "{H}", "{P}")):
+        for cid, want, rule, tool, tin, variant in _shard(self.shard):
+            if not self.names_a_path(tin):
                 continue
             checked += 1
             _, home = gc.variant_paths(self.root, variant)
@@ -130,8 +183,20 @@ class WindowsTypedPathTableTests(_Fixtures):
                                      getattr(result, "message", ""))
                     if isinstance(result, Block):
                         self.assertEqual(result.rule, rule)
-        self.assertGreater(checked, 100)
+        self.assertGreater(checked, 100 // TABLE_SHARDS)
 
+
+class WindowsTypedPathTableShardTests(unittest.TestCase):
+    def test_the_table_names_enough_paths(self):
+        self.assertGreater(sum(1 for c in gc.CASES if _WindowsTypedPathTable.names_a_path(c[4])), 100)
+
+
+class WindowsTypedPathTableShard0Tests(_WindowsTypedPathTable, _Fixtures):
+    shard = 0
+
+
+class WindowsTypedPathTableShard1Tests(_WindowsTypedPathTable, _Fixtures):
+    shard = 1
 
 
 @unittest.skipIf(os.name == "nt", "the pattern exemption is never given on Windows")
@@ -904,6 +969,64 @@ class DoctorFixBoundaryTests(_Fixtures):
                 self.assertEqual(result.rule, "self_protect")
 
 
+class WorktreeRunTests(unittest.TestCase):
+    """A run in any worktree of a checkout makes the guard active, and the config read-only, in every worktree;
+    found from the git common dir alone, without reading config."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="notme-guard-wt-")).resolve()
+        self.addCleanup(shutil.rmtree, str(self.tmp), True)
+        self.main = self.tmp / "main"
+        self.main.mkdir()
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+        for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "i"],
+                     ["worktree", "add", "-q", "-b", "a", str(self.tmp / "wt-a")],
+                     ["worktree", "add", "-q", "-b", "b", str(self.tmp / "wt-b")]):
+            subprocess.run(git + args, cwd=str(self.main), check=True, capture_output=True)
+        self.home = self.tmp / "home"
+        self.home.mkdir()
+
+    def ctx(self, where):
+        def no_git(args, cwd):
+            raise AssertionError(f"git {args} called")
+        return GuardContext.from_project(where, home=self.home, env={}, git=no_git)
+
+    def test_a_run_in_one_worktree_activates_the_guard_in_all(self):
+        for where in (self.main, self.tmp / "wt-a", self.tmp / "wt-b"):
+            self.assertFalse(guard.is_active(self.ctx(where)))
+        logs = runlog.log_root(self.main, None, {})
+        log = runlog.RunLog.start(logs, "new", "r", project_dir=self.tmp / "wt-b")
+        for where in (self.main, self.tmp / "wt-a", self.tmp / "wt-b"):
+            with self.subTest(where=where.name):
+                ctx = self.ctx(where)
+                self.assertTrue(ctx.active_run)
+                self.assertTrue(guard.is_active(ctx))
+        log.finish("done")
+        self.assertFalse(guard.is_active(self.ctx(self.tmp / "wt-a")))
+
+    def test_a_stale_run_in_a_linked_worktree_does_not_activate(self):
+        marker = runlog.default_marker_path(self.tmp / "wt-a")
+        marker.parent.mkdir(parents=True)
+        marker.write_text(json.dumps({"run_id": "old", "started": "2020-01-01T00:00:00+00:00"}), encoding="utf-8")
+        self.assertFalse(guard.is_active(self.ctx(self.main)))
+
+    def test_main_checkout_config_is_read_only_from_a_worktree_with_its_own_copy(self):
+        for where in (self.main, self.tmp / "wt-a"):
+            cfg = where / ".claude" / "not-me"
+            cfg.mkdir(parents=True)
+            (cfg / "project.md").write_text("---\nschema: 1\n---\n# Project\n", encoding="utf-8")
+        runlog.RunLog.start(runlog.log_root(self.main, None, {}), "new", "r", project_dir=self.tmp / "wt-b")
+        ctx = self.ctx(self.tmp / "wt-a")
+        for target in (self.main, self.tmp / "wt-a"):
+            with self.subTest(target=target.name):
+                event = {"tool_name": "Edit", "cwd": str(self.tmp / "wt-a"),
+                         "tool_input": {"file_path": str(target / ".claude" / "not-me" / "project.md"),
+                                        "old_string": "# Project", "new_string": "# Project x"}}
+                block = guard.decide(event, ctx)
+                self.assertIsInstance(block, Block)
+                self.assertEqual(block.rule, "self_protect")
+
+
 class HookTests(_Fixtures):
     def event(self, tool, tin, variant="app"):
         cwd, _ = gc.variant_paths(self.root, variant)
@@ -952,6 +1075,27 @@ class HookTests(_Fixtures):
             for tool, tin, variant in calls:
                 with self.subTest(tool=tool, input=tin, variant=variant):
                     self.assertEqual(mod.main(self.event(tool, tin, variant)), 0)
+
+    def test_main_leaves_no_watchdog_thread(self):
+        spec = importlib.util.spec_from_file_location("notme_repo_guard_hook", str(HOOK))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        for tin, variant, want in (({"command": "ls"}, "bare", 0), ({"command": "ls"}, "app", 0),
+                                   ({"command": "gh pr comment 1 -R acme/other -b x"}, "app", 2)):
+            with self.subTest(input=tin, variant=variant):
+                with mock.patch("sys.stderr"):
+                    self.assertEqual(mod.main(self.event("Bash", tin, variant)), want)
+                timers = [t for t in threading.enumerate() if isinstance(t, threading.Timer) and t.is_alive()]
+                self.assertEqual(timers, [])
+
+    def test_script_exit_codes_and_streams(self):
+        proc = self.hook(self.event("Bash", {"command": "ls"}))
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, b"", b""))
+        proc = self.hook(self.event("Bash", {"command": "gh pr comment 1 -R acme/other -b x"}))
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn(b"not-me guard [", proc.stderr)
+        self.assertIn(b"/not-me:allow-repo acme/other", proc.stderr)
+        self.assertEqual(proc.stdout, b"")
 
     def test_destructive_label(self):
         proc = self.hook(self.event("Bash", {"command": "gh secret set T --repo acme/app --body x"}))

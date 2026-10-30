@@ -142,7 +142,7 @@ Output: tracker, operator, dry_run (assign-issue would only record to the ledger
 
 ### `notme assign-issue`
 
-Add the operator, and only the operator, as the assignee of one tracker issue, so the queue picks it. For /not-me:suggest, after a person said yes to that issue. It takes no login, never removes an assignee and never touches labels, the board or a comment. Refused with no read and no write while a not-me run is active (kind active_run, with active_run {run_id, skill, ref, started}): autonomous runs never assign; only a person running /not-me:suggest does. Refused with no write: an issue outside the tracker (kind not_tracker), assigned to anyone else (kind assigned_to_other), or not among the issues suggest-issues lists now (kind not_eligible: closed, not to do, held back in an epic, by an untrusted author...). The write goes through the write gate; a dry run records it in the ledger and sends nothing. The assignees are read back after a real write: exit 5 when the operator is missing; exit 1 (kind assigned_to_other, assignees) when someone else is now assigned too. The operator stays assigned and nobody is unassigned; the queue will not pick the issue until a person sorts it out.
+Add the operator, and only the operator, as the assignee of one tracker issue, so the queue picks it. For /not-me:suggest, after a person said yes to that issue. It takes no login, never removes an assignee and never touches labels, the board or a comment. Refused with no read and no write while a not-me run is active in any worktree of the checkout (kind active_run, with active_run {run_id, skill, ref, started}): autonomous runs never assign; only a person running /not-me:suggest does. Refused with no write: an issue outside the tracker (kind not_tracker), assigned to anyone else (kind assigned_to_other), or not among the issues suggest-issues lists now (kind not_eligible: closed, not to do, held back in an epic, by an untrusted author...). The write goes through the write gate; a dry run records it in the ledger and sends nothing. The assignees are read back after a real write: exit 5 when the operator is missing; exit 1 (kind assigned_to_other, assignees) when someone else is now assigned too. The operator stays assigned and nobody is unassigned; the queue will not pick the issue until a person sorts it out.
 
 ```
 notme assign-issue N|REF
@@ -174,17 +174,18 @@ Output: number, previous, now, marker_comment_id, run_id; warnings when a queue.
 
 ### `notme release-issue`
 
-Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released, then post one comment with the old state, the new state (and the board column when the board follows) and the text of --reason-file. A comment that fails is a warning; the release stands. With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
+Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released. The old state, the new state (and the board column when the board follows) and the text of --reason-file go to the run log; a release to blocked also posts them as one comment, since the timeline cannot say why. A release to todo posts nothing. A comment that fails is a warning; the release stands. With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning. --no-comment releases the same way and posts nothing, even to blocked; --reason-file is then optional.
 
 ```
-notme release-issue N [--to TO] --reason-file F
+notme release-issue N [--to TO] [--reason-file F] [--no-comment]
 ```
 
 | Argument | Required | Meaning |
 |----------|----------|---------|
 | `N` | required |  |
 | `--to TO {todo|blocked}` | optional | (default todo) |
-| `--reason-file F` | required | file holding one line that says why; posted as one comment on the item |
+| `--reason-file F` | optional | file holding one line that says why; goes to the run log, and to one comment on a release to blocked; required unless --no-comment |
+| `--no-comment` | optional | post no comment: for a run that stops on a failure on not-me's own side |
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
@@ -192,7 +193,7 @@ Output: number, to, released, commented; warnings when a queue.sync mirror write
 
 ### `notme move-issue`
 
-Move an issue to a state, optionally only when it is currently in another one, then post one comment with the old state, the new state (and the label and board column the move also wrote) and the text of --reason-file. A comment that fails is a warning; the move stands. With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
+Move an issue to a state, optionally only when it is currently in another one. The old state, the new state (and the label and board column the move also wrote) and the text of --reason-file go to the run log, and to one comment when the new state is blocked, question, needs help, needs human or paused, which the timeline cannot explain. A comment that fails is a warning; the move stands. With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
 
 ```
 notme move-issue N --to STATE [--require-current STATE] --reason-file F
@@ -203,7 +204,7 @@ notme move-issue N --to STATE [--require-current STATE] --reason-file F
 | `N` | required |  |
 | `--to STATE` | required |  |
 | `--require-current STATE` | optional |  |
-| `--reason-file F` | required | file holding one line that says why; posted as one comment on the item |
+| `--reason-file F` | required | file holding one line that says why; goes to the run log, and to one comment on the item when the new state needs a person or stops work |
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
@@ -211,7 +212,7 @@ Output: number, to, require_current, commented; warnings when a queue.sync mirro
 
 ### `notme issue`
 
-An issue's facts. The body and comments of an author the roster does not trust are withheld.
+An issue's facts. The body and comments of an author the roster does not trust are withheld, and so are the title and body when whoever last edited the body is not trusted or cannot be read.
 
 ```
 notme issue N
@@ -221,7 +222,7 @@ notme issue N
 |----------|----------|---------|
 | `N` | required |  |
 
-Output: repo, number, title, state, url, author, author_trusted, labels, status, assignees, body, comments, comments_ignored, blocked_by ([{repo, number, state}] from GitHub issue dependencies; null when unknown), stack_on. stack_on is null unless a trusted author's body has one `Stack on:`, `Based on:` or `On top of:` owner/repo#N line (null too when the queue config is invalid: see warnings); then {ref, pr, head, base, state, draft, author, author_trusted (of the PR), stacks (branch from head and target it), ready, reason}. Read it here, never from the body: the line counts only from a trusted author, and the PR must be open, not a draft, from a trusted author and in this checkout's repo. A merged PR gives ready true and stacks false (a normal issue); queue.stacking off, another open blocker or a closed PR gives ready false
+Output: repo, number, title, state, url, author, author_trusted, labels, status, assignees, body, body_withheld (null, untrusted_author or untrusted_editor), comments, comments_ignored, blocked_by ([{repo, number, state}] from GitHub issue dependencies; null when unknown), blocking (the issues GitHub records as blocked by this one, same shape), stack_on. stack_on is null unless a trusted author's body has one `Stack on:`, `Based on:` or `On top of:` owner/repo#N line, or queue.stacking is auto and the issue has an open blocker (null too when the queue config is invalid: see warnings); then {ref, pr, head, base, state, draft, author, author_trusted (of the PR), stacks (branch from head and target it), ready, reason, via (declared: the line; blockers: auto, from the open blockers)}. Read it here, never from the body: the line counts only from a trusted author, and the PR must be open, not a draft, from a trusted author and in this checkout's repo. A merged PR gives ready true and stacks false (a normal issue); queue.stacking off, another open blocker, a blocker with no open PR or a closed PR gives ready false
 
 ### `notme pick-needs-work`
 
@@ -328,6 +329,21 @@ notme wait-checks REF [--minutes N]
 
 Output: state (success, failure, pending or none), checks, waited_s
 
+### `notme verify-plan`
+
+The verify plan for a run, from the effective verify doc, limits.ci_wait_minutes and a commit's CI. Reads only: the local origin/<base> ref (no fetch) and the check runs and statuses on GitHub of the checked commit: --sha when given (a rework run passes the PR head), else origin/<base>. The baseline is skipped only when verify.baseline is auto and that CI is green; a gh error, or more check runs or statuses than one page holds, makes base_ci unknown and the baseline runs. Targeted test commands are the lines of the fenced block in the verify doc's Targeted tests section (none when it is left as is). ci_wait is false when limits.ci_wait_minutes is 0.
+
+```
+notme verify-plan [--base B] [--sha SHA]
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `--base B` | optional | the base branch (default: the repo default branch) |
+| `--sha SHA` | optional | read the CI result of this commit (40 hex, e.g. the PR head) instead of origin/<base> |
+
+Output: base, base_sha, checked_sha (the commit whose CI was read), base_ci (success, failure, pending, none or unknown: the CI of checked_sha), baseline (setting, run, reason), targeted (configured, commands), ci_wait_minutes, ci_wait
+
 ### `notme feedback`
 
 Review findings on a PR from trusted authors only.
@@ -369,7 +385,7 @@ Output: url, strategy, head_sha, tried, skipped (when any); or none (with tried,
 
 ### `notme transition`
 
-Change an item's state label along a legal edge (reads the labels, replaces the set, reads it back), then post one comment with the old state, the new state and the text of --reason-file. A comment that fails is a warning; the change stands.
+Change an item's state label along a legal edge (reads the labels, replaces the set, reads it back). The old state, the new state and the text of --reason-file go to the run log, and to one comment when the new state is blocked, question, needs help, needs human or paused. A comment that fails is a warning; the change stands.
 
 ```
 notme transition N --from STATE --to STATE [--kind KIND] --reason-file F
@@ -381,7 +397,7 @@ notme transition N --from STATE --to STATE [--kind KIND] --reason-file F
 | `--from STATE` | required |  |
 | `--to STATE` | required |  |
 | `--kind KIND {issue|pr}` | optional | (default issue) |
-| `--reason-file F` | required | file holding one line that says why; posted as one comment on the item |
+| `--reason-file F` | required | file holding one line that says why; goes to the run log, and to one comment on the item when the new state needs a person or stops work |
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
@@ -389,7 +405,7 @@ Output: repo, number, kind, from, to, labels, commented
 
 ### `notme labels-sync`
 
-Make an item's labels match: --set replaces the whole set, --add and --remove edit it. --check only reports. A bare number is an item in the tracker; owner/name#N or a URL names an item in another allowed repository (a companion PR). A change that adds or removes a state label (needs human, blocked, question, paused, ...) needs --reason-file and posts one comment naming the labels and the reason; a failed comment is a warning and the change stands. Pass labels and other labels need no reason.
+Make an item's labels match: --set replaces the whole set, --add and --remove edit it. --check only reports. A bare number is an item in the tracker; owner/name#N or a URL names an item in another allowed repository (a companion PR). A change that adds or removes a state label needs --reason-file; the labels and the reason go to the run log. One comment names them only when the change adds blocked, question, needs help, needs human or paused; removing a state label or putting one back posts nothing. A failed comment is a warning and the change stands. Pass labels and other labels need no reason.
 
 ```
 notme labels-sync N|REF [--set a,b] [--add a,b] [--remove a,b] [--check] [--reason-file F]
@@ -406,11 +422,11 @@ notme labels-sync N|REF [--set a,b] [--add a,b] [--remove a,b] [--check] [--reas
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: repo, number, in_sync, changed, labels (current, or the new set); commented when a reason was posted
+Output: repo, number, in_sync, changed, labels (current, or the new set); commented (true when posted) when a state label changed
 
 ### `notme queue-resync`
 
-Set the side queue.source does not read to match the side it does, for each open issue on queue.board whose state label and board Status disagree (the issues `doctor` and `status` list): the board Status for a labels source, the labels (one full-set write, read back) for a board source. It follows the effective mode: in dry-run the writes reach only the ledger. A board the global allow list does not confirm is refused before anything is read. Issues not on the board are skipped and reported, never added; closed issues are never touched; neither are issues whose state has no column. A changed state label gets one comment saying why, as every other state-label change does (commented). The board Status change is not commented on.
+Set the side queue.source does not read to match the side it does, for each open issue on queue.board whose state label and board Status disagree (the issues `doctor` and `status` list): the board Status for a labels source, the labels (one full-set write, read back) for a board source. It follows the effective mode: in dry-run the writes reach only the ledger. A board the global allow list does not confirm is refused before anything is read. Issues not on the board are skipped and reported, never added; closed issues are never touched; neither are issues whose state has no column. Nothing is posted on GitHub: matching the other side is mechanical and the timeline shows the label change. Why each state label changed goes to the run log (--log).
 
 ```
 notme queue-resync
@@ -418,7 +434,7 @@ notme queue-resync
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: board, changes ([{number, url, side, from, to, result (changed, planned or failed), reason, commented (label changes only)}]), skipped ([{number, url, reason}]), truncated (the board has more items than the `read` count read; issues past them are reported as not among the items read, never as off the board), issues_truncated; dry_run when the writes were only recorded. Exits 1 when paused or disabled.
+Output: board, changes ([{number, url, side, from, to, result (changed, planned or failed), reason, commented (label changes only; always false)}]), skipped ([{number, url, reason}]), truncated (the board has more items than the `read` count read; issues past them are reported as not among the items read, never as off the board), issues_truncated; dry_run when the writes were only recorded. Exits 1 when paused or disabled.
 
 ### `notme labels-ensure`
 
@@ -508,7 +524,7 @@ Output: repo, number, updated
 
 ### `notme pr-open`
 
-Open a PR, set its labels, request review. The head branch may not be a protected branch. When --labels names a state label (needs review, ...), one comment on the new PR names it and the reason (the first line of --reason-file, else "pull request opened"); a failed comment is a warning and the PR stands. No comment in a dry run, which has no PR number.
+Open a PR, set its labels, request review. The head branch may not be a protected branch. When --labels names a state label (needs review, ...), the run log records it and the reason (the first line of --reason-file, else "pull request opened"). No comment is posted: opening the PR is the reason, and the timeline shows the labels.
 
 ```
 notme pr-open --head H --base B --title-file F --body-file F [--labels a,b] [--reviewers a,b] [--assignee L] [--draft] [--reason-file F]
@@ -524,11 +540,11 @@ notme pr-open --head H --base B --title-file F --body-file F [--labels a,b] [--r
 | `--reviewers a,b` | optional |  |
 | `--assignee L` | optional |  |
 | `--draft` | optional |  |
-| `--reason-file F` | optional | one line saying why the state labels are set; default: "pull request opened" |
+| `--reason-file F` | optional | one line for the run log saying why the state labels are set; default: "pull request opened" |
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: repo, number, url (both null in a dry run), head, base; commented when a state label was set
+Output: repo, number, url (both null in a dry run), head, base; commented (false) when a state label was set
 
 ### `notme companion-prs`
 
@@ -566,7 +582,7 @@ Output: repo, number, updated or unchanged
 
 ### `notme review-post`
 
-Post a review, optionally set labels, and read both back. APPROVE is refused unless review.auto_approve is true in the global (or default) layer; the repo layer cannot turn it on. --labels-auto reads the PR's reviews after posting and sets the full label set itself. With no rows in role.md, APPROVE moves the PR to review.approve_label and REQUEST_CHANGES to review.changes_label, as one approval did before. With rows, every roster reviewer except the author must approve (latest review that is not a comment; a dismissed review is not an approval): until then APPROVE keeps needs_review. Each role with an approving reviewer gets its pass label and a role with none loses it; REQUEST_CHANGES moves the PR to review.changes_label. COMMENT only updates the pass labels. A pass label missing from the repo is skipped with one warning. When the labels set change a state label (needs review, needs work, ready to merge, ...), one comment follows the review naming what was added and removed and the reason: the first line of --reason-file, else "a <EVENT> review was posted". A failed comment is a warning and the review and labels stand.
+Post a review, optionally set labels, and read both back. APPROVE is refused unless review.auto_approve is true in the global (or default) layer; the repo layer cannot turn it on. --labels-auto reads the PR's reviews after posting and sets the full label set itself. With no rows in role.md, APPROVE moves the PR to review.approve_label and REQUEST_CHANGES to review.changes_label, as one approval did before. With rows, every roster reviewer except the author must approve (latest review that is not a comment; a dismissed review is not an approval): until then APPROVE keeps needs_review. Each role with an approving reviewer gets its pass label and a role with none loses it; REQUEST_CHANGES moves the PR to review.changes_label. COMMENT only updates the pass labels. A pass label missing from the repo is skipped with one warning. When the labels set change a state label (needs review, needs work, ready to merge, ...), the run log records what was added and removed and the reason: the first line of --reason-file, else "a <EVENT> review was posted". No comment is posted: the review is the reason, and the timeline shows it next to the label change.
 
 ```
 notme review-post REF --event EVENT --body-file F [--comments-file J] [--reason-file F] [--labels-set a,b] [--labels-auto]
@@ -578,13 +594,13 @@ notme review-post REF --event EVENT --body-file F [--comments-file J] [--reason-
 | `--event EVENT {APPROVE|REQUEST_CHANGES|COMMENT}` | required |  |
 | `--body-file F` | required |  |
 | `--comments-file J` | optional |  |
-| `--reason-file F` | optional | one line saying why the state labels changed; default: the review's own verdict |
+| `--reason-file F` | optional | one line for the run log saying why the state labels changed; default: the review's own verdict |
 | `--labels-set a,b` | optional | set the full label set after posting |
 | `--labels-auto` | optional | work out the label set from the PR's reviews, role.md and the roster, then set it |
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
-Output: repo, number, event, state (event only in a dry run); with --labels-auto labels and approval (null with no roles; else required, approved, waiting, all_approved, pass_labels); commented when a state label changed
+Output: repo, number, event, state (event only in a dry run); with --labels-auto labels and approval (null with no roles; else required, approved, waiting, all_approved, pass_labels); commented (false) when a state label changed
 
 ### `notme resolve-threads`
 
@@ -605,7 +621,7 @@ Output: repo, number, resolved
 
 ### `notme issue-body`
 
-Replace an issue's body with a file's text. The text must pass `check-text` (exit 1, kind text_lint, and no write otherwise), and the issue's author must be trusted by the rule `issue` uses (otherwise exit 1, kind untrusted_author, and no write). Every not-me marker in the current body that the new text lacks is appended back, and the configured attribution is added when missing. The issue is read back after the write (exit 5 when the body differs; skipped in a dry run).
+Replace an issue's body with a file's text. The text must pass `check-text` (exit 1, kind text_lint, and no write otherwise), and the issue's author must be trusted by the rule `issue` uses (otherwise exit 1, kind untrusted_author, and no write), and so must whoever last edited the body (otherwise, or when that cannot be read, exit 1, kind untrusted_editor, and no write). Every not-me marker in the current body that the new text lacks is appended back, and the configured attribution is added when missing. The issue is read back after the write (exit 5 when the body differs; skipped in a dry run).
 
 ```
 notme issue-body N|REF --body-file F
@@ -619,6 +635,23 @@ notme issue-body N|REF --body-file F
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
 Output: repo, number, updated
+
+### `notme issue-stack-on`
+
+Add one line, `Stack on: OWNER/NAME#N`, to an issue's body, so the caller never reads or rewrites the body. The issue's author must be trusted by the rule `issue` uses (otherwise exit 1, kind untrusted_author), and so must whoever last edited the body (otherwise, or when that cannot be read, exit 1, kind untrusted_editor); neither writes anything. A body that already has a `Stack on:`, `Based on:` or `On top of:` line is left as it is (updated false). The line goes after the text and before any not-me markers at the end, which are kept. The issue is read back after the write (exit 5 when the body differs; skipped in a dry run).
+
+```
+notme issue-stack-on N|REF --pr OWNER/NAME#N
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `N|REF` | required | a number (in the tracker), #N, owner/name#N or a URL |
+| `--pr OWNER/NAME#N` | required | the pull request the issue may stack on |
+
+Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
+
+Output: repo, number, updated, line
 
 ### `notme followup`
 
@@ -642,7 +675,7 @@ Output: number, url (both null in a dry run), parent
 
 ### `notme check-text`
 
-Lint a text bound for GitHub (bare #N, local paths, assistant mentions, TL;DR line). Exit 1 when it finds problems.
+Lint a text bound for GitHub (bare #N, local paths, assistant mentions, TL;DR line, an account of local trouble the run worked around). Exit 1 when it finds problems.
 
 ```
 notme check-text --file F [--summary]
@@ -657,7 +690,7 @@ Output: ok, problems
 
 ### `notme log start`
 
-Start a run log and the active-run marker. Exit 1 (kind active_run) when another run is active.
+Start a run log and this worktree's active-run marker. Exit 1 (kind active_run) when another run is active in this worktree; runs in other worktrees of the checkout do not block it.
 
 ```
 notme log start --skill S --ref R [--force]
@@ -704,7 +737,7 @@ Output: path
 
 ### `notme log finish`
 
-Finish a run log: write its summary and clear the active-run marker.
+Finish a run log: write its summary, clear the run's active-run marker (in whichever worktree holds it) and drop the shared test environment lock when this run holds it.
 
 ```
 notme log finish PATH --status S [--failures-file F]
@@ -746,6 +779,30 @@ notme log list [--skill S] [--limit N]
 | `--limit N` | optional | at most N logs (default 20) (default 20) |
 
 Output: logs ([{path, run_id, skill, ref, status}])
+
+### `notme verify-lock acquire`
+
+Take the lock on the shared test environment for this run, when verify.md sets `shared_env: true`. One lock covers every worktree of the checkout (<git-common-dir>/not-me/verify.lock). Hold it from environment start through the last check, and only then; release it with `verify-lock release`. With `shared_env` false (the default) it takes nothing and returns locked false: each worktree verifies on its own. Taking it again while holding it is fine. A lock whose run is no longer active in any worktree, or older than `limits.claim_stale_hours`, is taken over. Held by another active run: polls every 15 seconds for up to --wait-seconds, then exits 1 (kind verify_locked, holder {run_id, since}, waited_seconds). Waiting never means skipping verification. Local only: nothing is sent to GitHub.
+
+```
+notme verify-lock acquire [--wait-seconds N]
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `--wait-seconds N` | optional | wait up to N seconds for it (at most 540; default 0, try once) |
+
+Output: shared_env, locked, waited_seconds (when shared_env)
+
+### `notme verify-lock release`
+
+Release the shared test environment lock when this run holds it; another run's lock is left alone. `log finish` releases it too. Local only.
+
+```
+notme verify-lock release
+```
+
+Output: released
 
 ### `notme retro save`
 
@@ -931,7 +988,7 @@ Output: restored
 
 ### `notme git worktree-add`
 
-Add a detached worktree at a sha at <main checkout>/.claude/worktrees/NAME; the CLI picks the path. NAME defaults to review-<first 12 chars of SHA> and must match review-[A-Za-z0-9._-]{1,57} with no ".."; anything else, a symlinked .claude, .claude/worktrees, info or info/exclude, or a main checkout (via core.worktree) that does not share this repository's git dir, is refused as unsafe_path. An existing path is refused as path_exists. The git common dir's info/exclude gets /.claude/worktrees/ so the worktree never shows as untracked in the main checkout. Works the same from the main checkout or a linked worktree.
+Add a detached worktree at a sha at <main checkout>/.claude/worktrees/NAME; the CLI picks the path. NAME defaults to review-<first 12 chars of SHA> and must be review-, notme-new- or notme-update- followed by [A-Za-z0-9._-]{1,57} with no ".." (notme-new- and notme-update- name the worktree a run works in when workspace is worktree); anything else, a symlinked .claude, .claude/worktrees, info or info/exclude, or a main checkout (via core.worktree) that does not share this repository's git dir, is refused as unsafe_path. An existing path is refused as path_exists. The git common dir's info/exclude gets /.claude/worktrees/ so the worktree never shows as untracked in the main checkout. Works the same from the main checkout or a linked worktree.
 
 ```
 notme git worktree-add SHA [--name NAME]
@@ -946,7 +1003,7 @@ Output: path (absolute), sha
 
 ### `notme git worktree-remove`
 
-Remove a worktree made by `git worktree-add`. PATH must be a review-* dir directly under <main checkout>/.claude/worktrees/; anything else, including Claude Code's own session worktrees there, is refused as unsafe_path.
+Remove a worktree made by `git worktree-add`. PATH must be a review-*, notme-new-* or notme-update-* dir directly under <main checkout>/.claude/worktrees/; anything else, including Claude Code's own session worktrees there, is refused as unsafe_path.
 
 ```
 notme git worktree-remove PATH
@@ -990,7 +1047,7 @@ A read-only summary: enabled and paused state, the active run, items needing a p
 notme status
 ```
 
-Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, queue (where the issue queue looks, as in config --explain), items, stale_claims, interrupted_runs (skill, run_id, ref, file), last_runs, picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and "; target epics: #N, ..." when set), queue_drift (when queue.board is set: [{number, url, label, status, skip}] of open issues whose state label and board Status disagree, [] when they agree; skip is why queue-resync cannot fix one, else null), queue_drift_truncated (the board has more items than were read), warnings
+Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run (the run in this worktree), active_runs (every fresh run in any worktree of the checkout: [{run_id, skill, ref, started}]), queue (where the issue queue looks, as in config --explain), items, stale_claims, interrupted_runs (skill, run_id, ref, file), last_runs, picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and "; target epics: #N, ..." when set), queue_drift (when queue.board is set: [{number, url, label, status, skip}] of open issues whose state label and board Status disagree, [] when they agree; skip is why queue-resync cannot fix one, else null), queue_drift_truncated (the board has more items than were read), warnings
 
 ### `notme pause`
 
@@ -1043,7 +1100,7 @@ Output: the mode show keys, plus written (layer, file, mode) and, when the repo 
 
 ### `notme doctor`
 
-Check the tools and setup: python, git and gh versions, config, mode (a warning when `mode: live` is set but not confirmed by `notme mode live`), config files (a warning when neither the global nor the repo layer holds a not-me config file), gh auth and scopes, pass labels (advice when role.md names any: the missing ones, for `labels-ensure`), the queue source (a warning when the pick label is missing, the board is not confirmed or not found, or a board_states column is not a status option; not run without gh), guard self-test, spawn depth. Exit 7 when the only failed required checks are gh, gh auth or gh scopes; exit 1 when another required check fails. --init-token instead creates <not-me home>/operator-token (random, mode 0600) and shows it once; only a person may run it (kind human_only otherwise), and an existing token is never replaced (kind token_exists: delete the file to make a new one).
+Check the tools and setup: python, git and gh versions, config, mode (a warning when `mode: live` is set but not confirmed by `notme mode live`), config files (a warning when neither the global nor the repo layer holds a not-me config file), gh auth and scopes, pass labels (advice when role.md names any: the missing ones, for `labels-ensure`), the queue source (a warning when the pick label is missing, the board is not confirmed or not found, or a board_states column is not a status option; not run without gh), guard self-test, spawn depth, permissions (advice: the recommended permissions.allow rules missing from the user and project settings files, with the JSON to add in its hint; doctor never writes settings). Exit 7 when the only failed required checks are gh, gh auth or gh scopes; exit 1 when another required check fails. --init-token instead creates <not-me home>/operator-token (random, mode 0600) and shows it once; only a person may run it (kind human_only otherwise), and an existing token is never replaced (kind token_exists: delete the file to make a new one).
 
 ```
 notme doctor [--init-token]

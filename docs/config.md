@@ -8,7 +8,7 @@ not-me is configured by six small markdown files. Each file has settings at the 
 | --- | --- |
 | `project.md` | Who and where: tracker repo, queue, labels, guard rules, models, limits, and the roster of people you trust |
 | `standards.md` | How work is shaped: branch names, commit style, PR title and template, issue readiness |
-| `verify.md` | How to prove a change works: start, tests, lint, build, CI parity |
+| `verify.md` | How to prove a change works: start, baseline, targeted tests, tests, lint, build, CI parity, person-only commands |
 | `review.md` | What a review looks at, which labels it applies |
 | `prove.md` | How to find the test site for a PR and run its testing steps |
 | `role.md` | Which reviewers must approve a PR, their roles, and the pass label each role earns |
@@ -199,7 +199,7 @@ Anyone with push access can edit the repo layer, and it is committed, so not-me 
 | `mode` | set `dry-run` | set `live`. The value is ignored |
 | `enabled` | set `false` | set `true` over a lower `false` |
 | `queue.include_unassigned` | set `false` | set `true` over a lower `false` |
-| `queue.stacking` | set `off` | set `declared` over a lower `off`, or set it to `null`. The value is ignored |
+| `queue.stacking` | set `off`, or `declared` over a lower `auto` | set `auto`, set `declared` over a lower `off`, or set it to `null`. The value is ignored |
 | `queue.list_limit` | lower it | raise it above the lower layer's value, or set it (or the whole `queue` map) to `null` |
 | `picking.value_max_chars` | lower it | raise it above the lower layer's value, or set `null` |
 | `picking.fields`, `picking.target_epics` and the `## Picking work` section | set anything | nothing: they only order eligible issues |
@@ -364,7 +364,11 @@ The reference is a PR, or an issue whose single open PR is used (a closed issue 
 
 Otherwise the issue is left out of `pick-issue` and listed under `stack_held` with the reason; when that leaves nothing to pick, the `none` result carries `reason: stack_held` and the refs and reasons. An explicit `/not-me:new N` on such an issue stops with `HELD` before any claim and creates no branch. A merged PR makes the issue a normal one on the default branch; a PR closed without merging keeps it waiting. When the PR gets new commits, `/not-me:update` on the stacked PR merges that branch in (a merge, never a rebase). GitHub retargets the stacked PR to the default branch only when the predecessor's head branch is deleted on merge; otherwise the base stays on the old branch, and `/not-me:update` reports it for a person to fix. Nothing here force-pushes, deletes a branch or merges.
 
-Set `queue.stacking: off` to never stack: the line is ignored and the issue waits. The default is `declared`. The repo layer may only turn it off. `/not-me:setup` explains the line and asks for the default, and `/not-me:ticket` offers to add the line when an issue's only open blocker is an issue whose single open PR could be stacked on. Base order: `--base`, an epic's predecessor branch, the stacked PR's branch, `Base branch:`, the epic's branch, the default branch.
+Set `queue.stacking: off` to never stack: the line is ignored and the issue waits. The default is `declared`.
+
+`queue.stacking: auto` stacks without the line. An issue with no line whose open blockers all resolve to one open PR is ready and stacks on that PR, under the same checks as a declared line. Its blockers are GitHub's blocked-by dependencies plus any `Blocked by: owner/repo#N` or `Depends on: owner/repo#N` line in a trusted body (same rules as `Stack on:`: whole line, full reference, not in a code block or comment). An issue blocker resolves to its single open PR; a PR blocker is itself; a closed issue or a merged PR no longer blocks. The issue still waits, listed under `stack_held`, when a blocker has no open PR yet, has more than one, is a draft, a fork or by someone off the roster, is in another repo, or when its blockers resolve to more than one PR (one PR that closes all of them is fine). An issue with no open blocker, or whose blockers cannot be read, is a normal issue. The fact says which way it was found: `via: declared` or `via: blockers`. In any mode, an open `Blocked by:` or `Depends on:` line that does not lead to the named PR also holds an issue that has a `Stack on:` line.
+
+`auto` may be set only in the plugin defaults or your global layer. The repo layer may only step down: `declared` or `off` under a global `auto`, `off` under `declared`. `/not-me:setup` explains the line and asks for the default, and `/not-me:ticket` adds the line when an issue's only open blocker has an open PR, and suggests one when it has none yet. When `/not-me:new` opens a PR for an issue that other open issues are blocked by, it names them in the PR body, adds a `Stack on:` line to each one written by a roster member that has no line, and moves one that carries `blocked` only because of this issue back to the pick label. Base order: `--base`, an epic's predecessor branch, the stacked PR's branch, `Base branch:`, the epic's branch, the default branch.
 
 ### Keeping labels and the board in step
 
@@ -387,7 +391,7 @@ queue:
 
 The mirror only follows moves not-me makes after `queue.sync` is on. Issues that drifted before, or that a person moved by hand, stay out of step until you fix them. With `queue.board` set, `notme doctor` (the `queue drift` check) and `notme status` (`queue_drift`) list every open issue whose state label and board Status disagree, with the issue URL and both values. They only read, and list nothing when the two sides agree. Reading the board needs the same allow-list confirmation as writing to it; an unconfirmed board is reported as not run. An issue `queue-resync` cannot fix (no mapped column, or a column the board lacks) is listed with the reason and the `queue.board_states` key to set. `notme queue-resync` stops with the usual paused error when not-me is paused or disabled.
 
-`notme queue-resync` fixes what that report lists. It sets the side `queue.source` does not read to match the side it does, issue by issue (the board Status for a labels source, the labels for a board source), and prints what it changed. It follows the effective mode: in dry-run the writes reach only the ledger and each change reads `planned`. In live mode it reads each result back. A state label it changes gets one comment saying why, like any other state-label change; a board Status change gets none. It never adds an issue to a board (an issue that is not on the board is skipped and listed), never touches a closed issue, and leaves states with no column (`needs_work`, `question`, ...) alone. It reads the board 100 items at a time, up to 10 pages (1000 items), and the first 200 open issues; when either is cut short, the report and the command say so (`truncated`, `issues_truncated`), drift past the read is not listed, and an issue that may be past it is reported as "not among the first N board items read", never as off the board. An issue with a state that maps to no board column, or to a column the board lacks, is skipped with the `queue.board_states` key to fix; `doctor` also flags a `queue.board_states` value that is not a real column when the source is labels and `queue.sync` is on.
+`notme queue-resync` fixes what that report lists. It sets the side `queue.source` does not read to match the side it does, issue by issue (the board Status for a labels source, the labels for a board source), and prints what it changed. It follows the effective mode: in dry-run the writes reach only the ledger and each change reads `planned`. In live mode it reads each result back. It posts no comment: a state label it changes is logged with the reason when it gets `--log`, and the timeline shows the change. It never adds an issue to a board (an issue that is not on the board is skipped and listed), never touches a closed issue, and leaves states with no column (`needs_work`, `question`, ...) alone. It reads the board 100 items at a time, up to 10 pages (1000 items), and the first 200 open issues; when either is cut short, the report and the command say so (`truncated`, `issues_truncated`), drift past the read is not listed, and an issue that may be past it is reported as "not among the first N board items read", never as off the board. An issue with a state that maps to no board column, or to a column the board lacks, is skipped with the `queue.board_states` key to fix; `doctor` also flags a `queue.board_states` value that is not a real column when the source is labels and `queue.sync` is on.
 
 Any `queue.source` value other than `labels`, `board` or `either` is reported as not supported by `notme status`, `notme config --explain` and `notme doctor`, and a run refuses it.
 
@@ -415,17 +419,24 @@ queue:
 
 ### Saying why on every state change
 
-`notme move-issue`, `notme release-issue` and `notme transition` take a required `--reason-file` (the text goes through a file, never a shell argument). After the state change succeeds they post one comment on the item: "Moved from `in progress` to `needs review` (board column `In review`): <reason>", with the run marker. When labels and the board are both written, the one comment names both; the mirror posts none of its own. A claim already leaves its marker comment, so `claim-issue` posts no second one. A comment that fails to post is a warning in the command's output and the run log; the state change stands.
+Every state change records why in the run log (an `ACTION  why: ...` line when the command gets `--log`). GitHub already shows each label change, review and unassign in the item's timeline, so not-me comments only when the timeline cannot say why: when the new state is `blocked`, `question`, `needs help`, `needs human` or `paused`, the states where work stopped or a person is needed. This rule is fixed in the CLI rather than left to a flag, so a run cannot add noise by habit.
+
+`notme move-issue`, `notme release-issue` and `notme transition` take a required `--reason-file` (the text goes through a file, never a shell argument). After the state change succeeds the reason goes to the run log, and a change to one of the states above also posts one comment on the item: "Moved from `in progress` to `blocked` (board column `Blocked`): <reason>", with the run marker. When labels and the board are both written, the one comment names both; the mirror posts none of its own. A claim already leaves its marker comment, so `claim-issue` posts no second one. A comment that fails to post is a warning in the command's output and the run log; the state change stands.
+
+`notme release-issue --no-comment` unassigns, moves the state back and marks the claim released as usual, posts no comment even to `blocked`, and needs no `--reason-file`. A run that stops on a failure on not-me's own side uses it, so nothing about that failure reaches GitHub; the run log and the `FAILED` result line carry the error.
 
 The reason is one line (at most 500 characters), it may not contain an HTML comment, so it can never carry a not-me marker, and it must pass the same text check as any other post.
 
-Other changes to a state label are explained too, so none is silent:
+Other changes to a state label are logged the same way:
 
-- `notme labels-sync` needs `--reason-file` whenever the change adds or removes a state label (any label in `labels`: `needs human`, `blocked`, `question`, `paused`, ...) and then posts one comment: "State labels changed (added `needs human`): <reason>". Pass labels and other labels need no reason and post nothing; `--check` needs none.
-- `notme review-post` posts that comment after the review when its labels change a state label (for example `needs review` to `needs work`). The reason is the first line of its optional `--reason-file`, else "a <EVENT> review was posted": the review just posted is the explanation.
-- `notme pr-open` posts it on the new PR when `--labels` names a state label, with the reason from its optional `--reason-file`, else "pull request opened". A dry run posts none, since there is no PR number.
+- `notme labels-sync` needs `--reason-file` whenever the change adds or removes a state label (any label in `labels`). It posts one comment, "State labels changed (added `needs human`): <reason>", only when it adds one of the states above. Removing a state label or putting one back is mechanical and is only logged. Pass labels and other labels need no reason and post nothing; `--check` needs none.
+- `notme review-post` logs the state labels its labels change, with the first line of its optional `--reason-file`, else "a <EVENT> review was posted". It posts no comment: the review is the reason, and it sits in the timeline next to the label change.
+- `notme pr-open` logs the state label `--labels` sets, with the reason from its optional `--reason-file`, else "pull request opened". It posts no comment.
+- `notme queue-resync` logs each state label it sets to match the board and posts no comment.
 
-`scripts/check-skills.py` rule R15 flags a skill or reference call to `move-issue`, `release-issue`, `transition` or `labels-sync` without `--reason-file`.
+`commented` in each command's output is true only when a comment was posted.
+
+`scripts/check-skills.py` rule R15 flags a skill or reference call to `move-issue`, `release-issue`, `transition` or `labels-sync` without `--reason-file`, except `release-issue --no-comment` and `labels-sync --check`.
 
 ## Companion sets
 
@@ -445,6 +456,26 @@ repos:
 - Inside a companion checkout, that repo's own `.claude/not-me/` applies for standards, verify, review, and guard settings. A companion with none uses the global and default layers.
 - `repos` is a replace key, not a union. A higher layer's list replaces the lower one.
 - The names in `repos` need confirming on your machine if they come from the repo layer (above).
+
+## Faster runs: targeted tests, the baseline, and the CI wait
+
+By default a run uses the full test, lint and build commands at every step, runs a full baseline before any edit, and waits for CI after the push. Three settings make runs faster without weakening the final check. `notme verify-plan` reports what is in force for a run.
+
+**Targeted tests.** Pin one or more commands in a fenced code block under `## Targeted tests` in `verify.md`. Each takes the changed test files or test names as trailing arguments. Runs then use them for red then green, after the implementer, and after each fix round, and tell implementers to run only them. The full `## Tests`, `## Lint` and `## Build` commands run once, right before the push. When Checkpoint B (merging the base in before the push) brings in commits, the targeted tests run again, and the full set only when they cannot cover the change. Left as shipped, the section configures nothing and every step runs the full commands, as before. Blank lines and lines that start with `#` in the block are ignored.
+
+````markdown
+## Targeted tests
+
+```bash
+python3 -m unittest
+```
+````
+
+**The baseline.** `baseline` in `verify.md` is `always` (default) or `auto`. With `auto`, a run skips the full baseline when the latest CI is green at the commit it starts from: the base branch's head SHA for a new issue, the local `HEAD` after Checkpoint A for a rework (`/not-me:update`). That is the PR head when Checkpoint A merged nothing; a merge commit it made has no CI, so the baseline runs. It logs that it skipped it and why. A CI result with more check runs or statuses than one page holds counts as unreadable. A red, pending, missing or unreadable CI result still runs the baseline. Any layer may set it.
+
+**The CI wait.** `limits.ci_wait_minutes` in `project.md` is how long a run waits for CI after the push (default `20`). `0` means open the PR and do not wait; a red CI result is then left to `/not-me:update` or a person.
+
+**Person-only commands.** List commands a run must never start, such as live evals or anything that calls a paid model or service for real, under `## Person only` in `verify.md`. A person runs them.
 
 ## The routing policy
 
@@ -528,7 +559,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `queue.board_states.in_progress` | `In progress` | Board column name for claimed work |
 | `queue.board_states.in_review` | `In review` | Board column name for work waiting on review |
 | `queue.board_states.blocked` | `Blocked` | Board column name for blocked work |
-| `queue.stacking` | `declared` | `declared` lets an issue with a trusted `Stack on: owner/repo#PR` (or `Based on:`, `On top of:`) line start from that open PR's branch; `off` never stacks, and such an issue waits for the merge. The repo layer may set `off`, never `declared` over a lower `off` (see [Stacking on an open PR](#stacking-on-an-open-pr)) |
+| `queue.stacking` | `declared` | `declared` lets an issue with a trusted `Stack on: owner/repo#PR` (or `Based on:`, `On top of:`) line start from that open PR's branch; `auto` also stacks an issue with no line whose open blockers all resolve to one ready open PR; `off` never stacks, and such an issue waits for the merge. `auto` only in the global layer; the repo layer may step down (`declared` under `auto`, `off`), never up (see [Stacking on an open PR](#stacking-on-an-open-pr)) |
 | `queue.sync` | `false` | `true` makes each claim, move and release also update the side `queue.source` does not read: the board Status for a labels source, the labels for a board source. `queue.source: either` always does this, and a `false` written next to it is a config error. Needs `queue.board` set; a board named in the repo layer must be confirmed on the global allow list; a failed mirror write is a warning (see [Keeping labels and the board in step](#keeping-labels-and-the-board-in-step)) |
 | `picking.fields` | `[]` | Board field names whose values `notme pick-issue` lists for each issue, for the rules in the `## Picking work` section to use. Any layer may set it (see [Picking work](#picking-work)) |
 | `picking.target_epics` | `[]` | Epic issue numbers to finish first, in this order. One counts only when a trusted roster member wrote it. Any layer may set it (see [Picking work](#picking-work)) |
@@ -559,8 +590,9 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `markers.legacy` | `[]` | Older run-marker strings that are still recognised as not-me's own. Union across layers |
 | `attribution` | `inherit` | `inherit` adds nothing and lets the client decide, `none` adds no line at all, any other text is added as the last line of commit messages and PR bodies |
 | `limits.fix_loop` | `3` | Fix rounds before a run gives up and parks |
-| `limits.ci_wait_minutes` | `20` | Minutes to wait for CI on a pushed head |
+| `limits.ci_wait_minutes` | `20` | Minutes to wait for CI on a pushed head. `0` means open the PR and do not wait; a red CI result is left to `/not-me:update` or a person |
 | `limits.claim_stale_hours` | `8` | Hours before an unfinished claim with no pushed branch is reported as stale. It is reported, never released automatically |
+| `limits.parallel_runs` | `3` | Most runs `/not-me --parallel N` starts at once; a larger N is lowered to this. See [Parallel runs](parallel-runs.md) |
 | `models.strategy` | `orchestrate` | `orchestrate` or `single`. See "The routing policy" |
 | `models.single_model` | `opus` | The model used for everything when `strategy` is `single` |
 | `models.bg` | `opus` | The model for `--bg` runs |
@@ -589,7 +621,9 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `schema` | `1` | Config format version. `verify.md` has no other keys. Its sections hold the commands, and leaving a section as is lets not-me discover them |
+| `schema` | `1` | Config format version. The sections hold the commands, and leaving a section as is lets not-me discover them. `## Targeted tests` pins commands for the work in progress; see "Faster runs" |
+| `baseline` | `always` | `always` or `auto`. `auto` skips the full baseline when the base branch's CI is green at its head, and logs why. Any layer may set it |
+| `shared_env` | `false` | `true` when the checks need one test environment that every worktree of the checkout shares (a stack started outside the worktree). Runs in other worktrees still run in parallel; only the verify step, from environment start through the last check, takes the lock (`notme verify-lock`), and a run that finds it busy waits or stops, never skipping verification. `false` means each worktree verifies on its own and nothing is locked. Setup detects it from the verify commands or asks |
 
 ### review.md
 

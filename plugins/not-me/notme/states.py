@@ -10,6 +10,10 @@ STATES = ("todo", "in_progress", "needs_review", "needs_work", "ready_to_merge",
 ADDITIVE_ISSUE = frozenset({"paused"})
 ADDITIVE_PR = frozenset({"paused", "needs_human"})
 
+# States whose arrival gets a state-change comment. The timeline shows every label change, but not why work
+# stopped or a person is needed; for every other state the reason goes to the run log only.
+EXPLAINED = frozenset({"blocked", "question", "needs_help", "needs_human", "paused"})
+
 ISSUE_EDGES: Dict[str, FrozenSet[str]] = {
     "todo": frozenset({"in_progress"}),
     "in_progress": frozenset({"needs_review", "blocked", "todo", "needs_human"}),

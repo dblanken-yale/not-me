@@ -20,10 +20,13 @@ Make one work directory in the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/
    `notme pr-body` must keep it too. After it comes the template at
    `standards.pr_template` when it resolves, else the default sections from
    `pr-shape.md`:
-   - `## Summary`. For a chained sub-issue the first line is
-     `Builds on <owner>/<repo>#<n>`.
+   - `## Summary`. For a chained sub-issue, or a stacked issue (`pr` in `stack_on`),
+     the first line is `Builds on <owner>/<repo>#<n>`. When `blocking` from
+     `notme issue N` lists open issues, add a line `Unblocks <ref>, <ref>` (full refs).
    - `## Testing steps`: a checklist a person can follow. Tick only what this run
-     ran and saw pass. Never inside `<details>`.
+     ran and saw pass. Never inside `<details>`. Each check by its command and
+     result only, with no account of local trouble the run got past; that stays
+     in the run log as a `WARN` (autonomy-and-logging.md, "Failures on our side").
    - `## Companion PRs`, only in a companion set.
    - `## References`: the issue as `<owner>/<repo>#N`, with the closing keyword
      from `standards.closing_keyword` (`auto`: `Closes <owner>/<repo>#N` when the
@@ -46,9 +49,9 @@ notme pr-open --head <branch> --base <base> --title-file title.txt \
   --assignee <operator> --log <path>
 ```
 
-1. `<needs_review name>` is the repo label for `needs_review` from `labels`. The CLI then posts
-   one comment on the new PR saying the state label was set ("pull request opened"); add
-   `--reason-file <f>` only to say something more specific.
+1. `<needs_review name>` is the repo label for `needs_review` from `labels`. The CLI logs that
+   the state label was set ("pull request opened") and posts no comment; add `--reason-file <f>`
+   only to log something more specific.
 2. Reviewers come from `reviewers`: the entry for this repo name, else `default`.
    An empty list: leave out `--reviewers`.
 3. `<operator>` is `operator` from the config, or the login `notme me` prints.
@@ -74,10 +77,29 @@ This replaces `in_progress` with `needs_review` on a label queue and moves the
 card on a board queue. A state mismatch (exit 1) means someone moved the issue
 during the run: log a `WARN`, leave it, and say so in the result note.
 
+## Issues waiting on this one
+
+After the move, unless `queue.stacking` is `off` (in a dry run, log what it would
+do), for each open issue D in the tracker that this issue's `blocking` lists:
+
+1. `notme issue D` for its facts. Skip D when `author_trusted` is false or
+   `body_withheld` is set. Never copy, edit or rewrite D's body yourself.
+2. Unless `via` in `stack_on` is `declared` (D already names a PR), run
+   `notme issue-stack-on D --pr <repo>#<pr> --log <path>`. The CLI reads D itself,
+   refuses one whose author or last editor is off the roster, adds the one
+   `Stack on:` line before the not-me markers, and reads it back.
+3. When D carries the `blocked` label (or sits in the board's Blocked column) and
+   this issue is its only open `blocked_by` entry:
+   `notme move-issue D --to todo --require-current blocked --reason-file <f> --log <path>`,
+   the reason saying `<ref> is open as <repo>#<pr>; D may stack on it`.
+4. A failure here is a `WARN` in the log; the PR stands.
+
 ## Checklist
 
 - [ ] Title and body written to files and checked with `notme check-text`.
 - [ ] Body has Summary, uncollapsed Testing steps, References with the right keyword.
+- [ ] No account of local trouble anywhere in the body.
 - [ ] Opened ready for review, `needs_review` and reviewers on the completing PR only.
 - [ ] Companion sections written on every PR in the set.
 - [ ] Moved the issue from `in_progress` to `needs_review`.
+- [ ] Added `Stack on:` to trusted issues waiting on this one; unblocked those it alone held.

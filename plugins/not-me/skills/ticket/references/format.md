@@ -63,14 +63,18 @@ report when the board has those fields, never questions and never writes.
 
 ## Stacking
 
-`notme issue N` returns `blocked_by` and `stack_on`. GitHub dependencies link
-issues, not PRs, so the case to offer is: the only open blocker is an issue whose
-single open PR is X (open, not a draft; check it with `notme bundle <X>`) and
-`stack_on` is null. Offer to add one line, `Stack on: <owner/repo#X>` (or `Based on:`,
-`On top of:`; the blocker issue's own ref works too), to the body: the issue may then
-start now, branched from X's branch. Say it still waits on any other open blocker, a
-draft or closed PR, or `queue.stacking: off`. Apply it only after a yes, through the
-body edit in Step 3 of the skill. A `stack_on` already there: report `ready` and `reason`.
+Stacking on an open PR is the normal way to start dependent work early. `notme issue N`
+returns `blocked_by` and `stack_on`; when filing, the blockers are the ones the
+operator names. GitHub dependencies link issues, not PRs, so the case is: the only
+open blocker is an issue whose single open PR is X (open, not a draft; check it with
+`notme bundle <X>`) and `via` in `stack_on` is not `declared`. Then put one line,
+`Stack on: <owner/repo#X>`, in the drafted body (filing or grooming) or offer it as
+the one edit (`--check`): the issue may start now, branched from X's branch. Say it
+still waits on any other open blocker, a draft or closed PR, or `queue.stacking: off`.
+When the only blocker has no PR yet, suggest the line in the report instead: once
+that PR opens, the run that opens it adds the line itself. Every write still needs
+the operator's yes, through the body edit in Step 3 of the skill. A declared
+`stack_on` already there: report `ready` and `reason`.
 
 ## Checklist
 

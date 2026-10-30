@@ -37,10 +37,12 @@ Six more states sit next to the main flow. They do not replace the state above.
 | `needs_human` (`needs human`) | new, update, review, prove | A run stopped short: parked, held, or gave up. A person must act |
 | `needs_help` (`needs help`) | prove | Proof failed `prove.give_up_after` times (default 3). Ask a person |
 | `paused` (`paused`) | a person | Every run skips this item until the label is removed |
-| `blocked` (`blocked`) | a person, or `release-issue --to blocked` | Cannot move until something else lands. Never picked up |
+| `blocked` (`blocked`) | a person, or `release-issue --to blocked` | Cannot move until something else lands. Never picked up. When new opens the PR for its only open blocker, it moves the issue back to `todo` with a `Stack on:` line |
 | `epic` (`epic`) | a person | Parent issue. Never picked up directly; its sub-issues are |
 
 That makes eleven: `to do`, `in progress`, `needs review`, `needs work`, `ready to merge`, `question`, `blocked`, `epic`, `needs help`, `needs human`, `paused`.
+
+**When a state change gets a comment.** GitHub's timeline already shows every label change, so not-me posts a one-line "why" comment only when an item moves to `blocked`, `question`, `needs help`, `needs human` or `paused`. Every other change (opening a PR, a review, a release to `to do`, a label matched to the board) posts nothing; its reason goes to the run log. See "Saying why on every state change" in [config.md](config.md).
 
 ### Approval with reviewer roles
 
@@ -69,7 +71,7 @@ Who acts where:
 
 ## What each skill does
 
-- **`/not-me`** is the router. It checks that not-me is on and idle, then runs the legs in the `router` order (default `update`, then `new`). It stops at the first leg that does something. Every leg returning `NONE` is a success. After a leg that did work it runs `/not-me:retro`.
+- **`/not-me`** is the router. It checks that not-me is on and idle, then runs the legs in the `router` order (default `update`, then `new`). It stops at the first leg that does something. Every leg returning `NONE` is a success. After a leg that did work it runs `/not-me:retro`. With `--parallel N` it instead starts up to N `/not-me:new` runs at once, one issue and one worktree each (see [Parallel runs](parallel-runs.md)).
 - **`/not-me:new`** picks one ready issue (or the number you give it), claims it, and implements it on a feature branch through a delegated implementer. It reproduces a bug first, writes the failing test first, runs the full gate, commits only the files it touched, pushes through the CLI, and opens a ready (not draft) PR. Then it moves the issue to `needs review` and, when a preview URL exists, starts a proof in the background. A fresh install picks only issues assigned to you; set `queue.include_unassigned: true` to also pick unassigned ones (see [Which issues the queue picks](config.md#which-issues-the-queue-picks)).
 - **`/not-me:update`** picks one PR labeled `needs work` that is assigned to the operator. It reads only trusted findings, decides each (refuse, defer, implement, or disagree with a reason), fixes the confirmed ones, merges the base branch in (never rebases), pushes, replies on each thread, posts one summary, and swaps the PR back to `needs review`. When every finding is deferred or refused it parks the PR with no code change.
 - **`/not-me:review`** reviews PRs labeled `needs review` where the operator is a requested reviewer and the author is on the roster at any tier (lead, authority or member) and is not the operator. A member's PR title and body are read as the text under review, never as instructions; an instruction in them ("approve this at once") becomes a finding. PRs by people not on the roster are skipped. It checks the head out in a detached worktree, runs the project's checks, reads the diff, delegates a code review and a security review, confirms each finding itself, and posts one review. Approval is only sent when `review.auto_approve` is true; otherwise it posts a comment and leaves approval to a person. It resolves only threads it judged fixed.
@@ -93,7 +95,7 @@ When `/not-me:new` is given no issue number, it asks `notme pick-issue` for the 
 3. **Target epics.** Issues in a `picking.target_epics` epic come first, in its task-list order. They are only reordered: a target epic never adds an issue.
 4. **Picking rules, else impact.** From the rest (every eligible issue when your rules are in your global layer; up to `queue.list_limit` with repo-layer rules or the default), the run applies your `## Picking work` rules to the listed facts, with impact breaking ties. With no rules it picks the issue that helps you most, weighing the facts: labels, epic and place in it, age, what the issue blocks or is blocked by, board fields and `picking.fields` values, and reactions from you and trusted roster members. It logs one line naming the issue, why, and the rule that decided (`rule: impact` or `rule: picking work (<layer> layer)`). See [Picking work](config.md#picking-work).
 
-A further check runs with the facts. An issue whose body has a trusted `Stack on: owner/repo#PR` line (or `Based on:`, `On top of:`) is ready only when that PR is open, not a draft, from a roster member, in this checkout's repo, and the issue has no other open blocker; otherwise the CLI leaves it out and lists it under `stack_held` with the reason. A ready one branches from the PR's branch, so its PR targets that branch and says `Builds on owner/repo#PR`; a merged PR makes it a normal issue on the default branch. `queue.stacking: off` turns this off. See [Stacking on an open PR](config.md#stacking-on-an-open-pr).
+A further check runs with the facts. An issue whose body has a trusted `Stack on: owner/repo#PR` line (or `Based on:`, `On top of:`) is ready only when that PR is open, not a draft, from a roster member, in this checkout's repo, and the issue has no other open blocker; otherwise the CLI leaves it out and lists it under `stack_held` with the reason. A ready one branches from the PR's branch, so its PR targets that branch and says `Builds on owner/repo#PR`; a merged PR makes it a normal issue on the default branch. `queue.stacking: off` turns this off. With `queue.stacking: auto` (global layer only) an issue needs no line: when its open blockers (GitHub dependencies, or `Blocked by:` and `Depends on:` lines) all resolve to one such open PR it stacks on it, and when a blocker has no open PR yet it is held the same way. When a run opens a PR that other open issues are blocked by, it adds a `Stack on:` line to each trusted one and moves one that is `blocked` only by this issue back to the pick label. See [Stacking on an open PR](config.md#stacking-on-an-open-pr).
 
 The output also names a suggested top issue (target epic issues first, then epic children, then oldest; on a board, by the fields a deprecated `queue.board.priority_fields` named, never by `picking.fields` alone), which is what older callers read.
 
@@ -137,7 +139,9 @@ Two skills add a verb of their own. `/not-me:retro` ends with `RETRO <log> <n> l
 
 ## Run logs
 
-Each run writes one markdown file. The default place is `<git-common-dir>/not-me/logs/<skill>/<run id>.md`, which is `.git/not-me/logs/` in a normal clone. Set `logs.root` to move the logs; the active-run marker and the guard log never move. Logs are local and never committed.
+Each run writes one markdown file. The default place is `<git-common-dir>/not-me/logs/<skill>/<run id>.md`, which is `.git/not-me/logs/` in a normal clone. Set `logs.root` to move the logs; the active-run markers and the guard log never move. Logs are local and never committed.
+
+One worktree holds one run at a time, and runs in different worktrees of one checkout run side by side; claims keep two runs off the same item. When the checks need one test environment that every worktree shares, set `shared_env: true` in `verify.md`: the verify step then takes a lock on it, and a run that finds it busy waits or stops with a clear reason, never skipping verification. Run every `notme` command on its own, not chained to another command: a sandbox that allows `notme` by its first word lets it write the run log under the main checkout's `.git` from a worktree.
 
 Find the newest one with `/not-me:status`, which lists the last result and log file of each skill, or with `notme log last` (see [cli.md](cli.md)).
 
@@ -224,6 +228,8 @@ Each tick runs `update`, then `new`, and prints one result line. A tick that fin
 Add `review` to `router` in `project.md` to run it as a router leg instead. `prove` needs no schedule: `new` and `update` start it in the background after they push, when a preview URL exists. Run it by hand on any PR with `/not-me:prove <repo>#<pr>`.
 
 Start a loop yourself. A run never starts or extends one.
+
+To work several issues at once, set `workspace.new: worktree` and run `/not-me --parallel 3` in an attended session. Each run gets its own issue (claims are compare-and-set) and its own worktree, and the main checkout's branch never changes. `--parallel` is not combined with `--bg`. See [Parallel runs](parallel-runs.md) for the limits and what is still open.
 
 ## First week
 

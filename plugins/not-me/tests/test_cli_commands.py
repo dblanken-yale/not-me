@@ -108,6 +108,9 @@ class IssueTests(base.CliCase):
         payload = self.ok("issue", "1")
         self.assertEqual((payload["stack_on"]["ready"], payload["stack_on"]["stacks"]), (True, True))
         self.assertEqual(payload["blocked_by"], [])
+        self.assertEqual(payload["blocking"], [])
+        things(self.fake)["1"]["blocking"] = [2]
+        self.assertEqual([d["number"] for d in self.ok("issue", "1")["blocking"]], [2])
         with mock.patch("notme.queue.BaseQueue.stacking", side_effect=ValueError("queue.stacking is broken")):
             code, payload, _ = self.cli("issue", "1")
         self.assertEqual(code, 0)
@@ -374,6 +377,67 @@ class IssueTests(base.CliCase):
         self.assertFalse(payload["author_trusted"])
         self.assertIsNone(payload["body"])
         self.assertIsNone(payload["title"])
+        self.assertEqual(payload["body_withheld"], "untrusted_author")
+
+    def test_issue_withholds_text_an_untrusted_person_last_edited(self):
+        self.assertIsNone(self.ok("issue", "1")["body_withheld"])
+        for key, value in (("editor", "mallory"), ("editor_fail", True)):
+            with self.subTest(key):
+                things(self.fake)["1"].pop("editor", None)
+                things(self.fake)["1"].pop("editor_fail", None)
+                things(self.fake)["1"][key] = value
+                payload = self.ok("issue", "1")
+                self.assertTrue(payload["author_trusted"])
+                self.assertEqual(payload["body_withheld"], "untrusted_editor")
+                self.assertIsNone(payload["body"])
+                self.assertIsNone(payload["title"])
+        things(self.fake)["1"].pop("editor_fail", None)
+        things(self.fake)["1"]["editor"] = "hubot"  # on the roster
+        payload = self.ok("issue", "1")
+        self.assertEqual((payload["body"], payload["body_withheld"]), ("Body of First issue", None))
+
+    def test_issue_stack_on_adds_the_line_before_the_markers(self):
+        things(self.fake)["1"]["body"] = "## Goal\n\nDo it.\n\n<!-- not-me:ticket -->\n<!-- not-me:claim octocat r-1 -->"
+        payload = self.ok("issue-stack-on", "1", "--pr", f"{REPO}#7")
+        self.assertEqual(payload, {"repo": REPO, "number": 1, "updated": True, "line": f"Stack on: {REPO}#7"})
+        self.assertEqual(things(self.fake)["1"]["body"],
+                         f"## Goal\n\nDo it.\n\nStack on: {REPO}#7\n\n<!-- not-me:ticket -->\n"
+                         "<!-- not-me:claim octocat r-1 -->\n")
+
+    def test_issue_stack_on_keeps_text_between_markers(self):
+        things(self.fake)["1"]["body"] = "<!-- not-me:ticket -->\nkept text\n<!-- not-me:followup -->"
+        self.ok("issue-stack-on", "1", "--pr", f"{REPO}#7")
+        self.assertEqual(things(self.fake)["1"]["body"],
+                         f"<!-- not-me:ticket -->\nkept text\n\nStack on: {REPO}#7\n\n<!-- not-me:followup -->\n")
+
+    def test_issue_stack_on_leaves_a_declared_body_alone(self):
+        things(self.fake)["1"]["body"] = "Do it.\n\nBased on: acme/app#3\n"
+        payload = self.ok("issue-stack-on", "1", "--pr", f"{REPO}#7")
+        self.assertFalse(payload["updated"])
+        self.assertEqual(self.fake.writes_made(), [])
+
+    def test_issue_stack_on_refuses_untrusted_text_without_writing(self):
+        for key, value, kind in (("author", "mallory", "untrusted_author"), ("editor", "mallory", "untrusted_editor"),
+                                 ("editor_fail", True, "untrusted_editor")):
+            with self.subTest(key):
+                saved = dict(things(self.fake)["1"])
+                things(self.fake)["1"][key] = value
+                code, payload, _ = self.cli("issue-stack-on", "1", "--pr", f"{REPO}#7")
+                self.assertEqual((code, payload["kind"]), (1, kind))
+                self.assertEqual(self.fake.writes_made(), [])
+                self.assertEqual(things(self.fake)["1"]["body"], "Body of First issue")
+                things(self.fake)["1"].clear()
+                things(self.fake)["1"].update(saved)
+
+    def test_issue_stack_on_checks_the_pr_ref_and_writes_nothing_in_a_dry_run(self):
+        for bad in ("7", "#7", "acme/app#x", "acme/app#7\nInjected: yes"):
+            with self.subTest(bad):
+                code, payload, _ = self.cli("issue-stack-on", "1", "--pr", bad)
+                self.assertEqual((code, payload["kind"]), (2, "usage"))
+        payload = self.ok("issue-stack-on", "1", "--pr", f"{REPO}#7", "--dry-run")
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(self.fake.writes_made(), [])
+        self.assertEqual(things(self.fake)["1"]["body"], "Body of First issue")
 
     def test_issue_body_replaces_the_body_of_a_trusted_author(self):
         body = self.write_file("b.md", "## Goal\n\nFixed body.\n")
@@ -388,6 +452,20 @@ class IssueTests(base.CliCase):
         self.assertEqual((code, payload["kind"]), (1, "untrusted_author"))
         self.assertEqual(self.fake.writes_made(), [])
         self.assertEqual(things(self.fake)["1"]["body"], "Body of First issue")
+
+    def test_issue_body_refuses_a_body_last_edited_off_the_roster_or_unreadable(self):
+        body = self.write_file("b.md", "Fixed body.\n")
+        for key, value in (("editor", "mallory"), ("editor_fail", True)):
+            with self.subTest(key):
+                things(self.fake)["1"].pop("editor", None)
+                things(self.fake)["1"].pop("editor_fail", None)
+                things(self.fake)["1"][key] = value
+                code, payload, _ = self.cli("issue-body", "1", "--body-file", body)
+                self.assertEqual((code, payload["kind"]), (1, "untrusted_editor"))
+                self.assertEqual(self.fake.writes_made(), [])
+        things(self.fake)["1"].pop("editor_fail", None)
+        things(self.fake)["1"]["editor"] = "hubot"  # on the roster
+        self.ok("issue-body", "1", "--body-file", body)
 
     def test_issue_body_restores_a_dropped_marker(self):
         things(self.fake)["1"]["body"] = "Old\n\n<!-- not-me:claim octocat r-1 -->\n<!-- not-me:ticket -->"
@@ -716,7 +794,7 @@ class StatusAndPauseTests(base.CliCase):
         things(self.fake)["3"]["labels"] = ["question", "paused"]
         payload = self.ok("status")
         self.assertEqual(set(payload), {"enabled", "paused", "mode", "repo", "tracker", "operator", "active_run",
-                                        "queue", "items", "stale_claims", "interrupted_runs", "last_runs", "picking",
+                                        "active_runs", "queue", "items", "stale_claims", "interrupted_runs", "last_runs", "picking",
                                         "warnings"})
         self.assertEqual(payload["picking"], "impact default")
         self.assertEqual(payload["queue"], {"source": "labels", "label": "to do", "opt_in_label": None, "ok": True,
@@ -1135,7 +1213,7 @@ class DoctorAndPreflightTests(base.CliCase):
         names = [c["name"] for c in payload["checks"]]
         self.assertEqual(names, ["python", "git", "gh", "config", "config files", "mode", "gh auth", "gh scopes",
                                  "queue",
-                                 "guard", "spawn depth"])
+                                 "guard", "spawn depth", "permissions"])
         self.assertTrue(payload["ok"])
         files = payload["checks"][4]
         self.assertTrue(files["ok"], files)
@@ -1282,17 +1360,20 @@ class QueueDriftCliTests(base.CliCase):
         self.assertEqual([c for c in self.fake.calls if "graphql" in c], [])
         self.assertEqual(self.fake.writes_made(), [])
 
-    def test_queue_resync_of_a_label_says_why_on_the_issue(self):
+    def test_queue_resync_of_a_label_logs_why_and_posts_nothing(self):
+        # matching the board is mechanical: the timeline shows the label change, the run log has the reason
         self.tc.write("repo", "project", "---\nschema: 1\nqueue: {source: board, board: {owner: acme, number: 6}}"
                                          "\n---\n# Project\n")
         things(self.fake)["1"]["labels"] = ["to do"]
         self.fake.state["board"]["items"][0]["status"] = "In progress"
-        out = self.ok("queue-resync")
+        log = self.ok("log", "start", "--skill", "new", "--ref", "1")["path"]
+        out = self.ok("queue-resync", "--log", log)
         self.assertEqual([(c["side"], c["result"], c["commented"]) for c in out["changes"]],
-                         [("labels", "changed", True)])
+                         [("labels", "changed", False)])
         self.assertEqual(things(self.fake)["1"]["labels"], ["in progress"])
-        bodies = [c["body"] for c in things(self.fake)["1"]["comments"]]
-        self.assertTrue(any("State label changed from `to do` to `in progress`" in b for b in bodies), bodies)
+        self.assertEqual(things(self.fake)["1"]["comments"], [])
+        self.assertIn("State label changed from `to do` to `in progress`",
+                      Path(log).read_text(encoding="utf-8"))
 
     def test_queue_resync_of_a_status_posts_no_comment(self):
         self.ok("queue-resync")
@@ -1611,6 +1692,121 @@ class GitTests(base.CliCase):
     def test_push_check_fails_without_origin(self):
         code, payload, _ = self.cli("git", "push-check")
         self.assertEqual((code, payload["kind"]), (1, "push_check"))
+
+
+class ParallelRunTests(base.CliCase):
+    """Runs in two worktrees of one checkout go side by side; only a shared test environment is locked, and only
+    by the verify step."""
+
+    def setUp(self):
+        super().setUp()
+        init_repo(self.project)
+        self.wt = self.tc.root / "wt-b"
+        git(self.project, "worktree", "add", "-q", "-b", "b", str(self.wt))
+
+    def in_wt(self, *argv, **kw):
+        return self.cli("--project-dir", str(self.wt), *argv, project=False, **kw)
+
+    def ok_wt(self, *argv, **kw):
+        code, payload, err = self.in_wt(*argv, **kw)
+        self.assertEqual(code, 0, f"{argv}: {payload} {err}")
+        return payload
+
+    def shared(self, on=True):
+        self.tc.write("repo", "verify", f"---\nschema: 1\nshared_env: {'true' if on else 'false'}\n---\n# Verify\n")
+
+    def two_runs(self):
+        return (self.ok("log", "start", "--skill", "new", "--ref", "acme/app#1"),
+                self.ok_wt("log", "start", "--skill", "new", "--ref", "acme/app#2"))
+
+    def test_two_worktrees_start_runs_side_by_side(self):
+        a, b = self.two_runs()
+        self.assertEqual(Path(a["path"]).parent, Path(b["path"]).parent)  # one log root
+        self.assertEqual(self.ok("status")["active_run"]["run_id"], a["run_id"])
+        status = self.ok_wt("status")
+        self.assertEqual(status["active_run"]["run_id"], b["run_id"])
+        self.assertEqual({r["run_id"] for r in status["active_runs"]}, {a["run_id"], b["run_id"]})
+        self.assertEqual(status["interrupted_runs"], [])
+        code, payload, _ = self.in_wt("log", "start", "--skill", "new", "--ref", "acme/app#3")
+        self.assertEqual((code, payload["kind"]), (1, "active_run"))  # still one run per worktree
+        self.ok("log", "finish", b["path"], "--status", "done")  # finishing from another worktree clears it
+        self.assertEqual([r["run_id"] for r in self.ok("status")["active_runs"]], [a["run_id"]])
+        self.assertIsNone(self.ok_wt("status")["active_run"])
+
+    def test_two_runs_cannot_claim_the_same_issue(self):
+        self.fake.add_assignee(REPO, 1, "octocat")
+        self.fake.add_assignee(REPO, 2, "octocat")
+        things(self.fake)["2"]["labels"] = ["to do"]
+        a, b = self.two_runs()
+        self.assertEqual(self.ok("claim-issue", "1")["run_id"], a["run_id"])  # each run claims as itself
+        code, payload, _ = self.in_wt("claim-issue", "1")
+        self.assertEqual(code, 3, payload)
+        self.assertEqual(self.ok_wt("claim-issue", "2")["run_id"], b["run_id"])
+
+    def test_assign_is_refused_while_a_run_is_active_in_any_worktree(self):
+        things(self.fake)["2"]["labels"] = ["to do"]  # unassigned and eligible
+        b = self.ok_wt("log", "start", "--skill", "new", "--ref", "acme/app#2")
+        code, payload, _ = self.cli("assign-issue", "2")
+        self.assertEqual((code, payload["kind"]), (1, "active_run"))
+        self.assertEqual(payload["active_run"]["run_id"], b["run_id"])
+
+    def test_no_shared_environment_takes_no_lock(self):
+        a, b = self.two_runs()
+        for out in (self.ok("verify-lock", "acquire", "--log", a["path"]),
+                    self.ok_wt("verify-lock", "acquire", "--log", b["path"])):
+            self.assertEqual((out["shared_env"], out["locked"]), (False, False))
+        self.assertFalse((self.project / ".git" / "not-me" / "verify.lock").exists())
+
+    def test_a_shared_environment_is_locked_for_one_run_at_a_time(self):
+        self.shared()
+        a, b = self.two_runs()
+        got = self.ok("verify-lock", "acquire", "--log", a["path"])
+        self.assertEqual((got["shared_env"], got["locked"]), (True, True))
+        self.assertEqual(self.ok("verify-lock", "acquire", "--log", a["path"])["locked"], True)  # ours again
+        code, payload, _ = self.in_wt("verify-lock", "acquire", "--log", b["path"])
+        self.assertEqual((code, payload["kind"]), (1, "verify_locked"))
+        self.assertEqual(payload["holder"]["run_id"], a["run_id"])
+        self.assertFalse(self.ok_wt("verify-lock", "release", "--log", b["path"])["released"])  # not ours
+        self.assertTrue(self.ok("verify-lock", "release", "--log", a["path"])["released"])
+        self.assertTrue(self.ok_wt("verify-lock", "acquire", "--log", b["path"])["locked"])
+        self.ok_wt("log", "finish", b["path"], "--status", "done")  # finishing a run drops its lock
+        self.assertTrue(self.ok("verify-lock", "acquire", "--log", a["path"])["locked"])
+
+    def test_waiting_for_the_lock_polls_until_it_is_free(self):
+        self.shared()
+        a, b = self.two_runs()
+        self.ok("verify-lock", "acquire", "--log", a["path"])
+        lock = self.project / ".git" / "not-me" / "verify.lock"
+        with mock.patch("notme.cli.time.sleep", side_effect=lambda s: lock.unlink()) as slept:
+            got = self.ok_wt("verify-lock", "acquire", "--log", b["path"], "--wait-seconds", "60")
+        self.assertTrue(got["locked"])
+        self.assertTrue(slept.called)
+        self.assertIn("waited_seconds", got)
+
+    def test_waiting_runs_out_and_reports_who_holds_it(self):
+        self.shared()
+        a, b = self.two_runs()
+        self.ok("verify-lock", "acquire", "--log", a["path"])
+        clock = iter(range(0, 10000, 30))
+        with mock.patch("notme.cli.time.monotonic", side_effect=lambda: next(clock)), \
+                mock.patch("notme.cli.time.sleep") as slept:
+            code, payload, _ = self.in_wt("verify-lock", "acquire", "--log", b["path"], "--wait-seconds", "120")
+        self.assertEqual((code, payload["kind"]), (1, "verify_locked"))
+        self.assertTrue(slept.called)
+        self.assertEqual(payload["holder"]["run_id"], a["run_id"])
+
+    def test_a_lock_left_by_a_finished_run_is_taken_over(self):
+        self.shared()
+        a, b = self.two_runs()
+        self.ok("verify-lock", "acquire", "--log", a["path"])
+        runlog.default_marker_path(self.project).unlink()  # run a died: its marker is gone, the lock is not
+        self.assertTrue(self.ok_wt("verify-lock", "acquire", "--log", b["path"])["locked"])
+
+    def test_wait_is_capped(self):
+        self.shared()
+        a, _ = self.two_runs()
+        code, payload, _ = self.cli("verify-lock", "acquire", "--log", a["path"], "--wait-seconds", "100000")
+        self.assertEqual((code, payload["kind"]), (2, "usage"))
 
 
 if __name__ == "__main__":

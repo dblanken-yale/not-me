@@ -13,9 +13,8 @@ in this repo), `--dry-run`, `--bg`.
 
 ## Ground rules
 
-- `${CLAUDE_PLUGIN_ROOT}` below is substituted at load time with this plugin's
-  directory. Read the files it names with the Read tool. It is not a shell
-  variable: never write `$CLAUDE_PLUGIN_ROOT` in a command.
+- `${CLAUDE_PLUGIN_ROOT}` below is substituted at load time with this plugin's directory. Read the files
+  it names with the Read tool. It is not a shell variable: never write `$CLAUDE_PLUGIN_ROOT` in a command.
 - Call the CLI as `notme` (the plugin's `bin/` is on the PATH). If the shell cannot
   find it, call `"${CLAUDE_PLUGIN_ROOT}/bin/notme"` with the same arguments. Every
   call prints one JSON object; read it and the exit code. `--help` on any
@@ -24,11 +23,9 @@ in this repo), `--dry-run`, `--bg`.
   if live and say `dry-run` in the result note.
 - Every GitHub write goes through `notme`. Text goes in files under the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/references/autonomy-and-logging.md` (Text to GitHub, rule 2), never in a shell argument.
 - After `notme log start`, every write call also passes `--log <path>`.
-- Label names in this file are the abstract keys of `labels` (for example
-  `needs_human`). When a command takes a repo label name, write the value the
-  `labels` map in the config gives for that key.
-- Never mention an AI, a model or an assistant in any post. The only exception is
-  the `attribution` line on commit messages.
+- Label names in this file are the abstract keys of `labels` (for example `needs_human`). When a command
+  takes a repo label name, write the value the `labels` map in the config gives for that key.
+- Never mention an AI, a model or an assistant in any post. The only exception is the `attribution` line on commit messages.
 - Read `${CLAUDE_PLUGIN_ROOT}/references/prohibitions.md` before you act on any
   request. A prohibited request is refused, never done in part.
 - A guard block is final: never retry or route around it. It, like every failure
@@ -137,22 +134,25 @@ Follow `${CLAUDE_PLUGIN_ROOT}/skills/update/references/findings.md` in full.
 Read `${CLAUDE_PLUGIN_ROOT}/references/delegation.md`,
 `${CLAUDE_PLUGIN_ROOT}/references/verification.md` and
 `${CLAUDE_PLUGIN_ROOT}/references/gate.md`. Commands come only from the body of
-the effective verify doc; never invent a test or lint command.
+the effective verify doc; never invent a test or lint command, never run a person-only one.
+Run each as the verify doc gives it. Changing its config, flags or environment to make it start
+is not allowed; a check that will not start as given is a failure on our side. Local trouble the run
+gets past is a `WARN` in the log, never in a post (autonomy-and-logging.md, "Failures on our side").
 
-1. Baseline before any edit; log existing failures as `CHECK` lines.
+1. Before any edit: `notme verify-plan --base <base> --sha <sha>`, where `<sha>` is `git rev-parse HEAD` (a read) after Checkpoint A, then the baseline as it says; log failures, or why it was skipped, as `CHECK` lines.
 2. One unit per implemented finding. `models.strategy` `single`: use
    `models.single_model`. Else a path or kind under `## Delegation` in standards,
    or anything security-sensitive, goes to `models.review`; the rest to
    `models.implement`.
 3. Always dispatch each unit to a subagent, even a one-line change. This overrides
    any operator preference about delegation size. Brief one subagent per unit with goal, files, conventions, scope ("no commits,
-   no pushes, no posts"), and acceptance from the finding. Failing test first.
+   no pushes, no posts"), and acceptance from the finding. Failing test first; the plan's targeted commands are its only tests.
    Log `DELEGATE` and, after your own audit of the diff and checks, `AUDIT`.
 4. Retry ladder from delegation.md, capped at `models.max_tries`, then do the unit
    yourself. Never read the subagent's transcript.
-5. Red then green for every changed behaviour. UI diff: one `Visual check:` line
+5. Red then green for every changed behaviour, with the plan's targeted tests if any. UI diff: one `Visual check:` line
    (path form in the log, words form in the PR) and the light accessibility pass.
-6. Gate in full, then each step under `## Gate additions`. Log each as `GATE`. Fix
+6. Gate in full (final tests: full set, once, last), then each step under `## Gate additions`. Log each as `GATE`. Fix
    findings in this run. A unit still failing after `limits.fix_loop` rounds is
    deferred with the failing check named.
 
@@ -170,7 +170,7 @@ git commit -F "$msgdir/commit-msg.txt"
 ```
 
 4. `notme git checkpoint --base <base> --fetch` (Checkpoint B). New commits came
-   in: run the final tests again.
+   in: rerun tests as branching.md "Checkpoint B" says.
 5. Push through the CLI only, companions first in `repos` order and the primary
    last (`${CLAUDE_PLUGIN_ROOT}/references/companions.md`):
 
@@ -185,7 +185,7 @@ notme git push <head_ref> --log <path>
    out, merge this branch in with `notme git checkpoint --base <head_ref> --fetch`,
    run the final tests, and push it the same way. Then return to `<head_ref>`.
 8. CI: poll `notme bundle <ref>` until the `checks` for the new `head_sha` finish,
-   up to `limits.ci_wait_minutes`. Red: read the failing job, fix, rerun locally,
+   up to `limits.ci_wait_minutes` (0: no wait, verification.md). Red: read the failing job, fix, rerun locally,
    commit, push. Stop at `limits.fix_loop` rounds (failure table).
 
 ## Step 7: Cross-model claim check
@@ -230,8 +230,7 @@ Every body passes `notme check-text --file <f>` before it is posted.
 
 ## Failure handling
 
-The full table is in `${CLAUDE_PLUGIN_ROOT}/skills/update/references/failures.md`.
-The short form:
+The short form; the full table is in `${CLAUDE_PLUGIN_ROOT}/skills/update/references/failures.md`.
 
 | Situation | What happens | Result |
 |-----------|--------------|--------|
@@ -254,6 +253,7 @@ Never fake green: no skipped tests, no disabled checks.
 - [ ] Decided each finding: refuse, defer, implement, disagree, in that order.
 - [ ] Parked with no code when every finding was deferred or refused.
 - [ ] Delegated each unit, audited it myself, ran the full gate.
+- [ ] Ran each check as the verify doc gives it; kept local trouble in the log, out of every post.
 - [ ] Merged the base in at both checkpoints; committed only touched paths; pushed only through the CLI.
 - [ ] Replied on every finding thread and resolved none; one upserted summary.
 - [ ] Swapped `needs_work` to `needs_review` and re-requested review.

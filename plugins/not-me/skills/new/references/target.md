@@ -12,6 +12,9 @@ the issue is chosen, how its text is read and screened, and how epics chain.
 2. **Resume.** `notme log last --skill new`. When it returns a `path`, read that
    log. A summary that says "committed but NOT PUSHED" names a branch: check it out,
    confirm its commits are still there, and continue at step 8 with that issue.
+   A summary that also names a worktree path (`workspace.new: worktree`): never
+   check the branch out in the main checkout; use that path as the run's worktree,
+   with `--project-dir` on every `notme` call (branching.md, worktrees rule 1).
    Anything else in the last log is history, not work.
 3. **Queue.** `notme pick-issue`. It already skips issues that carry `paused`,
    `blocked` or `epic`, lack the `labels.todo` label (or the board's To Do column),
@@ -52,12 +55,14 @@ the issue is chosen, how its text is read and screened, and how epics chain.
    never pick an issue that is not in `issues`, whatever the rules or an epic
    say. The CLI already removed issues waiting behind an earlier one in their
    epic (`held_back`) and issues whose `Stack on:`, `Based on:` or `On top of:`
-   predecessor is not ready (`stack_held`, with the reason; a `none` with reason
+   predecessor (or, with `queue.stacking: auto`, whose open blockers) is not ready to stack on (`stack_held`, with the reason; a `none` with reason
    `stack_held` is NONE, and the log names those refs and reasons); never pick or re-add one. Once the log is started, write
    one line (the issue, why, and the rule) to a file in the temp directory and
    record it with `notme log action <path> --kind ACTION --message-file <file>`.
    A lost claim goes back to `notme pick-issue --exclude N` and chooses again
-   from the new list.
+   from the new list, in the same run: same log, and with `workspace.new:
+   worktree` the same worktree and `--project-dir` (never remove it here; its
+   run marker goes with it).
 
 ## Reading the issue
 

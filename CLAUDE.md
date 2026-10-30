@@ -113,9 +113,19 @@ the owner's say-so, not a cleanup.
    the epoch, so a marker copy saved while live never verifies again; the
    loader does the same whenever the global layer's own `mode` is not `live`
    (a hand edit included; a repo-layer pin does not revoke). The guard's
-   Edit/Write check on the global `mode` is UX, not the boundary. Logs and the
-   active-run marker live under `<git-common-dir>/not-me/` and never move
-   with a configured log root, so the guard can always find a running run.
+   Edit/Write check on the global `mode` is UX, not the boundary. Logs live
+   under `<git-common-dir>/not-me/`. The active-run marker is per worktree,
+   in that worktree's own git dir (`<git-common-dir>/not-me/active-run` for
+   the main one, `<git-common-dir>/worktrees/<id>/not-me/active-run` for a
+   linked one), so runs in different worktrees of one checkout run in
+   parallel and one worktree holds one run. Markers never move with a
+   configured log root: the guard finds every one from the common dir
+   without reading config, and the config stays read-only while a run is
+   active in any worktree. Claims stay compare-and-set, and a marker older
+   than its stale time stops counting. Only a shared test environment is
+   locked across worktrees: `shared_env` in `verify.md` (default `false`,
+   the repo layer may set it) makes the verify step alone hold
+   `<git-common-dir>/not-me/verify.lock` (`notme verify-lock`).
 
 8. **No project-specific names in the plugin.** No org, person, hosting or
    product names from the original repositories appear in code, defaults,
