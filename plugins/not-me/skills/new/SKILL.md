@@ -161,12 +161,12 @@ the effective verify doc; never invent a test or lint command, never run a perso
    name it on every git call (`git -C <worktree> add`, `commit`); never `cd` into it first.
 2. Message per `standards.commit` (`conventional`: `fix(<N>): ...` or
    `feat(<N>): ...`, scope is the issue number, lowercase present tense).
-3. Write the message to a file (when `attribution` is text, end it with that line;
-   `inherit` and `none` add nothing), then commit locally from the file:
+3. Write the message to a file (when `attribution` is text, end it with that line; `inherit` and
+   `none` add nothing), then commit from it; `<checkout>` is the run worktree, else the session checkout:
 
 <!-- allowed-raw-write -->
 ```bash
-git commit -F "$msgdir/commit-msg.txt"
+git -C <checkout> commit -F "$msgdir/commit-msg.txt"
 ```
 
 ## Step 8: Checkpoint B, push, CI

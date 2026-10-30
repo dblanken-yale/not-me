@@ -162,11 +162,11 @@ the effective verify doc; never invent a test or lint command, never run a perso
    name it on every git call (`git -C <worktree> add`, `commit`); never `cd` into it first.
 2. Message per `standards.commit` (`conventional`: `fix(<N>): ...`, scope is the linked issue
    number, else the PR number, lowercase present tense), in a file; when `attribution` is text, end with that line.
-3. One commit per finding group, so each reply can cite its SHA:
+3. One commit per finding group, so each reply can cite its SHA (`<checkout>`: the run worktree, else the session checkout):
 
 <!-- allowed-raw-write -->
 ```bash
-git commit -F "$msgdir/commit-msg.txt"
+git -C <checkout> commit -F "$msgdir/commit-msg.txt"
 ```
 
 4. `notme git checkpoint --base <base> --fetch` (Checkpoint B). New commits came

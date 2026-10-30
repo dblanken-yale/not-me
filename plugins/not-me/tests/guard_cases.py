@@ -285,6 +285,10 @@ A, B, G = "allow", "block", "guide"  # guide: runs, and the guard logs it under 
 # unless an absolute `git -C` names the checkout. These directory-change shapes, written below with what an earlier
 # guard decided, now decide as listed here.
 CD_OUTCOMES: Dict[Tuple[str, str], Tuple[str, Optional[str]]] = {
+    # env -C and env --chdir run git in another directory: a directory change like cd
+    ('env -C {F}/other git push', 'app'): (B, PB),
+    ('env --chdir={F}/other git push', 'app'): (B, PB),
+    ('env -iC {F}/other git push', 'app'): (B, PB),
     # a followed leading cd into {F}/other: judged there (acme/other, off the allowed list), so guided
     ('cd {F}/other && git commit -m "fix: (x" && git push', 'app'): (G, OR),
     ('cd {F}/other 2>&1 && git log | head -1 && git push >&2', 'app'): (G, OR),
@@ -2008,19 +2012,21 @@ for cmd in ("git -C $W merge feature/y", 'git -C "$W/.." commit -m x', "git -C $
     cd_case(cmd, "app", G, PB)
 bash(G, OR, 'git -C "$W/.." push origin HEAD:refs/heads/x')
 bash(B, PB, "git -C $W subtree add --prefix=x y")  # subtree is not built in: looked up as an alias
-for variant in ("offalias", "off"):
-    bash(G, PB, 'git -C "$W/.." commit -m x', variant)
-    bash(G, PB, "git -C $W/.. merge feature/y", variant)
+for variant, want in (("offalias", B), ("off", G)):  # offalias sits on main: the unset path may be main too
+    bash(want, PB, 'git -C "$W/.." commit -m x', variant)
+    bash(want, PB, "git -C $W/.. merge feature/y", variant)
 bash(G, PB, "git -C $W reset --hard", "off")
 bash(A, None, "git -C $W merge feature/y", "mainpboff")  # protected_branches off: nothing to log
 bash(A, None, "git -C $W merge feature/y", "alloff")
 bash(A, None, 'git -C "$W/.." commit -m x', "alloff")
-# a checkout or switch through an unknown path may move any checkout's branch: no branch is known after it, so a
-# later commit or push runs and is logged rather than judged on a branch that may have drifted
+# a checkout or switch through an unknown path may move any checkout's branch, the session's included: a later
+# commit or push that reads the branch blocks; the switch alone is logged
 for cmd in ('git -C "$W/.." switch feature/y && git commit -m x', 'git -C "$W/.." checkout -b feature/y; git commit -m x',
-            'git -C "$W/.." switch feature/y && git push', "git -C $W checkout feature/y", "git -C $W switch feature/y"):
-    cd_case(cmd, "main", G, PB)
-bash(G, PB, 'git -C "$W/.." switch feature/y && git commit -m x', "offalias")
+            'git -C "$W/.." switch feature/y && git push'):
+    bash(B, PB, cmd, "main")
+for cmd in ("git -C $W checkout feature/y", "git -C $W switch feature/y"):
+    bash(G, PB, cmd, "main")
+bash(B, PB, 'git -C "$W/.." switch feature/y && git commit -m x', "offalias")
 bash(B, PB, 'git -C "$W" switch feature/y && git push origin HEAD:main', "main")  # a named protected branch
 # leading options do not hide a remote, submodule or clean write; through an unknown path each is guided
 for cmd in ("git -C $W remote -v add up https://github.com/acme/other", "git -C $W remote -v set-url origin x",
@@ -2068,13 +2074,15 @@ bash(B, PB, "git commit -m x", "main")  # no cd and no -C: the session's own bra
 # a leading cd to a directory that does not exist: git would not run (&&); judged where it would be
 for cmd in ("cd sub && git commit -m x", "cd {F}/nosuch && git commit -m x"):
     bash(G, OR, cmd, "main" if "nosuch" in cmd else "app")
-# a variable the guard cannot fill in, with no directory change: guided, never judged by the session's directory
+# a variable the guard cannot fill in, with no directory change: git reads an unset -C path as the current
+# directory, so it is judged on the session's branch too: blocked on main, guided on a feature branch
 for cmd in ("W={F}/live; W=$(pwd); git -C $W commit -m x", "W={F}/live; read W < f; git -C $W commit -m x",
             "(W={F}/live); git -C $W commit -m x", "W={F}/live git -C $W commit -m x",
             "true && W={F}/live; git -C $W commit -m x", "W={F}/live; set -a; git -C $W commit -m x",
             "W={F}/live; declare -x Y=1; git -C $W commit -m x", "W={F}/live; export Y; git -C $W commit -m x",
             "W={F}/live; read -r Y < f; git -C $W commit -m x"):
-    bash(G, PB, cmd, "main")
+    bash(B, PB, cmd, "main")
+    bash(G, PB, cmd)
 # any other directory change (a cd that is not leading or not joined by &&, cd after ;, || or &, a second cd,
 # pushd, popd, source, eval, trap, a function definition) next to a git write that reads the branch: blocked, in
 # whichever checkout the session sits
@@ -2101,6 +2109,25 @@ for variant in ("main", "app"):
 for cmd in ("cd {F}/main; git -C {F}/live commit -m x", "cd {F}/main && true & git add x", "cd {F}/main; git status"):
     bash(A, None, cmd)
 bash(G, PB, "cd {F}/main; git reset x")  # a soft reset in a checkout it cannot name: logged
+# Code review of the guard batch, finding 1: git reads an empty or unset -C path as the current directory, so a
+# -C path the guard cannot work out is judged on the session's own branch too, and blocks when that is protected.
+for cmd in ('git -C "$WT" commit -m x', 'git -C "$WT" push origin HEAD', 'git -C "$WT" push', 'git -C "$WT" reset --hard',
+            'W=; git -C "$W" commit -m x', 'git -C "" commit -m x', 'git -C "$W/.." merge feature/y',
+            'git -C "$W" switch main && git commit -m x'):
+    bash(B, PB, cmd, "main")
+bash(B, PB, 'git -C "$W" switch main && git commit -m x')  # the switch may move the session's checkout to main
+for cmd in ('git -C "$WT" commit -m x', 'git -C "$WT" reset --hard'):
+    bash(G, PB, cmd)  # the session's own branch is not protected: logged
+bash(G, OR, 'git -C "$WT" push origin HEAD')  # logged: the remote's repo is not known either
+bash(G, OR, 'git -C "$WT" push origin feature/x', "main")  # names the branch it pushes: no current branch read
+# finding 4: env -C and env --chdir change the directory git runs in, so they are not followed
+for cmd in ("env -C {F}/main git commit -m x", "env --chdir={F}/main git commit -m x",
+            "env --chdir {F}/main git commit -m x", "env -iC {F}/main git commit -m x"):
+    bash(B, PB, cmd)
+# finding 2: GH_REPO set where the guard does not read it: guided, never taken as the origin
+for cmd in ("true && export GH_REPO=acme/other && gh issue comment 1 --body-file f",
+            "env GH_REPO=acme/other gh issue comment 1 --body-file f", "read GH_REPO < f; gh issue comment 1 -b x"):
+    bash(G, OR, cmd)
 # a copy or move with a relative destination reaches the not-me home check: `..` from the checkout is the fixture
 # root, a directory above the home
 bash(B, SP, "cp -r backup ..")

@@ -1393,7 +1393,22 @@ def _words(c: SimpleCommand) -> Set[str]:
     out = set(c.words) - _DOT_LIKE
     if core and core[0] in _DOT_LIKE:
         out.add(core[0])
+    if _env_chdir(list(c.words)):
+        out.add("cd")
     return out
+
+
+def _env_chdir(words: List[str]) -> bool:
+    """`env -C dir`, `env --chdir dir` or `--chdir=dir` before the command: it runs in another directory."""
+    for k, w in enumerate(words):
+        if _prog(w) != "env":
+            continue
+        for a in words[k + 1:]:
+            if a.startswith("--chdir") or (a.startswith("-") and not a.startswith("--") and "C" in a[1:]):
+                return True
+            if not a.startswith("-") and not _ASSIGN.match(a):
+                break
+    return False
 _AND_LIST = {"&&", "|", "|&"}  # the only operators allowed after a followed leading cd
 
 
@@ -2539,9 +2554,32 @@ def _cmd_git(t, c, st, ctx, blk, depth: int = 0):
             yield b
             return
         # a write the guard could not place: rules it breaks on its own (a force push, a protected branch it names)
-        # have blocked above; the rest runs and is logged, never judged by the session's directory
+        # have blocked above. git reads an empty or unset -C path as the current directory, so the write is also
+        # judged on the session's own branch; only when that is not protected does it run and get logged
+        if (d is None or st.blind) and _reads_branch(sub, args) and not _names_every_branch(sub, args):
+            if st.blind:
+                why = "a checkout or switch earlier in the command, in a checkout the guard cannot name, may have " \
+                      "moved this checkout's branch"
+            else:
+                here = _branch(ctx, st, st.dir)
+                why = f"git reads an empty or unset -C path as the current directory, which is on the protected " \
+                      f"branch {here}" if here in ctx.protected_branches else ""
+            if why:
+                b = blk("protected_branches", f"git {sub} may land on a protected branch: {why}",
+                        "write the checkout out in full: `git -C /abs/path <command>`")
+                b.no_relax = True
+                yield b
+                return
         if (d is None and not _git_reads(sub, args)) or (call.blind and sub in _BRANCH_READERS):
             yield _unknown_checkout(call)
+
+
+def _names_every_branch(sub: str, args: List[str]) -> bool:
+    """A push whose every refspec names its destination branch: where it runs does not decide what it changes."""
+    if sub != "push":
+        return False
+    refspecs = _positionals(args)[1:]
+    return bool(refspecs) and all(r.lstrip("+").split(":", 1)[-1] not in ("", "HEAD", "@") for r in refspecs)
 
 
 # git branch options that only list; git accepts abbreviated long options, so anything not spelled out here is a write
@@ -3056,6 +3094,7 @@ def _gh_write(t: List[str], c: SimpleCommand, st: _State, ctx: GuardContext, blk
 # gh orders remotes this way when it picks a default repo: upstream, github, origin, then the rest by name
 _GH_REMOTE_ORDER = ("upstream", "github", "origin")
 _GH_REPO_ASSIGN = re.compile(r"^GH_REPO=")
+_GH_REPO_WORD = re.compile(r"(?<![A-Za-z0-9_])GH_REPO(?![A-Za-z0-9_])")
 
 
 def _gh_default_repo(c: SimpleCommand, st: _State, ctx: GuardContext) -> Tuple[Optional[str], str]:
@@ -3071,6 +3110,9 @@ def _gh_default_repo(c: SimpleCommand, st: _State, ctx: GuardContext) -> Tuple[O
         value = st.literal(prefix[-1][len("GH_REPO="):], getattr(prefix[-1], "expands", False))
     elif "GH_REPO" in st.vars:
         value = st.vars["GH_REPO"]
+    elif _GH_REPO_WORD.search(st.plain_text):
+        # set where the guard does not read it (export later on, env GH_REPO=..., read, declare): not the origin
+        return None, "the shell sets GH_REPO"
     elif ctx.env.get("GH_REPO"):
         value = ctx.env.get("GH_REPO")
     if value is None:

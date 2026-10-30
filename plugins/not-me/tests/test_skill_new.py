@@ -99,6 +99,13 @@ class SkillNewTest(unittest.TestCase):
     def test_length(self):
         self.assertLessEqual(len(self.body.splitlines()), 260)
 
+    def test_commit_names_its_checkout(self):
+        """dblanken-yale/not-me#144: the commit example in the new and update skills names its checkout with git -C."""
+        for path in (SKILL, PLUGIN / "skills" / "update" / "SKILL.md"):
+            for line in text(path).splitlines():
+                if re.match(r"\s*git\s+(?:.*\s)?commit\s", line):
+                    self.assertTrue(re.match(r"\s*git -C <checkout> ", line), f"{path.parent.name}: {line}")
+
     def test_commands_exist(self):
         known = known_commands()
         for path in docs():
