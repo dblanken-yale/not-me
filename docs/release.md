@@ -21,6 +21,15 @@ Users run:
 /plugin update not-me@not-me
 ```
 
+## After a release: live evals (optional, a person runs them)
+
+The live evals call a model for real and take a while, so CI and the plugin's own runs never start them. After a release, a person may run them by hand against the fixture repos to check the skills still behave (flags and setup: `evals-harness/README.md`):
+
+- `scripts/eval-live.sh`
+- `evals-harness/run_live.py`
+
+They are optional. A release does not wait on them.
+
 ## Config schema policy
 
 Repo config docs carry a `schema` number.
