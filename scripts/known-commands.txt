@@ -17,6 +17,7 @@ claim-pr
 release-pr
 bundle
 wait-checks
+verify-plan
 feedback
 pick-reviews
 prove-target

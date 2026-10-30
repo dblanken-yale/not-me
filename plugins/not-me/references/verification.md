@@ -3,18 +3,24 @@
 ## When to read this
 
 Read this before you change any code, and again before you claim a change works.
-It covers the baseline, reproducing the problem, red-then-green tests, running the
-project's own checks, the visual check, a light accessibility pass, the
-cross-model claim check, and the CI wait. The minimum gate that follows
+It covers the verify plan, the baseline, reproducing the problem, red-then-green
+tests, targeted tests, running the project's own checks, the visual check, a light
+accessibility pass, the cross-model claim check, and the CI wait. The minimum gate that follows
 verification is in `gate.md`.
 
 ## Baseline first
 
-1. Before you edit anything, run the commands under `## Baseline` in `verify.md`,
-   or the test and lint commands when that section is left as is.
-2. Record every failure that already exists, with its name, in the run log as a
+1. Before you edit anything, run `notme verify-plan --base <base>` once and keep
+   its JSON: `baseline` (run, reason), `targeted` (commands) and `ci_wait`.
+2. `run` true: run the commands under `## Baseline` in `verify.md`, or the test
+   and lint commands when that section is left as is. `run` false
+   (`baseline: auto` and green base CI at its head SHA): skip it and log the
+   plan's reason as a `CHECK` line. Red, pending, missing or unreadable base CI
+   always runs it. A rework run (`/not-me:update`) passes `--sha` with `HEAD`
+   after Checkpoint A, so a merge commit made there (no CI) runs the baseline.
+3. Record every failure that already exists, with its name, in the run log as a
    `CHECK` line. These are not yours to fix and not yours to blame on the change.
-3. A baseline you could not run is a `WARN` line with the exact error. Never skip
+4. A baseline you could not run is a `WARN` line with the exact error. Never skip
    it silently.
 
 Example: `CHECK baseline: 212 passed, 2 failed (test_tz_offset, test_locale_sort) before any change`.
@@ -34,53 +40,49 @@ Example: `CHECK baseline: 212 passed, 2 failed (test_tz_offset, test_locale_sort
 4. A test that passed before your change proves nothing. Rewrite it until it fails
    without the change.
 
+## Targeted tests
+
+1. The plan lists targeted commands: during the work (red then green, the audit
+   after the implementer, each fix round) run only those, with the changed test
+   files or test names as trailing arguments. None listed: the full commands.
+2. The full `## Tests`, `## Lint` and `## Build` run once, right before the push
+   (gate step 6). Checkpoint B commits: targeted again, the full set only when the
+   targeted tests cannot cover them (shared config, fixtures, the build).
+3. Only a command pinned under `## Targeted tests` is targeted; never narrow one.
+4. Never run a command under `## Person only` in `verify.md` (live evals, real
+   model or paid service calls), not even when CI runs it. A person runs those.
+
 ## Use the project's own commands
 
 1. Take commands from `verify.md`: `## Tests`, `## Lint`, `## Build`, `## CI parity`.
 2. A section left as shipped means "discover it": read package manifests, the
    Makefile, and the run steps in the CI workflow files. Log what you found as a
    `DECISION` line.
-3. Run every step the CI workflow runs, in the same order. Not a narrower local
+3. Before the push, run every step the CI workflow runs, in the same order. Not a narrower local
    check: lint on one file is not the same gate as lint on the tree.
 4. Use `## Environment start`, `## Health check` and `## Reset` as written when the
    change needs a running app.
 
 ## Shared test environment
 
-Runs in different worktrees of one checkout run side by side. Each verifies in
-its own worktree unless `verify.md` sets `shared_env: true`: then the checks need
-one environment every worktree shares (a stack started outside the worktree).
-
-1. `shared_env` false (the default): take no lock.
-2. `shared_env` true: run `notme verify-lock acquire --log <path>` right before
-   the first command that uses the environment (environment start, the baseline,
-   a test run), and `notme verify-lock release --log <path>` right after the last
-   one. Hold it for nothing else: reading, editing, committing, pushing and
-   opening the PR never wait on it.
-3. Exit 1 with kind `verify_locked`: another run holds it. Log a `CHECK` line
-   naming the holder, then wait with `notme verify-lock acquire --log <path>
-   --wait-seconds 540`, again as needed, up to `limits.ci_wait_minutes` in all.
-   Still locked: a failure on our side (`autonomy-and-logging.md`), `FAILED <ref>
-   shared env busy`. Never skip or shorten verification to avoid the wait.
-4. `notme log finish` drops a lock the run still holds.
+`shared_env: false` (the default): each worktree verifies on its own; take no lock.
+`shared_env: true` (one stack every worktree shares): run `notme verify-lock
+acquire --log <path>` right before the first command that uses it and `notme
+verify-lock release --log <path>` right after the last; nothing else waits on it.
+Kind `verify_locked`: log a `CHECK` naming the holder and acquire again with
+`--wait-seconds 540`, up to `limits.ci_wait_minutes` in all; then `FAILED <ref>
+shared env busy`, a failure on our side (`autonomy-and-logging.md`). Never skip or
+shorten verification to avoid the wait. `notme log finish` drops a held lock.
 
 ## Visual check
 
 UI diffs need a visual check line in the run log and another in the PR. The run
 log keeps the path. Text bound for GitHub never holds a local path.
 
-Run log:
-
 ```
-Visual check: <path of the screenshot you actually read>
-Visual check: not run (<named reason>)
-```
-
-PR body and any other text bound for GitHub:
-
-```
-Visual check: read <what was checked, in words>
-Visual check: not run (<named reason>)
+Visual check: <path of the screenshot you actually read>     (run log)
+Visual check: read <what was checked, in words>              (PR body, GitHub)
+Visual check: not run (<named reason>)                       (either)
 ```
 
 1. Reading the screenshot is the gate. Capturing it is not. Open the image and
@@ -97,12 +99,9 @@ Visual check: not run (<named reason>)
 
 ## Light accessibility pass
 
-For UI diffs, check what you changed for:
-
-1. Text contrast against its background.
-2. Alt text on images that carry meaning; empty alt on decorative ones.
-3. Labels on form fields.
-4. Accessible names on buttons and links, including icon-only ones.
+For UI diffs, check what you changed for text contrast, alt text on images that
+carry meaning (empty alt on decorative ones), labels on form fields, and
+accessible names on buttons and links, including icon-only ones.
 
 Auto-fix the trivial ones (a missing alt, a missing label). Flag the rest in the PR
 with file and line. Never pass a finding silently.
@@ -138,12 +137,15 @@ Before you post, check the claims this run originated with a second model.
 ## CI wait and fix loop
 
 1. After a push, wait for CI on the pushed head SHA, not on an older run. Wait up
-   to `limits.ci_wait_minutes`.
+   to `limits.ci_wait_minutes`. `ci_wait` false in the plan
+   (`limits.ci_wait_minutes: 0`): open the PR and do not wait. Log
+   `CHECK CI wait skipped: limits.ci_wait_minutes is 0`. A red CI result is then
+   left to `/not-me:update` or a person; the run never claims CI passed.
 2. CI red: read the failing job's log, fix, run the same step locally, push again.
 3. Each push after a red run is one round. Stop at `limits.fix_loop` rounds.
-4. At the cap, and once the failure is not also on the base (next section), the outcome is "still needs work": the PR keeps `needs_work`, gains `needs_human`,
-   gets a summary that says what is still red, and the result line is `FAILED <ref> ci-red`
-   (see `parking.md`) and name the failing job and test.
+4. At the cap, once the failure is not also on the base (next section): the PR
+   keeps `needs_work`, gains `needs_human` and a summary of what is still red
+   naming the failing job and test; the result is `FAILED <ref> ci-red` (`parking.md`).
 5. A CI wait that times out is a `WARN`, not a pass.
 
 ## A failure that is also on the base
@@ -162,7 +164,10 @@ Before a check or CI job counts against the change (the `models.max_tries` or
 
 ## Checklist
 
-- [ ] Captured the baseline test and lint state before any edit.
+- [ ] Ran `notme verify-plan` before any edit and kept its JSON.
+- [ ] Captured the baseline test and lint state before any edit, or logged why the plan skipped it.
+- [ ] Ran only the targeted tests during the work when the plan has them, and the full set once before the push.
+- [ ] Ran no person-only command.
 - [ ] Reproduced the bug, or held the issue when it could not be reproduced.
 - [ ] Saw each new test fail before the change and pass after it.
 - [ ] Ran every CI step locally with the project's own commands.
@@ -170,5 +175,5 @@ Before a check or CI job counts against the change (the `models.max_tries` or
 - [ ] Wrote a `Visual check:` line for UI diffs: path form in the log, words form in the PR.
 - [ ] Did the accessibility pass and flagged what was not auto-fixed.
 - [ ] Ran the cross-model claim check, or logged that `models.verifier` is `none`; verdict lines name the verifier.
-- [ ] Waited on CI for the pushed head and stopped at `limits.fix_loop`.
+- [ ] Waited on CI for the pushed head and stopped at `limits.fix_loop`, or logged that `ci_wait` is false.
 - [ ] Ran a failing check on the base before counting it against the change.

@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import subprocess
 import unittest
 from pathlib import Path
@@ -41,13 +42,23 @@ from tests.test_cli_contract import TtyIO  # noqa: E402
 
 
 class UnderClaudeCase(unittest.TestCase):
-    """A session project and a second checkout, a default global layer under a scratch HOME, CLAUDECODE=1."""
+    """A session project and a second checkout, a default global layer under a scratch HOME, CLAUDECODE=1.
+
+    Both checkouts are copies of one repo built per class by init_repo (a fresh repo holds no absolute path, so a
+    copy is the same repo a fresh init_repo makes, without four git processes per checkout per test)."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        template = TempCase()
+        cls.addClassCleanup(template.cleanup)
+        cls._template_repo = init_repo(template.root / "repo")
 
     def setUp(self):
         self.tc = TempCase()
         self.addCleanup(self.tc.cleanup)
-        self.session = init_repo(self.tc.root / "session")
-        self.other = init_repo(self.tc.root / "other")
+        self.session = Path(shutil.copytree(str(self._template_repo), str(self.tc.root / "session"), symlinks=True))
+        self.other = Path(shutil.copytree(str(self._template_repo), str(self.tc.root / "other"), symlinks=True))
         user = self.tc.root / "user"
         patcher = mock.patch.dict(os.environ, {"HOME": str(user), "USERPROFILE": str(user)})
         patcher.start()

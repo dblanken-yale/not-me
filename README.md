@@ -58,12 +58,17 @@ flowchart TD
         refuse, defer, implement, or disagree"]
         u3["Implement through a delegated subagent
         ⚙ models, standards.md Delegation"]
-        u4["Verify and gate; a shared test environment is locked
-        for the verify step only
-        ⚙ verify.md, verify.md shared_env"]
+        u4["Verify and gate: targeted tests during the work,
+        the full set once before the branch goes up; a shared
+        test environment is locked for the verify step only
+        ⚙ verify.md, Targeted tests, verify.md shared_env"]
         u5["Merge base in (the predecessor's branch on a stacked PR),
         send the branch up, reply on every thread, swap to 'needs review'"]
-        u1 --> u2 --> u3 --> u4 --> u5
+        u3b["Baseline, skipped when the base CI is green
+        ⚙ verify.md baseline: auto"]
+        u5b["Wait for CI
+        ⚙ limits.ci_wait_minutes, 0 skips it"]
+        u1 --> u2 --> u3b --> u3 --> u4 --> u5 --> u5b
     end
 
     subgraph new ["new leg: implement an issue"]
@@ -75,17 +80,22 @@ flowchart TD
         ⚙ standards.md branch, protected_branches, queue.stacking"]
         n3["Implement through a delegated subagent, failing test first
         ⚙ models, standards.md Delegation"]
-        n4["Verify and gate: baseline, tests, simplify, code review,
-        security review, CI-parity lint; a shared test environment
+        n3b["Baseline, skipped when the base CI is green
+        ⚙ verify.md baseline: auto"]
+        n4["Verify and gate: targeted tests during the work, simplify,
+        code review, security review, then the full tests, lint
+        and build once (CI parity); a shared test environment
         is locked while the checks use it
-        ⚙ verify.md, verify.md shared_env, limits.fix_loop"]
+        ⚙ verify.md, Targeted tests, verify.md shared_env, limits.fix_loop"]
         n4b["Gate additions and cross-model check
         ⚙ verify.md Gate additions, models.verifier"]
         n5["Commit and push through the CLI
         ⚙ standards.md commit, attribution"]
         n6["Open PR, move issue to 'needs review'
         ⚙ standards.md pr_title, pr_template, reviewers"]
-        n1 --> n2 --> n3 --> n4 --> n4b --> n5 --> n6
+        n7["Wait for CI on the PR
+        ⚙ limits.ci_wait_minutes, 0 skips it"]
+        n1 --> n2 --> n3b --> n3 --> n4 --> n4b --> n5 --> n6 --> n7
     end
 
     router -- "first" --> update
@@ -109,8 +119,8 @@ flowchart TD
 
     router -.-> review
     n6 -. "preview URL found" .-> prove
-    u5 --> retro
-    n6 --> retro
+    u5b --> retro
+    n7 --> retro
     review --> retro
     retro -.-> notify
     update --> writes
@@ -120,7 +130,7 @@ flowchart TD
 
     classDef optional stroke-dasharray: 5 5
     classDef person fill:#fde7c8,stroke:#c77700,color:#000
-    class review,prove,notify,n4b optional
+    class review,prove,notify,n4b,n3b,u3b,n7,u5b optional
     class live,merge person
 ```
 

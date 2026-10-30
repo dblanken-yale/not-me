@@ -328,6 +328,21 @@ notme wait-checks REF [--minutes N]
 
 Output: state (success, failure, pending or none), checks, waited_s
 
+### `notme verify-plan`
+
+The verify plan for a run, from the effective verify doc, limits.ci_wait_minutes and a commit's CI. Reads only: the local origin/<base> ref (no fetch) and the check runs and statuses on GitHub of the checked commit: --sha when given (a rework run passes the PR head), else origin/<base>. The baseline is skipped only when verify.baseline is auto and that CI is green; a gh error, or more check runs or statuses than one page holds, makes base_ci unknown and the baseline runs. Targeted test commands are the lines of the fenced block in the verify doc's Targeted tests section (none when it is left as is). ci_wait is false when limits.ci_wait_minutes is 0.
+
+```
+notme verify-plan [--base B] [--sha SHA]
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `--base B` | optional | the base branch (default: the repo default branch) |
+| `--sha SHA` | optional | read the CI result of this commit (40 hex, e.g. the PR head) instead of origin/<base> |
+
+Output: base, base_sha, checked_sha (the commit whose CI was read), base_ci (success, failure, pending, none or unknown: the CI of checked_sha), baseline (setting, run, reason), targeted (configured, commands), ci_wait_minutes, ci_wait
+
 ### `notme feedback`
 
 Review findings on a PR from trusted authors only.

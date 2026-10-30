@@ -49,7 +49,7 @@ if _PLUGIN_DIR not in sys.path:  # lets scripts load this file by path (the docs
 
 from notme import claims, config as config_mod, doctor as doctor_mod, feedback as feedback_mod  # noqa: E402
 from notme import gh as gh_mod, git as git_mod, guard as guard_mod, paths, prove, runlog, states  # noqa: E402
-from notme import humans, modeswitch, roles as roles_mod, writeback, writes  # noqa: E402
+from notme import humans, modeswitch, roles as roles_mod, verifyplan, writeback, writes  # noqa: E402
 from notme.dryrun import LedgerError  # noqa: E402
 from notme.gh import csv, names_of, login_of  # noqa: E402
 from notme.queue import NotOpen, board_ref, describe as describe_queue, make_queue, stale_claims  # noqa: E402
@@ -1247,6 +1247,55 @@ def cmd_wait_checks(ctx: Context, args: argparse.Namespace, repo: str, n: int) -
         return feedback_mod.bundle(ctx.gh, repo, n, ctx.roster, tracker=ctx.tracker, repos=[]).checks
 
     return feedback_mod.wait_checks(fetch, minutes, sleep=ctx.deps.sleep, clock=ctx.deps.clock)
+
+
+SHA40_RE = re.compile(r"[0-9a-f]{40}")  # a full commit hash, as GitHub reports it
+
+
+@command("verify-plan", "what to verify and when: baseline, targeted tests, CI wait", args=[
+    arg("--base", metavar="B", help="the base branch (default: the repo default branch)"),
+    arg("--sha", metavar="SHA", help="read the CI result of this commit (40 hex, e.g. the PR head) instead of "
+                                     "origin/<base>")])
+def cmd_verify_plan(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """The verify plan for a run, from the effective verify doc, limits.ci_wait_minutes and a commit's CI.
+    Reads only: the local origin/<base> ref (no fetch) and the check runs and statuses on GitHub of the checked
+    commit: --sha when given (a rework run passes the PR head), else origin/<base>. The baseline is skipped only
+    when verify.baseline is auto and that CI is green; a gh error, or more check runs or statuses than one page
+    holds, makes base_ci unknown and the baseline runs. Targeted test commands are the lines of the fenced block
+    in the verify doc's Targeted tests section (none when it is left as is). ci_wait is false when
+    limits.ci_wait_minutes is 0.
+
+    Output: base, base_sha, checked_sha (the commit whose CI was read), base_ci (success, failure, pending, none
+    or unknown: the CI of checked_sha), baseline (setting, run, reason), targeted (configured, commands),
+    ci_wait_minutes, ci_wait
+    """
+    if args.sha is not None and not SHA40_RE.fullmatch(args.sha):
+        raise fail(ExitCode.USAGE, "usage", f"invalid sha {args.sha!r}: use the full 40-character commit hash")
+    repo = _code_repo(ctx)
+    cwd = ctx.work_dir
+    base = git_mod.valid_branch(args.base) if args.base else None
+    if base is None:
+        base = git_mod.default_branch(ctx.gh, repo, cwd) if cwd is not None else ctx.gh.repo_default_branch(repo)
+    base_sha = git_mod.remote_tracking_sha(base, cwd) if cwd is not None else None
+    checked = args.sha or base_sha
+    state = "unknown"
+    if checked:
+        try:
+            runs = ctx.gh.read(["api", f"repos/{repo}/commits/{checked}/check-runs?per_page=100"])
+            combined = ctx.gh.read(["api", f"repos/{repo}/commits/{checked}/status?per_page=100"])
+        except gh_mod.GhError as exc:
+            ctx.warn(f"could not read the CI result at {checked}: {exc}")
+        else:
+            runs_doc = runs if isinstance(runs, dict) else {}
+            status_doc = combined if isinstance(combined, dict) else {}
+            state = verifyplan.ci_state(runs_doc.get("check_runs") or [], status_doc.get("statuses") or [],
+                                        runs_total=runs_doc.get("total_count"),
+                                        statuses_total=status_doc.get("total_count"))
+    # always or auto; the value comes from the config layers (defaults/verify.md), never from here
+    baseline_setting = (ctx.cfg.meta.get("verify") or {}).get("baseline")
+    return verifyplan.plan(setting=baseline_setting, base=base, base_sha=base_sha, checked_sha=checked,
+                           base_ci=state, verify_body=ctx.cfg.bodies.get("verify", ""),
+                           ci_wait_minutes=(ctx.meta.get("limits") or {}).get("ci_wait_minutes"))
 
 
 @command("feedback", "trusted review findings on a PR", ref="repo", args=[
