@@ -108,6 +108,9 @@ class IssueTests(base.CliCase):
         payload = self.ok("issue", "1")
         self.assertEqual((payload["stack_on"]["ready"], payload["stack_on"]["stacks"]), (True, True))
         self.assertEqual(payload["blocked_by"], [])
+        self.assertEqual(payload["blocking"], [])
+        things(self.fake)["1"]["blocking"] = [2]
+        self.assertEqual([d["number"] for d in self.ok("issue", "1")["blocking"]], [2])
         with mock.patch("notme.queue.BaseQueue.stacking", side_effect=ValueError("queue.stacking is broken")):
             code, payload, _ = self.cli("issue", "1")
         self.assertEqual(code, 0)
@@ -388,6 +391,20 @@ class IssueTests(base.CliCase):
         self.assertEqual((code, payload["kind"]), (1, "untrusted_author"))
         self.assertEqual(self.fake.writes_made(), [])
         self.assertEqual(things(self.fake)["1"]["body"], "Body of First issue")
+
+    def test_issue_body_refuses_a_body_last_edited_off_the_roster_or_unreadable(self):
+        body = self.write_file("b.md", "Fixed body.\n")
+        for key, value in (("editor", "mallory"), ("editor_fail", True)):
+            with self.subTest(key):
+                things(self.fake)["1"].pop("editor", None)
+                things(self.fake)["1"].pop("editor_fail", None)
+                things(self.fake)["1"][key] = value
+                code, payload, _ = self.cli("issue-body", "1", "--body-file", body)
+                self.assertEqual((code, payload["kind"]), (1, "untrusted_editor"))
+                self.assertEqual(self.fake.writes_made(), [])
+        things(self.fake)["1"].pop("editor_fail", None)
+        things(self.fake)["1"]["editor"] = "hubot"  # on the roster
+        self.ok("issue-body", "1", "--body-file", body)
 
     def test_issue_body_restores_a_dropped_marker(self):
         things(self.fake)["1"]["body"] = "Old\n\n<!-- not-me:claim octocat r-1 -->\n<!-- not-me:ticket -->"

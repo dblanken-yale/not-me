@@ -20,8 +20,9 @@ Make one work directory in the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/
    `notme pr-body` must keep it too. After it comes the template at
    `standards.pr_template` when it resolves, else the default sections from
    `pr-shape.md`:
-   - `## Summary`. For a chained sub-issue the first line is
-     `Builds on <owner>/<repo>#<n>`.
+   - `## Summary`. For a chained sub-issue, or a stacked issue (`pr` in `stack_on`),
+     the first line is `Builds on <owner>/<repo>#<n>`. When `blocking` from
+     `notme issue N` lists open issues, add a line `Unblocks <ref>, <ref>` (full refs).
    - `## Testing steps`: a checklist a person can follow. Tick only what this run
      ran and saw pass. Never inside `<details>`. Each check by its command and
      result only, with no account of local trouble the run got past; that stays
@@ -76,6 +77,22 @@ This replaces `in_progress` with `needs_review` on a label queue and moves the
 card on a board queue. A state mismatch (exit 1) means someone moved the issue
 during the run: log a `WARN`, leave it, and say so in the result note.
 
+## Issues waiting on this one
+
+After the move, unless `queue.stacking` is `off` (in a dry run, log what it would
+do), for each open issue D in the tracker that this issue's `blocking` lists:
+
+1. `notme issue D`. Skip D when `author_trusted` is false.
+2. Unless `via` in `stack_on` is `declared` (D already names a PR), write D's body with
+   one line added at the end, `Stack on: <repo>#<pr>`, to a file and run
+   `notme issue-body D --body-file <f> --log <path>` (the CLI keeps markers and
+   refuses a body whose author or last editor is off the roster).
+3. When D carries the `blocked` label (or sits in the board's Blocked column) and
+   this issue is its only open `blocked_by` entry:
+   `notme move-issue D --to todo --require-current blocked --reason-file <f> --log <path>`,
+   the reason saying `<ref> is open as <repo>#<pr>; D may stack on it`.
+4. A failure here is a `WARN` in the log; the PR stands.
+
 ## Checklist
 
 - [ ] Title and body written to files and checked with `notme check-text`.
@@ -84,3 +101,4 @@ during the run: log a `WARN`, leave it, and say so in the result note.
 - [ ] Opened ready for review, `needs_review` and reviewers on the completing PR only.
 - [ ] Companion sections written on every PR in the set.
 - [ ] Moved the issue from `in_progress` to `needs_review`.
+- [ ] Added `Stack on:` to trusted issues waiting on this one; unblocked those it alone held.

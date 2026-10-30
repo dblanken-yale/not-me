@@ -108,7 +108,10 @@ An issue may declare one line, `Stack on: <owner/repo#PR>`, `Based on: <owner/re
 or `On top of: <owner/repo#PR>` (a PR, or an issue whose single open PR is used).
 It counts only from a trusted author, and only the CLI reads it: `notme issue N`
 returns `stack_on`, and `notme pick-issue` leaves out an issue whose `stack_on` has
-`ready` false (it lists them in `stack_held` with the reason).
+`ready` false (it lists them in `stack_held` with the reason). With
+`queue.stacking: auto`, an issue with no line gets a `stack_on` from its open
+blockers (`via` is `blockers`): ready when they all resolve to one open PR that
+passes the same checks, held when a blocker has no open PR yet. Treat it the same.
 
 1. `stacks` true: branch from `origin/<head>`, the `head` field of `stack_on`, and
    open the PR against that branch with `Builds on <pr>`, the `pr` field (see

@@ -14,7 +14,7 @@ queue:                           # where work is picked from
   list_limit: 10                 # most eligible issues pick-issue lists with facts (about four reads each); the run chooses among them
   board: {owner: null, number: null, status_field: Status}  # project board used when source = board
   board_states: {todo: To Do, in_progress: In progress, in_review: In review, blocked: Blocked}  # board column names; map them to the board's real columns
-  stacking: declared             # declared | off; declared = an issue with a trusted `Stack on:`, `Based on:` or `On top of:` owner/repo#N line may branch from that open PR; off = never stack, the issue waits for the merge; the repo layer may only set off
+  stacking: declared             # auto | declared | off; declared = an issue with a trusted `Stack on:`, `Based on:` or `On top of:` owner/repo#N line may branch from that open PR; auto = that, and an issue with no line whose open blockers all resolve to one ready open PR stacks on it too (others wait); off = never stack, the issue waits for the merge; auto only in the global layer; the repo layer may only step down (auto > declared > off)
   sync: false                    # true = each claim, move and release also updates the side source does not read (labels or board Status); source: either does this whatever this says, and a false written in a layer with it is a config error; a board named in the repo layer must be confirmed on the global allow list
 picking:                         # how /not-me:new chooses among eligible issues; the rules are the Picking work section below; any layer may set these
   fields: []                     # board field names whose values pick-issue lists for each issue, e.g. [Priority]

@@ -52,7 +52,7 @@ the issue is chosen, how its text is read and screened, and how epics chain.
    never pick an issue that is not in `issues`, whatever the rules or an epic
    say. The CLI already removed issues waiting behind an earlier one in their
    epic (`held_back`) and issues whose `Stack on:`, `Based on:` or `On top of:`
-   predecessor is not ready (`stack_held`, with the reason; a `none` with reason
+   predecessor (or, with `queue.stacking: auto`, whose open blockers) is not ready to stack on (`stack_held`, with the reason; a `none` with reason
    `stack_held` is NONE, and the log names those refs and reasons); never pick or re-add one. Once the log is started, write
    one line (the issue, why, and the rule) to a file in the temp directory and
    record it with `notme log action <path> --kind ACTION --message-file <file>`.

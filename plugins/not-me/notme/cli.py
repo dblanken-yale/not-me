@@ -57,6 +57,7 @@ from notme.queue import resync as resync_mod  # noqa: E402
 from notme.queue.signals import picking_signals  # noqa: E402
 from notme.queue.sync import MirrorFailed  # noqa: E402
 from notme.redact import redact, redact_obj  # noqa: E402
+from notme.stacking import last_editor  # noqa: E402
 
 
 def launcher_path() -> str:
@@ -1138,22 +1139,25 @@ def cmd_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict
 
     Output: repo, number, title, state, url, author, author_trusted, labels, status, assignees, body, comments,
     comments_ignored, blocked_by ([{repo, number, state}] from GitHub issue dependencies; null when unknown),
-    stack_on. stack_on is null unless a trusted author's body has one `Stack on:`, `Based on:` or `On top of:`
-    owner/repo#N line (null too when the queue config is invalid: see warnings);
+    blocking (the issues GitHub records as blocked by this one, same shape), stack_on. stack_on is null unless a
+    trusted author's body has one `Stack on:`, `Based on:` or `On top of:` owner/repo#N line, or queue.stacking is
+    auto and the issue has an open blocker (null too when the queue config is invalid: see warnings);
     then {ref, pr, head, base, state, draft, author, author_trusted (of the PR), stacks (branch from head and
-    target it), ready, reason}. Read it here, never from the body: the line counts only from a trusted author, and
-    the PR must be open, not a draft, from a trusted author and in this checkout's repo. A merged PR gives ready true
-    and stacks false (a normal issue); queue.stacking off, another open blocker or a closed PR gives ready false
+    target it), ready, reason, via (declared: the line; blockers: auto, from the open blockers)}. Read it here,
+    never from the body: the line counts only from a trusted author, and the PR must be open, not a draft, from a
+    trusted author and in this checkout's repo. A merged PR gives ready true and stacks false (a normal issue);
+    queue.stacking off, another open blocker, a blocker with no open PR or a closed PR gives ready false
     """
     out = feedback_mod.issue_view(ctx.gh, repo, n, ctx.roster, ctx.operator, ctx.labels)
-    out["stack_on"] = out["blocked_by"] = None
+    out["stack_on"] = out["blocked_by"] = out["blocking"] = None
     if out["author_trusted"] and repo.lower() == ctx.tracker.lower():
         try:  # a queue or picking config error must not stop the read of the issue itself
             queue = ctx.queue()
             out["stack_on"] = queue.stack_on(n, out["author"], out["body"])
             out["blocked_by"] = queue.blocked_by(n)
+            out["blocking"] = queue.blocking(n)
         except ValueError as exc:
-            ctx.warn(f"stack_on and blocked_by are null: {exc}")
+            ctx.warn(f"stack_on, blocked_by and blocking are null: {exc}")
     return out
 
 
@@ -1749,7 +1753,8 @@ def _same_body(a: str, b: str) -> bool:
 def cmd_issue_body(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
     """Replace an issue's body with a file's text. The text must pass `check-text` (exit 1, kind text_lint, and no
     write otherwise), and the issue's author must be trusted by the rule `issue` uses (otherwise exit 1, kind
-    untrusted_author, and no write). Every not-me marker in the current body that the new text lacks is appended
+    untrusted_author, and no write), and so must whoever last edited the body (otherwise, or when that cannot be
+    read, exit 1, kind untrusted_editor, and no write). Every not-me marker in the current body that the new text lacks is appended
     back, and the configured attribution is added when missing. The issue is read back after the write (exit 5
     when the body differs; skipped in a dry run).
 
@@ -1765,6 +1770,11 @@ def cmd_issue_body(ctx: Context, args: argparse.Namespace, repo: str, n: int) ->
     if not feedback_mod.author_trusted(ctx.roster, author, ctx.operator):
         raise fail(ExitCode.ERROR, "untrusted_author",
                    f"{repo}#{n} is by {author or 'an unknown author'}, who is not trusted; its body is not replaced")
+    ok, editor = last_editor(ctx.gh, repo, n)  # a rewrite would make an untrusted editor's text ours
+    if not ok or (editor and not feedback_mod.author_trusted(ctx.roster, editor, ctx.operator)):
+        raise fail(ExitCode.ERROR, "untrusted_editor",
+                   f"{repo}#{n} was last edited by {editor or 'someone who could not be read'}, who is not trusted; "
+                   "its body is not replaced")
     body = with_attribution(ctx, text)
     missing = [m for m in _MARKER_RE.findall(issue.get("body") or "") if m not in body]
     if missing:

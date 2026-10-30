@@ -73,7 +73,8 @@ flowchart TD
 
     subgraph new ["new leg: implement an issue"]
         n1["Pick a ready issue and claim it; an issue that waits on one open PR
-        is ready when its trusted 'Stack on:' line names it
+        is ready when its trusted 'Stack on:' line names it, or, with
+        queue.stacking auto, when its open blockers all lead to that PR
         ⚙ queue, queue.stacking, picking, Picking work rules"]
         n2["Branch from the base: the default branch, an epic's branch,
         or the open PR's branch for a stacked issue
@@ -91,8 +92,9 @@ flowchart TD
         ⚙ verify.md Gate additions, models.verifier"]
         n5["Commit and push through the CLI
         ⚙ standards.md commit, attribution"]
-        n6["Open PR, move issue to 'needs review'
-        ⚙ standards.md pr_title, pr_template, reviewers"]
+        n6["Open PR, move issue to 'needs review'; add a 'Stack on:'
+        line to issues blocked by this one, unblock them
+        ⚙ standards.md pr_title, pr_template, reviewers, queue.stacking"]
         n7["Wait for CI on the PR
         ⚙ limits.ci_wait_minutes, 0 skips it"]
         n1 --> n2 --> n3b --> n3 --> n4 --> n4b --> n5 --> n6 --> n7

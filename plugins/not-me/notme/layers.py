@@ -60,7 +60,8 @@ class KeySpec:
     #   "no-bang": union list where "!value" removals from the repo are dropped |
     #   "ignore": every repo entry is dropped (extend it with the global allow list instead) |
     #   "off": may set off, never anything else (a switch that is on by default and may only be turned off) |
-    #   "max": a whole number the repo may lower, never raise above the lower layer's value or clear
+    #   "max": a whole number the repo may lower, never raise above the lower layer's value or clear |
+    #   "order": one of `enum`, listed tightest first; the repo may set one no looser than the lower layer's
     tighten_only: str = ""
 
 
@@ -72,7 +73,8 @@ SCHEMA: Dict[str, Dict[str, KeySpec]] = {
         "allow_repos": KeySpec(merge="union", tighten_only="ignore"),
         "enabled": KeySpec(tighten_only="false"),
         "queue.include_unassigned": KeySpec(tighten_only="false"),  # true widens what gets picked
-        "queue.stacking": KeySpec(enum=("declared", "off"), tighten_only="off"),  # declared lets issues stack on PRs
+        # declared lets issues stack on a named PR; auto also on the one PR their open blockers resolve to
+        "queue.stacking": KeySpec(enum=("off", "declared", "auto"), tighten_only="order"),
         "queue.list_limit": KeySpec(tighten_only="max"),  # higher (or null, no cap) means more reads per pick
         "markers.legacy": KeySpec(merge="union"),
         "picking.fields": KeySpec(items_type="field name"),  # only orders eligible issues: any layer may set it
@@ -236,6 +238,11 @@ def _loosens(spec: KeySpec, value: Any, current: Any) -> bool:
         if isinstance(value, bool) or not isinstance(value, int):
             return True  # null (no cap) or not a number: never tighter
         return isinstance(current, int) and not isinstance(current, bool) and value > current
+    if spec.tighten_only == "order":
+        if value not in spec.enum:
+            return True
+        floor = spec.enum.index(current) if current in spec.enum else 0  # nothing below: only the tightest
+        return spec.enum.index(value) > floor
     if spec.tighten_only == "superset":
         kept = current if isinstance(current, list) else []
         return not (isinstance(value, list) and all(i in value for i in kept))

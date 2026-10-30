@@ -195,15 +195,15 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/pr-shape.md` and
 `${CLAUDE_PLUGIN_ROOT}/references/companions.md`. Follow
 `${CLAUDE_PLUGIN_ROOT}/skills/new/references/pr-assembly.md`.
 
-1. Title file from `standards.pr_title`; body file with Summary, Testing steps,
+1. Title file from `standards.pr_title`; body file with Summary (`Unblocks` for open `blocking` issues), Testing steps,
    Companion PRs when there is a set, References and the closing keyword.
 2. `notme check-text --file <body>` must pass before opening.
 3. `notme pr-open --head <branch> --base <base> --title-file <t> --body-file <b>
-   --assignee <operator> --log <path>`, adding `--labels` and `--reviewers` only
-   on the PR that completes the set. Never `--draft`.
+   --assignee <operator> --log <path>`, adding `--labels` and `--reviewers` only on the PR that completes the set. Never `--draft`.
 4. Companion set: `notme companion-prs` on every PR once all exist.
 5. Move the issue with a one-line reason file (for example `Opened <repo>#<pr>`): `notme move-issue N
-   --to needs_review --require-current in_progress --reason-file <reason> --log <path>`.
+   --to needs_review --require-current in_progress --reason-file <reason> --log <path>`. Then give each
+   open issue waiting on this one a `Stack on:` line and unblock it (pr-assembly.md, "Issues waiting on this one").
 6. One comment on the issue, so a person reading it sees the run without opening
    the PR: write `Opened <repo>#<pr> for this issue.` plus the testing steps'
    one-line status to a file and run `notme comment-upsert <tracker>#N --marker

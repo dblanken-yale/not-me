@@ -239,6 +239,23 @@ class LayerCaseTests(unittest.TestCase):
         cfg = self.global_and_repo(None, "---\nschema: 1\n---\n")
         self.assertEqual(cfg.meta["project"]["queue"]["stacking"], "declared")  # the default
 
+    def test_only_the_global_layer_may_set_stacking_auto(self):
+        cfg = self.global_and_repo("---\nqueue: {stacking: auto}\n---\n", "---\nschema: 1\n---\n")
+        self.assertEqual(cfg.meta["project"]["queue"]["stacking"], "auto")
+        for global_ in (None, "---\nqueue: {stacking: declared}\n---\n", "---\nqueue: {stacking: off}\n---\n"):
+            with self.subTest(global_):
+                cfg = self.global_and_repo(global_, "---\nqueue: {stacking: auto}\n---\n")
+                self.assertNotEqual(cfg.meta["project"]["queue"]["stacking"], "auto")
+                self.assertEqual(len([w for w in cfg.warnings if "only tighten" in w]), 1)
+                ignored = cfg.explain()["keys"]["project.queue.stacking"]["ignored"]
+                self.assertEqual([i["layer"] for i in ignored], ["repo"])
+        for tighter in ("declared", "off"):  # below a global auto the repo may step down
+            with self.subTest(tighter):
+                cfg = self.global_and_repo("---\nqueue: {stacking: auto}\n---\n",
+                                           f"---\nqueue: {{stacking: {tighter}}}\n---\n")
+                self.assertEqual(cfg.meta["project"]["queue"]["stacking"], tighter)
+                self.assertEqual([w for w in cfg.warnings if "only tighten" in w], [])
+
     def test_repo_may_lower_list_limit_but_never_raise_or_clear_it(self):
         cfg = self.global_and_repo(None, "---\nqueue: {list_limit: 3}\n---\n")
         self.assertEqual(cfg.meta["project"]["queue"]["list_limit"], 3)  # lower than the default: tightens
