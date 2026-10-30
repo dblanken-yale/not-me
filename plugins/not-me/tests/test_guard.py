@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -1074,6 +1075,27 @@ class HookTests(_Fixtures):
             for tool, tin, variant in calls:
                 with self.subTest(tool=tool, input=tin, variant=variant):
                     self.assertEqual(mod.main(self.event(tool, tin, variant)), 0)
+
+    def test_main_leaves_no_watchdog_thread(self):
+        spec = importlib.util.spec_from_file_location("notme_repo_guard_hook", str(HOOK))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        for tin, variant, want in (({"command": "ls"}, "bare", 0), ({"command": "ls"}, "app", 0),
+                                   ({"command": "gh pr comment 1 -R acme/other -b x"}, "app", 2)):
+            with self.subTest(input=tin, variant=variant):
+                with mock.patch("sys.stderr"):
+                    self.assertEqual(mod.main(self.event("Bash", tin, variant)), want)
+                timers = [t for t in threading.enumerate() if isinstance(t, threading.Timer) and t.is_alive()]
+                self.assertEqual(timers, [])
+
+    def test_script_exit_codes_and_streams(self):
+        proc = self.hook(self.event("Bash", {"command": "ls"}))
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, b"", b""))
+        proc = self.hook(self.event("Bash", {"command": "gh pr comment 1 -R acme/other -b x"}))
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn(b"not-me guard [", proc.stderr)
+        self.assertIn(b"/not-me:allow-repo acme/other", proc.stderr)
+        self.assertEqual(proc.stdout, b"")
 
     def test_destructive_label(self):
         proc = self.hook(self.event("Bash", {"command": "gh secret set T --repo acme/app --body x"}))

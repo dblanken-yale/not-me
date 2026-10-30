@@ -25,11 +25,18 @@ from notme.guard import RULE_LABEL  # noqa: E402
 from tests import guard_cases as gc  # noqa: E402
 
 
-def run_case(case: gc.Case, root: Path, env: dict) -> "tuple[int, str]":
+TIMEOUT = 60
+
+
+def run_case(case: gc.Case, root: Path, env: dict) -> "tuple[int | None, str]":
+    """The hook's exit code and stderr; the code is None when the hook ran past TIMEOUT."""
     _, home = gc.variant_paths(root, case[5])
     run_env = dict(env, NOT_ME_HOME=str(home), PYTHONFAULTHANDLER="1")
-    proc = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(gc.event_for(case, root)).encode("utf-8"),
-                          capture_output=True, env=run_env, cwd=str(root), timeout=60)
+    try:
+        proc = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(gc.event_for(case, root)).encode("utf-8"),
+                              capture_output=True, env=run_env, cwd=str(root), timeout=TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        return None, (exc.stderr or b"").decode("utf-8", "replace")
     return proc.returncode, proc.stderr.decode("utf-8", "replace")
 
 
@@ -40,27 +47,33 @@ def _indent(text: str) -> str:
 def main(argv: "list[str]") -> int:
     verbose = "-v" in argv
     root = Path(tempfile.mkdtemp(prefix="notme-guard-")).resolve()
-    passed = failed = 0
+    passed = 0
+    failed_ids: "list[str]" = []
+    retried_ids: "list[str]" = []
     try:
         env = gc.build_fixtures(root)
         for case in gc.CASES:
             cid, want, rule, tool, tin, variant = case
             rc, err = run_case(case, root, env)
             first = None
-            if rc < 0:
+            if rc is not None and rc < 0:
                 first = (-rc, err)
+                retried_ids.append(cid)
                 rc, err = run_case(case, root, env)
-            problems = [f"crashed twice (signal {-rc})"] if first and rc < 0 else []
-            got = {0: "allow", 2: "block"}.get(rc, f"exit {rc}")
-            if got != want:
-                problems.append(f"want {want}, got {got}")
-            if want == "block" and rule and f"not-me guard [{RULE_LABEL.get(rule, rule)}]" not in err:
-                problems.append(f"want rule {rule}")
-            for text in gc.MESSAGE_CHECKS.get(cid, []):
-                if text not in err:
-                    problems.append(f"message lacks {text!r}")
+            if rc is None:
+                problems = [f"timed out after {TIMEOUT}s"]
+            else:
+                problems = [f"crashed twice (signal {-rc})"] if first and rc < 0 else []
+                got = {0: "allow", 2: "block"}.get(rc, f"exit {rc}")
+                if got != want:
+                    problems.append(f"want {want}, got {got}")
+                if want == "block" and rule and f"not-me guard [{RULE_LABEL.get(rule, rule)}]" not in err:
+                    problems.append(f"want rule {rule}")
+                for text in gc.MESSAGE_CHECKS.get(cid, []):
+                    if text not in err:
+                        problems.append(f"message lacks {text!r}")
             if problems:
-                failed += 1
+                failed_ids.append(cid)
                 print(f"FAIL {cid} [{variant}] {tool} {json.dumps(tin)}: {'; '.join(problems)}")
             else:
                 passed += 1
@@ -75,7 +88,13 @@ def main(argv: "list[str]") -> int:
                 print(_indent(err))
     finally:
         shutil.rmtree(root, ignore_errors=True)
-    print(f"guard cases: {passed + failed} run, {passed} passed, {failed} failed")
+    failed = len(failed_ids)
+    summary = f"guard cases: {passed + failed} run, {passed} passed, {failed} failed"
+    if failed_ids:
+        summary += f" ({', '.join(failed_ids)})"
+    if retried_ids:
+        summary += f"; retried: {', '.join(retried_ids)}"
+    print(summary)
     return 1 if failed else 0
 
 
