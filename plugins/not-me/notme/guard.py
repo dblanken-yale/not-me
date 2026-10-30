@@ -3013,9 +3013,13 @@ def _gh_write(t: List[str], c: SimpleCommand, st: _State, ctx: GuardContext, blk
             return
     if targets:
         return
-    if group == "project":  # a board belongs to an owner, not a repo
-        yield _unknown_target(blk, f"{what} names no repo, and gh's default repo is not always origin",
-                              f"pass --repo {ctx.origin_repo or 'owner/name'}")
+    if group == "project":
+        if verb.endswith(("list", "view")):  # list, item-list, field-list, view: reads
+            return
+        # never blocked (dblanken-yale/not-me#117): a board belongs to an owner, not a repo, and the operator chose
+        # it in setup; logged so a run's board change outside the notme CLI (which uses GraphQL) shows up
+        yield blk("other_repo", f"{what} changes an owner's board, not a repo; runs change boards through the notme "
+                                "CLI", "use the notme CLI, or gh api graphql for a read")
         return
     repo, how = _gh_default_repo(c, st, ctx)
     if repo:

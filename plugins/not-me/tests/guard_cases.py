@@ -2001,7 +2001,15 @@ GUIDE_START = len(CASES)
 # an issue or comment on another repo (the plugin's own included) runs and is logged as guided
 bash(G, OR, "gh issue create --repo dblanken-yale/not-me --title x --body-file b.md")
 bash(G, OR, "gh issue comment 3 --repo acme/other --body-file b.md")
-bash(G, OR, "gh project item-list 7 --owner acme --format json")
+# gh project (dblanken-yale/not-me#117): never blocked; a read passes, a board change is logged (a board belongs to an
+# owner, so gh's default repo does not decide it)
+bash(G, OR, "gh project item-edit --id X --project-id P --field-id F --text x")
+for cmd in ("gh project item-list 7 --owner acme --format json", "gh project list --owner acme",
+            "gh project field-list 7 --owner acme --format json", "gh project view 7 --owner acme"):
+    bash(A, None, cmd)
+bash(A, None, "gh project item-add 7 --owner acme --url https://github.com/acme/app/issues/1")  # names acme/app
+bash(G, OR, "GH_REPO=acme/app gh project item-edit --id X --project-id P --field-id F --text x")
+bash(A, None, "gh project item-edit --id X --project-id P --field-id F --text x", "off")  # other_repo off: no log
 bash(G, OR, 'gh api graphql -f query="mutation { addProjectV2ItemById(input:{}) { item { id } } }"')
 bash(A, None, "gh issue transfer 1 acme/other --repo acme/app")  # can be moved back: no longer destructive
 bash(A, None, "gh ruleset check main --repo acme/app")  # gh ruleset has only reads

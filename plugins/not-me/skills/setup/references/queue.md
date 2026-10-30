@@ -25,10 +25,12 @@ Run each read below; a failed read is not an error, just ask without that list.
 | What | Read |
 |------|------|
 | Labels in the tracker | `gh label list -R <tracker> --json name,description --limit 500` |
-| Boards of the tracker's owner | `gh project list --owner <owner> --format json` |
-| Columns of the chosen board | `gh project field-list <number> --owner <owner> --format json`: the options of the single-select field named in `queue.board.status_field` |
+| Boards of the tracker's owner | `gh api graphql -f query='query($o:String!){repositoryOwner(login:$o){... on ProjectV2Owner{projectsV2(first:50){nodes{number title closed}}}}}' -f o=<owner>` |
+| Columns of the chosen board | `gh api graphql -f query='query($o:String!,$n:Int!,$f:String!){repositoryOwner(login:$o){... on ProjectV2Owner{projectV2(number:$n){field(name:$f){... on ProjectV2SingleSelectField{options{name}}}}}}}' -f o=<owner> -F n=<number> -f f=<status field>`: the options of the single-select field named in `queue.board.status_field` |
 
-`<tracker>` and `<owner>` come from `notme preflight` (`tracker`).
+`<tracker>` and `<owner>` come from `notme preflight` (`tracker`). Boards are read
+through GraphQL, not the gh board subcommands: the read needs only the token's
+read:project scope and returns the same fields the CLI uses.
 
 ## 3. Ask
 
