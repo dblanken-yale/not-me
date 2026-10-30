@@ -20,8 +20,7 @@ verification is in `gate.md`.
    after Checkpoint A, so a merge commit made there (no CI) runs the baseline.
 3. Record every failure that already exists, with its name, in the run log as a
    `CHECK` line. These are not yours to fix and not yours to blame on the change.
-4. A baseline you could not run is a `WARN` line with the exact error. Never skip
-   it silently.
+4. A baseline you could not run is a `WARN` line with the exact error, never a silent skip.
 
 Example: `CHECK baseline: 212 passed, 2 failed (test_tz_offset, test_locale_sort) before any change`.
 
@@ -37,8 +36,7 @@ Example: `CHECK baseline: 212 passed, 2 failed (test_tz_offset, test_locale_sort
 1. Write the test that captures the bug or the new behaviour first.
 2. Run it and watch it fail for the right reason. Log the failing line.
 3. Make the change. Run the test again and watch it pass.
-4. A test that passed before your change proves nothing. Rewrite it until it fails
-   without the change.
+4. A test that passed before your change proves nothing; rewrite it until it fails without it.
 
 ## Targeted tests
 
@@ -79,10 +77,18 @@ shorten verification to avoid the wait. `notme log finish` drops a held lock.
 UI diffs need a visual check line in the run log and another in the PR. The run
 log keeps the path. Text bound for GitHub never holds a local path.
 
+Run log:
+
 ```
-Visual check: <path of the screenshot you actually read>     (run log)
-Visual check: read <what was checked, in words>              (PR body, GitHub)
-Visual check: not run (<named reason>)                       (either)
+Visual check: <path of the screenshot you actually read>
+Visual check: not run (<named reason>)
+```
+
+PR body and any other text bound for GitHub:
+
+```
+Visual check: read <what was checked, in words>
+Visual check: not run (<named reason>)
 ```
 
 1. Reading the screenshot is the gate. Capturing it is not. Open the image and
@@ -119,20 +125,16 @@ Before you post, check the claims this run originated with a second model.
 
 1. Claims to check: each disagreement with a reviewer, each deferral, each
    "already fixed", and each unfixed gate finding with its reason.
-2. Dispatch one subagent on `models.verifier`. `auto` means a
-   different model than the one running: a run on `opus` is checked by `sonnet`, a
-   run on any other model is checked by `opus`. Never ask the operator about it. A
-   model name pins that model. `none` means skip this check and log that it was
-   skipped.
-3. Give it the claims, the diff, and the file paths. Ask for one verdict per
-   claim: confirm or reject, with a reason.
+2. Dispatch one subagent on `models.verifier`: `auto` means a
+   different model than the one running (`opus` is checked by `sonnet`, any other
+   by `opus`), a model name pins it, `none` skips the check. Never ask the operator about it.
+3. Give it the claims, the diff and the file paths; ask for one verdict per claim.
 4. Apply verdicts mechanically. A rejected disagreement becomes an implement. A
    rejected "already fixed" becomes a fix. A rejected deferral is implemented when
    in scope, else deferred with the verifier's reason added.
-5. Log each verdict as a `CHECK` line that names the model that verified, for
-   example `CHECK verifier(sonnet) confirm: <claim>`. When `models.verifier` is
-   `none`, log `CHECK claim check skipped: models.verifier is none`. Do not argue
-   with the verdict.
+5. Log each verdict as a `CHECK` line naming the verifier (`CHECK verifier(sonnet)
+   confirm: <claim>`), or `CHECK claim check skipped: models.verifier is none`.
+   Do not argue with the verdict.
 
 ## CI wait and fix loop
 
@@ -166,8 +168,7 @@ Before a check or CI job counts against the change (the `models.max_tries` or
 
 - [ ] Ran `notme verify-plan` before any edit and kept its JSON.
 - [ ] Captured the baseline test and lint state before any edit, or logged why the plan skipped it.
-- [ ] Ran only the targeted tests during the work when the plan has them, and the full set once before the push.
-- [ ] Ran no person-only command.
+- [ ] Ran only the targeted tests during the work when the plan has them, the full set once before the push, and no person-only command.
 - [ ] Reproduced the bug, or held the issue when it could not be reproduced.
 - [ ] Saw each new test fail before the change and pass after it.
 - [ ] Ran every CI step locally with the project's own commands.
