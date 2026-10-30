@@ -363,6 +363,7 @@ class DryRunTests(CliCase):
             "resolve-threads": ["resolve-threads", "3", "--ids-file", str(self.project / "ids.json")],
             "followup": ["followup", "--title-file", title, "--body-file", body, "--parent", "1"],
             "issue-body": ["issue-body", "1", "--body-file", body],
+            "issue-stack-on": ["issue-stack-on", "1", "--pr", "acme/app#3"],
             "claim-pr": ["claim-pr", "3"],
             "release-pr": ["release-pr", "3"],
         }

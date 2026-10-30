@@ -82,11 +82,12 @@ during the run: log a `WARN`, leave it, and say so in the result note.
 After the move, unless `queue.stacking` is `off` (in a dry run, log what it would
 do), for each open issue D in the tracker that this issue's `blocking` lists:
 
-1. `notme issue D`. Skip D when `author_trusted` is false.
-2. Unless `via` in `stack_on` is `declared` (D already names a PR), write D's body with
-   one line added at the end, `Stack on: <repo>#<pr>`, to a file and run
-   `notme issue-body D --body-file <f> --log <path>` (the CLI keeps markers and
-   refuses a body whose author or last editor is off the roster).
+1. `notme issue D` for its facts. Skip D when `author_trusted` is false or
+   `body_withheld` is set. Never copy, edit or rewrite D's body yourself.
+2. Unless `via` in `stack_on` is `declared` (D already names a PR), run
+   `notme issue-stack-on D --pr <repo>#<pr> --log <path>`. The CLI reads D itself,
+   refuses one whose author or last editor is off the roster, adds the one
+   `Stack on:` line before the not-me markers, and reads it back.
 3. When D carries the `blocked` label (or sits in the board's Blocked column) and
    this issue is its only open `blocked_by` entry:
    `notme move-issue D --to todo --require-current blocked --reason-file <f> --log <path>`,

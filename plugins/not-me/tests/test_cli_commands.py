@@ -377,6 +377,67 @@ class IssueTests(base.CliCase):
         self.assertFalse(payload["author_trusted"])
         self.assertIsNone(payload["body"])
         self.assertIsNone(payload["title"])
+        self.assertEqual(payload["body_withheld"], "untrusted_author")
+
+    def test_issue_withholds_text_an_untrusted_person_last_edited(self):
+        self.assertIsNone(self.ok("issue", "1")["body_withheld"])
+        for key, value in (("editor", "mallory"), ("editor_fail", True)):
+            with self.subTest(key):
+                things(self.fake)["1"].pop("editor", None)
+                things(self.fake)["1"].pop("editor_fail", None)
+                things(self.fake)["1"][key] = value
+                payload = self.ok("issue", "1")
+                self.assertTrue(payload["author_trusted"])
+                self.assertEqual(payload["body_withheld"], "untrusted_editor")
+                self.assertIsNone(payload["body"])
+                self.assertIsNone(payload["title"])
+        things(self.fake)["1"].pop("editor_fail", None)
+        things(self.fake)["1"]["editor"] = "hubot"  # on the roster
+        payload = self.ok("issue", "1")
+        self.assertEqual((payload["body"], payload["body_withheld"]), ("Body of First issue", None))
+
+    def test_issue_stack_on_adds_the_line_before_the_markers(self):
+        things(self.fake)["1"]["body"] = "## Goal\n\nDo it.\n\n<!-- not-me:ticket -->\n<!-- not-me:claim octocat r-1 -->"
+        payload = self.ok("issue-stack-on", "1", "--pr", f"{REPO}#7")
+        self.assertEqual(payload, {"repo": REPO, "number": 1, "updated": True, "line": f"Stack on: {REPO}#7"})
+        self.assertEqual(things(self.fake)["1"]["body"],
+                         f"## Goal\n\nDo it.\n\nStack on: {REPO}#7\n\n<!-- not-me:ticket -->\n"
+                         "<!-- not-me:claim octocat r-1 -->\n")
+
+    def test_issue_stack_on_keeps_text_between_markers(self):
+        things(self.fake)["1"]["body"] = "<!-- not-me:ticket -->\nkept text\n<!-- not-me:followup -->"
+        self.ok("issue-stack-on", "1", "--pr", f"{REPO}#7")
+        self.assertEqual(things(self.fake)["1"]["body"],
+                         f"<!-- not-me:ticket -->\nkept text\n\nStack on: {REPO}#7\n\n<!-- not-me:followup -->\n")
+
+    def test_issue_stack_on_leaves_a_declared_body_alone(self):
+        things(self.fake)["1"]["body"] = "Do it.\n\nBased on: acme/app#3\n"
+        payload = self.ok("issue-stack-on", "1", "--pr", f"{REPO}#7")
+        self.assertFalse(payload["updated"])
+        self.assertEqual(self.fake.writes_made(), [])
+
+    def test_issue_stack_on_refuses_untrusted_text_without_writing(self):
+        for key, value, kind in (("author", "mallory", "untrusted_author"), ("editor", "mallory", "untrusted_editor"),
+                                 ("editor_fail", True, "untrusted_editor")):
+            with self.subTest(key):
+                saved = dict(things(self.fake)["1"])
+                things(self.fake)["1"][key] = value
+                code, payload, _ = self.cli("issue-stack-on", "1", "--pr", f"{REPO}#7")
+                self.assertEqual((code, payload["kind"]), (1, kind))
+                self.assertEqual(self.fake.writes_made(), [])
+                self.assertEqual(things(self.fake)["1"]["body"], "Body of First issue")
+                things(self.fake)["1"].clear()
+                things(self.fake)["1"].update(saved)
+
+    def test_issue_stack_on_checks_the_pr_ref_and_writes_nothing_in_a_dry_run(self):
+        for bad in ("7", "#7", "acme/app#x", "acme/app#7\nInjected: yes"):
+            with self.subTest(bad):
+                code, payload, _ = self.cli("issue-stack-on", "1", "--pr", bad)
+                self.assertEqual((code, payload["kind"]), (2, "usage"))
+        payload = self.ok("issue-stack-on", "1", "--pr", f"{REPO}#7", "--dry-run")
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(self.fake.writes_made(), [])
+        self.assertEqual(things(self.fake)["1"]["body"], "Body of First issue")
 
     def test_issue_body_replaces_the_body_of_a_trusted_author(self):
         body = self.write_file("b.md", "## Goal\n\nFixed body.\n")

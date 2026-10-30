@@ -212,7 +212,7 @@ Output: number, to, require_current, commented; warnings when a queue.sync mirro
 
 ### `notme issue`
 
-An issue's facts. The body and comments of an author the roster does not trust are withheld.
+An issue's facts. The body and comments of an author the roster does not trust are withheld, and so are the title and body when whoever last edited the body is not trusted or cannot be read.
 
 ```
 notme issue N
@@ -222,7 +222,7 @@ notme issue N
 |----------|----------|---------|
 | `N` | required |  |
 
-Output: repo, number, title, state, url, author, author_trusted, labels, status, assignees, body, comments, comments_ignored, blocked_by ([{repo, number, state}] from GitHub issue dependencies; null when unknown), blocking (the issues GitHub records as blocked by this one, same shape), stack_on. stack_on is null unless a trusted author's body has one `Stack on:`, `Based on:` or `On top of:` owner/repo#N line, or queue.stacking is auto and the issue has an open blocker (null too when the queue config is invalid: see warnings); then {ref, pr, head, base, state, draft, author, author_trusted (of the PR), stacks (branch from head and target it), ready, reason, via (declared: the line; blockers: auto, from the open blockers)}. Read it here, never from the body: the line counts only from a trusted author, and the PR must be open, not a draft, from a trusted author and in this checkout's repo. A merged PR gives ready true and stacks false (a normal issue); queue.stacking off, another open blocker, a blocker with no open PR or a closed PR gives ready false
+Output: repo, number, title, state, url, author, author_trusted, labels, status, assignees, body, body_withheld (null, untrusted_author or untrusted_editor), comments, comments_ignored, blocked_by ([{repo, number, state}] from GitHub issue dependencies; null when unknown), blocking (the issues GitHub records as blocked by this one, same shape), stack_on. stack_on is null unless a trusted author's body has one `Stack on:`, `Based on:` or `On top of:` owner/repo#N line, or queue.stacking is auto and the issue has an open blocker (null too when the queue config is invalid: see warnings); then {ref, pr, head, base, state, draft, author, author_trusted (of the PR), stacks (branch from head and target it), ready, reason, via (declared: the line; blockers: auto, from the open blockers)}. Read it here, never from the body: the line counts only from a trusted author, and the PR must be open, not a draft, from a trusted author and in this checkout's repo. A merged PR gives ready true and stacks false (a normal issue); queue.stacking off, another open blocker, a blocker with no open PR or a closed PR gives ready false
 
 ### `notme pick-needs-work`
 
@@ -635,6 +635,23 @@ notme issue-body N|REF --body-file F
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
 Output: repo, number, updated
+
+### `notme issue-stack-on`
+
+Add one line, `Stack on: OWNER/NAME#N`, to an issue's body, so the caller never reads or rewrites the body. The issue's author must be trusted by the rule `issue` uses (otherwise exit 1, kind untrusted_author), and so must whoever last edited the body (otherwise, or when that cannot be read, exit 1, kind untrusted_editor); neither writes anything. A body that already has a `Stack on:`, `Based on:` or `On top of:` line is left as it is (updated false). The line goes after the text and before any not-me markers at the end, which are kept. The issue is read back after the write (exit 5 when the body differs; skipped in a dry run).
+
+```
+notme issue-stack-on N|REF --pr OWNER/NAME#N
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `N|REF` | required | a number (in the tracker), #N, owner/name#N or a URL |
+| `--pr OWNER/NAME#N` | required | the pull request the issue may stack on |
+
+Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
+
+Output: repo, number, updated, line
 
 ### `notme followup`
 

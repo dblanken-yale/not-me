@@ -35,6 +35,7 @@ testing-steps
 review-post
 resolve-threads
 issue-body
+issue-stack-on
 followup
 check-text
 log start

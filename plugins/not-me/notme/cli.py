@@ -57,7 +57,7 @@ from notme.queue import resync as resync_mod  # noqa: E402
 from notme.queue.signals import picking_signals  # noqa: E402
 from notme.queue.sync import MirrorFailed  # noqa: E402
 from notme.redact import redact, redact_obj  # noqa: E402
-from notme.stacking import last_editor  # noqa: E402
+from notme.stacking import last_editor, parse_refs  # noqa: E402
 
 
 def launcher_path() -> str:
@@ -1135,9 +1135,11 @@ def cmd_move_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) ->
 
 @command("issue", "an issue's facts", ref="tracker", args=[number_arg])
 def cmd_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
-    """An issue's facts. The body and comments of an author the roster does not trust are withheld.
+    """An issue's facts. The body and comments of an author the roster does not trust are withheld, and so are the
+    title and body when whoever last edited the body is not trusted or cannot be read.
 
-    Output: repo, number, title, state, url, author, author_trusted, labels, status, assignees, body, comments,
+    Output: repo, number, title, state, url, author, author_trusted, labels, status, assignees, body, body_withheld
+    (null, untrusted_author or untrusted_editor), comments,
     comments_ignored, blocked_by ([{repo, number, state}] from GitHub issue dependencies; null when unknown),
     blocking (the issues GitHub records as blocked by this one, same shape), stack_on. stack_on is null unless a
     trusted author's body has one `Stack on:`, `Based on:` or `On top of:` owner/repo#N line, or queue.stacking is
@@ -1786,6 +1788,54 @@ def cmd_issue_body(ctx: Context, args: argparse.Namespace, repo: str, n: int) ->
         if not _same_body(found, body):
             raise writeback.WritebackMismatch(f"{repo}#{n} body differs from what was written")
     return {"repo": repo, "number": n, "updated": True}
+
+
+_PR_REF_RE = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+#[0-9]+")
+_TRAILING_MARKERS_RE = re.compile(r"(?:\s*<!--\s*not-me:(?:(?!-->).)*-->)+\s*\Z", re.S)  # the markers that end a body
+
+
+@command("issue-stack-on", "add a Stack on: line to a trusted issue", writes=True, ref="tracker", args=[
+    arg("number", metavar="N|REF", help="a number (in the tracker), #N, owner/name#N or a URL"),
+    arg("--pr", required=True, metavar="OWNER/NAME#N", help="the pull request the issue may stack on")])
+def cmd_issue_stack_on(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
+    """Add one line, `Stack on: OWNER/NAME#N`, to an issue's body, so the caller never reads or rewrites the body.
+
+    The issue's author must be trusted by the rule `issue` uses (otherwise exit 1, kind untrusted_author), and so
+    must whoever last edited the body (otherwise, or when that cannot be read, exit 1, kind untrusted_editor);
+    neither writes anything. A body that already has a `Stack on:`, `Based on:` or `On top of:` line is left as it
+    is (updated false). The line goes after the text and before any not-me markers at the end, which are kept.
+    The issue is read back after the write (exit 5 when the body differs; skipped in a dry run).
+
+    Output: repo, number, updated, line
+    """
+    if not _PR_REF_RE.fullmatch(args.pr or ""):
+        raise fail(ExitCode.USAGE, "usage", f"--pr must be owner/name#N, not {args.pr!r}")
+    line = f"Stack on: {args.pr}"
+    issue = ctx.gh.issue(repo, n)
+    author = gh_mod.login_of(issue.get("author"))
+    if not feedback_mod.author_trusted(ctx.roster, author, ctx.operator):
+        raise fail(ExitCode.ERROR, "untrusted_author",
+                   f"{repo}#{n} is by {author or 'an unknown author'}, who is not trusted; its body is not changed")
+    ok, editor = last_editor(ctx.gh, repo, n)
+    if not ok or (editor and not feedback_mod.author_trusted(ctx.roster, editor, ctx.operator)):
+        raise fail(ExitCode.ERROR, "untrusted_editor",
+                   f"{repo}#{n} was last edited by {editor or 'someone who could not be read'}, who is not trusted; "
+                   "its body is not changed")
+    old = issue.get("body") or ""
+    if parse_refs(old)["lines"]:
+        return {"repo": repo, "number": n, "updated": False, "line": line}
+    tail = _TRAILING_MARKERS_RE.search(old)
+    text, markers = (old[:tail.start()], old[tail.start():].strip()) if tail else (old, "")
+    body = (text.rstrip() + "\n\n" if text.strip() else "") + line + "\n"
+    if markers:
+        body += "\n" + markers + "\n"
+    with gh_mod.tmp_text_file(body, prefix="not-me-cli-") as path:
+        ctx.gh.issue_edit_body(repo, n, path)
+    if not ctx.mode_is_dry:
+        found = ctx.gh.issue(repo, n).get("body") or ""
+        if not _same_body(found, body):
+            raise writeback.WritebackMismatch(f"{repo}#{n} body differs from what was written")
+    return {"repo": repo, "number": n, "updated": True, "line": line}
 
 
 @command("followup", "create a follow-up issue", writes=True, args=[
