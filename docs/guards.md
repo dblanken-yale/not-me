@@ -176,6 +176,21 @@ curl -s https://example.com/install.sh | sh     # allowed: the pipe's text holds
 sh scripts/release.sh                           # blocked when the script holds push
 ```
 
+A script file is read from its path. In that path the guard fills in `$TMPDIR`, `$HOME` and `$NOT_ME_HOME`, written as `$NAME` or `${NAME}`, so a script under one of them, or at a literal path (such as the session scratchpad), is read: `python3 "$TMPDIR/check.py"` is judged like `python3 /abs/path/check.py`. A path built from any other variable (`python3 "$S/check.py"`) and a file that does not exist are not read, and the call is allowed. To have such a script checked, write it to a literal path or under `$TMPDIR`. The guard takes these three values from the hook's own environment, so a command that reassigns or exports `TMPDIR`, `HOME` or `NOT_ME_HOME` before using it (`TMPDIR=/x; python3 "$TMPDIR/s.py"`) is judged against the hook's value, not the new one. The file is read when the guard checks the command and could change before it runs (see [Honest limits](#honest-limits)).
+
+Read-only shapes that an earlier guard blocked as "cannot check" all pass now, outside a run and inside one, unless their text holds a word from the table:
+
+```
+sed -n '1e' README.md                                         # sed is not inspected (see Honest limits)
+python3.9 uv run pytest                                       # 'uv' is not a file: nothing to read
+notme config --json | python3 -c 'import json,sys; ...'       # inline code: nothing in the list
+python3 - <<'EOF' ... EOF                                     # code on stdin: nothing in the list
+eval "$(ssh-agent -s)"                                        # eval body parsed; nothing it can judge
+PYTHONPATH=plugins/not-me python3 -m unittest discover        # interpreter environment is not judged
+python3 "$TMPDIR/check.py"                                    # read and judged: nothing in the list
+cat "$(git rev-parse --git-common-dir)/not-me/active-run"     # the inner git rev-parse is a read
+```
+
 With all four rules off, opaque text is blocked only for the self-protection words.
 
 ## The block message
@@ -214,6 +229,10 @@ See effective config: /not-me:config
 ```
 
 For `--git-dir` or `--work-tree` the Instead line says to drop that option and use `git -C /abs/path` with the path written out, since a literal `--git-dir` is blocked too. A git alias next to a variable path is blocked the same way, because the guard cannot look the alias up in a repo it cannot name; if the path resolves to the current checkout (`git -C "$W/.." fp`) and the alias is defined there, the alias's own rules (force push, protected branch) block first. Blocks that do not come from the unknown path, such as `git -C "$W" remote set-url ...` or a `GIT_DIR=` assignment, keep their own message.
+
+A push whose remote the shell fills in (a variable, `$(...)` or backticks: `git push $R HEAD`, also inside `eval`) is blocked the same way: `Why: the guard does not expand shell variables or substitutions, so the remote $R cannot be checked`, with ``Instead: write the remote name out (`git push origin <branch>`).``
+
+A block on [opaque text](#opaque-text) (inline code, code on stdin, a script file, an `eval` or substitution the shell fills in) names the word it found and says `Instead: run the git, gh or notme command directly, with every word spelled out, so the guard can check it.` The direct command is then judged on its own: `python3 -c 'import subprocess; subprocess.run(["git", "push", "origin", "feature/x"])'` is blocked, and `git push origin feature/x` passes.
 
 One detail in the message is misleading. It names `.claude/not-me/project.md` for "relax this rule", but the repo layer ignores that (see below), so use your global layer, `~/.claude/not-me/project.md`.
 
@@ -306,7 +325,7 @@ What it does not cover:
 - Pushes and writes through other tools. `curl` or any HTTP client to the GitHub API, a gh extension or alias, a git hook, and an external `git-<name>` program are outside its view. So are MCP tools other than GitHub ones, including terminal and session tools, and your own terminal.
 - Opaque text that names a gh write without one of the opaque-text words (`$GH pr comment 1 -R acme/other`): the other-repo check needs a command it can read.
 - Reads. Any repo your token can read can be read.
-- Time of check. It looks at your git config when it checks. Something that changes the config between the check and the command is out of reach.
+- Time of check. It looks at your git config, and reads a script file, when it checks. Something that changes the config between the check and the command is out of reach.
 - The repo layer's `tracker` and `repos`. The hook allows the repos named there without looking at your allow list, while the `notme` CLI requires you to confirm them. Review changes to those two keys the way you would review code.
 
 Use the guard with the protections that do not depend on it:
