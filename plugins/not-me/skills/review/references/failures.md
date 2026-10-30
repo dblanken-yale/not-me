@@ -13,7 +13,8 @@ written, what is left alone, and the result for that PR. Logging rules are in
 2. Leave the labels of a failed PR as they were. Never post a partial review.
 3. Finish the log with `notme log finish <path> --status "<result>"`, passing the
    failing command and output with `--failures-file`.
-4. Remove the worktree with `notme git worktree-remove <path>` on every path.
+4. Remove the worktree with `notme git worktree-remove <worktree path>`, the
+   `path` that `worktree-add` returned, on every path.
 
 ## Table
 

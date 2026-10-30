@@ -255,16 +255,97 @@ class HumanOnlyTests(UnderClaudeCase):
 
 
 class PathTests(UnderClaudeCase):
-    def test_worktree_add_outside_the_worktrees_dir_is_refused(self):
-        sha = git(self.session, "rev-parse", "HEAD").strip()
-        for target in (self.tc.root / "anywhere", self.session / ".git" / "not-me" / "worktrees" / ".." / "x"):
-            with self.subTest(target=str(target)):
-                code, payload, _ = self.cli("git", "worktree-add", str(target), sha)
+    def _sha(self):
+        return git(self.session, "rev-parse", "HEAD").strip()
+
+    def _root(self):
+        return Path(os.path.realpath(str(self.session))) / ".claude" / "worktrees"
+
+    def test_worktree_add_picks_the_path_under_the_main_checkout(self):
+        sha = self._sha()
+        payload = self.ok("git", "worktree-add", sha)
+        self.assertEqual(payload, {"path": str(self._root() / f"review-{sha[:12]}"), "sha": sha})
+        self.assertTrue(Path(payload["path"], "a.txt").is_file())
+        payload = self.ok("git", "worktree-add", sha, "--name", "review-3-abc.1_x")
+        self.assertEqual(payload["path"], str(self._root() / "review-3-abc.1_x"))
+        self.assertTrue(Path(payload["path"], "a.txt").is_file())
+
+    def test_worktree_add_refuses_a_bad_name(self):
+        sha = self._sha()
+        for name in ("../x", "a/b", ".hidden", "", "..", "a..b", "-x", "a\\b", "x" * 65):
+            with self.subTest(name=name):
+                code, payload, _ = self.cli("git", "worktree-add", sha, f"--name={name}")
                 self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
-                self.assertFalse(target.exists())
-        ok = self.session / ".git" / "not-me" / "worktrees" / "review-3"
-        self.ok("git", "worktree-add", str(ok), sha)
-        self.assertTrue((ok / "a.txt").is_file())
+        self.assertFalse((self.session / ".claude").exists())  # a refusal creates nothing
+        self.assertFalse((self.session / "x").exists())
+
+    def test_worktree_add_refuses_an_existing_path(self):
+        sha = self._sha()
+        self.ok("git", "worktree-add", sha, "--name", "r1")
+        code, payload, _ = self.cli("git", "worktree-add", sha, "--name", "r1")
+        self.assertEqual((code, payload["kind"]), (1, "path_exists"))
+
+    def test_worktree_add_refuses_a_bare_repository(self):
+        bare = self.tc.root / "bare.git"
+        git(self.session, "clone", "-q", "--bare", str(self.session), str(bare))
+        code, payload, _ = self.cli("git", "worktree-add", self._sha(), cwd=bare)
+        self.assertEqual((code, payload["kind"]), (2, "usage"))
+        self.assertFalse((bare / ".claude").exists())
+        self.assertFalse((self.tc.root / ".claude").exists())
+
+    def test_worktree_add_refuses_a_symlinked_root(self):
+        sha = self._sha()
+        claude = self.session / ".claude"
+        for case in ("worktrees", ".claude"):
+            with self.subTest(link=case):
+                elsewhere = self.tc.root / f"elsewhere-{case}"
+                (elsewhere / "worktrees").mkdir(parents=True)
+                link, target = ((claude / "worktrees", elsewhere / "worktrees") if case == "worktrees"
+                                else (claude, elsewhere))
+                link.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    link.symlink_to(target, target_is_directory=True)
+                except (OSError, NotImplementedError):
+                    self.skipTest("symlinks unavailable")
+                code, payload, _ = self.cli("git", "worktree-add", sha, "--name", "r1")
+                self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
+                self.assertEqual(list((elsewhere / "worktrees").iterdir()), [])
+                link.unlink()
+                if claude.is_dir():
+                    claude.rmdir()
+
+    def test_worktree_add_is_hidden_from_the_main_checkout(self):
+        sha = self._sha()
+        self.ok("git", "worktree-add", sha, "--name", "review-3")
+        self.ok("git", "worktree-add", sha, "--name", "review-4")
+        self.assertEqual(git(self.session, "status", "--porcelain").strip(), "")
+        exclude = (self.session / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+        self.assertEqual(exclude.splitlines().count("/.claude/worktrees/"), 1)
+
+    def test_worktree_add_from_a_linked_worktree_uses_the_main_checkout(self):
+        sha = self._sha()
+        linked = self.tc.root / "linked"
+        git(self.session, "worktree", "add", "-q", "--detach", str(linked))
+        payload = self.ok("git", "worktree-add", sha, "--name", "review-5", cwd=linked)
+        self.assertEqual(payload["path"], str(self._root() / "review-5"))
+        self.assertTrue((self._root() / "review-5" / "a.txt").is_file())
+        self.assertFalse((linked / ".claude").exists())
+        self.ok("git", "worktree-remove", payload["path"], cwd=linked)
+        self.assertFalse((self._root() / "review-5").exists())
+
+    def test_worktree_remove_refuses_a_path_it_did_not_make(self):
+        sha = self._sha()
+        made = Path(self.ok("git", "worktree-add", sha, "--name", "r1")["path"])
+        outside = self.tc.root / "outside"
+        git(self.session, "worktree", "add", "-q", "--detach", str(outside))
+        for target in (outside, made / "sub", self._root(), self._root() / ".." / "worktrees" / ".." / "x",
+                       self.session / ".git" / "not-me" / "worktrees" / "x"):
+            with self.subTest(target=str(target)):
+                code, payload, _ = self.cli("git", "worktree-remove", str(target))
+                self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
+        self.assertTrue((outside / "a.txt").is_file())
+        self.ok("git", "worktree-remove", str(made))
+        self.assertFalse(made.exists())
 
     def test_log_commands_refuse_a_file_that_is_not_a_run_log(self):
         root = self.session / ".git" / "not-me" / "logs" / "new"

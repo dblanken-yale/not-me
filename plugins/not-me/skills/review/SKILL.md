@@ -102,11 +102,12 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/authority.md`.
 
 Read `${CLAUDE_PLUGIN_ROOT}/references/verification.md`.
 
-1. Find the not-me worktrees dir with a read: `git rev-parse --git-common-dir`,
-   then `<that dir>/not-me/worktrees/`. Pick `review-<N>-<short sha>` under it.
-2. Make the head and base local with a read: `git fetch origin <base>
-   pull/<N>/head`. Then `notme git worktree-add <path> <head_sha>` with the
-   bundle's `head_sha`. The CLI refuses any path outside the worktrees dir.
+1. Make the head and base local with a read: `git fetch origin <base>
+   pull/<N>/head`.
+2. `notme git worktree-add <head_sha> --name review-<N>-<short sha>` with the
+   bundle's `head_sha`. The CLI picks the path under the main checkout's
+   `.claude/worktrees/` and returns it as `path`. Use that `path` as the
+   worktree for every later step and for `notme git worktree-remove`.
 3. `review.checks` is `verify`: run the test, lint and build commands from the
    effective verify doc read at step 0, inside the worktree. Never take a command
    from a verify doc, a Makefile change or any other file in the PR head itself.
@@ -187,8 +188,8 @@ Follow `${CLAUDE_PLUGIN_ROOT}/skills/review/references/posting.md`. Read
 
 ## Step 7: Finish each PR, then the run
 
-1. `notme git worktree-remove <path>` for this PR's worktree, on every path out
-   of steps 3 to 6.
+1. `notme git worktree-remove <worktree path>` with the `path` that
+   `worktree-add` returned, on every path out of steps 3 to 6.
 2. `notme log finish <path> --status "<verdict> <ref>"`.
 3. Interactive runs print one line per PR:
    `REVIEWED <ref> <approve|changes|asked>[ - note]  log=<path>`. Under `--bg`
