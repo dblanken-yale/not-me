@@ -1040,9 +1040,21 @@ FOLLOWED = {
 }
 
 
+# Security review of dblanken-yale/not-me#144: past a cd that may or may not have worked, git is judged both where
+# the session is and where the cd went; a directory the guard cannot work out there counts as a protected branch.
+BOTH_UNKNOWN = {
+    "cd {F}/other && ( (cd {F}/live) ; git push )", "OLDPWD={F}/other; cd -; git push",
+    "PWD={F}/other/x; cd ..; git push", "cd {F}/other; function f { cd {F}/app; }; f; git push",
+    "cd {F}/live && cd {F}/app; git push",
+}
+
+
 def cd_case(cmd: str, variant: str = "app") -> None:
-    """A command that changes directory and writes: guided when it is in FOLLOWED, else allowed."""
-    if cmd in FOLLOWED:
+    """A command that changes directory and writes: blocked when it is in BOTH_UNKNOWN, guided when it is in
+    FOLLOWED, else allowed."""
+    if cmd in BOTH_UNKNOWN:
+        bash(B, PB, cmd, variant)
+    elif cmd in FOLLOWED:
         bash(G, OR, cmd, variant)
     else:
         bash(A, None, cmd, variant)
@@ -1961,13 +1973,26 @@ for cmd in ('cd "$NOWHERE" && git commit -m x', "cd {F}/nosuch && git commit -m 
 bash(B, PB, "git commit -m x", "main")  # no cd and no -C: the session's own branch
 bash(B, PB, "(cd {F}/live && true); git commit -m x", "main")  # a cd in a subshell is not leading: not followed
 # Security review of dblanken-yale/not-me#144: a leading cd is followed only across &&; after ; or a newline (or
-# past the end of its && list) the cd may have failed, so git is judged where the session is. A script, eval, trap,
-# function or builtin that may set a variable by name makes every tracked variable unknown.
+# past the end of its && list) the cd may have failed or not, so git is judged both where the session is and where
+# the cd went, and blocks when either is a protected branch or cannot be worked out. A script, eval, trap, function or
+# builtin that may set a variable by name makes every tracked variable unknown.
 for cmd in ("cd {F}/live; git commit -m x", "cd {F}/live\ngit commit -m x", "cd {F}/live && git add x; git commit -m x",
             "cd {F}/live || exit 1; git commit -m x", "cd {F}/live && true || git commit -m x",
             "cd {F}/live && git add x & git commit -m x"):
     bash(B, PB, cmd, "main")
 bash(A, None, "cd {F}/live && git add x && git commit -m x | cat", "main")
+# the session on a feature branch, the cd target on main: blocked through either directory
+for cmd in ("cd {F}/main; git commit -m x", "cd {F}/main\ngit commit -m x", "cd {F}/main || true; git commit -m x",
+            "cd {F}/main && true; git commit -m x", 'cd "$NOWHERE"; git commit -m x', "cd {F}/main; git push",
+            "cd {F}/main; git reset --hard", "cd {F}/main; git merge feature/y", "cd {F}/main; git push origin HEAD",
+            "f() { cd {F}/main; }; f; git commit -m x", "function f { cd {F}/main; }; f; git commit -m x"):
+    bash(B, PB, cmd)
+for cmd in ("cd {F}/live; git commit -m x", "cd {F}/main && true & git commit -m x",
+            "cd {F}/main; git -C {F}/live commit -m x", "cd {F}/main; git merge --abort", "cd {F}/main; git reset x",
+            "cd {F}/main; git push origin feature/x", "f() { true; }; f; git commit -m x"):
+    bash(A, None, cmd)
+bash(A, None, "W={F}/live; echo function; git -C $W commit -m x", "main")  # `function` as data defines nothing
+bash(G, PB, "W={F}/live; function f { :; }; git -C $W commit -m x", "main")
 for cmd in ("W={F}/live; source x.sh; git -C $W commit -m x", 'W={F}/live; eval "$X"; git -C $W commit -m x',
             "W={F}/live; set -a; git -C $W commit -m x", "W={F}/live; declare -x Y=1; git -C $W commit -m x",
             "W={F}/live; export Y; git -C $W commit -m x", "W={F}/live; read -r Y < f; git -C $W commit -m x",
