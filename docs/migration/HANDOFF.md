@@ -26,7 +26,7 @@ dev loop in any GitHub repository: `/not-me:new` picks a ready issue and opens a
 PR, `/not-me:update` reworks a PR labeled `needs work`, `/not-me:review` reviews
 PRs labeled `needs review`, `/not-me:prove` runs a PR's testing steps on its
 deploy target, `/not-me` routes between them, and `setup`, `config`, `doctor`,
-`status`, `ticket`, `suggest`, `retro` and `allow-repo` support them. It replaces three
+`status`, `ticket`, `suggest`, `retro`, `allow-repo`, `mode` and `pause` support them. It replaces three
 bespoke skill families Dave uses daily (YaleSites `not_dave*`, palliative-care-rag
 `pcr-*`, YDS-Web-Component `wc_dave*`). Mechanics live in a stdlib-only Python
 CLI (`notme`), judgment stays in the model, and a small PreToolUse guard hook hard-blocks
@@ -144,6 +144,19 @@ them without asking him.
    merging is a person's call). No skill merges and runs never merge; a person
    merges by hand or by asking Claude directly. The guard does not block
    merges. Design in `docs/guards.md` "Merging pull requests".
+9. **Operator commands run in the session** (dblanken-yale/not-me#118, owner
+   2026-10-30). `/not-me:allow-repo`, `/not-me:pause` and `/not-me:mode` are
+   user-invocable only; a person typing one is the approval and the skill runs
+   the CLI itself. The operator token, `notme doctor --init-token`,
+   `NOT_ME_OPERATOR_CONFIRM`, the signed live marker and epoch, and the guard's
+   blocks on those commands and on pty or detached wrappers around notme are
+   gone; `references/prohibitions.md` "Operator commands" is the rule. Every
+   change prints a summary and appends to `<not-me home>/settings-changes.jsonl`.
+   Repos and the board named in the repo layer count as allowed when the same
+   names are in `.claude/not-me/project.md` on origin/HEAD of the main checkout
+   (`writes.default_branch_names`), so setup's allow-repo step is only needed
+   before the config merges. Restricted mode still guards `--project-dir` and
+   `NOT_ME_HOME`.
 
 ## How to work here (the orchestration loop that built this)
 

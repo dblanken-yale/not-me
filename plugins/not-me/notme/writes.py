@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
 
-from . import git, paths
+from . import frontmatter, git, paths
 from .dryrun import utc_now
 
 SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.][A-Za-z0-9_.-]*$")  # no leading "-" in either part
@@ -268,6 +268,44 @@ def allowlist_list(home: Any, project: Optional[str] = None) -> List[Dict[str, s
     return out
 
 
+# --- the repo layer on the default branch ------------------------------------
+
+REPO_LAYER_PROJECT = ".claude/not-me/project.md"
+_ORIGIN_REF = "refs/remotes/origin/"
+
+
+def default_branch_names(project_dir: Any) -> Dict[str, FrozenSet[str]]:
+    """The repos and board the repo layer names as committed on the default branch, lowercased by key: tracker,
+    repos (their names) and board ("owner/number"). The default branch is the commit refs/remotes/origin/HEAD
+    points at in project_dir's repository; the file is read from that commit, never from the working tree, so a
+    checked-out PR branch or an uncommitted edit adds nothing. A missing origin/HEAD, a missing file or one that
+    does not parse gives empty sets, so nothing extra counts."""
+    out: Dict[str, FrozenSet[str]] = {"tracker": frozenset(), "repos": frozenset(), "board": frozenset()}
+    if project_dir is None:
+        return out
+    ref = paths.run_git(["symbolic-ref", "-q", "refs/remotes/origin/HEAD"], project_dir)
+    if not ref or not ref.startswith(_ORIGIN_REF) or len(ref) == len(_ORIGIN_REF):
+        return out
+    text = paths.run_git(["cat-file", "blob", f"{ref}:{REPO_LAYER_PROJECT}"], project_dir)
+    if not text:
+        return out
+    try:
+        meta, _ = frontmatter.parse(text, source=REPO_LAYER_PROJECT)
+    except Exception:  # FrontmatterError or anything a hostile file provokes: nothing counts
+        return out
+    tracker = meta.get("tracker")
+    repos = meta.get("repos") if isinstance(meta.get("repos"), list) else []
+    board = ((meta.get("queue") or {}).get("board") or {}) if isinstance(meta.get("queue"), dict) else {}
+    board = board if isinstance(board, dict) else {}
+    number = board.get("number")
+    out["tracker"] = frozenset({tracker.lower()} if valid_slug(tracker) else ())
+    out["repos"] = frozenset(str(n).lower() for n in (r.get("name") if isinstance(r, dict) else r for r in repos)
+                             if valid_slug(n))
+    if board.get("owner") and isinstance(number, int) and not isinstance(number, bool):
+        out["board"] = frozenset({f"{board['owner']}/{number}".lower()})
+    return out
+
+
 # --- guard context ---------------------------------------------------------
 
 
@@ -305,17 +343,27 @@ class GuardContext:
             warnings.append(warning)
         confirmed = [e["repo"] for scope in ([origin] if origin else []) + ["*"] for e in _entries(data, scope)]
         confirmed_lower = {c.lower() for c in confirmed}
+        # the repo layer as merged to the default branch, read only when a repo-layer name needs it
+        merged: List[Dict[str, Any]] = []
+
+        def on_default_branch() -> Dict[str, Any]:
+            if not merged:
+                merged.append(default_branch_names(getattr(cfg, "project_dir", None) or project_dir))
+            return merged[0]
 
         def from_repo_layer(key: str) -> bool:
             return (getattr(cfg, "sources", {}).get(f"project.{key}") or {}).get("layer") == "repo"
 
         def untrusted(slug: Any, key: str) -> bool:
-            """A repo-layer name (committed, so untrusted) that the global allow list has not confirmed."""
+            """A repo-layer name (untrusted as read: the working tree may hold any branch) that is neither on the
+            default branch under the same key nor confirmed in the global allow list."""
             if not valid_slug(slug) or not from_repo_layer(key) or str(slug).lower() in confirmed_lower:
                 return False
+            if str(slug).lower() in on_default_branch()[key]:
+                return False
             where = (cfg.sources.get(f"project.{key}") or {}).get("path") or ".claude/not-me/project.md"
-            warnings.append(f"{slug} is listed in {where} but not confirmed; run /not-me:allow-repo {slug} "
-                            "(setup does this for you)")
+            warnings.append(f"{slug} is listed in {where} but not confirmed: it counts once it is on the default "
+                            f"branch, or run /not-me:allow-repo {slug}")
             return True
 
         tracker = meta.get("tracker")
@@ -343,10 +391,10 @@ class GuardContext:
             confirmed_boards = {b.lower() for scope in ([origin] if origin else []) + ["*"]
                                 for b in _board_entries(data, scope)}
             label = f"{board[0]}/{board[1]}"
-            if label.lower() not in confirmed_boards:
+            if label.lower() not in confirmed_boards and label.lower() not in on_default_branch()["board"]:
                 where = (cfg.sources.get("project.queue.board.owner") or {}).get("path") or ".claude/not-me/project.md"
-                warnings.append(f"board {label} is listed in {where} but not confirmed; "
-                                f"run /not-me:allow-repo --board {label}")
+                warnings.append(f"board {label} is listed in {where} but not confirmed: it counts once it is on the "
+                                f"default branch, or run /not-me:allow-repo --board {label}")
                 board = None
 
         guard = meta.get("guard")

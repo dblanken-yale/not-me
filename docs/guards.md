@@ -6,11 +6,11 @@ The guard is a small safety net for an agent that is trying to follow the rules.
 
 ## How it works in one minute
 
-- Claude Code calls the hook before every `Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and read tool call. GitHub MCP tools (`mcp__*github*`) get the hard rules only (deletes and settings, writes and merges that land on a protected branch); other MCP tools are not judged, and no MCP tool gets the other-repo check. You decide which MCP tools to install and allow.
+- Claude Code calls the hook before every `Bash`, `Write`, `Edit`, `MultiEdit` and `NotebookEdit` call. Read tools (`Read`, `Grep`, `Glob`, `LS`) are not hooked: nothing the guard protects is secret. GitHub MCP tools (`mcp__*github*`) get the hard rules only (deletes and settings, writes and merges that land on a protected branch); other MCP tools are not judged, and no MCP tool gets the other-repo check. You decide which MCP tools to install and allow.
 - The hook looks at the call and either lets it through (exit code 0) or blocks it (exit code 2, with a message that goes back to Claude).
 - A blocked call does not run. Claude reads the message, does not retry, and records a question for you. In a not-me run a block is a failure on not-me's side: the run posts nothing, changes no labels, gives back its claim and stops with `FAILED <ref> blocked - <target>` (see "When a person is needed" in [workflow.md](workflow.md)).
 - A guided call runs. The guard found something a run should not do on its own (a write to a repo outside the project, say), so it logs it; the skills and references tell the run not to do it, and a person may.
-- Every block and every guided call in a not-me project is appended to `<git-common-dir>/not-me/logs/guard.jsonl` with the time, `outcome` (`blocked` or `guided`), tool, rule, reason, target, and `input`: the call (the Bash command, the file path for file tools, else the tool's arguments without any content body at any depth). `input` is redacted before it is written (the operator token, the live-mode marker and epoch, values of variables, flags and argument keys named like a token, key, secret or password, the `--body`/`-b` or `<<<` value of `gh secret set` (not a value piped in), `Authorization` header values, passwords in URLs and in `curl -u user:pass`, and GitHub token shapes) and cut to 2000 characters. The file stays on your machine; nothing posts it to GitHub. One call writes at most one line.
+- Every block and every guided call in a not-me project is appended to `<git-common-dir>/not-me/logs/guard.jsonl` with the time, `outcome` (`blocked` or `guided`), tool, rule, reason, target, and `input`: the call (the Bash command, the file path for file tools, else the tool's arguments without any content body at any depth). `input` is redacted before it is written (values of variables, flags and argument keys named like a token, key, secret or password, the `--body`/`-b` or `<<<` value of `gh secret set` (not a value piped in), `Authorization` header values, passwords in URLs and in `curl -u user:pass`, and GitHub token shapes) and cut to 2000 characters. The file stays on your machine; nothing posts it to GitHub. One call writes at most one line.
 
 ## Activation
 
@@ -21,11 +21,11 @@ The rule groups only apply when not-me is in play:
 
 Anywhere else (outside any git repo, or in a git repo that is not a not-me project, such as one nested inside a not-me checkout) the rule groups are off and only [self-protection](#self-protection) is checked. Those checks start no process and read no config, and their blocks are not logged.
 
-It is also cheap. A Bash command that mentions none of `git`, `gh`, `rm`, `notme`, a shell or interpreter, a wrapper such as `nohup` or `script`, `$`, backticks, `&`, a path or a glob is allowed after one text check, with no process started and no config read.
+It is also cheap. A Bash command that mentions none of `git`, `gh`, `rm`, a shell or interpreter, `$`, backticks, `&`, a path, a glob or the allow list's name is allowed after one text check, with no process started and no config read.
 
 ## Audit: what blocks, what guides
 
-Decided by the owner on 2026-10-30 (dblanken-yale/not-me#141): guide runs to the right process and state; hard-block only what breaks the process or cannot be undone. **Keep** is a hard block. **Guide** means the call runs, the guard logs it as `guided`, and a process rule in the references covers it. **Remove** means neither. Items marked "changed by" are reshaped by a later change and stay as they are here until it lands.
+Decided by the owner on 2026-10-30 (dblanken-yale/not-me#141): guide runs to the right process and state; hard-block only what breaks the process or cannot be undone. **Keep** is a hard block. **Guide** means the call runs, the guard logs it as `guided`, and a process rule in the references covers it. **Remove** means neither. Rows naming dblanken-yale/not-me#118 were reshaped by that change (owner, 2026-10-30: operator-invoked allow-list, pause and mode changes run in the session).
 
 ### Guard rules
 
@@ -49,17 +49,18 @@ Decided by the owner on 2026-10-30 (dblanken-yale/not-me#141): guide runs to the
 | Changing where git pushes: `git remote add\|set-url\|rename`, push config keys, `-c` keys on a read, file edits to `.git/config`, `.git/hooks/*`, `~/.gitconfig` | guide | Pushes are judged against the live config, so the protected-branch and force rules still hold after the change. |
 | GitHub MCP tools | keep the hard rules only (deletes, settings, secrets; file writes, ref updates and branch merges on a protected or default branch; forced ref updates); remove the repo check and every other MCP tool | The operator decides which MCP tools to install and allow, and which repos to touch; what cannot be undone or skips review still blocks. Merging a pull request passes, as with `gh pr merge`. |
 | Opaque text holding `push`, `reset --hard`, deletes, secrets, `branch -D`, `clean -x`, `rm -r .git` | keep for shell text, script files and code that starts a process or names git, gh, notme or the GitHub API | Reported under the first hard rule that is on; `other_repo` is no longer one of them. |
-| The same words, or `allow-repo add`, `pause off`, `mode live`, in interpreter code (`python3 -c`, `node -e`, a here-document fed to an interpreter) that starts no process and names none of those | guide (rule `process`) | Such code runs no git, gh or notme command; it only holds the word, for example in text it edits. `rm -r .git` and the protected path names still block. |
+| The same words in interpreter code (`python3 -c`, `node -e`, a here-document fed to an interpreter) that starts no process and names none of those | guide (rule `process`) | Such code runs no git, gh or notme command; it only holds the word, for example in text it edits. `rm -r .git` and the allow list's name still block. |
+| `allow-repo add`, `pause off`, `mode live` in opaque text | remove (dblanken-yale/not-me#118) | The not-me CLI is not judged any more; see the self-protection rows below. |
 
 ### Self-protection
 
 | Item | Outcome | Why |
 | --- | --- | --- |
-| Reading or writing the operator token and the live-mode epoch; writing the live-mode marker | keep, changed by dblanken-yale/not-me#118 | The token and the signed marker go away there. |
-| Writing the allow list (`allowed-repos.json`) | keep, changed by dblanken-yale/not-me#118 | Allow-list changes move into the operator-invoked skill. |
-| `notme allow-repo add\|remove`, `notme pause off`, `notme mode` other than show or dry-run, as parsed commands and in opaque text | keep, changed by dblanken-yale/not-me#118 | Becomes a process rule: only when the operator typed the slash command. |
-| A pseudo-terminal or detached wrapper around notme | keep, changed by dblanken-yale/not-me#118 | Exists only to protect the CLI's terminal check, which goes away there. |
-| A Write or Edit that leaves the global `mode` other than dry-run | keep, changed by dblanken-yale/not-me#118 | Early refusal for the signed marker. |
+| Reading or writing the operator token and the live-mode epoch; writing the live-mode marker | remove (dblanken-yale/not-me#118) | The token and the signed marker are gone; leftover files of those names are ordinary files. The read tools are no longer hooked. |
+| Shell words naming the allow list (`allowed-repos.json`), and Write or Edit of it | keep (narrowed by dblanken-yale/not-me#118) | Changes go through `/not-me:allow-repo`, which shows them and logs them in the settings ledger. A recursive copy or search of the not-me home is no longer blocked: nothing there is secret. |
+| `notme allow-repo add\|remove`, `notme pause off`, `notme mode` other than show or dry-run, as parsed commands and in opaque text | remove (dblanken-yale/not-me#118) | A process rule now: `prohibitions.md` allows them only when the operator typed the slash command in that turn; the skills are user-invocable only. |
+| A pseudo-terminal or detached wrapper around notme | remove (dblanken-yale/not-me#118) | It protected the CLI's terminal check for those commands, which is gone. Restricted mode still refuses another checkout and `NOT_ME_HOME` without a terminal or under a Claude Code ancestor. |
+| A Write or Edit that leaves the global `mode` other than dry-run | keep (reworded by dblanken-yale/not-me#118) | `mode: live` in the global layer is enough now, so this sends the change through `/not-me:mode`, which shows and logs it. |
 | Writes to the installed plugin's `hooks`, `bin`, `notme`, `cli` and `skills` | keep | Breaks the process: editing the guard switches every hard block off. |
 | Writes to the global layer's `.md` files during a run | keep | The global layer can switch hard rules off (`confirm_guard_off`). |
 | Writes to the repo layer `.claude/not-me/` during a run | guide (rule `process`) | The repo layer can only tighten, and a run edit there can wait for `/not-me:retro`. Blocking it also stopped other sessions in the same repo. |
@@ -69,12 +70,14 @@ Decided by the owner on 2026-10-30 (dblanken-yale/not-me#141): guide runs to the
 
 | Check | Outcome | Why |
 | --- | --- | --- |
-| Restricted mode for `allow-repo add\|remove`, `pause off` and `mode live` (stdin a terminal, no Claude Code ancestor) | keep, changed by dblanken-yale/not-me#118 | The operator typing the slash command becomes the approval. |
-| The operator token for allow-list and pause changes | keep, changed by dblanken-yale/not-me#118 | Dropped there. |
-| The signed live-mode marker | keep, changed by dblanken-yale/not-me#118 | Dropped there; `mode: live` in the global layer will be enough. |
+| Restricted mode for `allow-repo add\|remove`, `pause off` and `mode live` (stdin a terminal, no Claude Code ancestor) | remove (dblanken-yale/not-me#118) | The operator typing the slash command is the approval; the skill runs the CLI in the session. |
+| The operator token for allow-list and pause changes (`notme doctor --init-token`, `NOT_ME_OPERATOR_CONFIRM`) | remove (dblanken-yale/not-me#118) | Same. |
+| The signed live-mode marker | remove (dblanken-yale/not-me#118) | `mode: live` in the global layer is enough; the repo layer still cannot set it. |
+| Every allow-list, pause and mode change prints what changed and appends a line to `<not-me home>/settings-changes.jsonl` | keep (new in dblanken-yale/not-me#118) | The operator can see each change and undo it. |
 | `--project-dir`, `CLAUDE_PROJECT_DIR` or `NOT_ME_HOME` naming another checkout refused in restricted mode | keep | A run acts on the checkout it runs in (decision 4). |
 | `NOT_ME_DRY_RUN` can only turn dry-run on | keep | Safe direction only. |
 | The write gate (`writes.check_write`): CLI writes only to origin, tracker, companions and the allow list | keep | Now the line that keeps runs to their project's repos, since the guard only guides there. |
+| A tracker, companion or board named only in the repo layer counts when the same name is in that file on the default branch (origin/HEAD), without an allow-list entry | keep (new in dblanken-yale/not-me#118) | The file reaches the default branch only through a reviewed merge. A PR branch, a checked-out branch or the working tree still cannot widen anything. |
 | The repo layer may only tighten (decision 1) | keep | A PR branch must not widen what not-me may touch. |
 | `APPROVE` needs `review.auto_approve` in the global layer; `assign-issue` refused during a run; branch and worktree names checked | keep | Process rules the CLI can enforce exactly, with no false blocks. |
 
@@ -207,8 +210,7 @@ Opaque text is allowed unless its decoded text (quotes and backslashes removed, 
 | `push` as a word | `protected_branches`, else `force_push` |
 | `reset --hard` | `protected_branches` |
 | `-X DELETE`, `--method DELETE`, `secret set`, `secret delete`, `secret remove`, a secrets API path (`/actions/secrets`, `/dependabot/secrets`, `/codespaces/secrets`, `/environments/<name>/secrets`), `branch -D`, `clean -x` (also `-fdx`), `rm -r... .git` | `destructive_git` |
-| `operator-token`, `mode-live.sig`, `mode-live.epoch`, `allowed-repos.json` | self-protection, always |
-| `allow-repo add` (or any argument but `list`), `pause off`, `mode live`, when the text sits in the command itself rather than in a script file | self-protection, always |
+| `allowed-repos.json` | self-protection, always |
 
 So:
 
@@ -225,7 +227,7 @@ s = open('f.py').read().replace('push', 'send')
 EOF
 ```
 
-Interpreter code (inline, or a here-document fed to an interpreter) that starts no process and names no `git`, `gh`, `notme` or GitHub API runs none of those commands. A word from the list in it, or `allow-repo add`, `pause off`, `mode live`, is guided under `process`: the call runs and the guard log records it. Code counts as starting a process when it holds words such as `system`, `exec`, `spawn`, `popen`, `subprocess`, `child_process`, `shell`, `eval`, `run(`, `fetch`, `request` or `http`, so splitting `"g"+"it push"` across strings inside `os.system` still blocks. `rm -r .git` and the protected path names block either way. Shell text, script files and code read from a pipe are judged by their words as before. The process rule: run git, gh and notme directly, never from interpreter code.
+Interpreter code (inline, or a here-document fed to an interpreter) that starts no process and names no `git`, `gh`, `notme` or GitHub API runs none of those commands. A word from the list in it is guided under `process`: the call runs and the guard log records it. Code counts as starting a process when it holds words such as `system`, `exec`, `spawn`, `popen`, `subprocess`, `child_process`, `shell`, `eval`, `run(`, `fetch`, `request` or `http`, so splitting `"g"+"it push"` across strings inside `os.system` still blocks. `rm -r .git` and the allow list's name block either way. Shell text, script files and code read from a pipe are judged by their words as before. The process rule: run git, gh and notme directly, never from interpreter code.
 
 With the three hard rules off, opaque text is blocked only for the self-protection words.
 
@@ -267,7 +269,7 @@ For `--git-dir` or `--work-tree` the Instead line says to drop that option and u
 
 ## Allow a repo
 
-The allow list now matters to the `notme` CLI, whose write gate keeps runs to the project's repos; the guard only logs a write elsewhere. Only you can change it.
+The allow list now matters to the `notme` CLI, whose write gate keeps runs to the project's repos; the guard only logs a write elsewhere. The tracker, companions and board named in `.claude/not-me/project.md` count without it once that file is on the default branch (as `refs/remotes/origin/HEAD` points at it in the main checkout; run `git fetch` after the merge). For anything else, or to use a new name before its pull request merges, you type `/not-me:allow-repo`; it runs the change in the session and prints what changed. A run never does it on its own.
 
 ```
 /not-me:allow-repo acme/friend
@@ -294,10 +296,11 @@ The entries live in `~/.claude/not-me/allowed-repos.json`:
 
 - The key is the project's `origin` repo, or `*` for everywhere.
 - A repo entry must be a plain `owner/name`. URLs and wildcards are rejected. Matching ignores upper and lower case.
-- To remove an entry, delete it from the file in your own editor.
+- To remove an entry, type `/not-me:allow-repo --remove owner/name` (or `--remove --board owner/number`).
+- Every add and remove prints what changed and appends a line to `~/.claude/not-me/settings-changes.jsonl`.
 - If the file is not valid JSON, it is ignored, and only the checkout's own repo, `tracker`, `repos`, and global `allow_repos` are allowed. The `notme` CLI says so in its warnings.
 
-`/not-me:setup` offers to do this for the companion repos and board that it writes into the repo layer.
+`/not-me:setup` prints these commands for the companion repos and board it writes into the repo layer, for use before that file is merged.
 
 ## Relax a rule
 
@@ -326,14 +329,14 @@ Why you usually should not:
 
 Self-protection is always on, in every directory, whether or not the guard is active there. It does not depend on the rule groups and cannot be switched off. It blocks:
 
-- By file path: reading or changing the operator token or the live-mode epoch (`mode-live.epoch`), and changing the live-mode marker (`mode-live.sig`) or the allow list (`allowed-repos.json`). This covers the Read, Grep, Glob and LS tools, Write and Edit, and Bash words and redirections that name one of those files after a path separator, resolve to it, or reach it through a glob or a part the shell fills in (`$VAR`, `$(...)`, backticks, `{a,b}`) when the rest of the path pins it there. A recursive copy or search (`cp -r`, `tar`, `rsync`, `grep -r`, `rg`) of a directory that holds the not-me home counts too. The search pattern of `grep`, `egrep`, `fgrep` or `rg` and a read-only `sed` script (no `-i`, no `w`, `r` or `e`) are not paths, so a pattern that only mentions one of those names is allowed. That holds only for a command line that is a single bare `grep`, `egrep`, `fgrep`, `rg` or `sed` command, with no assignments, substitutions (`$(...)`, backticks, `<(...)`) or words the shell fills in (`$VAR`, globs, `{a,b}`), no `GREP_OPTIONS`, `RIPGREP_CONFIG_PATH`, `BASH_ENV` or exported function in the hook's environment, and whose program resolves on `PATH` to a file the user cannot write, in a directory the user cannot write, with no relative `PATH` entry before it (never on Windows). Otherwise, or when an option is unknown and the pattern cannot be told apart from a file, every word is checked. A shell function or alias defined in your own shell startup files is outside what the guard sees.
-- As parsed commands: `notme allow-repo` with anything but `list` (`add`, `remove`, `--everywhere`), `notme pause off`, and `notme mode` with anything but `show` or `dry-run`, however notme is started (`notme`, `bin/notme`, `bash bin/notme`, `python3 cli/notme.py`, `python3 -m notme.cli` or `-m notme`, also after python options such as `-W ignore` or `-X utf8`). Without the signed marker a `mode: live` setting runs as dry-run, so no file edit can turn live mode on; going back to dry-run with `/not-me:mode dry-run --global` replaces the epoch, so a saved copy of an old signature stops working.
-- A pseudo-terminal or detached process around notme: `script`, `expect`, `unbuffer`, `socat ... pty`, `tmux send-keys`, `screen -X stuff`, `ssh -t localhost`, `nohup`, `setsid`, `disown`, `at`, `batch`, `systemd-run`, `daemon`, `launchctl submit`, `crontab` and a background `&`, when the command or a file it is given names `notme`. Those would pass the CLI's own human check. Around anything else they are allowed.
-- A Write or Edit that would leave `mode: live` (or anything but `dry-run`) in your global `project.md`. This one is a courtesy: it stops the attempt early with a pointer to `/not-me:mode live`. The signature above is what actually keeps live mode off.
+- By file path: the allow list (`allowed-repos.json`). This covers Write and Edit, and Bash words and redirections that name the file after a path separator, resolve to it, or reach it through a glob or a part the shell fills in (`$VAR`, `$(...)`, backticks, `{a,b}`) when the rest of the path pins it there. A Bash word cannot tell a read from a write, so `cat` of the file blocks too; `/not-me:allow-repo --list` shows it. The search pattern of `grep`, `egrep`, `fgrep` or `rg` and a read-only `sed` script (no `-i`, no `w`, `r` or `e`) are not paths, so a pattern that only mentions the name is allowed. That holds only for a command line that is a single bare `grep`, `egrep`, `fgrep`, `rg` or `sed` command, with no assignments, substitutions (`$(...)`, backticks, `<(...)`) or words the shell fills in (`$VAR`, globs, `{a,b}`), no `GREP_OPTIONS`, `RIPGREP_CONFIG_PATH`, `BASH_ENV` or exported function in the hook's environment, and whose program resolves on `PATH` to a file the user cannot write, in a directory the user cannot write, with no relative `PATH` entry before it (never on Windows). Otherwise, or when an option is unknown and the pattern cannot be told apart from a file, every word is checked. A shell function or alias defined in your own shell startup files is outside what the guard sees.
+- A Write or Edit that would leave `mode: live` (or anything but `dry-run`) in your global `project.md`. `mode: live` there is enough to go live, so the change goes through `/not-me:mode live`, which shows it and logs it.
 - Writes to the installed plugin's own files: its `hooks`, `bin`, `notme`, `cli`, and `skills` folders.
 - Writes to the global layer's `.md` files while a run is in progress. A write to the repo's `.claude/not-me/` folder during a run is guided under `process`, not blocked: the repo layer can only tighten.
 
-The first four items change with dblanken-yale/not-me#118 (see the audit above). The block message in each case says to ask the operator, which is you.
+The not-me CLI itself is not judged (dblanken-yale/not-me#118). `/not-me:allow-repo`, `/not-me:pause` and `/not-me:mode` are user-invocable only, so you typing one is the approval, and the skill runs `notme allow-repo add|remove`, `notme pause off` or `notme mode live` in the session. [`references/prohibitions.md`](../plugins/not-me/references/prohibitions.md) forbids a run from issuing them unless you invoked the matching slash command in that turn; an autonomous run logs a QUESTION instead. Every such change prints what changed and appends a line to `~/.claude/not-me/settings-changes.jsonl`. Files an older install left behind (`operator-token`, `mode-live.sig`, `mode-live.epoch`) do nothing now; you may delete them.
+
+The block message in each case says to ask the operator, which is you.
 
 ## When the guard itself breaks
 
@@ -352,6 +355,8 @@ What it does not cover:
 - Programs it does not read. A script file is scanned only for the opaque-text words, the modules a script imports and the file arguments of `python3 -m` are not read, a file written and run in the same command is read before the write, and a script that builds its command from pieces will not match. Programs that run commands from their own arguments (`awk 'BEGIN{system(...)}'`, `sed e`, `vim -c '!...'`, `tar --to-command`, `less +!`) are not inspected.
 - Merges. The guard does not block them; the skills do not merge. See [Merging pull requests](#merging-pull-requests).
 - Writes to other repos. They are guided, not blocked: a run that ignores `prohibitions.md` and calls `gh` directly can write to any repo your token can reach. The CLI's write gate holds only for writes through `notme`, and the guard log shows the rest.
+- The default-branch check of the repo layer reads the local `refs/remotes/origin/HEAD` and the commit it names. A session that rewrites that local ref (`git update-ref`, a fetch into it from elsewhere) can make a name count; it is a check for a run that follows the rules, like the rest of this page.
+- The operator commands. `notme allow-repo add`, `pause off` and `mode live` are not blocked; only `prohibitions.md` keeps a run from issuing them on its own. The settings ledger shows each change after the fact.
 - Pushes and writes through other tools. `curl` or any HTTP client to the GitHub API, a gh extension or alias, a git hook, an external `git-<name>` program, MCP tools other than GitHub ones, the repo a GitHub MCP tool writes to, and your own terminal are outside its view.
 - Reads. Any repo your token can read can be read.
 - Time of check. It looks at your git config when it checks. Something that changes the config between the check and the command is out of reach.

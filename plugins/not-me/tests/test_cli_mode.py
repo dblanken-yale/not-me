@@ -1,17 +1,14 @@
-"""`notme mode show|dry-run|live`, the line-level mode editor, and the hidden operator-token prompt."""
+"""`notme mode show|dry-run|live` and the line-level mode editor."""
 from __future__ import annotations
 
-import json
 import os
 import unittest
 from pathlib import Path
-from unittest import mock
 
-from notme import cli, humans, modeswitch
+from notme import cli, modeswitch
 from notme.frontmatter import parse
 from tests import TempCase
 from tests import test_cli_contract as base
-from tests.test_cli_contract import TtyIO
 from tests.test_cli_security import UnderClaudeCase
 
 GLOBAL_DRY = base.GLOBAL_PROJECT.replace("mode: live", "mode: dry-run   # dry-run | live")
@@ -171,34 +168,22 @@ class WriteModeTests(unittest.TestCase):
 
 
 class ModeCliCase(base.CliCase):
-    """A person at a terminal (base.CliCase) with a dry-run global layer."""
+    """A project with a dry-run global layer."""
 
     global_project = GLOBAL_DRY
-
-    def setUp(self):
-        super().setUp()
-        humans.clear_live_marker(self.tc.home)  # nobody has run `notme mode live` yet
 
     @property
     def global_file(self) -> Path:
         return self.tc.home / "project.md"
 
-    @property
-    def marker(self) -> Path:
-        return humans.live_marker_path(self.tc.home)
-
-    @property
-    def token(self) -> str:
-        return self.env["NOT_ME_OPERATOR_CONFIRM"]
-
-    def no_env(self):
-        return {k: v for k, v in self.env.items() if k != "NOT_ME_OPERATOR_CONFIRM"}
+    def settings_ledger(self):
+        from notme.dryrun import Ledger
+        return Ledger(self.tc.home / cli.SETTINGS_LEDGER).read()
 
 
 class ModeShowTests(ModeCliCase):
-    def test_reports_mode_source_and_token_presence_without_reading_the_token(self):
-        with mock.patch.object(humans, "read_token", side_effect=AssertionError("token read")):
-            out = self.ok("mode", "show")
+    def test_reports_mode_and_source(self):
+        out = self.ok("mode", "show")
         self.assertEqual(out["mode"], "dry-run")
         self.assertTrue(out["dry_run"])
         self.assertEqual(out["source"]["layer"], "global")
@@ -206,33 +191,14 @@ class ModeShowTests(ModeCliCase):
         self.assertEqual(out["layers"]["global"]["mode"], "dry-run")
         self.assertIsNone(out["layers"]["repo"]["mode"])
         self.assertIsNone(out["repo_pin"])
-        self.assertFalse(out["live_confirmed"])
-        self.assertTrue(out["token_present"])
-        self.assertNotIn(self.token, json.dumps(out))
-        humans.token_path(self.tc.home).unlink()
-        self.assertFalse(self.ok("mode", "show")["token_present"])
+        for gone in ("live_confirmed", "unconfirmed", "token_present", "launcher", "shell", "live_cmd"):
+            self.assertNotIn(gone, out)
 
-    def test_a_hand_set_live_is_not_confirmed(self):
-        self.global_file.write_text(base.GLOBAL_PROJECT, encoding="utf-8")  # mode: live, no marker
+    def test_a_global_live_is_enough(self):
+        self.global_file.write_text(base.GLOBAL_PROJECT, encoding="utf-8")  # mode: live, set by hand
         out = self.ok("mode", "show")
-        self.assertEqual(out["layers"]["global"]["mode"], "live")
-        self.assertEqual((out["mode"], out["dry_run"], out["live_confirmed"]), ("dry-run", True, False))
-        self.assertIn("not confirmed", out["unconfirmed"])
-        self.tc.sign_live()
-        out = self.ok("mode", "show")
-        self.assertEqual((out["mode"], out["dry_run"], out["live_confirmed"]), ("live", False, True))
-        self.assertIsNone(out["unconfirmed"])
-        self.assertNotIn(self.marker.read_text(encoding="utf-8").strip(), json.dumps(out))
-
-    def test_launcher_and_live_command_are_absolute_and_runnable(self):
-        out = self.ok("mode", "show")
-        launcher = Path(out["launcher"])
-        self.assertTrue(launcher.is_absolute())
-        self.assertTrue(launcher.is_file())
-        self.assertEqual(launcher.name, "notme")
-        self.assertIn(out["launcher"], out["live_cmd"])
-        self.assertTrue(out["live_cmd"].endswith("mode live"))
-        self.assertNotIn("CLAUDE_PLUGIN_ROOT", out["live_cmd"])
+        self.assertEqual((out["mode"], out["dry_run"]), ("live", False))
+        self.assertNotIn("downgraded", out["source"])
 
     def test_reports_a_repo_layer_dry_run_pin(self):
         self.tc.write("repo", "project", "---\nschema: 1\nmode: dry-run\n---\n")
@@ -262,15 +228,9 @@ class ModeDryRunTests(ModeCliCase):
                          REPO_LAYER.replace("schema: 1\n", "schema: 1\nmode: dry-run\n"))
         self.assertEqual(self.global_file.read_bytes(), before_global)
         self.assertEqual(out["mode"], "dry-run")
-        self.assertFalse(self.marker.exists())
         self.assertEqual(out["repo_pin"]["line"], 3)
-
-    def test_repo_layer_dry_run_keeps_the_marker(self):
-        signed = self.tc.sign_live().read_bytes()
-        out = self.ok("mode", "dry-run")
-        self.assertEqual(self.marker.read_bytes(), signed)
-        self.assertTrue(out["live_confirmed"])
-        self.assertEqual(out["mode"], "dry-run")  # the repo pin still wins here
+        self.assertEqual(out["summary"], "mode set to dry-run in the repo layer (this project only)")
+        self.assertEqual([x["op"] for x in self.settings_ledger()], ["mode dry-run"])
 
     def test_creates_the_repo_layer_file_when_missing(self):
         self.ok("mode", "dry-run")
@@ -278,11 +238,9 @@ class ModeDryRunTests(ModeCliCase):
         self.assertEqual(meta["mode"], "dry-run")
 
     def test_global_changes_only_the_mode_line(self):
-        self.tc.sign_live()
         out = self.ok("mode", "dry-run", "--global")
-        self.assertFalse(self.marker.exists())  # going back removes the signature too
-        self.assertFalse(out["live_confirmed"])
         self.assertEqual(out["written"]["layer"], "global")
+        self.assertEqual(out["summary"], "mode set to dry-run in the global layer (every project)")
         self.assertEqual(self.global_file.read_text(encoding="utf-8"),
                          base.GLOBAL_PROJECT.replace("mode: live", "mode: dry-run # dry-run | live"))
         self.assertFalse((self.tc.repo_dir / "project.md").exists())
@@ -290,7 +248,6 @@ class ModeDryRunTests(ModeCliCase):
 
     def test_global_quoted_mode_key_is_rewritten(self):
         self.global_file.write_text(GLOBAL_DRY.replace("mode: dry-run", '"mode": live'), encoding="utf-8")
-        self.tc.sign_live()
         self.assertEqual(self.ok("mode", "show")["mode"], "live")
         out = self.ok("mode", "dry-run", "--global")
         self.assertEqual(out["mode"], "dry-run")
@@ -306,71 +263,28 @@ class ModeDryRunTests(ModeCliCase):
         code, out, _ = self.cli("mode", "dry-run")
         self.assertEqual((code, out["kind"]), (1, "mode_edit_refused"))
         self.assertEqual(victim.read_text(encoding="utf-8"), "print('hook')\n")
+        self.assertEqual(self.settings_ledger(), [])
 
 
 class ModeLiveTests(ModeCliCase):
-    def test_via_the_environment_variable(self):
+    def test_sets_the_global_layer_only_and_says_so(self):
         repo = self.tc.write("repo", "project", REPO_LAYER)
         out = self.ok("mode", "live")
         self.assertEqual(out["written"], {"layer": "global", "file": str(self.global_file.resolve()), "mode": "live"})
         self.assertEqual(self.global_file.read_text(encoding="utf-8"),
                          GLOBAL_DRY.replace("mode: dry-run   #", "mode: live      #"))
         self.assertEqual(repo.read_text(encoding="utf-8"), REPO_LAYER)  # never the repo layer
-        self.assertEqual(out["mode"], "live")
-        self.assertFalse(out["dry_run"])
-        self.assertTrue(out["live_confirmed"])
-        self.assertTrue(humans.live_confirmed(self.tc.home))
-        self.assertNotIn(self.token, self.marker.read_text(encoding="utf-8"))
+        self.assertEqual((out["mode"], out["dry_run"]), ("live", False))
+        self.assertEqual(out["summary"], "mode set to live in the global layer (every project)")
         self.assertNotIn("note", out)
+        line = self.settings_ledger()[-1]
+        self.assertEqual((line["op"], line["target"]), ("mode live", "global layer (every project)"))
 
-    def test_via_the_hidden_prompt(self):
-        asked = []
-        code, out, err = self.cli("mode", "live", env=self.no_env(), prompt=lambda: asked.append(1) or self.token)
-        self.assertEqual(code, 0, out)
-        self.assertEqual(asked, [1])
-        self.assertEqual(out["mode"], "live")
-        self.assertTrue(humans.live_confirmed(self.tc.home))
-        self.assertNotIn(self.token, json.dumps(out) + err)
-
-    def test_wrong_or_empty_prompt_answer_is_refused(self):
-        for answer in ("wrong", "", None, self.token + "x"):
-            with self.subTest(answer=answer):
-                code, out, _ = self.cli("mode", "live", env=self.no_env(), prompt=lambda: answer)
-                self.assertEqual((code, out["kind"]), (1, "human_only"))
-        self.assertEqual(self.global_file.read_text(encoding="utf-8"), GLOBAL_DRY)
-        self.assertFalse(self.marker.exists())
-
-    def test_a_set_variable_is_not_overridden_by_the_prompt(self):
-        env = dict(self.env, NOT_ME_OPERATOR_CONFIRM="wrong")
-        code, out, _ = self.cli("mode", "live", env=env, prompt=lambda: self.fail("prompted"))
-        self.assertEqual((code, out["kind"]), (1, "human_only"))
-
-    def test_without_any_token_is_refused(self):
-        code, out, _ = self.cli("mode", "live", env=self.no_env())
-        self.assertEqual((code, out["kind"]), (1, "human_only"))
-        humans.token_path(self.tc.home).unlink()
-        code, out, _ = self.cli("mode", "live", env=self.no_env(), prompt=lambda: self.fail("prompted"))
-        self.assertEqual((code, out["kind"]), (1, "human_only"))
-        self.assertEqual(self.global_file.read_text(encoding="utf-8"), GLOBAL_DRY)
-
-    def test_running_it_again_after_a_token_rotation_re_signs(self):
+    def test_back_to_dry_run_and_live_again(self):
         self.ok("mode", "live")
-        humans.token_path(self.tc.home).unlink()
-        new = humans.create_token(self.tc.home)
-        self.assertEqual(self.ok("mode", "show")["mode"], "dry-run")
-        out = self.ok("mode", "live", env=dict(self.env, NOT_ME_OPERATOR_CONFIRM=new))
-        self.assertEqual((out["mode"], out["live_confirmed"]), ("live", True))
-
-    def test_a_marker_saved_while_live_is_dead_after_dry_run_global(self):
-        self.ok("mode", "live")
-        saved = self.marker.read_bytes()
-        self.ok("mode", "dry-run", "--global")
-        self.global_file.write_text(base.GLOBAL_PROJECT, encoding="utf-8")  # mode: live again, by hand
-        self.marker.write_bytes(saved)  # and the old signature put back
-        out = self.ok("mode", "show")
-        self.assertEqual((out["mode"], out["live_confirmed"]), ("dry-run", False))
-        self.assertEqual(self.ok("mode", "live")["live_confirmed"], True)  # a person can still go live
-        self.assertNotEqual(self.marker.read_bytes(), saved)
+        self.assertEqual(self.ok("mode", "dry-run", "--global")["mode"], "dry-run")
+        self.assertEqual(self.ok("mode", "live")["mode"], "live")
+        self.assertEqual([x["op"] for x in self.settings_ledger()], ["mode live", "mode dry-run", "mode live"])
 
     def test_reports_a_repo_layer_dry_run_pin(self):
         self.tc.write("repo", "project", "---\nschema: 1\nmode: dry-run\n---\n")
@@ -381,99 +295,27 @@ class ModeLiveTests(ModeCliCase):
         self.assertIn(":3", out["note"])
 
 
-class PromptForOtherPersonCommandsTests(ModeCliCase):
-    def test_pause_off_and_allow_repo_add_take_the_token_at_the_prompt(self):
-        self.ok("pause", "on")
-        code, out, _ = self.cli("pause", "off", env=self.no_env(), prompt=lambda: self.token)
-        self.assertEqual(code, 0, out)
-        self.assertFalse(out["paused"])
-        code, out, _ = self.cli("allow-repo", "add", "acme/extra", "--everywhere", env=self.no_env(),
-                                prompt=lambda: self.token)
-        self.assertEqual(code, 0, out)
-        self.assertTrue(out["added"])
-        code, out, _ = self.cli("allow-repo", "add", "acme/more", "--everywhere", env=self.no_env(),
-                                prompt=lambda: "nope")
-        self.assertEqual((code, out["kind"]), (1, "human_only"))
-
-
-class ShellCommandTests(unittest.TestCase):
-    def test_posix_form(self):
-        with mock.patch.object(cli.os, "name", "posix"):
-            self.assertEqual(cli.shell_name(), "posix")
-            self.assertEqual(cli.shell_command("/opt/p/bin/notme", ["mode", "live"], "/w/my app"),
-                             "cd '/w/my app' && /opt/p/bin/notme mode live")
-
-    def test_windows_form_runs_the_launcher_through_git_bash(self):
-        with mock.patch.object(cli.os, "name", "nt"):
-            self.assertEqual(cli.shell_name(), "git-bash")
-            cmd = cli.shell_command("C:\\Users\\op\\plugin\\bin\\notme", ["mode", "live"], "C:\\work\\app")
-        self.assertEqual(cmd, "cd 'C:\\work\\app' && bash 'C:\\Users\\op\\plugin\\bin\\notme' mode live")
-
-
-class ShellFieldTests(ModeCliCase):
-    def test_mode_show_and_the_refusal_name_the_shell(self):
-        self.assertEqual(self.ok("mode", "show")["shell"], cli.shell_name())
-        with mock.patch.object(cli, "shell_name", return_value="git-bash"):
-            self.assertEqual(self.ok("mode", "show")["shell"], "git-bash")
-            code, out, _ = self.cli("mode", "live", env=self.no_env())
-        self.assertEqual((code, out["kind"], out["shell"]), (1, "human_only", "git-bash"))
-
-
 class ModeLiveUnderClaudeTests(UnderClaudeCase):
+    """The operator's /not-me:mode live runs the CLI inside the session (dblanken-yale/not-me#118)."""
+
     def setUp(self):
         super().setUp()
         self.global_file = self.home / "project.md"
         self.global_file.write_text(GLOBAL_DRY, encoding="utf-8")
-        humans.clear_live_marker(self.home)
 
-    def live(self, env, stdin=None, prompt=None):
-        code, payload, _ = self.cli("mode", "live", env=env, stdin=stdin, prompt=prompt)
-        return code, payload
+    def test_runs_under_claude_code_without_a_terminal(self):
+        payload = self.ok("mode", "live")
+        self.assertEqual((payload["mode"], payload["dry_run"]), ("live", False))
+        self.assertIn("mode: live", self.global_file.read_text(encoding="utf-8"))
 
-    def assert_refused(self, code, payload):
-        self.assertEqual((code, payload["kind"]), (1, "human_only"))
-        self.assertEqual(self.global_file.read_text(encoding="utf-8"), GLOBAL_DRY)
-        self.assertFalse(humans.live_confirmed(self.home))
-
-    def test_refused_under_claude_code_without_prompting(self):
-        code, payload = self.live(self.env, stdin=TtyIO(), prompt=lambda: self.fail("prompted"))
-        self.assert_refused(code, payload)
-        cmd = payload["terminal_cmd"]
-        self.assertTrue(cmd.startswith("cd "), cmd)
-        self.assertIn(cli.launcher_path(), cmd)
-        self.assertTrue(cmd.endswith("mode live"), cmd)
-        for stale in ("$(cat", "NOT_ME_OPERATOR_CONFIRM", "CLAUDE_PLUGIN_ROOT"):
-            self.assertNotIn(stale, cmd)
-        self.assertNotIn("NOT_ME_OPERATOR_CONFIRM", payload["error"])
-
-    def test_refused_from_a_non_terminal(self):
-        self.assert_refused(*self.live(self.human_env, prompt=lambda: self.fail("prompted")))
-
-    def test_refused_under_a_claude_code_ancestor(self):
-        self.claude_ancestor = True
-        self.assert_refused(*self.live(self.human_env, stdin=TtyIO(), prompt=lambda: self.fail("prompted")))
-
-    def test_refused_without_or_with_a_wrong_token(self):
-        no_token = {k: v for k, v in self.human_env.items() if k != "NOT_ME_OPERATOR_CONFIRM"}
-        self.assert_refused(*self.live(no_token, stdin=TtyIO()))
-        self.assert_refused(*self.live(dict(self.human_env, NOT_ME_OPERATOR_CONFIRM="octocat"), stdin=TtyIO()))
-
-    def test_dry_run_needs_no_person(self):
+    def test_dry_run_too(self):
         self.global_file.write_text(base.GLOBAL_PROJECT, encoding="utf-8")  # live
-        humans.write_live_marker(self.home)
         payload = self.ok("mode", "dry-run", "--global")
         self.assertEqual(payload["mode"], "dry-run")
-        self.assertFalse(humans.live_marker_path(self.home).exists())
         self.assertEqual(self.global_file.read_text(encoding="utf-8"),
                          base.GLOBAL_PROJECT.replace("mode: live", "mode: dry-run"))
-        payload = self.ok("mode", "dry-run")
+        self.ok("mode", "dry-run")
         self.assertTrue((self.session / ".claude" / "not-me" / "project.md").is_file())
-
-    def test_a_person_succeeds(self):
-        code, payload = self.live(self.human_env, stdin=TtyIO())
-        self.assertEqual(code, 0, payload)
-        self.assertEqual(payload["mode"], "live")
-        self.assertTrue(humans.live_confirmed(self.home))
 
 
 if __name__ == "__main__":

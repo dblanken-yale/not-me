@@ -136,12 +136,9 @@ def config_files_check(files: Mapping[str, Sequence[str]]) -> Check:
     return check("config files", bool(found), detail, required=False, fix=SETUP_FIX)
 
 
-def mode_check(mode: Any, unconfirmed: Optional[str]) -> Check:
-    """A warning when the config says `mode: live` but `notme mode live` never signed it (so it runs dry-run).
-    Never a fix: going live is a person's step, and the detail already names it."""
-    if unconfirmed:
-        return check("mode", False, unconfirmed, required=False)
-    return check("mode", True, "live (confirmed)" if mode == "live" else str(mode or "dry-run"), required=False)
+def mode_check(mode: Any) -> Check:
+    """The effective mode, for information. Never a fix: the operator changes it with /not-me:mode."""
+    return check("mode", True, str(mode or "dry-run"), required=False)
 
 
 def pass_label_check(result: Mapping[str, Any]) -> Check:
@@ -193,8 +190,9 @@ def _board_problems(q: Mapping[str, Any], gh: GhClient, confirmed_board: Optiona
     label = f"{owner}/{number}"
     problems: List[str] = []
     if not confirmed_board or str(confirmed_board[0]).lower() != owner.lower() or int(confirmed_board[1]) != number:
-        problems.append(f"board {label} is not confirmed in your allow list, so not-me cannot move its "
-                        f"cards; run /not-me:allow-repo {origin + ' ' if origin else ''}--board {label}")
+        problems.append(f"board {label} is neither in the repo layer on the default branch nor in your allow list, "
+                        f"so not-me cannot move its cards; merge the config or run /not-me:allow-repo "
+                        f"{origin + ' ' if origin else ''}--board {label}")
         return problems  # an unconfirmed board is not read
     status_field = (q.get("board") or {}).get("status_field") or ""
     options = status_options(gh, owner, number, status_field)

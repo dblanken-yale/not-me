@@ -13,13 +13,13 @@ mode is the default: a --project-dir or CLAUDE_PROJECT_DIR naming another checko
 ignored. Only a person gets those honoured: stdin is a terminal, neither CLAUDECODE nor CLAUDE_PROJECT_DIR is set,
 and no ancestor process is Claude Code (the CLI or the desktop app; the app's own terminal panel is a child of it,
 so use a separate terminal application). When the process ancestry cannot be read, the CLI stays restricted.
-NOT_ME_DRY_RUN can only turn dry-run on. `allow-repo add|remove`, `pause off` and `mode live` also need the
-private operator token in <not-me home>/operator-token (create it with `notme doctor --init-token`): a person types
-it at a hidden prompt, or a script sets NOT_ME_OPERATOR_CONFIRM to it.
-The PreToolUse guard is the enforcement; this check is a second layer.
+NOT_ME_DRY_RUN can only turn dry-run on. `allow-repo add|remove`, `pause` and `mode` run in a session too: the
+operator typing the matching slash command is the approval, and references/prohibitions.md keeps a run from issuing
+them on its own. Each change prints a summary of what changed and appends a line to the settings ledger
+(<not-me home>/settings-changes.jsonl).
 
 --dry-run, NOT_ME_DRY_RUN=1 or `mode: dry-run` send every write to the intended-writes ledger instead of
-GitHub; so does a `mode: live` that `notme mode live` did not sign (see `mode show`). Write commands then carry "dry_run": true. Write commands take --log PATH (an existing run log under
+GitHub. Write commands then carry "dry_run": true. Write commands take --log PATH (an existing run log under
 the log root) and append an ACTION line to it.
 
 Each handler's docstring is its reference entry: the first paragraph says what it does, the `Output:` line lists
@@ -34,7 +34,6 @@ import json
 import os
 import re
 import secrets
-import shlex
 import sys
 import tempfile
 import time
@@ -50,33 +49,13 @@ if _PLUGIN_DIR not in sys.path:  # lets scripts load this file by path (the docs
 from notme import claims, config as config_mod, doctor as doctor_mod, feedback as feedback_mod  # noqa: E402
 from notme import gh as gh_mod, git as git_mod, guard as guard_mod, paths, prove, runlog, states  # noqa: E402
 from notme import humans, modeswitch, roles as roles_mod, verifyplan, writeback, writes  # noqa: E402
-from notme.dryrun import LedgerError  # noqa: E402
+from notme.dryrun import Ledger, LedgerError  # noqa: E402
 from notme.gh import csv, names_of, login_of  # noqa: E402
 from notme.queue import NotOpen, board_ref, describe as describe_queue, make_queue, stale_claims  # noqa: E402
 from notme.queue import resync as resync_mod  # noqa: E402
 from notme.queue.signals import picking_signals  # noqa: E402
 from notme.queue.sync import MirrorFailed  # noqa: E402
 from notme.redact import redact, redact_obj  # noqa: E402
-
-
-def launcher_path() -> str:
-    """The absolute path of this plugin's `notme` launcher, for commands a person pastes into a terminal."""
-    return str(Path(_PLUGIN_DIR) / "bin" / "notme")
-
-
-def shell_name() -> str:
-    """The shell the commands handed to a person are written for. bin/notme is a bash script, so on Windows that
-    is Git Bash (not PowerShell or cmd); elsewhere any POSIX shell."""
-    return "git-bash" if os.name == "nt" else "posix"
-
-
-def shell_command(launcher: str, argv: Sequence[str], work_dir: Optional[str]) -> str:
-    """`cd <work_dir> && <launcher> <argv>`, quoted for a POSIX shell; on Windows the launcher is run through
-    `bash` explicitly, for Git Bash."""
-    run = " ".join(shlex.quote(a) for a in [launcher, *argv])
-    if os.name == "nt":
-        run = "bash " + run
-    return f"cd {shlex.quote(work_dir)} && {run}" if work_dir else run
 
 
 class ExitCode(IntEnum):
@@ -102,7 +81,9 @@ class ExitCode(IntEnum):
 PAUSED_FILE = "PAUSED"
 MAX_INPUT_BYTES = 1024 * 1024
 CLAUDE_ENV = ("CLAUDECODE", "CLAUDE_PROJECT_DIR")  # either one keeps the CLI restricted; never a reason to relax
-CONFIRM_ENV = "NOT_ME_OPERATOR_CONFIRM"
+# what the operator changed with allow-repo, pause and mode: one JSON line each, under the not-me home, so a change
+# made for every project is logged once and the operator can see and undo it
+SETTINGS_LEDGER = "settings-changes.jsonl"
 _AUTH_RE = re.compile(r"(?i)gh auth login|not logged in|bad credentials|http 401|requires?\b.*\bscopes?\b|"
                       r"missing\b.*\bscopes?\b|token has not been granted|authentication required")
 _REF_RES = (
@@ -227,8 +208,7 @@ class Deps:
                  hook_cmd: Optional[List[str]] = None, cwd: Optional[str] = None,
                  argv: Sequence[str] = (), sleep: Optional[Callable[[float], None]] = None,
                  clock: Optional[Callable[[], float]] = None,
-                 process_check: Optional[Callable[[], bool]] = None,
-                 prompt: Optional[Callable[[], Optional[str]]] = None):
+                 process_check: Optional[Callable[[], bool]] = None):
         self.runner = runner
         self.sleep: Callable[[float], None] = sleep or time.sleep
         self.clock: Callable[[], float] = clock or time.monotonic
@@ -240,9 +220,6 @@ class Deps:
         self.cwd = cwd
         self.argv = list(argv)
         self.process_check = process_check or humans.under_claude_process_tree
-        # The hidden prompt reads the process's own terminal, so it is offered only when stdin is the process's own
-        # (an injected stdin, as in tests, gets no prompt unless one is injected too).
-        self.prompt: Optional[Callable[[], Optional[str]]] = prompt or (humans.ask_token if stdin is None else None)
 
     def isatty(self) -> bool:
         """True only when stdin is a real terminal (a person typing, not a model's tool call)."""
@@ -394,30 +371,17 @@ class Context:
             raise fail(ExitCode.USAGE, "usage", "no project directory: run inside a clone (or pass --project-dir)")
         return self.work_dir
 
-    def require_human(self, what: str) -> None:
-        """Refuse `what` unless a person runs it (not restricted) and gives the operator token: in
-        NOT_ME_OPERATOR_CONFIRM, or, when that is unset, at a hidden prompt (asked only after the terminal and
-        process checks pass, so the prompt never relaxes anything on its own). A wrong or empty answer is the same
-        refusal, which carries the command to run in a terminal that Claude Code did not start."""
-        if not self.restricted and humans.token_matches(self.cfg.home, self._confirmation()):
-            return
-        raise fail(ExitCode.ERROR, "human_only",
-                   f"{what} is for a person: run the terminal_cmd command in a terminal application that Claude "
-                   "Code did not start (not the desktop app's terminal panel); it asks for the operator token "
-                   f"(create one with `notme doctor --init-token`); {humans.SECOND_LAYER}",
-                   terminal_cmd=self.terminal_command(self.deps.argv), shell=shell_name(), note=humans.SECOND_LAYER)
-
-    def _confirmation(self) -> Optional[str]:
-        """The token from NOT_ME_OPERATOR_CONFIRM, else (when unset and a token exists) typed at the prompt."""
-        given = self.deps.env.get(CONFIRM_ENV)
-        if given is not None or self.deps.prompt is None or not humans.token_path(self.cfg.home).is_file():
-            return given
-        return self.deps.prompt()
-
-    def terminal_command(self, argv: Sequence[str]) -> str:
-        """argv as a command a person can paste into a fresh terminal: cd into the project, then the absolute
-        launcher (never ${CLAUDE_PLUGIN_ROOT}, which only Claude Code sets)."""
-        return shell_command(launcher_path(), argv, str(self.work_dir) if self.work_dir else None)
+    def record_setting(self, op: str, target: str, summary: str) -> Dict[str, Any]:
+        """After an operator setting changed (allow list, pause, mode): append one line to the settings ledger in
+        the not-me home and return the output keys that show it (summary, ledger). The change already happened, so
+        a ledger that cannot be written is a warning, never an error."""
+        path = Path(self.cfg.home) / SETTINGS_LEDGER
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            Ledger(path, base=path.parent).append(op, target, self.deps.argv, description=summary)
+        except (LedgerError, OSError) as exc:
+            self.warn(f"the settings ledger was not written ({exc}); the change stands")
+        return {"summary": summary, "ledger": str(path)}
 
     # --- config ---
 
@@ -1955,7 +1919,6 @@ def _origin(ctx: Context) -> Optional[str]:
 
 
 def _allow_change(ctx: Context, args: argparse.Namespace, add: bool) -> Dict[str, Any]:
-    ctx.require_human(f"allow-repo {'add' if add else 'remove'}")
     scope = None
     if not args.everywhere:
         scope = _origin(ctx)
@@ -1965,8 +1928,19 @@ def _allow_change(ctx: Context, args: argparse.Namespace, add: bool) -> Dict[str
     change = writes.allowlist_add if add else writes.allowlist_remove
     changed = change(ctx.cfg.home, scope, repo=None if args.board else args.slug, everywhere=args.everywhere,
                      board=args.board)
-    return {"added" if add else "removed": changed, "scope": "*" if args.everywhere else scope,
-            **({"board": args.board} if args.board else {"repo": args.slug})}
+    what = f"board {args.board}" if args.board else f"repo {args.slug}"
+    where = "every project" if args.everywhere else f"this project ({scope}) only"
+    out: Dict[str, Any] = {"added" if add else "removed": changed, "scope": "*" if args.everywhere else scope,
+                           **({"board": args.board} if args.board else {"repo": args.slug})}
+    if changed:
+        summary = f"{'allowed' if add else 'removed'} {what} for {where}"
+        out.update(ctx.record_setting(f"allow-repo {'add' if add else 'remove'}",
+                                      f"{what} ({'every project' if args.everywhere else scope})", summary))
+    else:
+        out["summary"] = (f"{what} for {where} was "
+                          + ("already allowed" if add else "not on the allow list") + "; nothing changed")
+    out["entries"] = writes.allowlist_list(ctx.cfg.home, _origin(ctx))
+    return out
 
 
 _ALLOW_ARGS = [arg("slug", nargs="?", metavar="SLUG"), arg("--board", metavar="OWNER/NUMBER"),
@@ -1975,21 +1949,22 @@ _ALLOW_ARGS = [arg("slug", nargs="?", metavar="SLUG"), arg("--board", metavar="O
 
 @command("allow-repo add", "allow a repo or board", args=_ALLOW_ARGS)
 def cmd_allow_repo_add(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Allow a repo (or, with --board, a project board) for this project or everywhere. Only a person may do this:
-    it must run from a terminal Claude Code did not start and be given the operator token (typed at a hidden prompt,
-    or in NOT_ME_OPERATOR_CONFIRM for scripts); otherwise the refusal (kind human_only) carries the command to run. The guard is the enforcement; this check is
-    a second layer.
+    """Allow a repo (or, with --board, a project board) for this project or everywhere. The operator runs it
+    through /not-me:allow-repo, in the session; a run never does on its own (references/prohibitions.md). Repos
+    and the board named in the repo layer on the default branch are allowed without it. summary says in words what
+    changed (or that nothing did); a change also appends a line to the settings ledger, whose path is ledger;
+    entries is the allow list afterwards, as `allow-repo list` shows it.
 
-    Output: added, scope, repo or board
+    Output: added, scope, repo or board, summary, ledger (when something changed), entries
     """
     return _allow_change(ctx, args, add=True)
 
 
 @command("allow-repo remove", "remove an entry", args=_ALLOW_ARGS)
 def cmd_allow_repo_remove(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Remove a repo (or --board) from the allow list. The same person check as add applies.
+    """Remove a repo (or --board) from the allow list, with the same summary, ledger line and entries as add.
 
-    Output: removed, scope, repo or board
+    Output: removed, scope, repo or board, summary, ledger (when something changed), entries
     """
     return _allow_change(ctx, args, add=False)
 
@@ -2318,18 +2293,18 @@ def _status_items(ctx: Context) -> List[Dict[str, Any]]:
     arg("--global", dest="global_", action="store_true", help="for every project")])
 def cmd_pause(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """Turn not-me off or on for this project (or for every project with --global) by writing or removing the
-    PAUSED file. Pick and claim commands then report paused. `pause off` needs the same person check as allow-repo
-    add (else kind human_only, with the command for a person to run).
+    PAUSED file. Pick and claim commands then report paused. The operator runs it through /not-me:pause; a run
+    never turns a pause off on its own (references/prohibitions.md). summary says in words what changed (or that
+    nothing did); a change also appends a line to the settings ledger, whose path is ledger.
 
-    Output: paused, scope
+    Output: paused, scope, summary, ledger (when something changed)
     """
-    if args.state == "off":
-        ctx.require_human("pause off")
     scope = "global" if args.global_ else "project"
     files = ctx.pause_files()
     if scope not in files:
         raise fail(ExitCode.USAGE, "usage", "no project directory: run inside a clone or use --global")
     path = files[scope]
+    was = path.is_file()
     if args.state == "on":
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n", encoding="utf-8")
@@ -2338,7 +2313,15 @@ def cmd_pause(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
             path.unlink()
         except FileNotFoundError:
             pass
-    return {"paused": args.state == "on", "scope": scope}
+    on = args.state == "on"
+    where = "every project" if args.global_ else f"this project ({_origin(ctx) or ctx.work_dir})"
+    out: Dict[str, Any] = {"paused": on, "scope": scope}
+    if was != on:
+        out.update(ctx.record_setting(f"pause {args.state}", f"PAUSED ({where})",
+                                      f"not-me is {'paused' if on else 'no longer paused'} for {where}"))
+    else:
+        out["summary"] = f"not-me was {'already' if on else 'not'} paused for {where}; nothing changed"
+    return out
 
 
 def _mode_state(ctx: Context) -> Dict[str, Any]:
@@ -2351,44 +2334,31 @@ def _mode_state(ctx: Context) -> Dict[str, Any]:
     repo = layers["repo"]
     pin = {k: repo[k] for k in ("path", "file", "line")} if repo["mode"] == "dry-run" else None
     return {"mode": ctx.meta.get("mode"), "dry_run": ctx.mode_is_dry, "source": modeswitch.source(cfg),
-            "layers": layers, "repo_pin": pin,
-            "live_confirmed": humans.live_confirmed(cfg.home),  # verified only: the marker is never shown
-            "unconfirmed": cfg.live_unconfirmed,
-            "token_present": humans.token_path(cfg.home).is_file(),
-            "launcher": launcher_path(), "shell": shell_name(), "live_cmd": ctx.terminal_command(["mode", "live"])}
+            "layers": layers, "repo_pin": pin}
 
 
 def _set_mode(ctx: Context, layer: str, value: str) -> Dict[str, Any]:
     target = modeswitch.layer_file(ctx.cfg, layer)
     if target is None:
         raise fail(ExitCode.USAGE, "usage", "no project directory: run inside a clone or use --global")
-    home = ctx.cfg.home
-    if layer == "global" and value == "dry-run":
-        humans.clear_live_marker(home)  # first, so a failed edit below still leaves live unconfirmed
     written = modeswitch.write_mode(target, value, follow_links=layer == "global")
-    if value == "live":
-        try:
-            humans.write_live_marker(home)
-        except ValueError as exc:
-            raise fail(ExitCode.ERROR, "human_only", str(exc)) from None
     ctx.reload_cfg()
-    return {**_mode_state(ctx), "written": {"layer": layer, "file": str(written), "mode": value}}
+    every = layer == "global"
+    shown = ctx.record_setting(f"mode {value}", f"{layer} layer ({'every project' if every else 'this project'})",
+                               f"mode set to {value} in the {layer} layer "
+                               f"({'every project' if every else 'this project only'})")
+    return {**_mode_state(ctx), "written": {"layer": layer, "file": str(written), "mode": value}, **shown}
 
 
 @command("mode show", "the effective mode and where it comes from")
 def cmd_mode_show(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """The effective mode, the layer, file and line it comes from, what the global and repo layers each say, and
     whether the repo layer pins dry-run (repo_pin: path, file, line). dry_run also counts --dry-run and
-    NOT_ME_DRY_RUN. A global `mode: live` counts only when signed: live_confirmed says whether the marker that
-    `notme mode live` writes (<not-me home>/mode-live.sig, an HMAC keyed by the operator token and the epoch)
-    verifies; when the layers say live but it does not, mode is dry-run and unconfirmed holds the warning (else
-    null).
-    token_present says whether the operator token file exists; launcher is the absolute path of this notme, and
-    live_cmd the command a person runs in their own terminal to go live, written for shell: posix, or git-bash on
-    Windows (bin/notme is a bash script, so not PowerShell or cmd). Neither the token nor the marker is shown.
+    NOT_ME_DRY_RUN. `mode: live` counts only from the global layer: the repo layer can pin dry-run but never turn
+    live mode on.
 
-    Output: mode, dry_run, source (layer, path, line[, ignored, downgraded]), layers (global, repo: mode, path,
-    line, file), repo_pin, live_confirmed, unconfirmed, token_present, launcher, shell, live_cmd
+    Output: mode, dry_run, source (layer, path, line[, ignored]), layers (global, repo: mode, path, line, file),
+    repo_pin
     """
     return _mode_state(ctx)
 
@@ -2397,29 +2367,27 @@ def cmd_mode_show(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     arg("--global", dest="global_", action="store_true", help="in the global layer, not the repo layer")])
 def cmd_mode_dry_run(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """Set `mode: dry-run` in the repo layer (<project>/.claude/not-me/project.md), or with --global in the
-    global layer (<not-me home>/project.md), which also deletes the live marker and replaces the epoch
-    (<not-me home>/mode-live.epoch), so no saved copy of an old marker verifies again (the repo layer leaves both).
-    Always allowed: it only tightens. A missing or empty file gets
-    minimal frontmatter; otherwise only the mode line changes. Kind mode_edit_refused when the file cannot be
-    edited safely: text without frontmatter, frontmatter that does not parse, a symlink or hard link in the repo
-    layer, or a global symlink that does not lead to a regular project.md.
+    global layer (<not-me home>/project.md). A missing or empty file gets minimal frontmatter; otherwise only the
+    mode line changes. Kind mode_edit_refused when the file cannot be edited safely: text without frontmatter,
+    frontmatter that does not parse, a symlink or hard link in the repo layer, or a global symlink that does not
+    lead to a regular project.md. summary says in words what changed; the change also appends a line to the
+    settings ledger, whose path is ledger.
 
-    Output: the mode show keys, plus written (layer, file, mode)
+    Output: the mode show keys, plus written (layer, file, mode), summary, ledger
     """
     return _set_mode(ctx, "global" if args.global_ else "repo", "dry-run")
 
 
-@command("mode live", "set mode: live in the global layer (a person only)")
+@command("mode live", "set mode: live in the global layer")
 def cmd_mode_live(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Set `mode: live` in the global layer only (the repo layer can never turn live mode on) and sign it: write
-    <not-me home>/mode-live.sig, an HMAC-SHA256 keyed by the operator token and the epoch in
-    <not-me home>/mode-live.epoch (created when missing), without which `mode: live` runs as dry-run. Only a person may do this, with the same check as allow-repo add (else kind human_only, with the
-    command to run). After a token rotation, run it again. When the repo layer still pins dry-run, the global
-    layer is written anyway and repo_pin names that file and line.
+    """Set `mode: live` in the global layer only (the repo layer can never turn live mode on). The operator runs it
+    through /not-me:mode live, in the session; a run never does on its own (references/prohibitions.md). When the
+    repo layer still pins dry-run, the global layer is written anyway, repo_pin names that file and line, and note
+    says so. summary and ledger as for mode dry-run.
 
-    Output: the mode show keys, plus written (layer, file, mode) and, when the repo pins dry-run, note
+    Output: the mode show keys, plus written (layer, file, mode), summary, ledger and, when the repo pins dry-run,
+    note
     """
-    ctx.require_human("mode live")
     out = _set_mode(ctx, "global", "live")
     pin = out["repo_pin"]
     if pin:
@@ -2428,26 +2396,21 @@ def cmd_mode_live(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     return out
 
 
-@command("doctor", "check tools, auth, config and the guard", args=[
-    arg("--init-token", action="store_true", help="create the operator token (a person only; shown once)")])
+@command("doctor", "check tools, auth, config and the guard")
 def cmd_doctor(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Check the tools and setup: python, git and gh versions, config, mode (a warning when `mode: live` is set but
-    not confirmed by `notme mode live`), config files (a warning when neither the global nor the repo layer holds a not-me config file), gh auth
+    """Check the tools and setup: python, git and gh versions, config, mode, config files (a warning when neither
+    the global nor the repo layer holds a not-me config file), gh auth
     and scopes, pass labels (advice when role.md names any: the missing ones, for `labels-ensure`), the queue
     source (a warning when the pick label is missing, the board is not confirmed or not found, or a
     board_states column is not a status option; not run without gh), guard self-test, spawn depth.
     Exit 7 when the only failed required checks are gh, gh auth or gh scopes; exit 1 when another
-    required check fails. --init-token instead creates <not-me home>/operator-token (random, mode 0600) and shows
-    it once; only a person may run it (kind human_only otherwise), and an existing token is never replaced
-    (kind token_exists: delete the file to make a new one).
+    required check fails.
 
-    Output: ok, checks (name, ok, detail, required, fix, hint); with --init-token token, path
+    Output: ok, checks (name, ok, detail, required, fix, hint)
     """
-    if args.init_token:
-        return _init_token(ctx)
     checks = doctor_mod.run(ctx.deps.runner or gh_mod._default_runner, ctx.config_errors(), lambda: ctx.gh,
                             ctx.guard_state, ctx.env,
-                            doctor_mod.mode_check(ctx.meta.get("mode"), ctx.cfg.live_unconfirmed),
+                            doctor_mod.mode_check(ctx.meta.get("mode")),
                             config_files=ctx.cfg.layers.files, pass_labels=lambda: _pass_label_check(ctx),
                             queue=lambda: _doctor_queue(ctx), drift=lambda: _doctor_drift(ctx))
     verdict = doctor_mod.exit_kind(checks)
@@ -2494,20 +2457,6 @@ def _queue_drift(ctx: Context) -> Dict[str, Any]:
     MirrorFailed (board not set, or not allowed: checked before any board read), LookupError (board not found),
     GhError or ValueError (the queue cannot be built) are left to the caller. Only reads."""
     return resync_mod.read(ctx.queue())
-
-
-def _init_token(ctx: Context) -> Dict[str, Any]:
-    if ctx.restricted:
-        raise fail(ExitCode.ERROR, "human_only", "the operator token is created by a person, in a terminal "
-                                                 f"application that Claude Code did not start; {humans.SECOND_LAYER}",
-                   note=humans.SECOND_LAYER)
-    try:
-        token = humans.create_token(ctx.cfg.home)
-    except FileExistsError:
-        raise fail(ExitCode.ERROR, "token_exists", "an operator token already exists; delete "
-                                                   f"{humans.token_path(ctx.cfg.home)} to make a new one") from None
-    return {"token": token, "path": str(humans.token_path(ctx.cfg.home)),
-            "note": "shown once: keep it out of files the agent can read"}
 
 
 # --- parser ------------------------------------------------------------------------
@@ -2599,13 +2548,12 @@ def main(argv: Optional[Sequence[str]] = None, *, runner: Optional[gh_mod.Runner
          env: Optional[Mapping[str, str]] = None, stdin: Optional[TextIO] = None, stdout: Optional[TextIO] = None,
          stderr: Optional[TextIO] = None, hook_cmd: Optional[List[str]] = None, cwd: Optional[str] = None,
          sleep: Optional[Callable[[float], None]] = None, clock: Optional[Callable[[], float]] = None,
-         process_check: Optional[Callable[[], bool]] = None,
-         prompt: Optional[Callable[[], Optional[str]]] = None) -> int:
+         process_check: Optional[Callable[[], bool]] = None) -> int:
     """Run one invocation and return its exit code. The keyword arguments let tests inject the gh runner,
-    environment, streams, hook command, working directory, the sleep and clock `wait-checks` uses, the
-    Claude Code ancestry check and the hidden operator-token prompt."""
+    environment, streams, hook command, working directory, the sleep and clock `wait-checks` uses and the
+    Claude Code ancestry check."""
     argv = list(sys.argv[1:] if argv is None else argv)
-    deps = Deps(runner, env, stdin, stdout, stderr, hook_cmd, cwd, argv, sleep, clock, process_check, prompt)
+    deps = Deps(runner, env, stdin, stdout, stderr, hook_cmd, cwd, argv, sleep, clock, process_check)
     code, payload = int(ExitCode.OK), {}
     ctx: Optional[Context] = None
     log: Any = None

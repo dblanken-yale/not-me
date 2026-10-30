@@ -87,9 +87,9 @@ Then, as in Step 6 of the skill: show the diff, ask once, write, run
 
 - Labels: when the chosen label is missing from the tracker, run
   `notme labels-ensure --check` and ask before `notme labels-ensure`.
-- Board and either: a board in the repo layer is trusted for writes only once a person
-  confirms it. Print the exact command with this repo's origin and the board, for
-  the user to run:
+- Board and either: a board in the repo layer is trusted for writes once this file
+  is on the default branch, or once a person allows it. To use it before the merge,
+  print the exact command with this repo's origin and the board, for the user to run:
 
 ```
 /not-me:allow-repo owner/name --board owner/number

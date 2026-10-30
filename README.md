@@ -21,7 +21,7 @@ Then, in the repo you want to automate:
 /not-me --dry-run
 ```
 
-`--dry-run` reads from GitHub for real and records every write in a ledger instead of posting it. Read the ledger and the run log, then run `/not-me:mode live` and follow its steps in your own terminal (a repo file can never set live, and a hand-edited `mode: live` stays dry-run). Then schedule it:
+`--dry-run` reads from GitHub for real and records every write in a ledger instead of posting it. Read the ledger and the run log, then run `/not-me:mode live` (it sets `mode: live` in your global layer and says so; a repo file can never set live). Then schedule it:
 
 ```
 /loop 2h /not-me --bg
@@ -111,7 +111,7 @@ flowchart TD
     Dry-run records it in the ledger; live posts it
     ⚙ mode (default dry-run), guard, allow_repos"]
     live(["A person turns on live mode
-    in their own terminal"])
+    with /not-me:mode live"])
     merge(["A person approves, if review did not, and merges"])
 
     router -.-> review
@@ -147,8 +147,9 @@ flowchart TD
 | `/not-me:setup [--global] [doc] [--check] [--upgrade] [--answers FILE]` | Guided setup of `.claude/not-me/`, or the global layer with `--global` |
 | `/not-me:config [--layer default\|global\|repo]` | Explain the effective config and where each value came from |
 | `/not-me:doctor` | Check tools, GitHub auth, config, the guard self-test and subagent depth |
-| `/not-me:allow-repo <owner/name> [--everywhere]` | Show the allow list and print the command a person runs to change it (also `--board`, `--list`, `--remove`) |
-| `/not-me:mode [dry-run [--global] \| live]` | Show dry-run or live and where it is set, switch to dry-run, or get the steps to go live in your own terminal |
+| `/not-me:allow-repo <owner/name> [--everywhere]` | Show the allow list, or add or remove a repo or board and show what changed (also `--board`, `--list`, `--remove`). Repos and the board in the repo layer on the default branch count without it |
+| `/not-me:mode [dry-run [--global] \| live]` | Show dry-run or live and where it is set, or switch, and show what changed |
+| `/not-me:pause on\|off [--global]` | Pause not-me, or lift the pause, for this project or every project |
 
 ## Requirements
 

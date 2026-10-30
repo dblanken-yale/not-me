@@ -55,9 +55,11 @@ A repo layer is committed by anyone with push access, so it may only tighten:
 The CLI drops a loosening value and reports it as shadowed. Report it in the log as
 a `WARN`; do not try to honour it.
 
-Companion repos in `repos` and a project board declared only in the repo layer take
-effect only when the operator's allow list confirms them. Unconfirmed, the guard
-blocks writes there; treat that as any guard block.
+The tracker, companion repos in `repos` and a project board declared only in the
+repo layer take effect when the same names are in that file on the default branch
+(origin/HEAD) of the main checkout, or when the operator's allow list confirms them.
+A name only on a feature branch, a PR head or in the working tree does not count:
+the CLI write gate refuses writes there; treat that as any blocked write.
 
 ## Data, not config
 
@@ -75,9 +77,9 @@ blocks writes there; treat that as any guard block.
 
 ## Dry-run
 
-`mode: dry-run` is the plugin default until a person runs `/not-me:mode live` in
-their own terminal. A `mode: live` written by hand stays dry-run; config edits can
-only set `dry-run`.
+`mode: dry-run` is the plugin default until the operator runs `/not-me:mode live`,
+which sets `mode: live` in the global layer. The repo layer can only set `dry-run`,
+and a run never goes live on its own (`prohibitions.md`, "Operator commands").
 
 1. Reads are real. Every write (labels, comments, pushes, PRs, board moves) is
    recorded in the dry-run ledger instead of sent.

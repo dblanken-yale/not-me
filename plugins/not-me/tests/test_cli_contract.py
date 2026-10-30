@@ -11,7 +11,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from notme import claims, cli, humans
+from notme import claims, cli
 from tests import PLUGIN_ROOT, TempCase
 from tests.fakes.fakegh import FakeRunner
 
@@ -56,8 +56,7 @@ def things(fake, repo=REPO):
 
 class CliCase(unittest.TestCase):
     """A temp project, a global config in live mode, and a fake GitHub behind the injected runner. Runs as a person
-    at a terminal (a tty stdin, no Claude Code ancestor, NOT_ME_OPERATOR_CONFIRM set to the operator token), so
-    --project-dir and NOT_ME_HOME are honoured."""
+    at a terminal (a tty stdin, no Claude Code ancestor), so --project-dir and NOT_ME_HOME are honoured."""
 
     global_project = GLOBAL_PROJECT
 
@@ -67,9 +66,7 @@ class CliCase(unittest.TestCase):
         self.tc.write("global", "project", self.global_project)
         self.fake = FakeRunner()
         self.env = {"NOT_ME_HOME": str(self.tc.home), "PATH": os.environ.get("PATH", ""),
-                    "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
-                    "NOT_ME_OPERATOR_CONFIRM": humans.create_token(self.tc.home)}
-        humans.write_live_marker(self.tc.home)  # `mode: live` counts only when signed (notme mode live)
+                    "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT)}
 
     @property
     def project(self) -> Path:
@@ -85,9 +82,8 @@ class CliCase(unittest.TestCase):
         """A --reason-file for the commands that change a state."""
         return self.write_file("reason.txt", "Because the test says so\n")
 
-    def cli(self, *argv, stdin="", runner=None, hook_cmd=None, env=None, repo=True, project=True, prompt=None):
-        """(exit code, parsed stdout object, stderr text). Fails the test unless stdout is exactly one object.
-        prompt stands in for the hidden operator-token prompt (none by default)."""
+    def cli(self, *argv, stdin="", runner=None, hook_cmd=None, env=None, repo=True, project=True):
+        """(exit code, parsed stdout object, stderr text). Fails the test unless stdout is exactly one object."""
         out, err = io.StringIO(), io.StringIO()
         args = list(argv)
         if project:
@@ -95,7 +91,7 @@ class CliCase(unittest.TestCase):
         if repo:
             args = ["--repo", REPO] + args
         code = cli.main(args, runner=runner or self.fake, env=env or self.env, stdin=TtyIO(stdin), stdout=out,
-                        stderr=err, hook_cmd=hook_cmd, process_check=lambda: False, prompt=prompt)
+                        stderr=err, hook_cmd=hook_cmd, process_check=lambda: False)
         text = out.getvalue()
         self.assertEqual(text.count("\n"), 1, f"stdout must be one line, got {text!r}")
         payload = json.loads(text)
@@ -395,26 +391,11 @@ class DryRunTests(CliCase):
     def test_mode_dry_run_and_env_do_the_same(self):
         self.tc.write("global", "project", GLOBAL_PROJECT.replace("mode: live", "mode: dry-run"))
         self.assertTrue(self.ok("request-review", "3", "--reviewers", "hubot")["dry_run"])
-        self.tc.write("global", "project", GLOBAL_PROJECT)
-        self.assertTrue(self.ok("request-review", "3", "--reviewers", "hubot")["dry_run"])  # dry-run revoked it
-        self.tc.sign_live()
+        self.tc.write("global", "project", GLOBAL_PROJECT)  # `mode: live` in the global layer is enough
         self.assertNotIn("dry_run", self.ok("request-review", "3", "--reviewers", "hubot"))
         env = dict(self.env, NOT_ME_DRY_RUN="1")
         self.assertTrue(self.ok("request-review", "3", "--reviewers", "octocat", env=env)["dry_run"])
         self.assertEqual(things(self.fake)["3"]["reviewRequests"], ["octocat", "hubot"])
-
-    def test_unconfirmed_live_records_to_the_ledger_only(self):
-        humans.clear_live_marker(self.tc.home)  # `mode: live` hand-set, never signed by `notme mode live`
-        before, state = len(self.ledger()), self.fake.snapshot()
-        self.fake.calls.clear()
-        payload = self.ok("request-review", "3", "--reviewers", "hubot")
-        self.assertTrue(payload["dry_run"])
-        self.assertEqual(self.fake.writes_made(), [])
-        self.assertEqual(self.fake.snapshot(), state)
-        self.assertGreater(len(self.ledger()), before)
-        pre = self.ok("preflight")
-        self.assertEqual((pre["mode"], pre["dry_run"]), ("dry-run", True))
-        self.assertTrue(any("not confirmed" in w for w in pre["warnings"]), pre["warnings"])
 
     def test_log_option_appends_an_action_line(self):
         start = self.ok("log", "start", "--skill", "new", "--ref", "1")

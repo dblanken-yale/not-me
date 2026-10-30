@@ -209,12 +209,12 @@ Anyone with push access can edit the repo layer, and it is committed, so not-me 
 
 Each dropped value shows up under `ignored` in `/not-me:config` and as a warning. Where the loosening belongs (your global layer), see below.
 
-Two more things are listed in the repo layer but only take effect once you confirm them on your own machine:
+Two more things are listed in the repo layer but only take effect once they are on the default branch, or once you allow them on your own machine:
 
 - Extra repos in `tracker` and `repos` (companion repos).
 - A project board in `queue.board`.
 
-Run `/not-me:allow-repo owner/name` for a repo, or `/not-me:allow-repo --board owner/number` for a board. `/not-me:setup` offers to do this for you. Until confirmed, the `notme` CLI refuses to write there and says why. The confirmation lives in `~/.claude/not-me/allowed-repos.json`, which is outside the repo, so a teammate cannot grant it for you. See [guards.md](guards.md).
+A name counts when `.claude/not-me/project.md` names it under the same key in the commit `refs/remotes/origin/HEAD` points at in your main checkout (run `git fetch` after the merge; a clone sets `origin/HEAD`, and `git remote set-head origin --auto` sets it when it is missing). The working tree, a checked-out branch and a pull request's head never count, so a pull request cannot widen what not-me touches until it is reviewed and merged. To use a name sooner, or one not in any config, run `/not-me:allow-repo owner/name` for a repo, or `/not-me:allow-repo --board owner/number` for a board. Until one of those holds, the `notme` CLI refuses to write there and says why. Allow-list entries live in `~/.claude/not-me/allowed-repos.json`, outside the repo. See [guards.md](guards.md).
 
 ## Label mapping
 
@@ -330,7 +330,7 @@ not-me finds work in one of three ways: issues carrying a label (`queue.source: 
 
 The easy way to see or change it is `/not-me:setup project --queue`. It shows what the queue picks today, lists the repo's labels and the owner's boards and columns so you pick instead of typing, writes only the queue keys of the repo layer's `project.md`, and for a board prints the `/not-me:allow-repo owner/name --board owner/number` command you run to confirm it. The labels source picks by the `labels.todo` label, so for labels setup writes that name to both `labels.todo` and `queue.pick_label`.
 
-To see where the queue looks without changing anything, `/not-me:status` and `/not-me:config` print it in plain words, for example "picks issues labeled `to do`, assigned to you" or "picks issues in the `To Do` column of board acme/7, assigned to you". In JSON this is the `queue` object of `notme status` and `notme config --explain`, and `notme pick-issue` adds the same sentence as `queue_summary` whenever it finds nothing. `/not-me:doctor` warns when the source cannot work: the pick label does not exist (labels and either), the board is not confirmed in your allow list or cannot be found, or a `queue.board_states` column is not one of the board's Status options.
+To see where the queue looks without changing anything, `/not-me:status` and `/not-me:config` print it in plain words, for example "picks issues labeled `to do`, assigned to you" or "picks issues in the `To Do` column of board acme/7, assigned to you". In JSON this is the `queue` object of `notme status` and `notme config --explain`, and `notme pick-issue` adds the same sentence as `queue_summary` whenever it finds nothing. `/not-me:doctor` warns when the source cannot work: the pick label does not exist (labels and either), the board is neither in the repo layer on the default branch nor in your allow list, or cannot be found, or a `queue.board_states` column is not one of the board's Status options.
 
 To set it by hand, with `queue.source: board` set the board and its column names:
 
@@ -341,7 +341,7 @@ queue:
   board_states: {todo: To Do, in_progress: In progress, in_review: In review, blocked: Blocked}
 ```
 
-Your token needs the `project` scope, and the board must be confirmed with `/not-me:allow-repo --board acme/7` if it was set in the repo layer. Pull request states always use labels.
+Your token needs the `project` scope, and a board set in the repo layer counts once that file is on the default branch, or once you run `/not-me:allow-repo --board acme/7`. Pull request states always use labels.
 
 The `board_states` defaults (`To Do`, `In progress`, `In review`, `Blocked`) are only a guess. Map each key to the real column name on your board, spelled the way the board spells it; `/not-me:doctor` warns about a name the board does not have.
 
@@ -408,7 +408,7 @@ queue:
 - **Disagreement.** An issue labeled `to do` whose Status is any other column (In review, Done, ...) is not picked, and neither is one in the To Do column that carries a later state label (`in progress`, `needs review`, ...). `notme pick-issue` lists each in `disagreements` with a reason naming both values, for example "acme/app#5 is labeled `to do` but its board Status is `In review`". Fix one side by hand and the issue is picked again. A claim of such an issue is refused the same way.
 - **Writes.** Every claim, move and release writes both sides: the labels and the board Status. `either` always syncs, so `queue.sync` need not be set. Left at its default (`false`, never written in a layer) it counts as on; a `queue.sync: false` written in any layer next to `source: either` is a config error that `notme config --check` reports with the file and line, and the fix is to remove that line or set it to `true`.
 - **Claims stay safe.** The claim's compare-and-set and its read-back through the issue timeline run on the label side, as for a labels queue. A board-only issue gets its state label when claimed. The board write follows as a mirror, so a failed board write is one warning and never undoes the claim (see the list above). An issue that is not on the board warns that it must be added; not-me never adds items.
-- **Trust.** The board must be on your global allow list when the repo layer names it. The gate runs before the board is read, so an unconfirmed board makes picking and claiming stop with the `/not-me:allow-repo --board owner/number` command to run.
+- **Trust.** When the repo layer names the board, it must be in that file on the default branch or on your global allow list. The gate runs before the board is read, so an unconfirmed board makes picking and claiming stop with the `/not-me:allow-repo --board owner/number` command to run.
 - **Doctor.** `notme doctor` checks the label and the board together: the label exists, the board is confirmed and found, and each `queue.board_states` column is a Status option.
 - **Long boards.** Board items are read 100 at a time, up to 10 pages (1000 items). A label-listed issue that is not among the items read on a longer board has an unknown Status, so it is not picked or claimed and `disagreements` says why; a board-only issue past the cap is not seen. Keep the To Do column near the top of long boards or archive done items.
 - **Setup.** `/not-me:setup project --queue` offers "labels or board column (either)" and asks for the label, the board and the column mapping in one pass.
@@ -505,11 +505,11 @@ The ledger is `<git-common-dir>/not-me/logs/intended-writes.jsonl`, one JSON obj
 
 ### Live mode
 
-To go live, run `/not-me:mode live` and follow the steps. It needs the operator token (see [install.md](install.md#the-operator-token)). It sets `mode: live` in your global `project.md` and signs it: it writes `~/.claude/not-me/mode-live.sig`, a code made from your operator token and the random epoch in `~/.claude/not-me/mode-live.epoch`. `live` takes effect only when the signature matches your current token and epoch, so typing `mode: live` by hand does not turn live mode on. Not-me then stays in dry-run, and `/not-me:mode`, `/not-me:config` (the `downgraded` entry) and `/not-me:doctor` say live is set but not confirmed. A new operator token invalidates the signature: run `/not-me:mode live` again. The repo layer cannot set `live` at all.
+To go live, type `/not-me:mode live`. It sets `mode: live` in your global `project.md`, in the session, prints what changed and adds a line to `~/.claude/not-me/settings-changes.jsonl`. `mode: live` in the global layer is all live mode needs. The repo layer cannot set `live` at all; a repo-layer `mode: dry-run` keeps that project in dry-run. A run never goes live on its own (see [Your own commands](install.md#your-own-commands)).
 
-`/not-me:mode dry-run` switches back (with `--global`, it also deletes the signature and replaces the epoch, so an old signature saved somewhere never works again). Setting `mode: dry-run` by hand works too. Returning the global layer to dry-run by any means (a hand edit or removing the `mode` key included) revokes the signature, so going live again needs `/not-me:mode live`. A repo-layer `mode: dry-run` pin does not revoke it.
+`/not-me:mode dry-run` switches back for this project (the repo layer), `/not-me:mode dry-run --global` for every project. Setting `mode: dry-run` by hand works too.
 
-Upgrading: an existing global `mode: live` written before signatures existed runs as dry-run until you run `/not-me:mode live` once.
+Upgrading: a global `mode: live` that an older version kept in dry-run because it was never signed is live as it stands now. The signature files (`mode-live.sig`, `mode-live.epoch`) and `operator-token` do nothing any more.
 
 ## Schema and upgrades
 
@@ -530,7 +530,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | Key | Default | What it does |
 | --- | --- | --- |
 | `schema` | `1` | Config format version. Setup upgrades older files |
-| `mode` | `dry-run` | `dry-run` or `live`. `live` counts only when `/not-me:mode live` signed it (see [Live mode](#live-mode)). The repo layer may only set `dry-run` |
+| `mode` | `dry-run` | `dry-run` or `live`. The operator sets `live` with `/not-me:mode live` (see [Live mode](#live-mode)). The repo layer may only set `dry-run` |
 | `enabled` | `true` | `false` turns not-me off for this layer and above. The repo layer may set `false`, never `true` over a global `false` |
 | `tracker` | `auto` | `owner/name` of the repo that holds issues. `auto` means `origin` |
 | `repos` | `[]` | Companion set, in push order. `[]` means just the tracker. Items are `{name, path: auto, default_branch: auto, role: primary or companion}` |
@@ -549,7 +549,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `queue.board_states.in_review` | `In review` | Board column name for work waiting on review |
 | `queue.board_states.blocked` | `Blocked` | Board column name for blocked work |
 | `queue.stacking` | `declared` | `declared` lets an issue with a trusted `Stack on: owner/repo#PR` (or `Based on:`, `On top of:`) line start from that open PR's branch; `off` never stacks, and such an issue waits for the merge. The repo layer may set `off`, never `declared` over a lower `off` (see [Stacking on an open PR](#stacking-on-an-open-pr)) |
-| `queue.sync` | `false` | `true` makes each claim, move and release also update the side `queue.source` does not read: the board Status for a labels source, the labels for a board source. `queue.source: either` always does this, and a `false` written next to it is a config error. Needs `queue.board` set; a board named in the repo layer must be confirmed on the global allow list; a failed mirror write is a warning (see [Keeping labels and the board in step](#keeping-labels-and-the-board-in-step)) |
+| `queue.sync` | `false` | `true` makes each claim, move and release also update the side `queue.source` does not read: the board Status for a labels source, the labels for a board source. `queue.source: either` always does this, and a `false` written next to it is a config error. Needs `queue.board` set; a board named in the repo layer counts once it is on the default branch or on the global allow list; a failed mirror write is a warning (see [Keeping labels and the board in step](#keeping-labels-and-the-board-in-step)) |
 | `picking.fields` | `[]` | Board field names whose values `notme pick-issue` lists for each issue, for the rules in the `## Picking work` section to use. Any layer may set it (see [Picking work](#picking-work)) |
 | `picking.target_epics` | `[]` | Epic issue numbers to finish first, in this order. One counts only when a trusted roster member wrote it. Any layer may set it (see [Picking work](#picking-work)) |
 | `picking.value_max_chars` | `80` | Longest text field value `notme pick-issue` reports under `fields`; longer ones are cut. A whole number of at least 1. The repo layer may lower it, never raise it or set it to `null` (see [Picking work](#picking-work)) |

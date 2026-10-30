@@ -135,8 +135,9 @@ For each detected sibling checkout, ask whether it is in the set and where it go
 in push order. Write `repos` with one `primary` (this repo) and the rest
 `companion`, in push order.
 
-Then tell the user each companion must be confirmed once by a person, and print the
-commands, one per companion, plus one per board declared only in the repo layer:
+Then tell the user the companions and a board declared only in the repo layer count
+as allowed once this file is merged to the default branch. To use them before that,
+print the commands, one per companion, plus one per such board:
 
 ```
 /not-me:allow-repo owner/companion
@@ -203,14 +204,13 @@ Keep every other section's default text. Do not invent sections.
 ## Step 7: finish
 
 1. Run `notme doctor` again.
-2. If it passes and the user said yes to live mode, do not edit any file: run
-   `notme mode show` and print the live command it gives for the user to run in
-   their own terminal (as `/not-me:mode live` does). Only that signed command turns live on; a
-   hand-set `mode: live` stays dry-run, and the repo layer can never set it.
+2. If it passes and the user said yes to live mode, do not edit any file and do
+   not run it here: tell the user to type `/not-me:mode live`, which sets the global
+   layer and shows the change. The repo layer can never set live.
 3. Otherwise explain dry-run: every write a run would make is recorded in the
    ledger and nothing is sent, until the user runs `/not-me:mode live`.
 4. Print the next commands: `/not-me:doctor`, `/not-me --dry-run`, and each
-   `/not-me:allow-repo` confirmation from Step 4.
+   `/not-me:allow-repo` command from Step 4.
 
 ## Queue mode (`project --queue`)
 

@@ -782,12 +782,17 @@ class StatusAndPauseTests(base.CliCase):
 
     def test_pause_on_and_off(self):
         self.fake.add_assignee(REPO, 1, "octocat")  # the default queue picks only issues assigned to me
-        self.assertEqual(self.ok("pause", "on"), {"paused": True, "scope": "project"})
+        on = self.ok("pause", "on")
+        self.assertEqual((on["paused"], on["scope"]), (True, "project"))
+        self.assertEqual(on["summary"], "not-me is paused for this project (acme/app)")
         self.assertEqual(self.ok("status")["paused"]["project"], True)
         self.assertEqual(self.ok("pick-issue"), {"none": True, "reason": "paused", "queue_summary": WHERE})
         code, payload, _ = self.cli("claim-issue", "1")
         self.assertEqual((code, payload["kind"]), (1, "paused"))
-        self.assertEqual(self.ok("pause", "off"), {"paused": False, "scope": "project"})
+        off = self.ok("pause", "off")
+        self.assertEqual((off["paused"], off["scope"]), (False, "project"))
+        self.assertEqual(self.ok("pause", "off")["summary"],
+                         "not-me was not paused for this project (acme/app); nothing changed")
         self.assertEqual(self.ok("pick-issue")["number"], 1)
 
     def test_global_pause_writes_the_home_file(self):
@@ -1144,19 +1149,8 @@ class DoctorAndPreflightTests(base.CliCase):
         self.assertTrue(files["ok"], files)
         self.assertIn("global: project.md", files["detail"])
         self.assertTrue(all({"name", "ok", "detail", "required", "fix", "hint"} <= set(c) for c in payload["checks"]))
-        self.assertEqual(payload["checks"][5], {"name": "mode", "ok": True, "detail": "live (confirmed)",
+        self.assertEqual(payload["checks"][5], {"name": "mode", "ok": True, "detail": "live",
                                                 "required": False, "fix": None, "hint": None})
-
-    def test_doctor_warns_about_an_unconfirmed_live(self):
-        from notme import humans
-        humans.clear_live_marker(self.tc.home)
-        payload = self.ok("doctor")
-        mode = next(c for c in payload["checks"] if c["name"] == "mode")
-        self.assertFalse(mode["ok"])
-        self.assertFalse(mode["required"])
-        self.assertIn("not confirmed", mode["detail"])
-        self.assertIn("/not-me:mode live", mode["detail"])
-        self.assertTrue(payload["ok"])
 
     def test_doctor_queue_check_warns_about_a_missing_pick_label(self):
         payload = self.ok("doctor")  # the fake repo has no labels defined

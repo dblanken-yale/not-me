@@ -41,12 +41,17 @@ the owner's say-so, not a cleanup.
    per key; union lists (`protected_branches`, `allow_repos`, `markers.legacy`)
    only grow. The repo layer cannot turn a guard rule off, set `mode: live`,
    enable approval, shorten `protected_branches`, or add `allow_repos`; it can
-   name companion repos and a board, but the write gate trusts those only once
-   the operator confirmed them in the global allow list. Reason: a PR branch
-   or a compromised repo file must not be able to widen what the plugin may
-   touch. (`notme/layers.py` `tighten_only`, `notme/writes.py`.) Since the
-   guard only guides writes to other repos (decision 3), the CLI's write gate
-   is what holds this line for runs.
+   name a tracker, companion repos and a board, and the write gate trusts
+   those once the same names are in `.claude/not-me/project.md` as committed
+   on the default branch (the commit `refs/remotes/origin/HEAD` points at in
+   the main checkout, never the working tree), or once the operator allowed
+   them with `/not-me:allow-repo` (owner, 2026-10-30,
+   dblanken-yale/not-me#118). Reason: a PR branch or a compromised repo file
+   must not be able to widen what the plugin may touch; a file reaches the
+   default branch only through a reviewed merge, so that review is the
+   approval. (`notme/layers.py` `tighten_only`, `notme/writes.py`
+   `default_branch_names`.) Since the guard only guides writes to other repos
+   (decision 3), the CLI's write gate is what holds this line for runs.
 
 2. **Every GitHub write goes through one gated path.** `GhClient.write` →
    `writes.check_write`. Reads are an explicit allow-list; disguised
@@ -76,12 +81,12 @@ the owner's say-so, not a cleanup.
    parse (a `bash -c` body too deep, inline code, a script file, a command it cannot lex) is allowed unless it holds one
    of a few words (`push`, `reset --hard`, a GitHub secrets action, a protected
    path name and the like), then blocked under the first relevant hard rule
-   that is on. Self-protection is always on: the operator token, the live-mode
-   epoch and marker and the allow list by path;
-   `notme allow-repo add|remove`, `pause off` and `mode` other than show or
-   dry-run as parsed commands in every invocation form; a pseudo-terminal or
-   detached wrapper around notme (these change with dblanken-yale/not-me#118);
-   the plugin's own files; the global config during a run. Keywords in
+   that is on. Self-protection is always on: the allow list file by path; a
+   Write or Edit that leaves the global `mode` other than dry-run; the
+   plugin's own files; the global config during a run. The not-me CLI itself
+   is not judged: `allow-repo add|remove`, `pause off` and `mode live` are
+   the operator's slash commands, a process rule in `prohibitions.md`
+   (decision 4). Keywords in
    interpreter code that starts no process and names no git, gh, notme or
    GitHub API are guided, not blocked. The inactive path
    is fork-free. Block messages say what to do next in the session and never
@@ -90,16 +95,22 @@ the owner's say-so, not a cleanup.
    force push, PR required) are the backstop the docs recommend.
 
 4. **The CLI's trust anchor is the checkout it runs in.** Restricted mode is
-   the default. It relaxes only when all of these hold: stdin is a terminal,
-   no ancestor process is Claude Code (the desktop app's terminal panel
-   counts as Claude Code), and, for allow-list changes and turning the pause
-   off, `NOT_ME_OPERATOR_CONFIRM` equals the random token in
-   `~/.claude/not-me/operator-token` that `notme doctor --init-token` creates
-   for a person. Env vars never relax anything; `NOT_ME_DRY_RUN` can only
-   turn dry-run on. The guard blocks pseudo-terminal and detached wrappers
-   around notme and reads of the token so these checks cannot be spoofed
-   from a session; the CLI checks are the second layer, the guard is the
-   first.
+   the default: a `--project-dir` or `CLAUDE_PROJECT_DIR` naming another
+   checkout is refused and `NOT_ME_HOME` is ignored. It relaxes only when
+   stdin is a terminal and no ancestor process is Claude Code (the desktop
+   app's terminal panel counts as Claude Code). Env vars never relax
+   anything; `NOT_ME_DRY_RUN` can only turn dry-run on. Changing the allow
+   list, the pause and the mode is not gated by this check (owner,
+   2026-10-30, dblanken-yale/not-me#118): `/not-me:allow-repo`,
+   `/not-me:pause` and `/not-me:mode` are user-invocable only
+   (`disable-model-invocation: true`), so a person typing the slash command
+   is the approval, and the skill runs the CLI in the session. No operator
+   token, no terminal hand-back. `references/prohibitions.md` forbids a run
+   from issuing those commands unless the operator invoked the matching
+   slash command in that turn; autonomous runs log a QUESTION instead. Every
+   such change prints what changed (repo or board, this project or every
+   project) and appends a line to `<not-me home>/settings-changes.jsonl`, so
+   the operator can see and undo it.
 
 5. **Untrusted text never reaches the model as instructions.** Authors are
    filtered by login against the roster before any body is read; only counts,
@@ -114,20 +125,15 @@ the owner's say-so, not a cleanup.
    whole timeline, and fail closed when our own event cannot be found. Stale
    claims are reported, never auto-released.
 
-7. **Mode defaults to dry-run; live is signed by a person.** A fresh install
-   writes only to the ledger. Live needs `notme mode live`, run by a person
-   (decision 4's checks): it sets `mode: live` in the global layer and writes
-   `<not-me home>/mode-live.sig`, an HMAC keyed by the operator token plus
-   the random epoch in `<not-me home>/mode-live.epoch` (key = token, NUL,
-   epoch) over a versioned message and the resolved home. The config loader
-   honours live only when that marker verifies (`notme/config.py`
-   `_confirm_live`); otherwise the effective mode is dry-run with a warning,
-   so no file edit can turn live on, and a new token means going live again.
-   Going back to dry-run in the global layer deletes the marker and replaces
-   the epoch, so a marker copy saved while live never verifies again; the
-   loader does the same whenever the global layer's own `mode` is not `live`
-   (a hand edit included; a repo-layer pin does not revoke). The guard's
-   Edit/Write check on the global `mode` is UX, not the boundary. Logs and the
+7. **Mode defaults to dry-run; the operator turns live on.** A fresh install
+   writes only to the ledger. `mode: live` in the global layer is enough
+   (owner, 2026-10-30, dblanken-yale/not-me#118: the signed live marker, its
+   epoch and the loader's check are gone). The operator sets it with
+   `/not-me:mode live`, which runs `notme mode live` in the session (decision
+   4). The repo layer can never set `mode: live`; it can only pin dry-run.
+   The guard refuses a Write or Edit that would leave the global `mode`
+   other than dry-run, so the change goes through the command that shows
+   and logs it. Logs and the
    active-run marker live under `<git-common-dir>/not-me/` and never move
    with a configured log root, so the guard can always find a running run.
 

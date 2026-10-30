@@ -1,8 +1,9 @@
 """Attacks a prompt-injected model could try through the notme command line, and the CLI's refusals.
 
 The model controls argv, env prefixes, the working directory and any file it writes. Under Claude Code (CLAUDECODE
-or CLAUDE_PROJECT_DIR set) none of those may move the trust anchor: the session project, the global layer, the
-log root, the allow list or the pause switch.
+or CLAUDE_PROJECT_DIR set) none of those may move the trust anchor: the session project, the global layer or the
+log root. The allow list, the pause switch and the mode change through the operator's own slash commands in the
+session (dblanken-yale/not-me#118); references/prohibitions.md keeps a run from issuing them on its own.
 """
 from __future__ import annotations
 
@@ -73,19 +74,15 @@ class UnderClaudeCase(unittest.TestCase):
         (self.home / "project.md").write_text(base.GLOBAL_PROJECT, encoding="utf-8")
         self.fake = FakeRunner()
         self.env = {"CLAUDECODE": "1", "PATH": os.environ.get("PATH", ""), "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT)}
-        self.token = humans.create_token(self.home)
-        humans.write_live_marker(self.home)  # the global layer says live; signed as `notme mode live` would
-        # a person: no Claude Code variable, the operator token, and (with stdin=TtyIO()) a terminal
+        # a person: no Claude Code variable and (with stdin=TtyIO()) a terminal
         self.human_env = {k: v for k, v in self.env.items() if k not in cli.CLAUDE_ENV}
-        self.human_env["NOT_ME_OPERATOR_CONFIRM"] = self.token
         self.claude_ancestor = False  # the injected process-tree check
 
-    def cli(self, *argv, env=None, cwd=None, stdin=None, repo=True, prompt=None):
+    def cli(self, *argv, env=None, cwd=None, stdin=None, repo=True):
         out, err = io.StringIO(), io.StringIO()
         args = (["--repo", REPO] if repo else []) + list(argv)
         code = cli.main(args, runner=self.fake, env=env or self.env, stdin=stdin or io.StringIO(""), stdout=out,
-                        stderr=err, cwd=str(cwd or self.session), process_check=lambda: self.claude_ancestor,
-                        prompt=prompt)
+                        stderr=err, cwd=str(cwd or self.session), process_check=lambda: self.claude_ancestor)
         return code, json.loads(out.getvalue()), err.getvalue()
 
     def ok(self, *argv, **kw):
@@ -181,81 +178,70 @@ class EnvironmentTests(UnderClaudeCase):
                       os.path.realpath(payload["path"]))
 
 
-class HumanOnlyTests(UnderClaudeCase):
+class OperatorCommandTests(UnderClaudeCase):
+    """allow-repo add|remove, pause off and going live run inside a Claude Code session: the operator typing the
+    slash command is the approval (dblanken-yale/not-me#118). Each change says what changed and leaves a line in
+    the settings ledger."""
+
     def entries(self):
         return self.ok("allow-repo", "list")["entries"]
 
-    def test_allow_repo_add_without_confirmation_is_refused(self):
-        code, payload, _ = self.cli("allow-repo", "add", "evil/repo", "--everywhere")
-        self.assertEqual((code, payload["kind"]), (1, "human_only"))
-        self.assertIn("allow-repo add evil/repo --everywhere", payload["terminal_cmd"])
-        self.assertEqual(self.entries(), [])
+    def settings_ledger(self):
+        from notme.dryrun import Ledger
+        return Ledger(self.home / cli.SETTINGS_LEDGER).read()
 
-    def test_allow_repo_confirmation_needs_a_terminal(self):
-        code, payload, _ = self.cli("allow-repo", "add", "evil/repo", "--everywhere", env=self.human_env)
-        self.assertEqual((code, payload["kind"]), (1, "human_only"))
-        self.assertEqual(self.entries(), [])
+    def test_allow_repo_add_runs_in_the_session_and_says_what_changed(self):
+        out = self.ok("allow-repo", "add", "acme/extra")
+        self.assertTrue(out["added"])
+        self.assertEqual(out["scope"], REPO)
+        self.assertEqual(out["summary"], f"allowed repo acme/extra for this project ({REPO}) only")
+        self.assertEqual([e["repo"] for e in out["entries"]], ["acme/extra"])
+        out = self.ok("allow-repo", "add", "--board", "acme/6", "--everywhere")
+        self.assertEqual(out["summary"], "allowed board acme/6 for every project")
+        self.assertEqual({e.get("repo") or e.get("board") for e in self.entries()}, {"acme/extra", "acme/6"})
+        lines = self.settings_ledger()
+        self.assertEqual([x["op"] for x in lines], ["allow-repo add", "allow-repo add"])
+        self.assertEqual(lines[0]["description"], f"allowed repo acme/extra for this project ({REPO}) only")
+        self.assertEqual(lines[1]["target"], "board acme/6 (every project)")
 
-    def test_refusals_say_the_guard_is_the_enforcement(self):
-        code, payload, _ = self.cli("allow-repo", "add", "evil/repo")
-        self.assertEqual(payload["note"], humans.SECOND_LAYER)
-        self.assertIn("the PreToolUse guard is the enforcement; this check is a second layer", payload["error"])
+    def test_allow_repo_remove_and_a_no_op_say_so(self):
+        self.ok("allow-repo", "add", "acme/extra", "--everywhere")
+        out = self.ok("allow-repo", "remove", "acme/extra", "--everywhere")
+        self.assertTrue(out["removed"])
+        self.assertEqual(out["summary"], "removed repo acme/extra for every project")
+        self.assertEqual(out["entries"], [])
+        out = self.ok("allow-repo", "remove", "acme/extra", "--everywhere")
+        self.assertFalse(out["removed"])
+        self.assertEqual(out["summary"], "repo acme/extra for every project was not on the allow list; nothing changed")
+        self.assertEqual(len(self.settings_ledger()), 2)  # a change that changed nothing is not logged
 
-    def test_confirmation_must_be_the_operator_token_not_the_gh_login(self):
-        for wrong in ("octocat", "mallory", self.token + "x", ""):
-            with self.subTest(wrong=wrong):
-                env = dict(self.human_env, NOT_ME_OPERATOR_CONFIRM=wrong)
-                code, payload, _ = self.cli("allow-repo", "add", "evil/repo", "--everywhere", env=env, stdin=TtyIO())
-                self.assertEqual((code, payload["kind"]), (1, "human_only"))
-        self.assertEqual(self.entries(), [])
-        self.assertTrue(self.ok("allow-repo", "add", "acme/extra", "--everywhere", env=self.human_env,
-                                stdin=TtyIO())["added"])
-        self.assertEqual([e["repo"] for e in self.entries()], ["acme/extra"])
-
-    def test_a_token_readable_by_others_does_not_count(self):
-        if os.name != "posix":
-            self.skipTest("POSIX permissions")
-        humans.token_path(self.home).chmod(0o644)
-        code, payload, _ = self.cli("allow-repo", "add", "acme/extra", "--everywhere", env=self.human_env,
-                                    stdin=TtyIO())
-        self.assertEqual((code, payload["kind"]), (1, "human_only"))
-
-    def test_pty_spoof_under_a_claude_ancestor_is_refused(self):
-        """A pty wrapper makes stdin a tty and the token may have leaked; the Claude Code ancestor still refuses."""
+    def test_the_old_confirmation_variable_and_terminal_change_nothing(self):
+        env = dict(self.env, NOT_ME_OPERATOR_CONFIRM="anything")
+        self.assertTrue(self.ok("allow-repo", "add", "acme/extra", env=env, stdin=TtyIO())["added"])
         self.claude_ancestor = True
-        code, payload, _ = self.cli("allow-repo", "add", "evil/repo", "--everywhere", env=self.human_env,
-                                    stdin=TtyIO())
-        self.assertEqual((code, payload["kind"]), (1, "human_only"))
-        self.ok("pause", "on")
-        code, payload, _ = self.cli("pause", "off", env=self.human_env, stdin=TtyIO())
-        self.assertEqual((code, payload["kind"]), (1, "human_only"))
-        code, payload, _ = self.cli("--project-dir", str(self.other), "git", "status", env=self.human_env,
-                                    stdin=TtyIO())
-        self.assertEqual((code, payload["kind"]), (1, "project_override_refused"))
-        code, payload, _ = self.cli("doctor", "--init-token", env=self.human_env, stdin=TtyIO())
-        self.assertEqual((code, payload["kind"]), (1, "human_only"))
-        self.assertEqual(self.entries(), [])
+        self.assertTrue(self.ok("allow-repo", "add", "acme/more")["added"])
 
-    def test_init_token_is_for_a_person_and_never_replaces_a_token(self):
-        humans.token_path(self.home).unlink()
-        code, payload, _ = self.cli("doctor", "--init-token")
-        self.assertEqual((code, payload["kind"]), (1, "human_only"))
-        self.assertFalse(humans.token_path(self.home).exists())
-        made = self.ok("doctor", "--init-token", env=self.human_env, stdin=TtyIO())
-        self.assertEqual(humans.read_token(self.home), made["token"])
-        if os.name == "posix":
-            self.assertEqual(humans.token_path(self.home).stat().st_mode & 0o777, 0o600)
-        code, payload, _ = self.cli("doctor", "--init-token", env=self.human_env, stdin=TtyIO())
-        self.assertEqual((code, payload["kind"]), (1, "token_exists"))
-        self.assertEqual(humans.read_token(self.home), made["token"])
-
-    def test_pause_off_is_refused_and_the_pause_stays(self):
-        self.ok("pause", "on")
-        code, payload, _ = self.cli("pause", "off")
-        self.assertEqual((code, payload["kind"]), (1, "human_only"))
-        self.assertIn("pause off", payload["terminal_cmd"])
+    def test_pause_off_runs_in_the_session(self):
+        out = self.ok("pause", "on")
+        self.assertEqual(out["summary"], f"not-me is paused for this project ({REPO})")
         self.assertTrue(self.ok("status")["paused"]["project"])
-        self.assertFalse(self.ok("pause", "off", env=self.human_env, stdin=TtyIO())["paused"])
+        out = self.ok("pause", "off")
+        self.assertFalse(out["paused"])
+        self.assertEqual(out["summary"], f"not-me is no longer paused for this project ({REPO})")
+        out = self.ok("pause", "on", "--global")
+        self.assertEqual(out["summary"], "not-me is paused for every project")
+        self.assertEqual([x["op"] for x in self.settings_ledger()], ["pause on", "pause off", "pause on"])
+
+    def test_init_token_is_gone(self):
+        code, _, _ = self.cli("doctor", "--init-token")
+        self.assertEqual(code, 2)
+
+    def test_overrides_still_need_a_person_at_a_terminal(self):
+        """Restricted mode stays for the trust anchor (decision 4); only the operator commands lost the checks."""
+        self.claude_ancestor = True
+        env = {k: v for k, v in self.env.items() if k not in cli.CLAUDE_ENV}
+        code, payload, _ = self.cli("--project-dir", str(self.other), "git", "status", env=env, stdin=TtyIO())
+        self.assertEqual((code, payload["kind"]), (1, "project_override_refused"))
 
     def test_repo_layer_cannot_enable_auto_approve(self):
         add_pr_state(self.fake)
@@ -655,7 +641,7 @@ def _without_claude_env(case):
 
 
 _SKIP_NO_ENV = {"test_overrides_are_honoured_only_for_a_person_at_a_terminal"}
-for _case in (TrustAnchorTests, EnvironmentTests, HumanOnlyTests, PathTests, ProveTargetTests, CorrectnessTests):
+for _case in (TrustAnchorTests, EnvironmentTests, OperatorCommandTests, PathTests, ProveTargetTests, CorrectnessTests):
     _variant = _without_claude_env(_case)
     for _name in _SKIP_NO_ENV & set(dir(_case)):
         setattr(_variant, _name, unittest.skip("needs a Claude Code variable")(getattr(_case, _name)))

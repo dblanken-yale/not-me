@@ -38,7 +38,6 @@ class LayerCaseTests(unittest.TestCase):
 
     def test_L3_global_only(self):
         tc = self.case("L3")
-        tc.sign_live()
         cfg = tc.load()
         self.assertEqual(cfg.meta["project"]["mode"], "live")
         self.assertEqual(cfg.sources["project.mode"]["layer"], "global")
@@ -142,7 +141,6 @@ class LayerCaseTests(unittest.TestCase):
 
     def test_L16_malformed_repo_falls_back_to_global(self):
         tc = self.case("L16")
-        tc.sign_live()
         cfg = tc.load()
         self.assertEqual(cfg.meta["project"]["mode"], "live")
         self.assertEqual(cfg.meta["project"]["tracker"], "auto")
@@ -165,7 +163,6 @@ class LayerCaseTests(unittest.TestCase):
         real = tc.root / "real-home"
         tc.home.rename(real)
         os.symlink(real, tc.home)
-        tc.sign_live()  # signed through the link: bound to the resolved home
         cfg = tc.load()
         self.assertEqual(cfg.meta["project"]["mode"], "live")
         self.assertEqual(cfg.sources["project.mode"]["layer"], "global")

@@ -29,15 +29,14 @@ references/prohibitions.md:
                       repo check too)
   process             edits to the repo layer config while a run is active
 GitHub MCP tools get the hard rules only (see _mcp); other MCP tools are not judged.
-Self-protection is always on, in every directory: the operator token, the
-live-mode epoch and marker and the allow list (by
-file path), `notme allow-repo add|remove`, `notme pause off` and `notme mode`
-other than show or dry-run (as parsed commands), a pseudo-terminal or
-detached process around notme, the plugin's own files, and the global not-me
-config during a run. Live mode is signed: `mode: live` counts only next to a marker
-that `notme mode live` writes with the operator token, so no file edit can
-turn it on; the Edit/Write check on the global project.md is an early,
-friendly refusal, not the boundary. Merging pull requests is not the guard's
+Self-protection is always on, in every directory: the allow list file (by
+path: changes go through `notme allow-repo`, which shows and logs them), a
+Write or Edit that leaves the global `mode` other than dry-run (changes go
+through `notme mode`), the plugin's own files, and the global not-me config
+during a run. The not-me CLI itself is not judged: the operator's
+/not-me:allow-repo, /not-me:pause and /not-me:mode run it in the session, and
+references/prohibitions.md keeps a run from doing so on its own
+(dblanken-yale/not-me#118). Merging pull requests is not the guard's
 business: no not-me skill merges, and a person may merge or ask Claude to.
 
 Bash commands are split by `lex`, one linear pass that reads quotes,
@@ -50,10 +49,6 @@ opaque: it is allowed unless its decoded text holds one of the words in
 _DANGER or _SELF_TEXT, and then blocked under the first relevant rule that is
 on. The guard does not follow cd: writes are judged in the hook's working
 directory, or the `git -C` / `gh -R` they name.
-
-Residual risk: a token file readable by the same OS user cannot be fully hidden
-from an agent running as that user; this guard is the enforcement, and the
-operator token is a second layer, not a secret.
 """
 from __future__ import annotations
 
@@ -103,19 +98,10 @@ GLOB_LIMIT = 5000  # paths a glob may expand to before the guard stops expanding
 
 GitFn = Callable[[List[str], str], Optional[str]]
 
-OPERATOR_TOKEN = "operator-token"  # the human-confirm token file under the global not-me home
-# the token-signed live-mode marker under the global not-me home (humans.LIVE_MARKER, kept literal so the hook
-# imports no more than it needs); only `notme mode live`, run by a person, writes it
-LIVE_MARKER_NAME = "mode-live.sig"
-LIVE_MARKER_WHY = "the live-mode marker is the operator's own signature"
-LIVE_HINT = "ask the operator to run /not-me:mode live"
-# the random epoch that keys the marker together with the token (humans.LIVE_EPOCH); it is replaced on every return
-# to dry-run, so the agent may neither read nor write it, exactly like the token
-LIVE_EPOCH_NAME = "mode-live.epoch"
-LIVE_EPOCH_WHY = "the live-mode epoch is the operator's own secret"
-TOKEN_WHY, TOKEN_HINT = "the operator token is the operator's own confirmation", "ask the operator to confirm by hand"
-ALLOW_WHY, ALLOW_HINT = "only the operator changes the not-me allow list", "ask the operator to run /not-me:allow-repo"
-HOME_WHY = "the not-me home holds the operator's own secrets"
+# the allow list and the global mode change only through the not-me CLI, which shows and logs every change
+ALLOW_WHY = "the not-me allow list changes only through /not-me:allow-repo, which shows and logs the change"
+ALLOW_HINT = "ask the operator to run /not-me:allow-repo"
+MODE_HINT = "ask the operator to run /not-me:mode"
 
 # --- patterns --------------------------------------------------------------
 
@@ -128,8 +114,6 @@ _PARAM_DEFAULT = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=+?]([^{}]*)\}")
 _ESC_SEQ = re.compile(r"\\(?:x([0-9A-Fa-f]{1,2})|([0-7]{1,3})|u([0-9A-Fa-f]{4}))")  # \x67, \147, g
 _SHELL_PIECES = re.compile(r"\$\{[^{}]*\}|\$\([^()]*\)|`[^`]*`|\$(?=['\"])")
 _GLOB = re.compile(r"[*?\[]")
-_BACKGROUND = re.compile(r"(?<![&<>|])&(?![&>])")  # a lone & (also zsh &! and ( ... ) &), not &&, 2>&1 or &>
-_LOCALHOST = re.compile(r"^(?:[^@]+@)?(?:localhost|127(?:\.\d+){3}|::1|\[::1\]|0\.0\.0\.0)$", re.IGNORECASE)
 _NOTME_WORD = re.compile(r"notme", re.IGNORECASE)
 # interpreter program names (lowercased, versioned or not); the prefilter is built from the same pattern
 _INTERP_NAMES = (r"(?:python|pythonw|py|node|nodejs|perl|ruby|php|deno|bun|lua|luajit|rscript|osascript|pwsh"
@@ -224,12 +208,7 @@ _DANGER: Tuple[Tuple[Matcher, Tuple[str, ...]], ...] = (
 _RM_DOT_GIT = _then(re.compile(r"rm\s+-[A-Za-z]*[rR]"), re.compile(r"\.git(?![A-Za-z0-9_-])"))
 _DANGER += ((_RM_DOT_GIT, (_DG,)),)
 # protected path names: self-protection in any opaque text
-_SELF_TEXT = re.compile(r"operator-token|mode-live\.(?:sig|epoch)|allowed-repos\.json", re.IGNORECASE)
-# the not-me CLI's human switches, in text the guard does not parse that sits in the command itself (not in a
-# script file, whose own text may describe them; the CLI's restricted mode is the second layer there)
-_NOTME_TEXT = re.compile(r"allow-repo[\s,]+(?!list(?![A-Za-z0-9_-]))[^\s,]"
-                         r"|(?<![A-Za-z0-9_-])pause[\s,]+-*off(?![A-Za-z0-9_-])|(?<![A-Za-z0-9_-])mode[\s,]+live",
-                         re.IGNORECASE)
+_SELF_TEXT = re.compile(r"allowed-repos\.json", re.IGNORECASE)
 # interpreter code that starts a process or reaches the GitHub API (or may build a call to either): its words count
 _RUNS_SOMETHING = re.compile(r"system|exec|spawn|popen|subprocess|child_process|shell|command|process|eval|`|qx"
                              r"|%x|run\s*\(|call\s*\(|import\s*\(|__import__|importlib|getattr|ctypes|fetch|request"
@@ -238,10 +217,9 @@ _OPAQUE_HINT ="run the git, gh or notme command directly, with every word spelle
 
 # Bash commands that cannot matter to any rule skip the full check (applied with quotes/backslashes removed).
 _PREFILTER = re.compile(
-    r"(?<![A-Za-z0-9_-])(gh|git|rm|find|xargs|parallel|sudo|doas|notme|bash|sh|zsh|dash|ksh|fish|source|exec|eval"
-    r"|script|expect|unbuffer|socat|ssh|tmux|screen|nohup|setsid|disown|daemon|at|batch|systemd-run"
-    r"|start-stop-daemon|launchctl|crontab|(?i:" + _INTERP_NAMES + r"))(?![A-Za-z0-9_-])"
-    r"|not-me|NOT_ME_|operator-token|mode-live|allowed-repos"
+    r"(?<![A-Za-z0-9_-])(gh|git|rm|find|xargs|parallel|sudo|doas|bash|sh|zsh|dash|ksh|fish|source|exec|eval"
+    r"|(?i:" + _INTERP_NAMES + r"))(?![A-Za-z0-9_-])"
+    r"|not-me|NOT_ME_|allowed-repos"
     r"|[$`/~*?\[\\&]|(?:^|[\s;|&(])\.(?:\s|$)|\.(?:sh|bash|zsh)\b|\.git")
 
 _SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
@@ -265,16 +243,7 @@ _PREFIX_WORDS: Dict[str, Set[str]] = {
     "nocorrect": set(),
 }
 _NOTME_PROGS = {"notme", "notme.py"}
-_PAUSE_OK = ([], ["on"], ["status"])
-_MODE_OK = ("show", "dry-run")  # `notme mode` subcommands the agent may run
 _PY_VALUE_OPTS = "WXQ"  # python short options that take a value (-W ignore, -Xutf8), skipped before -m or the script
-# wrappers that give their command a pseudo-terminal or run it outside the session's process tree, which would pass
-# the not-me CLI's human check: blocked around notme
-_PTY_PROGS = {"script", "expect", "unbuffer"}
-_ORPHAN_PREFIX = {"nohup", "setsid", "unbuffer"}
-_ORPHAN_PROGS = {"disown", "daemon", "start-stop-daemon", "systemd-run", "at", "batch"}
-# commands that copy or search a directory recursively: one that names a directory holding the not-me home reaches it
-_TOKEN_COPIERS = {"cp", "mv", "ln", "rsync", "tar", "zip", "scp", "install"}
 # git commands that are built in (git never runs an alias of these names); any other subcommand is looked up as an
 # alias, and an external git-<name> program is outside the guard's view
 _GIT_BUILTINS = set("""
@@ -500,7 +469,7 @@ def _spellings(text: str) -> List[str]:
 
 def risky_text(text: str) -> bool:
     """text, read as opaque, holds a word that would block: used by the hook when it cannot decide a call at all."""
-    return any(_SELF_TEXT.search(v) or _NOTME_TEXT.search(v) or any(match(v) for match, _ in _DANGER)
+    return any(_SELF_TEXT.search(v) or any(match(v) for match, _ in _DANGER)
                for v in _spellings(text))
 
 
@@ -1147,8 +1116,6 @@ def _decide(event: Mapping[str, Any], ctx: GuardContext) -> Decision:
         cands = _bash(str(tin.get("command") or ""), cwd, ctx)
     elif tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
         cands = _file(tool, str(tin.get("file_path") or tin.get("notebook_path") or ""), cwd, ctx, tin)
-    elif tool in _READ_TOOLS:
-        cands = _read_tool(tool, tin, cwd, ctx)
     elif _MCP_GITHUB.match(tool):
         cands = _mcp(tool, tin, ctx)
     else:
@@ -1193,15 +1160,7 @@ def _unknown_target(blk: Blk, why: str, fix: str) -> Block:
     return b
 
 
-_READ_TOOLS = ("Read", "NotebookRead", "LS", "Grep", "Glob")
-
-
-# The not-me home's private files, as (name, why, hint). The agent may neither read nor write the secrets (the
-# operator token and the live-mode epoch); the shell checks also cover the live marker, which the agent may not
-# write (the Read tool may still read it).
-_HOME_SECRETS = ((OPERATOR_TOKEN, TOKEN_WHY, TOKEN_HINT), (LIVE_EPOCH_NAME, LIVE_EPOCH_WHY, LIVE_HINT))
-_HOME_GUARDED = _HOME_SECRETS + ((LIVE_MARKER_NAME, LIVE_MARKER_WHY, LIVE_HINT),)
-# (_norm path, plain normcased path, why, hint) of one guarded file
+# (_norm path, plain normcased path, why, hint) of one guarded file in the not-me home
 _Guarded = Tuple[str, str, str, str]
 
 
@@ -1213,57 +1172,17 @@ def _guarded(ctx: GuardContext, base: str, entries: Tuple[Tuple[str, str, str], 
     return out
 
 
-def _pattern_hit(pattern: str, base: str, guarded: List[_Guarded], recursive: bool) -> Optional[_Guarded]:
+def _pattern_hit(pattern: str, base: str, guarded: List[_Guarded]) -> Optional[_Guarded]:
     """The guarded file a shell pattern (relative to base) could name, or None. fnmatch's * also crosses "/",
     so this over-approximates: a pattern that could reach the file counts."""
     p = _path.expanduser(pattern)
     if not _path.isabs(p) and not p.startswith("*"):
         p = _path.join(base, p)
     p = _path.normcase(_path.normpath(p))
-    pats = [p] + ([p.rstrip(_path.sep) + _path.sep + "*"] if recursive else [])
     for g in guarded:
-        if any(fnmatch.fnmatchcase(c, q) for c in g[:2] for q in pats):
+        if any(fnmatch.fnmatchcase(c, p) for c in g[:2]):
             return g
     return None
-
-
-def _read_tool(tool: str, tin: Mapping[str, Any], cwd: str, ctx: GuardContext) -> Iterator[Block]:
-    """Read, NotebookRead, LS, Grep and Glob may not reach the operator token or the live-mode epoch (or list the
-    not-me home)."""
-    if tool in ("Read", "NotebookRead"):
-        yield from _token_file(tool, str(tin.get("file_path") or tin.get("notebook_path") or ""), cwd, ctx)
-        return
-    raw = str(tin.get("path") or "")
-    here = _norm(cwd, os.getcwd())
-    base = _norm(_expand_home(raw, ctx), here) if raw else here
-    home = _norm(str(ctx.home), cwd)
-    pattern = str(tin.get("pattern" if tool == "Glob" else "glob") or "")
-    blk = _blk(_short(f"{tool} {raw} {pattern}".strip()))
-    for g, (name, why, hint) in zip(_guarded(ctx, cwd, _HOME_SECRETS), _HOME_SECRETS):
-        secret = g[0]
-        hit = base in (home, secret) or _under(base, secret) or name in raw.lower() or name in pattern.lower()
-        if not hit and tool != "LS" and _under(secret, base):
-            rel = secret[len(base):].lstrip(_path.sep).replace(_path.sep, "/")
-            # a missing or matching filter reaches the secret (fnmatch's * also crosses "/": an over-approximation)
-            hit = not pattern or any(fnmatch.fnmatch(x, pattern) for x in (rel, name))
-        if not hit and tool == "Glob" and pattern:
-            full = _norm(_expand_home(pattern, ctx), base)
-            hit = (full in (home, secret) or _under(full, home)
-                   or (bool(_GLOB.search(pattern)) and _pattern_hit(full, base, [g], False) is not None))
-        if hit:
-            yield blk(SELF, why, hint)
-            return
-
-
-def _token_file(tool: str, fpath: str, cwd: str, ctx: GuardContext) -> Iterator[Block]:
-    """The operator-token and live-mode epoch files are the operator's own: the agent may not read or change them."""
-    if not fpath:
-        return
-    full = _norm(fpath, cwd)
-    for g, (name, why, hint) in zip(_guarded(ctx, cwd, _HOME_SECRETS), _HOME_SECRETS):
-        if _base(fpath).lower() == name or _under(full, g[0]):
-            yield _blk(_short(f"{tool} {fpath}"))(SELF, why, hint)
-            return
 
 
 @dataclass(frozen=True)
@@ -1356,10 +1275,10 @@ def _edit_results(tool: str, tin: Mapping[str, Any], current: Optional[str]) -> 
 
 
 def _global_mode(tool: str, tin: Mapping[str, Any], full: str, blk: Blk) -> Iterator[Block]:
-    """An early, friendly refusal (not the security boundary: live mode also needs the token-signed marker, which
-    no file edit can make). An agent Write/Edit/MultiEdit of the global project.md is allowed only when, parsed as
-    the config loader parses it, the result says `mode: dry-run`, or has no mode and had none before. Anything else
-    (live, null, any other value, a result that does not parse, an edit that cannot be worked out) is blocked."""
+    """Going live goes through `notme mode live`, which shows the change and logs it in the settings ledger. An
+    agent Write/Edit/MultiEdit of the global project.md is allowed only when, parsed as the config loader parses
+    it, the result says `mode: dry-run`, or has no mode and had none before. Anything else (live, null, any other
+    value, a result that does not parse, an edit that cannot be worked out) is blocked."""
     current = _read_text(full)
     try:
         afters = [_mode_of(text) for text in _edit_results(tool, tin, current)] or [_UNKNOWN]
@@ -1367,24 +1286,16 @@ def _global_mode(tool: str, tin: Mapping[str, Any], full: str, blk: Blk) -> Iter
         afters = [_UNKNOWN]
     if all(a == "dry-run" or (a is _ABSENT and _mode_of(current) is _ABSENT) for a in afters):
         return
-    yield blk(SELF, "only a person turns live mode on" + ("" if _UNKNOWN not in afters else
-                                                          " (this edit to the global project.md cannot be checked)"),
-              LIVE_HINT)
-
-
-def _names_live_marker(fpath: str, full: str, ctx: GuardContext, cwd: str) -> bool:
-    return _base(fpath).lower() == LIVE_MARKER_NAME or full.lower() == _norm(
-        _path.join(str(ctx.home), LIVE_MARKER_NAME), cwd).lower()
+    yield blk(SELF, "the global mode changes only through /not-me:mode, which shows and logs the change"
+              + ("" if _UNKNOWN not in afters else " (this edit to the global project.md cannot be checked)"),
+              MODE_HINT)
 
 
 def _file(tool: str, fpath: str, cwd: str, ctx: GuardContext, tin: Mapping[str, Any]) -> Iterator[Block]:
     if not fpath:
         return
-    yield from _token_file(tool, fpath, cwd, ctx)
     blk = _blk(_short(f"{tool} {fpath}"))
     full = _norm(fpath, cwd)
-    if _names_live_marker(fpath, full, ctx, cwd):
-        yield blk(SELF, LIVE_MARKER_WHY, LIVE_HINT)
     if _is_global_project(full, _global_target(ctx, cwd)):
         yield from _global_mode(tool, tin, full, blk)
     if full == _norm(str(ctx.allowlist_path), cwd) or _base(fpath) == ALLOWLIST_NAME:
@@ -1452,7 +1363,6 @@ class _State:
         self.subs = parsed.subs
         self.text = parsed.code + "\n" + parsed.code.replace("\\\n", "")
         self.raw = raw
-        self.background = bool(_BACKGROUND.search(parsed.code))
         self.switched: Dict[str, str] = {}  # checkout dir -> the branch a checkout in this command moved to
         self.memo: Dict[Tuple[str, ...], Any] = {}
 
@@ -1464,10 +1374,6 @@ class _State:
     @cached_property
     def plain_text(self) -> str:
         return _unshell(self.text)
-
-    @cached_property
-    def plain_raw(self) -> str:
-        return _unshell(self.raw)
 
 
 def _bash(cmd: str, cwd: str, ctx: GuardContext, depth: int = 0,
@@ -1508,27 +1414,22 @@ def _raw_variant(parsed: Parsed) -> Optional[Parsed]:
     return Parsed(commands, parsed.subs, parsed.code, parsed.funcdef)
 
 
-def _opaque(text: str, blk: Blk, what: str, inline: bool = True, code: bool = False) -> Iterator[Block]:
-    """Text the guard does not parse: allowed unless a spelling of it names a protected path (or, when it sits in
-    the command itself, a not-me switch), which is self-protection, or holds a word in _DANGER, which blocks under
-    the first of that word's rules that is on.
+def _opaque(text: str, blk: Blk, what: str, code: bool = False) -> Iterator[Block]:
+    """Text the guard does not parse: allowed unless a spelling of it names a protected path, which is
+    self-protection, or holds a word in _DANGER, which blocks under the first of that word's rules that is on.
 
     code: the text is interpreter code (python -c, node -e, a here-document fed to an interpreter). Code that
-    starts no process and names no git, gh, notme or GitHub API runs none of those commands, so a not-me switch or
-    a _DANGER word in it (a string it edits, say) is guided under PROCESS, not blocked (dblanken-yale/not-me#141).
-    rm -r .git and the protected path names still block. Shell text is always judged by its words."""
+    starts no process and names no git, gh, notme or GitHub API runs none of those commands, so a _DANGER word in
+    it (a string it edits, say) is guided under PROCESS, not blocked (dblanken-yale/not-me#141). rm -r .git and
+    the protected path names still block. Shell text is always judged by its words."""
     spellings = _spellings(text)
     inert = code and not any(has_gh_git(v) or _NOTME_WORD.search(v) or _RUNS_SOMETHING.search(v) for v in spellings)
     guided: Optional[Block] = None  # yielded last, and only when nothing blocks
-    for pattern in (_SELF_TEXT, _NOTME_TEXT if inline else None):
-        m = next((m for m in (pattern.search(v) for v in spellings) if m), None) if pattern else None
-        if m is None:
-            continue
-        if pattern is _SELF_TEXT or not inert:
-            yield blk(SELF, f"{what}, and it names {_short(m.group(0), 40)}, which only the operator may touch or run",
-                      "ask the operator")
-            return
-        guided = blk(PROCESS, f"{what}, and it holds `{_short(m.group(0), 40)}` but runs no notme command")
+    m = next((m for m in (_SELF_TEXT.search(v) for v in spellings) if m), None)
+    if m is not None:
+        yield blk(SELF, f"{what}, and it names {_short(m.group(0), 40)}, which only the operator may change",
+                  ALLOW_HINT)
+        return
     for v in spellings:
         for match, rules in _DANGER:
             hit = match(v)
@@ -1586,24 +1487,19 @@ def _command(c: SimpleCommand, st: _State, ctx: GuardContext) -> Iterator[Block]
     blk = _blk(_short(seg))
     yield from _path_checks(c, st, ctx, blk)
     t = list(c.words)
-    seen: Set[str] = set()
     while t:
         head = _head(t[0])
         if _ASSIGN.match(t[0]) or head in _KEYWORDS:
             t = t[1:]
         elif head in _PREFIX_WORDS:
-            seen.add(head)
             t = _drop_prefix(head, t[1:])
         else:
             break
     if not t:
         return
-    wrapper = _wrapper(t, seen, st)
-    if wrapper is not None:
-        yield from _around_notme(wrapper, t, st, blk)
-    notme_args = _notme_args(t)
-    if notme_args is not None:
-        yield from _cmd_notme(notme_args, blk)
+    if _notme_args(t) is not None:
+        # the not-me CLI: its write gate judges what it writes (decision 2), and the operator's own slash commands
+        # run allow-repo, pause and mode in the session (dblanken-yale/not-me#118)
         return
     word = t[0]
     if getattr(word, "glob", False) or getattr(word, "brace", False) or _unresolved(word) or word.startswith("="):
@@ -1637,21 +1533,18 @@ def _expand_home(arg: str, ctx: GuardContext) -> str:
     return arg
 
 
-# what a Bash word may not name: the home's private files and the allow list
-_BASH_GUARDED = _HOME_GUARDED + ((ALLOWLIST_NAME, ALLOW_WHY, ALLOW_HINT),)
+# what a Bash word may not name: the allow list (changed only through `notme allow-repo`, which logs it)
+_BASH_GUARDED = ((ALLOWLIST_NAME, ALLOW_WHY, ALLOW_HINT),)
 # shell text that leaves a path unresolved for the guard: $(...), backticks, ${...}, $VAR, {a,b} and a stray $
 _UNRESOLVED = re.compile(r"\$\([^)]*\)?|`[^`]*`?|\$\{[^}]*\}?|\$[A-Za-z0-9_@*#?!-]+|\{[^}]*\}?|\$")
 _HOME_PARAM = re.compile(r"\$\{(NOT_ME_HOME|HOME)(?![A-Za-z0-9_])[^}]*\}")
 
 
 def _path_checks(c: SimpleCommand, st: _State, ctx: GuardContext, blk: Blk) -> Iterator[Block]:
-    """Words and redirection targets that name a protected file in the not-me home (the operator token, the
-    live-mode epoch and marker, the allow list), the home itself, or for a recursive copy
-    or search a directory that holds it. Globs are matched as patterns and expanded for real."""
+    """Words and redirection targets that name the allow list in the not-me home. Globs are matched as patterns
+    and expanded for real."""
     core = _core(list(c.words))
     prog = _prog(core[0]) if core else ""
-    recursive = prog in _TOKEN_COPIERS or prog == "rg" or (prog in ("grep", "egrep", "fgrep") and (
-        "r" in _short_flags(core[1:]).lower() or "--recursive" in core[1:]))
     # a search pattern or sed script only mentions a name, it opens nothing: those words are not paths
     skip: Set[int] = set()
     spec = _PATTERN_SPECS.get(prog)
@@ -1668,7 +1561,7 @@ def _path_checks(c: SimpleCommand, st: _State, ctx: GuardContext, blk: Blk) -> I
             args.append(w.split("=", 1)[1])
     args += [target for op, target in c.redirs if op not in ("<<", "<<-", "<<<")]
     for a in args:
-        found = _protected(a, st, ctx, recursive)
+        found = _protected(a, st, ctx)
         if found:
             yield blk(SELF, found[0], found[1])
             return
@@ -1897,11 +1790,10 @@ def _sed_reads_only(script: str) -> bool:
     return True
 
 
-def _protected(arg: str, st: _State, ctx: GuardContext, recursive: bool) -> Optional[Tuple[str, str]]:
+def _protected(arg: str, st: _State, ctx: GuardContext) -> Optional[Tuple[str, str]]:
     """(why, hint) when arg names a protected file: by its name after a path separator (in any directory), by its
     real path, or through a glob; a part the shell fills in ($VAR, $(...), backticks, {a,b}) counts as * when the
-    rest still pins the pattern near a protected file. For a recursive copy or search, a directory that holds the
-    not-me home counts too."""
+    rest still pins the pattern near a protected file."""
     a = _expand_home(arg.replace('"', "").replace("'", ""), ctx)
     a = _HOME_PARAM.sub(lambda m: str(ctx.home) if m.group(1) == "NOT_ME_HOME"
                         else (ctx.env.get("HOME") or _path.expanduser("~")), a)
@@ -1913,7 +1805,6 @@ def _protected(arg: str, st: _State, ctx: GuardContext, recursive: bool) -> Opti
         for (name, why, hint) in _BASH_GUARDED:
             if parts[-1] == name:
                 return why, hint
-    home = st.once(("home",), lambda: _norm(str(ctx.home), st.dir))
 
     def absolute(p: str, unknown_base: bool = False) -> str:
         p = _path.expanduser(p)  # a pattern that starts with an unresolved part may be anywhere
@@ -1922,19 +1813,15 @@ def _protected(arg: str, st: _State, ctx: GuardContext, recursive: bool) -> Opti
     def hit(path: str) -> Optional[Tuple[str, str]]:
         full = _norm(path, st.dir)
         g = next((g for g in guarded if _under(full, g[0])), None)
-        if g is not None:
-            return g[2], g[3]
-        if recursive and _under(home, full):
-            return HOME_WHY, TOKEN_HINT
-        return None
+        return (g[2], g[3]) if g is not None else None
     if _UNRESOLVED.search(a):
         pattern = _UNRESOLVED.sub("*", a)
-        g = _pattern_hit(absolute(pattern, True), st.dir, guarded, recursive) if pattern.strip("*/\\.") else None
+        g = _pattern_hit(absolute(pattern, True), st.dir, guarded) if pattern.strip("*/\\.") else None
         return (g[2], g[3]) if g is not None else None
     if not _GLOB.search(a):
         return hit(a)
     full = absolute(a)
-    g = _pattern_hit(full, st.dir, guarded, recursive)
+    g = _pattern_hit(full, st.dir, guarded)
     if g is not None:
         return g[2], g[3]
     try:
@@ -1947,57 +1834,6 @@ def _protected(arg: str, st: _State, ctx: GuardContext, recursive: bool) -> Opti
     except (OSError, ValueError, re.error):
         return None
     return None
-
-
-# --- wrappers around notme ----------------------------------------------------------
-
-
-def _wrapper(t: List[str], seen: Set[str], st: _State) -> Optional[str]:
-    """The name of what gives this command a pseudo-terminal or runs it outside the session's process tree, or
-    None."""
-    prog, args = _prog(t[0]), t[1:]
-    low = [a.lower() for a in args]
-    if seen & _ORPHAN_PREFIX:
-        return sorted(seen & _ORPHAN_PREFIX)[0]
-    if prog in _PTY_PROGS or prog in _ORPHAN_PROGS:
-        return prog
-    if prog == "socat" and any("pty" in a for a in low):
-        return "socat pty"
-    if prog == "tmux" and any(a in ("send-keys", "send", "send-key") for a in low):
-        return "tmux send-keys"
-    if prog == "screen" and "-x" in low and "stuff" in low:
-        return "screen -X stuff"
-    if prog == "ssh":
-        flags = _short_flags([a for a in args if a.startswith("-")])
-        dest = next((a for a in _skip_options(args, {"-p", "-l", "-i", "-o", "-F", "-J", "-L", "-R", "-D", "-E",
-                                                      "-b", "-c", "-e", "-m", "-O", "-Q", "-S", "-W", "-w"})), "")
-        if "t" in flags and _LOCALHOST.match(dest):
-            return "ssh -t to this machine"
-    if prog == "launchctl" and {"submit", "bootstrap"} & set(low):
-        return "launchctl"
-    if prog == "crontab" and [a for i, a in enumerate(low) if a != "-u" and not (i and low[i - 1] == "-u")] != ["-l"]:
-        return "crontab"
-    if st.background:
-        return "a background &"
-    return None
-
-
-def _around_notme(wrapper: str, t: List[str], st: _State, blk: Blk) -> Iterator[Block]:
-    """A wrapper that hides the caller may not run the not-me CLI: named anywhere in the command, or in a file it
-    is given."""
-    why = (f"{wrapper} would run notme in a pseudo-terminal or a detached process, which passes the not-me CLI's "
-           "human check")
-    hint = "run notme directly, or ask the operator to run the matching /not-me command"
-    if any(_NOTME_WORD.search(v) for v in (st.plain_raw, st.raw)):
-        yield blk(SELF, why, hint)
-        return
-    for a in t[1:]:
-        if a.startswith("-"):
-            continue
-        text = _read_script(_norm(a, st.dir), st)
-        if text is not None and _NOTME_WORD.search(text):
-            yield blk(SELF, f"{why} ({a} names it)", hint)
-            return
 
 
 def _read_script(path: str, st: Optional[_State] = None) -> Optional[str]:
@@ -2071,24 +1907,6 @@ def _is_notme_module(name: str) -> bool:
     return low == "notme" or low.startswith("notme.")
 
 
-def _cmd_notme(args: List[str], blk: Blk) -> Iterator[Block]:
-    """The not-me CLI's human switches: changing the allow list, turning a pause off, and going live."""
-    plain = [_unshell(a) for a in args]
-    pos = [a for a in plain if not a.startswith("-")]
-    helping = bool({"--help", "-h"} & set(plain))
-    if pos[:1] == ["allow-repo"] and pos[1:2] != ["list"] and not helping:
-        yield blk(SELF, ALLOW_WHY, ALLOW_HINT)
-    if "pause" in plain:
-        rest = plain[plain.index("pause") + 1:]
-        if rest not in _PAUSE_OK:
-            yield blk(SELF, "only a person turns a not-me pause off", "leave the pause for the operator")
-    if "mode" in pos and not helping:
-        # anything but `mode show` or `mode dry-run` (live, an abbreviation, a typo) is the person's switch
-        sub = pos[pos.index("mode") + 1:pos.index("mode") + 2]
-        if not sub or sub[0] not in _MODE_OK:
-            yield blk(SELF, "only a person turns live mode on", LIVE_HINT)
-
-
 # --- shells, scripts and interpreters --------------------------------------------------
 
 
@@ -2096,7 +1914,7 @@ def _script_file(path: str, st: _State, blk: Blk) -> Iterator[Block]:
     """A script file runs text the guard does not parse: judged as opaque text (a file it cannot read is allowed)."""
     text = _read_script(_norm(path, st.dir), st)
     if text is not None:
-        yield from _opaque(text, blk, f"{_short(path, 60)} is a script the guard does not parse", inline=False)
+        yield from _opaque(text, blk, f"{_short(path, 60)} is a script the guard does not parse")
 
 
 _SHELL_VALUE_OPTS = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
@@ -3055,11 +2873,9 @@ _COMMANDS: Dict[str, Callable[..., Iterator[Block]]] = {
 LOG_INPUT_MAX = 2000  # characters of the blocked input kept in a guard log line
 LOG_TRUNCATED = "...[truncated]"
 REDACTED = "[redacted]"
-_SECRET_FILE_MAX = 4096  # bytes read from a secret file; the token, marker and epoch are far shorter
-_SECRET_MIN = 8  # a secret file value shorter than this is not searched for (it would redact ordinary text)
 # the one field that says what a tool call touched; Write and Edit bodies are never logged
 _LOG_FIELD = {"Bash": "command", "Write": "file_path", "Edit": "file_path", "MultiEdit": "file_path",
-              "Read": "file_path", "NotebookEdit": "notebook_path", "NotebookRead": "notebook_path"}
+              "NotebookEdit": "notebook_path"}
 _LOG_BODY_KEYS = frozenset({"content", "old_string", "new_string", "edits", "new_source", "body"})
 # The log patterns run on what the model sent, inside the hook's timeout (a hook that times out does not block), so
 # each one must be linear: a match may only start where a run of its leading characters starts (the lookbehinds),
@@ -3081,8 +2897,7 @@ _LOG_USER_FLAGS = frozenset({"-u", "--user"})
 _GH_SECRET = re.compile(r"\bsecret\b")  # gh secret [-R o/r] set: set may follow a repo flag
 _GH_SET = re.compile(r"\bset\b")
 _USER_SHORT = re.compile(r"-[A-Za-z]*u")  # -u, or combined short flags ending in it (curl -sSu user:pass)
-_SECRET_NAME = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|APIKEY|(?:^|_)KEY$|^NOT_ME_OPERATOR_CONFIRM$",
-                          re.IGNORECASE)
+_SECRET_NAME = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|APIKEY|(?:^|_)KEY$", re.IGNORECASE)
 _AUTH_HEADER = re.compile(r"(authorization:\s*(?:bearer|token|basic)\s+)[^\s\"']+", re.IGNORECASE)
 # scheme://user:password@ keeps the user; a lone user part of 16 or more characters is taken for a token
 _URL_PASSWORD = re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://[^@\s/:]+:)[^@\s/]+@")
@@ -3090,24 +2905,8 @@ _URL_TOKEN_USER = re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://)[^@\s/:
 # The input is cut before redacting so the work stays bounded: to _LOG_SCAN characters, and again to _LOG_SCAN plus
 # _LOG_SCAN_MARGIN. Only what both redacted cuts agree on is kept, so a secret no longer than the margin that one cut
 # splits (and so does not redact) never shows in part.
-_LOG_SCAN_MARGIN = _SECRET_FILE_MAX + 256
+_LOG_SCAN_MARGIN = 4096 + 256
 _LOG_SCAN = LOG_INPUT_MAX + _LOG_SCAN_MARGIN
-
-
-def _secret_values(ctx: GuardContext) -> List[str]:
-    """The operator token, live-mode marker and epoch file values; read only when a block is logged."""
-    homes = {ctx.home, ctx.allowlist_path.parent}
-    found = []
-    for home in homes:
-        for name, _why, _hint in _HOME_GUARDED:
-            try:
-                with open(home / name, "rb") as fh:
-                    value = fh.read(_SECRET_FILE_MAX).decode("utf-8", "replace").strip()
-            except OSError:
-                continue
-            if len(value) >= _SECRET_MIN:
-                found.append(value)
-    return sorted(set(found), key=len, reverse=True)
 
 
 def _secret_name(name: str) -> bool:
@@ -3145,11 +2944,8 @@ def _redact_values(text: str, names: "re.Pattern[str]", how: Callable[["re.Match
     return "".join(out)
 
 
-def _redact(text: str, secrets: List[str]) -> str:
-    """Replace known secrets, secret-named assignment values, auth header values, URL credentials and GitHub
-    token shapes."""
-    for value in secrets:
-        text = text.replace(value, REDACTED)
+def _redact(text: str) -> str:
+    """Replace secret-named assignment values, auth header values, URL credentials and GitHub token shapes."""
     text = _redact_values(text, _LOG_ASSIGN, lambda m: "all" if _secret_name(m.group(1)) else None)
     secret = _GH_SECRET.search(text)
     secret_set = bool(secret and _GH_SET.search(text, secret.end()))
@@ -3198,14 +2994,13 @@ def _logged_input(ctx: GuardContext, block: Block, tool_input: Any) -> Optional[
         text = block.command
     if text is None:
         return None
-    secrets = _secret_values(ctx)
     if len(text) <= _LOG_SCAN:
-        text = _redact(text, secrets)
+        text = _redact(text)
         return text if len(text) <= LOG_INPUT_MAX else text[:LOG_INPUT_MAX] + LOG_TRUNCATED
     # a secret the shorter cut splits ends inside the longer one and is redacted there, so the two differ from where
     # it starts; one the longer cut splits starts past the shorter one, so the agreed prefix stops before it
-    text = os.path.commonprefix([_redact(text[:_LOG_SCAN], secrets),
-                                 _redact(text[:_LOG_SCAN + _LOG_SCAN_MARGIN], secrets)])
+    text = os.path.commonprefix([_redact(text[:_LOG_SCAN]),
+                                 _redact(text[:_LOG_SCAN + _LOG_SCAN_MARGIN])])
     return text[:LOG_INPUT_MAX] + LOG_TRUNCATED
 
 
