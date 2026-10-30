@@ -928,9 +928,23 @@ for _variant in ("app", "nogit"):
                 "tar -xzf x.tgz -C {H}/..", "tar xf x.tar --directory={H}", "unzip x.zip -d {H}",
                 "unzip -o x.zip -d{H}/.."):
         bash(B, SP, cmd, _variant)
-for cmd in ("cp notes.txt {H}/..", "mv notes.txt {H}/..", "cp -r scripts /tmp/copy", "tar -xzf x.tgz -C /tmp/out",
-            "unzip x.zip -d /tmp/out", "rsync -a scripts/ /tmp/copy/", "mv a.txt b.txt", "cp -r {H} /tmp/backup"):
+for cmd in ("cp notes.txt {H}/..", "cp -r scripts /tmp/copy", "tar -xzf x.tgz -C /tmp/out",
+            "unzip x.zip -d /tmp/out", "rsync -a scripts/ /tmp/copy/", "mv a.txt b.txt", "cp -r {H} /tmp/backup",
+            "tar -xzf x.tgz", "tar xf x.tar", "unzip x.zip", "tar -czf x.tgz -C {H}/.. .", "unzip -l x.zip",
+            "less README.md", "more README.md"):
     bash(A, None, cmd)
+# mv moves whole directories, so a destination above the home counts, and so does moving the home or a directory
+# above it; ln can link a directory there too. tar -P extracts to the archive's absolute paths. (Round 2 of the
+# #118 security review.) An extract with no -C or -d writes into the tracked working directory: test_guard
+# checks that one from inside the home.
+for _variant in ("app", "nogit"):
+    for cmd in ("mv notes.txt {H}/..", "mv /tmp/x {H}/../..", "mv {H} /tmp/x", "mv {H}/.. /tmp/y",
+                "mv -t /tmp {H}", "ln -s /tmp/x {H}/..", "tar -xPf x.tar", "tar xPf x.tar",
+                "tar -x --absolute-names -f x.tar"):
+        bash(B, SP, cmd, _variant)
+# less and more can write a log file (-o, --log-file): they are not readers of the global project.md
+bash(B, SP, "less -o {H}/project.md README.md", "gdry")
+bash(B, SP, "less {H}/project.md", "gdry")
 # `notme mode live` is the operator's /not-me:mode live, in every spelling and in or out of a run.
 bash(A, None, "notme mode live")
 bash(A, None, "{P}/bin/notme mode live", "running")

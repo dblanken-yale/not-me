@@ -470,7 +470,7 @@ class TokenizerTests(unittest.TestCase):
         for cmd in ("git status", "g''h pr list", "g\\it log", "${X} y", "./run", "make.sh", "python3 -c 1",
                     "find . -name x", "cat ~/.claude/not-me/allowed-repos.json", "sh <<EOF\ngh pr merge 1\nEOF",
                     "cp -r /some/home x", "wc < /some/home/al*", "echo 0 >~/x", "cat allowed-repos.json",
-                    "nohup make &", "cp -r C:\\Users\\op\\homes\\h0 backup"):  # only backslashes: a Windows path
+                    "nohup make &", "tar xf x.tar", "unzip x.zip", "cp -r C:\\Users\\op\\homes\\h0 backup"):  # only backslashes: a Windows path
             self.assertTrue(bash(cmd), cmd)
         self.assertTrue(guard.needs_check({"tool_name": "Write", "tool_input": {"file_path": "x"}}))
         self.assertTrue(guard.needs_check({"tool_name": "mcp__github__create_issue", "tool_input": {}}))
@@ -1037,6 +1037,39 @@ class HooksJsonTests(unittest.TestCase):
     def test_declares_only_the_guard(self):
         data = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
         self.assertEqual(list(data["hooks"]), ["PreToolUse"])
+
+
+class ExtractIntoCwdTests(unittest.TestCase):
+    """tar or unzip with no -C or -d extracts into the working directory: from the not-me home or a directory
+    above it, that can replace the allow list (security review of dblanken-yale/not-me#118)."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="notme-extract-")).resolve()
+        self.addCleanup(shutil.rmtree, str(self.dir), True)
+        self.home = self.dir / "user" / ".claude" / "not-me"
+        self.home.mkdir(parents=True)
+        self.work = self.dir / "work"
+        self.work.mkdir()
+
+    def rule(self, cmd, cwd):
+        ctx = GuardContext(cwd=str(cwd), root=None, home=str(self.home), env={})
+        block = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(cwd)}, ctx)
+        return getattr(block, "rule", None)
+
+    def test_an_extract_from_the_home_or_above_blocks(self):
+        for cwd in (self.home, self.home.parent, self.dir / "user"):
+            for cmd in ("tar -xzf x.tgz", "tar xf x.tar", "unzip x.zip", "tar -xf x.tar -C $D",
+                        "unzip x.zip -d \"$D\""):
+                with self.subTest(cwd=cwd, cmd=cmd):
+                    self.assertEqual(self.rule(cmd, cwd), guard.SELF)
+
+    def test_the_same_extract_elsewhere_and_a_listing_in_the_home_pass(self):
+        for cmd in ("tar -xzf x.tgz", "unzip x.zip", "tar -xf x.tar -C $D"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.rule(cmd, self.work))
+        for cmd in ("tar -tzf x.tgz", "unzip -l x.zip", "tar -czf ../x.tgz ."):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.rule(cmd, self.home))
 
 
 class AllowListNameTests(unittest.TestCase):

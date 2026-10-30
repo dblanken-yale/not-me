@@ -218,6 +218,7 @@ _OPAQUE_HINT ="run the git, gh or notme command directly, with every word spelle
 # Bash commands that cannot matter to any rule skip the full check (applied with quotes/backslashes removed).
 _PREFILTER = re.compile(
     r"(?<![A-Za-z0-9_-])(gh|git|rm|find|xargs|parallel|sudo|doas|bash|sh|zsh|dash|ksh|fish|source|exec|eval"
+    r"|tar|bsdtar|gtar|unzip"  # an extract with no destination writes into the working directory
     r"|(?i:" + _INTERP_NAMES + r"))(?![A-Za-z0-9_-])"
     r"|not-me|NOT_ME_|allowed-repos"
     r"|[$`/~*?\[\\&]|(?:^|[\s;|&(])\.(?:\s|$)|\.(?:sh|bash|zsh)\b|\.git")
@@ -1573,8 +1574,8 @@ def _path_checks(c: SimpleCommand, st: _State, ctx: GuardContext, blk: Blk) -> I
 # word or redirection naming it blocks unless the program only reads (dblanken-yale/not-me#118).
 _GLOBAL_DOC_ENTRY = ((GLOBAL_DOC, "the global not-me config changes only through /not-me:mode and the operator's "
                                   "own editor, so the change is shown and logged", MODE_HINT),)
-# programs that only read the files named on their command line
-_READERS = frozenset({"cat", "head", "tail", "less", "more", "grep", "egrep", "fgrep", "rg", "wc", "diff", "cmp",
+# programs that only read the files named on their command line (not less or more: -o and --log-file write)
+_READERS = frozenset({"cat", "head", "tail", "grep", "egrep", "fgrep", "rg", "wc", "diff", "cmp",
                       "file", "stat", "ls", "bat", "md5", "md5sum", "shasum", "sha1sum", "sha256sum", "od",
                       "hexdump", "strings", "nl", "realpath", "readlink", "basename", "dirname", "test", "["})
 _READ_REDIRS = ("<", "<<", "<<-", "<<<", "<&")
@@ -1629,7 +1630,35 @@ def _global_doc_checks(c: SimpleCommand, st: _State, ctx: GuardContext, blk: Blk
 # Programs that write into a destination directory, and how to find it: a destination that is the not-me home
 # lets a copy or an extract replace the allow list. For a recursive copy or an extract, a directory above the home
 # counts too (the copy can recreate .claude/not-me/allowed-repos.json under it).
-_DEST_LAST = {"cp": "rRa", "rsync": "ra", "mv": "", "ln": "", "install": "", "ditto": None}
+# (None: always recursive. mv moves whole directories and ln can link one, so both count as recursive.)
+_DEST_LAST = {"cp": "rRa", "rsync": "ra", "mv": None, "ln": None, "install": "", "ditto": None}
+_TAR_PROGS = ("tar", "bsdtar", "gtar")
+_UNZIP_NO_EXTRACT = set("ltvpzZ")  # unzip options that list, test, print or show a comment instead of extracting
+
+
+def _option_letters(args: List[str], takes_value: str, old_style: bool = False) -> Set[str]:
+    """The single-letter options in args, each cluster read up to its first option that takes a value (the rest
+    of the word is that value: `-C/tmp/x`, `-fx.tar`, `-d/out`). old_style: a first word without a dash is a
+    cluster too (tar's `xzf`)."""
+    words = [a[1:] for a in args if a.startswith("-") and not a.startswith("--") and len(a) > 1]
+    if old_style and args and not args[0].startswith("-"):
+        words.append(args[0])
+    letters: Set[str] = set()
+    for w in words:
+        for ch in w:
+            letters.add(ch)
+            if ch in takes_value:
+                break
+    return letters
+
+
+_TAR_VALUE = "fCTXbHKNVgL"  # tar short options that take a value
+_UNZIP_VALUE = "dPx"  # unzip short options that take a value
+
+
+def _tar_letters(args: List[str]) -> Set[str]:
+    """The single-letter options of a tar call, old style (a first word without a dash, `xzf`) included."""
+    return _option_letters(args, _TAR_VALUE, old_style=True)
 
 
 def _dest_dirs(prog: str, args: List[str]) -> Tuple[List[str], bool]:
@@ -1670,20 +1699,48 @@ def _dest_dirs(prog: str, args: List[str]) -> Tuple[List[str], bool]:
 def _home_dest_checks(core: List[str], st: _State, ctx: GuardContext, blk: Blk) -> Iterator[Block]:
     """A copy, move, link or extract whose destination is the not-me home (or, recursive, a directory above it)."""
     prog = _prog(core[0]) if core else ""
-    if prog not in _DEST_LAST and prog not in ("tar", "bsdtar", "gtar", "unzip"):
+    if prog not in _DEST_LAST and prog not in _TAR_PROGS and prog != "unzip":
         return
-    dests, above = _dest_dirs(prog, list(core[1:]))
-    if not dests:
-        return
-    home = st.once(("home",), lambda: _norm(str(ctx.home), st.dir))
+    args = list(core[1:])
+    dests, above = _dest_dirs(prog, args)
+    home = st.once(("home",), lambda: _norm(str(ctx.home), st.dir)).lower()
+    why = f"{prog} would write into the not-me home or a directory above it, which can replace the allow list"
+    extract = False
+    if prog in _TAR_PROGS:
+        letters = _tar_letters(args)
+        extract = "x" in letters or any(a in ("--extract", "--get") for a in args)
+        if not extract:
+            dests = []  # creating or listing an archive reads its -C directory
+        elif "P" in letters or "--absolute-names" in args:
+            yield blk(SELF, f"{prog} -P extracts to the absolute paths in the archive, which may be the not-me home",
+                      ALLOW_HINT)
+            return
+    elif prog == "unzip":
+        extract = not (_UNZIP_NO_EXTRACT & _option_letters(args, _UNZIP_VALUE))
+        if not extract:
+            dests = []
+    if extract and not dests:
+        dests = [st.dir]  # no -C or -d: it extracts into the working directory the guard tracks
+    if prog == "mv":  # moving the home, or a directory above it, away and back replaces the allow list too
+        pos = _positionals(args)
+        moved = pos if any(a == "-t" or a.startswith("--target-directory") for a in args) else pos[:-1]
+        for s in moved:
+            a = _shell_word(s, ctx)
+            if a and not _UNRESOLVED.search(a) and not _GLOB.search(a) and _under(home, _norm(a, st.dir).lower()):
+                yield blk(SELF, f"mv would move the not-me home ({_short(s, 60)}), which holds the allow list",
+                          ALLOW_HINT)
+                return
     for d in dests:
         a = _shell_word(d, ctx)
         if not a or _UNRESOLVED.search(a) or _GLOB.search(a):
-            continue  # a destination the shell fills in cannot be placed; the allow list's name still blocks
-        full = _norm(a, st.dir)
-        if full.lower() == home.lower() or (above and _under(home.lower(), full.lower())):
-            yield blk(SELF, f"{prog} would write into the not-me home ({_short(d, 60)}), which can replace the allow "
-                            "list", ALLOW_HINT)
+            # a destination the shell fills in cannot be placed: an extract run from the home or above it blocks
+            if extract and _under(home, _norm(st.dir, st.dir).lower()):
+                yield blk(SELF, f"{why} (the destination is not known here)", ALLOW_HINT)
+                return
+            continue
+        full = _norm(a, st.dir).lower()
+        if full == home or (above and _under(home, full)):
+            yield blk(SELF, f"{why} ({_short(d, 60)})", ALLOW_HINT)
             return
 
 
