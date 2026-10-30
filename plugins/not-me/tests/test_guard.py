@@ -623,13 +623,29 @@ class MessageTests(unittest.TestCase):
         session's directory."""
         ctx = self.ctx()
         ctx.git = lambda args, cwd: None
-        for cmd in ("git -C $W commit -m x", 'git -C "$W" push origin HEAD:refs/heads/x', "git -C $W merge feature/y",
-                    "git -C $W reset --hard"):
-            with self.subTest(cmd=cmd):
-                r = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": "."}, ctx)
-                self.assertIsNone(r, getattr(r, "message", ""))
-                self.assertTrue(any("could not work out which checkout" in g.reason or "is not known" in g.reason
-                                    for g in ctx.guided), ctx.guided)
+        # git reads an unset -C path as the current directory, so the session's own branch decides: guided from a
+        # feature branch, blocked from a protected one (a push naming its destination never reads the branch)
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp).resolve()
+            for name, branch in (("main", "main"), ("wt", "feature/x")):
+                (d / name / ".git").mkdir(parents=True)
+                (d / name / ".git" / "HEAD").write_text(f"ref: refs/heads/{branch}\n", encoding="utf-8")
+            for cmd in ("git -C $W commit -m x", 'git -C "$W" push origin HEAD:refs/heads/x',
+                        "git -C $W merge feature/y", "git -C $W reset --hard"):
+                with self.subTest(cmd=cmd, cwd="wt"):
+                    ctx.guided = []
+                    r = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(d / "wt")},
+                                     ctx)
+                    self.assertIsNone(r, getattr(r, "message", ""))
+                    self.assertTrue(any("could not work out which checkout" in g.reason or "is not known" in g.reason
+                                        for g in ctx.guided), ctx.guided)
+            for cmd in ("git -C $W commit -m x", "git -C $W merge feature/y", "git -C $W reset --hard"):
+                with self.subTest(cmd=cmd, cwd="main"):
+                    r = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(d / "main")},
+                                     ctx)
+                    self.assertIsNotNone(r)
+                    self.assertEqual(r.rule, "protected_branches")
+            ctx.guided = []
         # a literal path to a checkout with no github origin is guided, not blocked
         r = guard.decide({"tool_name": "Bash", "tool_input": {"command": "git -C /nowhere commit -m x"}, "cwd": "."},
                          ctx)

@@ -2119,7 +2119,9 @@ bash(B, PB, 'git -C "$W" switch main && git commit -m x')  # the switch may move
 for cmd in ('git -C "$WT" commit -m x', 'git -C "$WT" reset --hard'):
     bash(G, PB, cmd)  # the session's own branch is not protected: logged
 bash(G, OR, 'git -C "$WT" push origin HEAD')  # logged: the remote's repo is not known either
-bash(G, OR, 'git -C "$WT" push origin feature/x', "main")  # names the branch it pushes: no current branch read
+# a refspec with no `:` destination is not taken as naming the branch (fails closed): judged on the session's branch
+bash(B, PB, 'git -C "$WT" push origin feature/x', "main")
+bash(G, OR, 'git -C "$WT" push origin feature/x:feature/x', "main")  # names its destination: no current branch read
 # finding 4: env -C and env --chdir change the directory git runs in, so they are not followed
 for cmd in ("env -C {F}/main git commit -m x", "env --chdir={F}/main git commit -m x",
             "env --chdir {F}/main git commit -m x", "env -iC {F}/main git commit -m x"):
@@ -2127,6 +2129,27 @@ for cmd in ("env -C {F}/main git commit -m x", "env --chdir={F}/main git commit 
 # finding 2: GH_REPO set where the guard does not read it: guided, never taken as the origin
 for cmd in ("true && export GH_REPO=acme/other && gh issue comment 1 --body-file f",
             "env GH_REPO=acme/other gh issue comment 1 --body-file f", "read GH_REPO < f; gh issue comment 1 -b x"):
+    bash(G, OR, cmd)
+# final review round: env options that take a value do not end the scan, abbreviated --chdir counts, and an env
+# option the guard does not know counts as a directory change
+for cmd in ("env -u FOO -C {F}/main git commit -m x", "env -uFOO -C{F}/main git commit -m x",
+            "env --unset FOO --chdir {F}/main git commit -m x", "env -i -u FOO --ch={F}/main git commit -m x",
+            "env --chd {F}/main git commit -m x", "env --c {F}/main git commit -m x",
+            "env --chdi={F}/main git commit -m x", "env -P /usr/bin -C {F}/main git commit -m x",
+            "env -S '--chd {F}/main' git commit -m x", "env '--split-string=--chd {F}/main' git commit -m x",
+            "env -Q {F}/main git commit -m x", "env --frobnicate {F}/main git commit -m x"):
+    bash(B, PB, cmd)
+# a push option's value is not a refspec: this push still pushes the current branch, main
+for cmd in ('git -C "$W" push -o opt origin', 'git -C "$W" push --push-option opt origin',
+            'git -C "$W" push --repo origin x', 'git -C "$W" push -vo opt origin'):
+    bash(B, PB, cmd, "main")
+bash(G, OR, 'git -C "$W" push -o opt origin HEAD:feature/x', "main")  # names its destination: no branch read
+# a mention of GH_REPO that does not set it leaves gh's default repo found the usual way
+for cmd in ("echo GH_REPO; gh issue comment 1 --body-file f", "echo $GH_REPO && gh issue comment 1 --body-file f"):
+    bash(A, None, cmd)
+for cmd in ("unset GH_REPO; gh issue comment 1 --body-file f", "declare GH_REPO; gh issue comment 1 --body-file f",
+            ": ${GH_REPO:=acme/other}; gh issue comment 1 --body-file f",
+            "env -u GH_REPO gh issue comment 1 --body-file f"):
     bash(G, OR, cmd)
 # a copy or move with a relative destination reaches the not-me home check: `..` from the checkout is the fixture
 # root, a directory above the home

@@ -1398,15 +1398,52 @@ def _words(c: SimpleCommand) -> Set[str]:
     return out
 
 
+# env's options, GNU and BSD: short ones that take a value (attached or the next word), short ones that take none, and
+# the long names (GNU accepts any unambiguous prefix). An option not listed here counts as a directory change.
+_ENV_SHORT_VALUE = set("uCSP")
+_ENV_SHORT_FLAG = set("i0v")
+_ENV_LONG_VALUE = ("unset", "split-string")
+_ENV_LONG_FLAG = ("ignore-environment", "null", "debug", "help", "version", "list-signal-handling", "block-signal",
+                  "default-signal", "ignore-signal")
+
+
 def _env_chdir(words: List[str]) -> bool:
-    """`env -C dir`, `env --chdir dir` or `--chdir=dir` before the command: it runs in another directory."""
+    """env runs its command in another directory: -C dir, -Cdir, --chdir (or any prefix of it, with or without =),
+    anywhere among env's options. Fails closed: an env option the guard does not know counts as a directory change.
+    The string -S splits is read as more options."""
     for k, w in enumerate(words):
         if _prog(w) != "env":
             continue
-        for a in words[k + 1:]:
-            if a.startswith("--chdir") or (a.startswith("-") and not a.startswith("--") and "C" in a[1:]):
-                return True
-            if not a.startswith("-") and not _ASSIGN.match(a):
+        rest = list(words[k + 1:])
+        while rest:
+            a = rest.pop(0)
+            if a == "--":
+                break
+            if a == "-" or _ASSIGN.match(a):
+                continue
+            if not a.startswith("-"):
+                break
+            if a.startswith("--"):
+                name, eq, value = a[2:].partition("=")
+                if "chdir".startswith(name):
+                    return True
+                if any(o.startswith(name) for o in _ENV_LONG_VALUE):
+                    if not eq:
+                        value = rest.pop(0) if rest else ""
+                    if "split-string".startswith(name):
+                        rest = value.split() + rest
+                    continue
+                if not any(o.startswith(name) for o in _ENV_LONG_FLAG):
+                    return True
+                continue
+            for j, ch in enumerate(a[1:], 1):
+                if ch in _ENV_SHORT_FLAG:
+                    continue
+                if ch == "C" or ch not in _ENV_SHORT_VALUE:
+                    return True
+                value = a[j + 1:] or (rest.pop(0) if rest else "")
+                if ch == "S":
+                    rest = value.split() + rest
                 break
     return False
 _AND_LIST = {"&&", "|", "|&"}  # the only operators allowed after a followed leading cd
@@ -2578,8 +2615,34 @@ def _names_every_branch(sub: str, args: List[str]) -> bool:
     """A push whose every refspec names its destination branch: where it runs does not decide what it changes."""
     if sub != "push":
         return False
-    refspecs = _positionals(args)[1:]
-    return bool(refspecs) and all(r.lstrip("+").split(":", 1)[-1] not in ("", "HEAD", "@") for r in refspecs)
+    refspecs = _push_positionals(args)[1:]
+    # fails closed: each refspec must name its destination after a `:`, so a word the guard took for a refspec but
+    # git reads as an option's value never makes a push of the current branch look exempt
+    return bool(refspecs) and all(":" in r and r.lstrip("+").split(":", 1)[1] not in ("", "HEAD", "@")
+                                  for r in refspecs)
+
+
+_PUSH_LONG_VALUE = ("push-option", "repo", "receive-pack", "exec")
+
+
+def _push_positionals(args: List[str]) -> List[str]:
+    """git push's remote and refspecs, without the values of options that take one (-o x, --repo x, any prefix of
+    a long one)."""
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--":
+            return out + args[i:]
+        if not a.startswith("-") or a == "-":
+            out.append(a)
+        elif a.startswith("--"):
+            name = a[2:]
+            if "=" not in name and any(o.startswith(name) for o in _PUSH_LONG_VALUE):
+                i += 1
+        elif a.endswith("o"):  # -o, or a bundle ending in it (-vo): the value is the next word; -ox has it attached
+            i += 1
+    return out
 
 
 # git branch options that only list; git accepts abbreviated long options, so anything not spelled out here is a write
@@ -3094,7 +3157,12 @@ def _gh_write(t: List[str], c: SimpleCommand, st: _State, ctx: GuardContext, blk
 # gh orders remotes this way when it picks a default repo: upstream, github, origin, then the rest by name
 _GH_REMOTE_ORDER = ("upstream", "github", "origin")
 _GH_REPO_ASSIGN = re.compile(r"^GH_REPO=")
-_GH_REPO_WORD = re.compile(r"(?<![A-Za-z0-9_])GH_REPO(?![A-Za-z0-9_])")
+# GH_REPO set where the guard does not read it: by assignment, ${GH_REPO:=x}, `for GH_REPO in`, or a builtin or env
+# that sets or unsets it by name (export, declare, read, unset, env -u ...). A bare mention (echo GH_REPO, $GH_REPO)
+# does not count.
+_GH_REPO_SET = re.compile(r"(?<![A-Za-z0-9_$])GH_REPO(?:\[[^\]]*\])?\s*\+?=|\$\{GH_REPO:?=|(?<![A-Za-z0-9_-])"
+                          r"(?:export|declare|typeset|local|readonly|read|mapfile|readarray|unset|printf|env|for)"
+                          r"(?![A-Za-z0-9_-])[^;&|\n]*?(?<![A-Za-z0-9_${])GH_REPO(?![A-Za-z0-9_])")
 
 
 def _gh_default_repo(c: SimpleCommand, st: _State, ctx: GuardContext) -> Tuple[Optional[str], str]:
@@ -3110,7 +3178,7 @@ def _gh_default_repo(c: SimpleCommand, st: _State, ctx: GuardContext) -> Tuple[O
         value = st.literal(prefix[-1][len("GH_REPO="):], getattr(prefix[-1], "expands", False))
     elif "GH_REPO" in st.vars:
         value = st.vars["GH_REPO"]
-    elif _GH_REPO_WORD.search(st.plain_text):
+    elif _GH_REPO_SET.search(st.plain_text) or _GH_REPO_SET.search(st.text):  # raw text keeps ${GH_REPO:=x}
         # set where the guard does not read it (export later on, env GH_REPO=..., read, declare): not the origin
         return None, "the shell sets GH_REPO"
     elif ctx.env.get("GH_REPO"):
