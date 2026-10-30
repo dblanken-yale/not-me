@@ -103,7 +103,9 @@ changes its branch or files. Inside a linked worktree already, work in place.
    `git rev-parse HEAD`, then `notme git worktree-add <sha> --name notme-new-<N>`
    (`notme-update-<N>` for rework). `path_exists`: add `-2`, `-3`. Keep the
    returned `path`. A resumed run whose log names a path uses that path instead.
-   A lost claim removes the worktree (rule 4) before the next pick makes another.
+   A lost claim keeps the worktree, its log and run marker: still detached with
+   nothing done, it serves the next pick as is. Never remove it mid-run, since
+   that deletes the marker with it; make no second one.
 2. From then on pass `--project-dir <path>` to every `notme` call, so the run
    marker, branch, checkpoints and push all land in that worktree. Run local git
    as `git -C <path> ...`, never `cd <path> && git ...` (the guard does not follow
@@ -111,7 +113,7 @@ changes its branch or files. Inside a linked worktree already, work in place.
    implementer with the absolute path.
 3. The worktree starts detached: there is nothing to stash. Branch with
    `notme --project-dir <path> git branch-create <name> --base origin/<base>`.
-4. On every way out, after `notme log finish`, run `notme git worktree-remove <path>`
+4. Only when the run ends, after `notme log finish`, run `notme git worktree-remove <path>`
    without `--project-dir`. Remove only the worktree this run made. A tree that will not come off clean stays: a `WARN` naming it.
    "committed but NOT PUSHED": keep it and name the path in the log summary.
 
@@ -162,3 +164,4 @@ passes the same checks, held when a blocker has no open PR yet. Treat it the sam
 - [ ] Stashed with a unique message and restored by SHA.
 - [ ] Left the checkout clean on the branch it started on.
 - [ ] With `workspace` `worktree`: worked only in my own worktree, `--project-dir` on every `notme` call.
+- [ ] Kept that one worktree through a lost claim; removed it only after `notme log finish`.

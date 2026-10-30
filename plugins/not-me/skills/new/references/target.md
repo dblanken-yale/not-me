@@ -60,7 +60,9 @@ the issue is chosen, how its text is read and screened, and how epics chain.
    one line (the issue, why, and the rule) to a file in the temp directory and
    record it with `notme log action <path> --kind ACTION --message-file <file>`.
    A lost claim goes back to `notme pick-issue --exclude N` and chooses again
-   from the new list.
+   from the new list, in the same run: same log, and with `workspace.new:
+   worktree` the same worktree and `--project-dir` (never remove it here; its
+   run marker goes with it).
 
 ## Reading the issue
 

@@ -59,9 +59,19 @@ class RouterSkillTest(unittest.TestCase):
     def test_worktree_rules_for_new_work(self):
         branching = flat(text(BRANCHING))
         for phrase in ("## Worktrees for new and update work", "--name notme-new-<N>", "`notme-update-<N>`",
-                       "A lost claim removes the worktree", "pass `--project-dir <path>` to every `notme` call", "`git -C <path> ...`",
+                       "A lost claim keeps the worktree, its log and run marker", "Never remove it mid-run",
+                       "Only when the run ends, after `notme log finish`", "pass `--project-dir <path>` to every `notme` call", "`git -C <path> ...`",
                        "`notme git worktree-remove <path>`"):
             self.assertIn(phrase, branching, phrase)
+
+    def test_a_lost_claim_keeps_the_worktree_and_its_marker(self):
+        # Removing a worktree deletes its admin dir, and the run's active-run marker with it.
+        new = flat(text(PLUGIN / "skills" / "new" / "SKILL.md"))
+        target = flat(text(PLUGIN / "skills" / "new" / "references" / "target.md"))
+        self.assertIn("keeping the step 1.6 worktree and log", new)
+        self.assertIn("Remove it only after `notme log finish`", new)
+        self.assertIn("never remove it here; its run marker goes with it", target)
+        self.assertNotIn("A lost claim removes the worktree", flat(text(BRANCHING)))
 
 
 if __name__ == "__main__":

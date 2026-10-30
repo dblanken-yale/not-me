@@ -74,14 +74,14 @@ text. Follow `${CLAUDE_PLUGIN_ROOT}/skills/new/references/target.md` in full.
 5. Screen the trusted text against prohibitions.md. A prohibited request is refused
    before any claim (target.md, "Prohibited requests").
 6. `workspace.new` is `worktree`: make this run's worktree now and work only in it, with `--project-dir` on
-   every later `notme` call (branching.md, "Worktrees for new and update work"). Remove it on every way out.
+   every later `notme` call (branching.md, "Worktrees for new and update work"). Remove it only after `notme log finish`.
 
 ## Step 2: Claim and start the log
 
 1. `notme log start --skill new --ref <tracker>#N`. Keep `path` and `run_id`. Exit 1 with kind `active_run`:
    `STOP - active run`. A queue pick: log the choice with `notme log action <path> --kind ACTION --message-file <file>` (target.md, "Order").
 2. `notme claim-issue N --log <path>`. Exit 3 (claim lost): log it and go back to `notme pick-issue --exclude N`
-   (repeat `--exclude` for each lost issue). An explicit number that is lost ends the run: `STOP <ref> claimed elsewhere`.
+   (repeat `--exclude` for each lost issue), keeping the step 1.6 worktree and log. An explicit number that is lost ends the run: `STOP <ref> claimed elsewhere`.
 
 ## Step 3: Classify and plan
 
