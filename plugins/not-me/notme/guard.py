@@ -2948,10 +2948,10 @@ def _cmd_gh(t, c, st, ctx, blk):
     if group == "api":
         yield from _gh_api(t, c.raw, st, ctx, blk)
     elif group in _GH_GROUPS:
-        yield from _gh_write(t, ctx, blk)
+        yield from _gh_write(t, c, st, ctx, blk)
 
 
-def _gh_write(t: List[str], ctx: GuardContext, blk: Blk) -> Iterator[Block]:
+def _gh_write(t: List[str], c: SimpleCommand, st: _State, ctx: GuardContext, blk: Blk) -> Iterator[Block]:
     group, verb = t[1], (t[2] if len(t) > 2 else "")
     what = f"gh {group} {verb}".strip()
     verbs = _GH_DESTRUCTIVE.get(group, set())
@@ -2978,6 +2978,8 @@ def _gh_write(t: List[str], ctx: GuardContext, blk: Blk) -> Iterator[Block]:
             n_repo += 1
         elif j >= 3:
             raw = parse_origin(a, allow_path=True)
+            if raw is None and "github.com" in a.lower() and "://" in a:
+                raw = a  # a URL gh may read as the repo, which the guard cannot: not taken as gh's default
         if raw is None:
             continue
         repo = repo_slug(raw)
@@ -2998,9 +3000,78 @@ def _gh_write(t: List[str], ctx: GuardContext, blk: Blk) -> Iterator[Block]:
         if verb in ("create", "fork") and not targets:
             yield blk("other_repo", f"gh repo {verb} without an allowed owner/name", "name the repo explicitly")
             return
-    if not targets:
+    if targets:
+        return
+    if group == "project":  # a board belongs to an owner, not a repo
         yield _unknown_target(blk, f"{what} names no repo, and gh's default repo is not always origin",
                               f"pass --repo {ctx.origin_repo or 'owner/name'}")
+        return
+    repo, how = _gh_default_repo(c, st, ctx)
+    if repo:
+        yield from _check_target(ctx, repo, blk)
+        return
+    # dblanken-yale/not-me#142: not blocked; the log line records the repo the guard assumed
+    assumed = ctx.origin_repo
+    b = blk("other_repo", f"{what} names no repo, and gh's default repo could not be worked out ({how}); assumed "
+                          f"{assumed or 'none'}", f"pass --repo {assumed or 'owner/name'}", target=assumed)
+    b.no_checkout = True
+    yield b
+
+
+# gh orders remotes this way when it picks a default repo: upstream, github, origin, then the rest by name
+_GH_REMOTE_ORDER = ("upstream", "github", "origin")
+_GH_REPO_ASSIGN = re.compile(r"^GH_REPO=")
+
+
+def _gh_default_repo(c: SimpleCommand, st: _State, ctx: GuardContext) -> Tuple[Optional[str], str]:
+    """The repo a gh command with no --repo works on, found the way gh finds it (dblanken-yale/not-me#142):
+    GH_REPO (set on the command, earlier in it, or in the environment), else the remote `gh repo set-default`
+    marked (remote.<name>.gh-resolved), else the first github remote of upstream, github, origin and the rest by
+    name, read where the command runs. (owner/name, how it was found), or (None, why it could not be)."""
+    value: Optional[str] = ""
+    words = list(c.words)
+    prefix = [w for w in words[:next((k for k, w in enumerate(words) if not _ASSIGN.match(w)), len(words))]
+              if _GH_REPO_ASSIGN.match(w)]
+    if prefix:
+        value = st.literal(prefix[-1][len("GH_REPO="):], getattr(prefix[-1], "expands", False))
+    elif "GH_REPO" in st.vars:
+        value = st.vars["GH_REPO"]
+    elif ctx.env.get("GH_REPO"):
+        value = ctx.env.get("GH_REPO")
+    if value is None:
+        return None, "the shell fills in GH_REPO"
+    if value:
+        repo = repo_slug(value)
+        return (repo, "GH_REPO") if repo else (None, f"GH_REPO {_short(value, 60)} is not owner/name")
+    d = st.cur
+    if d is None:
+        return None, "the directory it runs in is not known"
+    out = st.once(("gh-remotes", d), lambda: ctx.git(
+        ["config", "--get-regexp", r"^remote\..*\.(url|gh-resolved)$"], d)) or ""
+    urls: Dict[str, str] = {}
+    resolved: Dict[str, str] = {}
+    for line in out.splitlines():
+        key, _, val = line.strip().partition(" ")
+        name, _, kind = key[len("remote."):].rpartition(".")
+        if key.startswith("remote.") and name:
+            (urls if kind == "url" else resolved).setdefault(name, val.strip())
+    order = sorted(set(urls) | set(resolved), key=lambda n: (
+        _GH_REMOTE_ORDER.index(n) if n in _GH_REMOTE_ORDER else len(_GH_REMOTE_ORDER), n))
+    for name in order:
+        mark = resolved.get(name, "")
+        if mark == "base":
+            repo = parse_origin(urls.get(name) or "")
+        elif mark:
+            repo = repo_slug(mark[len("base:"):] if mark.startswith("base:") else mark)
+        else:
+            continue
+        if repo:
+            return repo, f"remote {name}, set by gh repo set-default"
+    for name in order:
+        repo = parse_origin(urls.get(name) or "")
+        if repo:
+            return repo, f"remote {name}"
+    return None, "no github remote"
 
 
 def _gh_api(t: List[str], seg: str, st: _State, ctx: GuardContext, blk: Blk) -> Iterator[Block]:

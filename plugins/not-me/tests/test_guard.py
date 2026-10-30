@@ -670,6 +670,29 @@ class MessageTests(unittest.TestCase):
                 with self.subTest(cmd=cmd):
                     self.assertEqual(run(cmd, cwd).rule, "protected_branches")
 
+    def test_gh_default_repo_is_found_the_way_gh_finds_it(self):
+        """dblanken-yale/not-me#142: GH_REPO, then the gh repo set-default remote, then upstream, github, origin."""
+        remotes = {"cfg": ""}
+
+        def guided(cmd: str, env: dict = None) -> list:
+            c = GuardContext(env=env or {}, write_ctx=writes.GuardContext(
+                origin_repo="acme/app", allowed_repos=("acme/app",), protected_branches=("main",)))
+            c.git = lambda args, cwd: remotes["cfg"] if "--get-regexp" in args else None
+            self.assertIsNone(guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": "."}, c))
+            return [(g.rule, g.target, g.reason) for g in c.guided]
+        cmd = "gh issue comment 1 --body-file f"
+        remotes["cfg"] = "remote.origin.url https://github.com/acme/app.git\n"
+        self.assertEqual(guided(cmd), [])
+        self.assertEqual(guided(cmd, {"GH_REPO": "acme/other"})[0][:2], ("other_repo", "acme/other"))
+        remotes["cfg"] += "remote.upstream.url git@github.com:acme/up.git\n"
+        self.assertEqual(guided(cmd)[0][:2], ("other_repo", "acme/up"))
+        remotes["cfg"] += "remote.origin.gh-resolved base\n"
+        self.assertEqual(guided(cmd), [])  # set-default chose origin over upstream
+        remotes["cfg"] = ""
+        rule, target, reason = guided(cmd)[0]
+        self.assertEqual((rule, target), ("other_repo", "acme/app"))
+        self.assertIn("could not be worked out (no github remote); assumed acme/app", reason)
+
     def test_decide_fills_message_and_tool(self):
         ctx = self.ctx()
         ctx.git = lambda args, cwd: None
@@ -1161,7 +1184,7 @@ class GuideNotBlockTests(_Fixtures):
     def test_writes_to_another_repo_are_guided(self):
         for cmd in ("gh issue create --repo dblanken-yale/not-me --title x --body-file b.md",
                     "gh issue comment 5 --repo acme/other --body-file b.md",
-                    "gh pr comment 5 --repo acme/other --body hi", "gh pr create --title x --body y",
+                    "gh pr comment 5 --repo acme/other --body hi", "GH_REPO=acme/lib gh pr create --title x --body y",
                     "git push https://github.com/acme/lib.git HEAD", "git remote set-url origin " + gc.GH + "acme/lib"):
             with self.subTest(cmd=cmd):
                 result, ctx = self.decide(cmd)

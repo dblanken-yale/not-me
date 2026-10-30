@@ -85,6 +85,9 @@ REPOS: Dict[str, Tuple[str, str, Optional[str], str]] = {
     "upmain": (GH + "acme/app.git", "feature/x", "", "upmain"),
     "pushspec": (GH + "acme/app.git", "feature/x", "", "pushspec"),
     "mirror": (GH + "acme/app.git", "feature/x", "", "mirror"),
+    # gh's default repo (dblanken-yale/not-me#142): gh repo set-default chose another remote; an upstream remote
+    "ghdefault": (GH + "acme/app.git", "feature/x", "", "ghdefault"),
+    "ghupstream": (GH + "acme/app.git", "feature/x", "", "ghupstream"),
 }
 
 # The repo layer may only tighten guard.*, mode, enabled and protected_branches, and its
@@ -188,6 +191,11 @@ def build_fixtures(root: Path) -> Dict[str, str]:
             _git(["config", "remote.origin.push", "refs/heads/*:refs/heads/*"], repo, env)
         elif extra == "mirror":
             _git(["config", "remote.origin.mirror", "true"], repo, env)
+        elif extra == "ghdefault":
+            _git(["remote", "add", "fork", GH + "acme/other.git"], repo, env)
+            _git(["config", "remote.fork.gh-resolved", "base"], repo, env)
+        elif extra == "ghupstream":
+            _git(["remote", "add", "upstream", GH + "acme/other.git"], repo, env)
         elif extra == "pushdefault":
             _git(["remote", "add", "up", GH + "acme/lib.git"], repo, env)
             _git(["config", "remote.pushDefault", "up"], repo, env)
@@ -299,7 +307,7 @@ bash(G, OR, "gh pr comment 5 --repo acme/other --body hi")
 bash(G, OR, "gh pr comment 5 --repo=acme/other --body hi")
 bash(G, OR, "gh pr merge https://github.com/acme/lib/pull/9")  # merging is allowed; other repos are not
 bash(G, OR, "gh issue create --repo acme/internal --title x")
-bash(G, OR, "gh pr create --title x", "other")
+bash(A, None, "gh pr create --title x", "other")  # gh's default: the origin
 bash(G, OR, "gh pr comment 5 --repo acme/app-fork --body hi")
 bash(G, OR, "gh pr comment 5 --repo evil/acme/app --body hi")
 bash(G, OR, "gh run rerun 123 --repo acme/lib")
@@ -315,7 +323,7 @@ bash(G, OR, "gh api user/repos -f name=x")
 bash(G, OR, 'gh api graphql -f query="mutation { addComment(input:{}) { clientMutationId } }"')
 bash(B, DG, "gh api graphql -F query=@q.graphql")
 bash(G, OR, "gh api repos/{owner}/{repo}/issues -f title=x")
-bash(G, OR, "gh pr create --title x --body y")
+bash(A, None, "gh pr create --title x --body y")  # gh's default repo, acme/app
 bash(G, OR, "git -C {F}/other push origin HEAD")
 bash(G, OR, "git -C {F}/other push")
 bash(G, OR, "cd {F}/other; git push")
@@ -657,8 +665,8 @@ bash(A, None, "notme git worktree-add 0123456789abcdef")
 bash(A, None, "notme git worktree-add 0123456789abcdef --name ../../hooks")  # the CLI refuses the name
 bash(A, None, "notme git worktree-add")
 # VAR=value in front of gh, git or notme is fine, except variables that change where git pushes (GIT_DIR and the
-# like); a gh write still has to name its repo.
-bash(G, OR, "GH_REPO=acme/app gh pr comment 1 -b x")
+# like); a gh write with no --repo is judged on gh's default repo (dblanken-yale/not-me#142).
+bash(A, None, "GH_REPO=acme/app gh pr comment 1 -b x")
 bash(A, None, "FOO=1 git push origin feature/x")
 bash(A, None, "PYTHONPATH=/tmp notme status")
 bash(A, None, "FOO=1 git status", "alloff")
@@ -2109,6 +2117,23 @@ mcp(B, PB, "mcp__github__create_or_update_file", {"owner": "acme", "repo": "app"
 mcp(B, PB, "mcp__github__update_ref", {"owner": "acme", "repo": "app", "ref": "refs/remotes/origin/x"})
 mcp(A, None, "mcp__github__push_files", {"owner": "acme", "repo": "app", "branch": "refs/heads/feature/x", "files": []})
 ROUND_B_END = len(CASES)
+
+# dblanken-yale/not-me#142: a gh write with no --repo works on gh's default repo, found the way gh finds it: GH_REPO,
+# the remote `gh repo set-default` marked, then upstream, github, origin. An allowed one runs; another is guided; one
+# that cannot be worked out runs and is logged with the repo the guard assumed.
+bash(A, None, "gh issue comment 118 --body-file c.md")  # in a checkout of an allowed repo
+bash(A, None, "gh pr create --title x --body-file b.md", "repooff")
+bash(G, OR, "gh issue comment 118 --body-file c.md", "ghdefault")  # set-default chose acme/other
+bash(A, None, "gh issue comment 118 --repo acme/app --body-file c.md", "ghdefault")
+bash(G, OR, "gh issue comment 118 --body-file c.md", "ghupstream")  # upstream comes before origin
+bash(G, OR, "GH_REPO=acme/other gh issue comment 118 --body-file c.md")
+bash(G, OR, "export GH_REPO=acme/other; gh issue comment 118 --body-file c.md")
+bash(A, None, "GH_REPO=acme/friend gh issue comment 118 --body-file c.md", "app@hproj")
+bash(G, OR, "cd {F}/other && gh issue comment 118 --body-file c.md")  # judged where the leading cd lands
+bash(G, OR, 'cd "$NOWHERE" && gh issue comment 118 --body-file c.md')  # cannot be worked out: assumed, logged
+bash(G, OR, 'GH_REPO="$R" gh issue comment 118 --body-file c.md')
+bash(G, OR, "gh pr comment 5 --repo acme/other --body hi", "ghdefault")  # --repo still wins
+bash(B, DG, "gh issue delete 1 --yes", "ghdefault")
 
 # Substrings a block message must contain, by case id. Guided cases print no message; test_guard checks their rule.
 MESSAGE_CHECKS: Dict[str, List[str]] = {

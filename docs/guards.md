@@ -108,10 +108,12 @@ gh issue create --repo acme/not-me --title x --body-file b.md   # reporting a bu
 gh pr comment 5 --repo acme/other --body hi
 git push https://github.com/acme/lib.git HEAD
 gh api -X POST repos/acme/lib/issues/1/comments -f body=x
-gh pr create --title x --body y                  # names no repo: gh's default is not always origin
+GH_REPO=acme/lib gh pr create --title x --body y  # names no repo: gh's default repo is acme/lib
 git remote set-url origin https://github.com/acme/lib.git
 git config remote.origin.pushurl https://github.com/acme/lib.git
 ```
+
+A gh command with no `--repo` (or `-R`) works on gh's default repo, and the guard works it out the way gh does (dblanken-yale/not-me#142): `GH_REPO` (on the command, set earlier in it, or in the environment), else the remote `gh repo set-default` marked (`remote.<name>.gh-resolved`), else the first GitHub remote of `upstream`, `github`, `origin` and the rest by name, read where the command runs (after a leading `cd`, see [Where git runs](#where-git-runs-git--c-a-leading-cd-and-variables)). So `gh issue comment 118 --body-file c.md` inside a checkout of an allowed repo just runs. A default it cannot work out (no GitHub remote, a `GH_REPO` the shell fills in, a directory it cannot name) is not blocked: the call runs and the guard log records it as guided, naming the repo it assumed (the checkout's `origin`). A `--repo` naming a repo off the allowed list is guided as before. `gh project` is not judged by its repo: a board belongs to an owner.
 
 The process rule (`prohibitions.md`): a run writes only to the project's repos, through the `notme` CLI, whose write gate refuses anything else. In a session a person drives, an issue or comment on another repo is fine when that person asked for it, and always on the plugin's own repository. Setting `guard.other_repo: off` (with `confirm_guard_off`) stops the log lines and also lifts that write-gate check.
 
