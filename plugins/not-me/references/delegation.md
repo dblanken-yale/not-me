@@ -46,6 +46,10 @@ Every brief has:
 3. **Conventions**: the project's commit style, test framework, lint command.
 4. **Scope**: "touch nothing outside these paths"; no commits, no pushes, no posts.
 5. **Acceptance**: the tests or commands that must pass, and the expected result.
+   When `notme verify-plan` lists targeted commands, name them and tell the
+   implementer to run only those, with the changed test files or test names as
+   trailing arguments, never the full suite. The full set runs once, by you,
+   before the push. With no targeted command, give the full test command.
 6. On a retry: the previous attempt's failure, quoted from your own check.
 
 Example: "Goal: the last page of `pager.py` includes the final item when the total
@@ -57,7 +61,8 @@ a failing test first. Acceptance: the project test command passes and
 
 1. Never read the subagent's transcript, and never trust its summary.
 2. Read the diff. Check it stayed inside the scope you gave.
-3. Run the tests, the lint, and the gate steps that apply yourself (see `gate.md`).
+3. Run the tests (the targeted ones when the plan has them), the lint, and the
+   gate steps that apply yourself (see `gate.md`).
 4. Check the result against the acceptance in the brief, not against "looks right".
 
 ## Retry ladder
