@@ -47,8 +47,11 @@ including the ones inside $( ) and backticks. Text the guard does not parse
 code, a script file, a command name it cannot resolve, words xargs adds) is
 opaque: it is allowed unless its decoded text holds one of the words in
 _DANGER or _SELF_TEXT, and then blocked under the first relevant rule that is
-on. The guard does not follow cd: writes are judged in the hook's working
-directory, or the `git -C` / `gh -R` they name.
+on. Writes are judged in the hook's working directory, or the `git -C` / `gh -R`
+they name. For git and gh the guard follows a leading `cd <path>` and fills in
+variables set to a literal path earlier in the same command; a directory it
+cannot work out is logged as guided, never judged as the session's own
+(dblanken-yale/not-me#144, see _State).
 """
 from __future__ import annotations
 
@@ -219,6 +222,7 @@ _OPAQUE_HINT ="run the git, gh or notme command directly, with every word spelle
 _PREFILTER = re.compile(
     r"(?<![A-Za-z0-9_-])(gh|git|rm|find|xargs|parallel|sudo|doas|bash|sh|zsh|dash|ksh|fish|source|exec|eval"
     r"|tar|bsdtar|gtar|unzip"  # an extract with no destination writes into the working directory
+    r"|cp|mv|ln|rsync|install|ditto"  # a relative destination (`..`) may be the not-me home or above it
     r"|(?i:" + _INTERP_NAMES + r"))(?![A-Za-z0-9_-])"
     r"|not-me|NOT_ME_|allowed-repos"
     r"|[$`/~*?\[\\&]|(?:^|[\s;|&(])\.(?:\s|$)|\.(?:sh|bash|zsh)\b|\.git")
@@ -310,6 +314,8 @@ _FIND_EXEC = {"-exec", "-execdir", "-ok", "-okdir"}
 # git subcommands whose target branch the guard must know: pointed at another repository's git dir, they block
 _BRANCH_WRITES = frozenset({"commit", "push", "merge", "rebase", "cherry-pick", "am", "reset", "branch", "clean",
                             "send-pack", "subtree"})
+# git subcommands whose check reads the branch checked out where they run
+_BRANCH_READERS = frozenset({"commit", "push", "merge", "rebase", "cherry-pick", "am", "reset"})
 
 # --- results ---------------------------------------------------------------
 
@@ -327,6 +333,7 @@ class Block:
     rules: Tuple[str, ...] = ()  # for OPAQUE: the rules it may be reported under, in order
     no_relax: bool = False  # the fix is to rewrite the command, so the message leaves out how to relax the rule
     no_checkout: bool = False  # raised because the checkout (or its push URL) could not be resolved
+    guide_only: bool = False  # logged as guided under its rule (when that rule is on), never blocked
 
 
 Decision = Optional[Block]  # None = allow
@@ -498,6 +505,9 @@ class SimpleCommand:
     bodies: List[str] = field(default_factory=list)  # here-document bodies and here-strings fed to it
     redirs: List[Tuple[str, str]] = field(default_factory=list)  # (operator, target)
     nested: bool = False  # inside $( ), backticks or <( )
+    # top-level commands only: the operators between the previous top-level command and this one (;, &&, ||, |, &,
+    # parentheses, newlines), comments and here-document bodies removed
+    before: str = ""
 
 
 @dataclass
@@ -506,6 +516,7 @@ class Parsed:
     subs: List[str]  # source of every $( ), backtick, <( ) and >( ) body, here-document bodies removed
     code: str  # the whole command without here-document bodies
     funcdef: bool  # a name() function definition
+    tail: str = ""  # the operators after the last top-level command
 
 
 _META = frozenset(" \t\n;&|()<>")
@@ -879,11 +890,20 @@ def lex(cmd: str) -> Parsed:
     lx = _Lexer(cmd)
     lx.parse(None)
     lx.read_bodies()  # a here-document opened on the last line has an empty body
+    prev = 0
     for c in lx.commands:
         c.raw = lx.without_bodies(*c.span)
+        if not c.nested:
+            c.before = _COMMENT.sub("", lx.without_bodies(prev, c.span[0]))
+            prev = c.span[1]
     subs = [lx.without_bodies(a, b) for a, b, _ in lx.sub_spans]
     subs = [_PARAM_OP.sub(" ", s, count=1) if p else s for s, (_, _, p) in zip(subs, lx.sub_spans)]
-    return Parsed(lx.commands, subs, lx.without_bodies(0, len(cmd)), lx.funcdef)
+    return Parsed(lx.commands, subs, lx.without_bodies(0, len(cmd)), lx.funcdef,
+                  _COMMENT.sub("", lx.without_bodies(prev, len(cmd))))
+
+
+# between two top-level commands there are no words, so a # always starts a comment
+_COMMENT = re.compile(r"#[^\n]*")
 
 
 # the name and operator at the start of a ${...} body, so the word after ${x:-word} reads as a word
@@ -1137,7 +1157,7 @@ def _decide(event: Mapping[str, Any], ctx: GuardContext) -> Decision:
         elif block.rule != SELF and not ctx.rules.get(block.rule, True):
             continue
         block.tool = tool
-        if block.rule in GUIDED:
+        if block.rule in GUIDED or block.guide_only:
             ctx.guided.append(block)
             continue
         block.message = render(block, ctx)
@@ -1351,9 +1371,23 @@ def _mcp(tool: str, tin: Mapping[str, Any], ctx: GuardContext) -> Iterator[Block
 # --- Bash ----------------------------------------------------------------------
 
 
+_GAP_TOKEN = re.compile(r"&&|\|\||\|&|;;&?|;&|[;&|()\n]")
+_VAR_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+_ASSIGN_NAME = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\+?)=")
+_DIR_CHANGERS = frozenset({"cd", "pushd", "popd", "chdir"})
+_DIR_RUNNERS = frozenset({"source", ".", "eval", "trap"})  # may run a cd the guard does not see
+_SEQ = {";", "&&", "\n"}  # operators that keep the next command in this shell, run after the one before
+
+
 class _State:
     """Per-command state: the hook's real working directory, the command's text (code without here-document
-    bodies, and raw with them), the branch a checkout moved to, and memoised lookups."""
+    bodies, and raw with them), the branch a checkout moved to, and memoised lookups.
+
+    For git and gh it also tracks (dblanken-yale/not-me#144) the directory they run in and the variables set to a
+    literal value earlier in the same command. Only a leading `cd <path>` is followed (after any plain variable
+    assignments, joined by `&&`, `;` or a newline); a later cd, pushd or popd, or a leading cd whose directory
+    cannot be worked out, leaves the directory unknown (`cur` None). Every other path check uses `dir`, the hook's
+    real working directory."""
 
     def __init__(self, cwd: str, parsed: Parsed, raw: str, depth: int = 0, parent: Optional["_State"] = None):
         self.dir = cwd
@@ -1366,6 +1400,17 @@ class _State:
         self.raw = raw
         self.switched: Dict[str, str] = {}  # checkout dir -> the branch a checkout in this command moved to
         self.memo: Dict[Tuple[str, ...], Any] = {}
+        # where git and gh run: a body (bash -c, eval) starts where its parent command runs; None = unknown
+        self.base: Optional[str] = parent.cur if parent is not None else cwd
+        self.cur: Optional[str] = self.base
+        # a checkout or switch in a checkout the guard could not name: no branch is known any more
+        self.blind = parent.blind if parent is not None else False
+        self.vars: Dict[str, Optional[str]] = {}  # name -> literal value, None once it cannot be known
+        self.prelude = True  # only plain assignments so far: the next cd is the leading one
+        self.followed = False  # a leading cd moved (or lost) the directory
+        self.cd_open = False  # the and-or list that holds the leading cd has not ended yet
+        top = [c for c in parsed.commands if not c.nested]
+        self.after = {id(c): (top[k + 1].before if k + 1 < len(top) else parsed.tail) for k, c in enumerate(top)}
 
     def once(self, key: Tuple[str, ...], fn: Callable[[], Any]) -> Any:
         if key not in self.memo:
@@ -1375,6 +1420,91 @@ class _State:
     @cached_property
     def plain_text(self) -> str:
         return _unshell(self.text)
+
+    def literal(self, word: str, expands: bool) -> Optional[str]:
+        """word's value when the guard knows it: as written when nothing in it expands, else with $NAME and ${NAME}
+        filled in from literal assignments earlier in this command; None when any part is not known."""
+        if not expands:
+            return None if ("$" in word or "`" in word) else word
+        missing = []
+
+        def fill(m: "re.Match[str]") -> str:
+            value = self.vars.get(m.group(1) or m.group(2))
+            if value is None:
+                missing.append(m.group(0))
+                return ""
+            return value
+        out = _VAR_REF.sub(fill, word)
+        if missing or "$" in out or "`" in out or (out.startswith("~") and "HOME" in self.vars):
+            return None
+        return out
+
+    def step(self, c: SimpleCommand) -> None:
+        """Bring the directory and variables up to date before c runs."""
+        if self.funcdef:  # a function body may run any time: nothing is tracked
+            return
+        if not c.nested:
+            for tok in _GAP_TOKEN.findall(c.before):
+                if self.cd_open and tok == "&":  # the list holding the cd ran in the background
+                    self.cur, self.cd_open = self.base, False
+                elif tok in (";", "\n", ";;", ";&", ";;&"):
+                    self.cd_open = False
+            gap_ok = set(_GAP_TOKEN.findall(c.before)) <= _SEQ
+            if self.prelude:
+                assigns = self._assignments(c) if gap_ok else None
+                if assigns is not None:
+                    self.vars.update(assigns)
+                    return
+                self.prelude = False
+                if gap_ok and c.words[:1] == ["cd"] and not c.redirs:
+                    self._leading_cd(c)
+                    return
+            # after a followed cd, anything that may change the directory again (a cd in a function or a group, a
+            # sourced script, eval, a trap) leaves it unknown
+            if self.followed and (_DIR_CHANGERS | _DIR_RUNNERS) & set(c.words):
+                self.cur = None
+        for name in list(self.vars):
+            if name in c.words or re.search(r"(?<![A-Za-z0-9_$])" + name + r"(?:\[|\+?=)", c.raw):
+                self.vars[name] = None
+
+    def _assignments(self, c: SimpleCommand) -> Optional[Dict[str, Optional[str]]]:
+        """{name: literal value or None} when c only assigns variables (`W=/x`, `export W=/x`), else None."""
+        words = list(c.words[1:] if c.words[:1] == ["export"] else c.words)
+        if not words or c.redirs:
+            return None
+        out: Dict[str, Optional[str]] = {}
+        for w in words:
+            m = _ASSIGN_NAME.match(w)
+            if not m:
+                return None
+            value = (getattr(w, "raw", "") or w)[m.end():]  # as typed, the way git -C reads a path (see _cmd_git)
+            known = None if m.group(2) or not value or _GLOB.search(value) else \
+                self.literal(value, getattr(w, "expands", False))
+            out[m.group(1)] = known
+        return out
+
+    def _leading_cd(self, c: SimpleCommand) -> None:
+        nxt = _GAP_TOKEN.findall(self.after.get(id(c), ""))
+        first = nxt[0] if nxt else "\n"
+        if first in ("|", "|&", "&"):  # in a pipeline or in the background: the cd does not reach later commands
+            return
+        self.followed = True
+        arg = c.words[1] if len(c.words) == 2 else None
+        path = None
+        # one operand, no option, no glob or brace; ~ only as the user's own home, and only while HOME is untouched
+        if first in _SEQ and arg and not arg.startswith("-") and not getattr(arg, "glob", False) and \
+                not getattr(arg, "brace", False) and \
+                (not arg.startswith("~") or ((arg == "~" or arg.startswith("~/")) and "HOME" not in self.vars)):
+            value = self.literal(getattr(arg, "raw", "") or arg, getattr(arg, "expands", False))
+            relative = value is not None and not _path.isabs(_path.expanduser(value))
+            # a relative cd goes through CDPATH and the logical $PWD, which the command or the session may have set
+            if relative and (self.cur is None or {"PWD", "CDPATH"} & set(self.vars) or os.environ.get("CDPATH")):
+                value = None
+            if value is not None:
+                full = _norm(value, self.cur or self.dir)
+                path = full if _path.isdir(full) else None
+        self.cur = path
+        self.cd_open = first == "&&"
 
 
 def _bash(cmd: str, cwd: str, ctx: GuardContext, depth: int = 0,
@@ -1393,6 +1523,7 @@ def _bash(cmd: str, cwd: str, ctx: GuardContext, depth: int = 0,
             continue
         st = _State(cwd, p, cmd, depth, parent)
         for c in p.commands:
+            st.step(c)
             yield from _command(c, st, ctx)
 
 
@@ -1411,8 +1542,9 @@ def _raw_variant(parsed: Parsed) -> Optional[Parsed]:
     if not any(getattr(w, "raw", w) != w for c in parsed.commands for w in c.words + [t for _, t in c.redirs]):
         return None
     commands = [SimpleCommand([_raw_word(w) for w in c.words], c.raw, c.span, c.bodies,
-                              [(op, _raw_word(t)) for op, t in c.redirs], c.nested) for c in parsed.commands]
-    return Parsed(commands, parsed.subs, parsed.code, parsed.funcdef)
+                              [(op, _raw_word(t)) for op, t in c.redirs], c.nested, c.before)
+                for c in parsed.commands]
+    return Parsed(commands, parsed.subs, parsed.code, parsed.funcdef, parsed.tail)
 
 
 def _opaque(text: str, blk: Blk, what: str, code: bool = False) -> Iterator[Block]:
@@ -2292,28 +2424,41 @@ class _GitCall:
     ctx: GuardContext
     st: _State
     blk: Blk
-    d: str
+    d: Optional[str]  # the checkout git runs in; None when the guard cannot work it out
     sub: str
     args: List[str] = field(default_factory=list)
 
+    @property
+    def blind(self) -> bool:
+        """The branch git works on cannot be known: the checkout is unknown, or a checkout in an unknown one moved."""
+        return self.d is None or self.st.blind
+
+
+def _unknown_checkout(c: _GitCall) -> Block:
+    """Guided, not blocked (dblanken-yale/not-me#144): the call runs and the guard log records it."""
+    b = c.blk("protected_branches", f"the guard could not work out which checkout or branch git {c.sub} runs on, "
+                                    "so it did not check the branch")
+    b.guide_only = True
+    return b
+
 
 def _cmd_git(t, c, st, ctx, blk, depth: int = 0):
-    d = st.dir
+    d: Optional[str] = st.cur
     c_keys: List[str] = []
     redirect: Optional[str] = None
-    var_opt: Optional[str] = None  # the first -C, --git-dir or --work-tree whose path the shell fills in
     var_redirect: Optional[str] = None  # the first --git-dir or --work-tree whose path the shell fills in
     i = 1
     while i < len(t) and t[i].startswith("-"):
         a = t[i]
         name, eq, val = a.partition("=")
         nxt = t[i + 1] if i + 1 < len(t) else ""
-        if (a == "-C" or name in ("--git-dir", "--work-tree")) and _unresolved(val if eq else nxt):
-            var_opt = var_opt or name
-            if name != "-C":
-                var_redirect = var_redirect or name
+        if name in ("--git-dir", "--work-tree") and _unresolved(val if eq else nxt):
+            var_redirect = var_redirect or name
         if a == "-C":  # as typed: with unquoted backslashes bash would hand git a path that does not exist
-            d = _norm(getattr(nxt, "raw", "") or nxt or ".", d)
+            path = st.literal(getattr(nxt, "raw", "") or nxt or ".", getattr(nxt, "expands", False))
+            known = path is not None and not getattr(nxt, "glob", False) and \
+                (d is not None or _path.isabs(_path.expanduser(path)))
+            d = _norm(path, d or st.dir) if known else None
             i += 2
         elif a == "-c":
             c_keys.append(nxt.split("=", 1)[0])
@@ -2344,13 +2489,19 @@ def _cmd_git(t, c, st, ctx, blk, depth: int = 0):
             return
         yield blk("other_repo", f"git -c {_short(key, 40)} can change where or what git pushes")
     if sub and sub not in _GIT_BUILTINS:
+        if d is None:
+            # the alias lives in a checkout the guard cannot name, so what it runs cannot be looked up
+            b = blk(OPAQUE, f"the guard could not work out which checkout this git command runs in, so it cannot "
+                            f"look up the alias git {_short(sub, 40)}",
+                    "write the path out in full (`git -C /abs/path <sub> ...`), or run the command the alias stands "
+                    "for; a rewritten command is checked afresh, so this is not a retry",
+                    rules=("other_repo", "protected_branches"))
+            b.no_relax = True
+            yield b
+            return
         alias = st.once(("alias", d, sub), lambda: ctx.git(["config", "--get", f"alias.{sub}"], d))
         if alias:
             yield from _git_alias(alias, sub, args, t[:i], c, st, ctx, blk, depth)
-        if var_opt is not None:
-            # the alias that runs lives in the repo the shell names, which may not be the one looked up here: after
-            # any rules the alias found here raises (decide takes the first enabled one), fail closed
-            yield _var_path(blk, var_opt)
         return  # an external git-<name> program is outside the guard's view
     redirect = redirect or st.once(("git-env",), lambda: (lambda m: _short(m.group(0), 40) if m else None)(
         _GIT_ENV.search(st.plain_text)))
@@ -2369,16 +2520,12 @@ def _cmd_git(t, c, st, ctx, blk, depth: int = 0):
         yield blk("other_repo", f"{redirect} changes which repository or config git uses")
     handler = _GIT_RULES.get(sub)
     if handler is not None:
-        for b in handler(_GitCall(ctx, st, blk, d, sub, args)):
-            # the guard looked for a checkout literally named $W: say so rather than blame the repo (blocks that do
-            # not come from the unresolved checkout keep their own message)
-            if var_opt is not None and b.no_checkout:
-                b = _var_path(blk, var_opt)
-            yield b
-        if var_opt is not None and not _git_reads(sub, args):
-            # the handler judged the checkout _norm made of the path ("$W" names nothing, "$W/.." names this one),
-            # not the one the shell will pick: after its own rules, fail closed on any write
-            yield _var_path(blk, var_opt)
+        call = _GitCall(ctx, st, blk, d, sub, args)
+        yield from handler(call)
+        # a write the guard could not place: rules it breaks on its own (a force push, a protected branch it names)
+        # have blocked above; the rest runs and is logged, never judged by the session's directory
+        if (d is None and not _git_reads(sub, args)) or (call.blind and sub in _BRANCH_READERS):
+            yield _unknown_checkout(call)
 
 
 # git branch options that only list; git accepts abbreviated long options, so anything not spelled out here is a write
@@ -2447,7 +2594,10 @@ def _git_alias(alias: str, sub: str, args: List[str], prefix: List[str], c: Simp
     yield from _cmd_git(words, c, st, ctx, blk, depth + 1)
 
 
-def _branch(ctx: GuardContext, st: _State, d: str) -> Optional[str]:
+def _branch(ctx: GuardContext, st: _State, d: Optional[str]) -> Optional[str]:
+    """The branch checked out at d; None when detached, unreadable or not known (see _GitCall.blind)."""
+    if d is None or st.blind:
+        return None
     if d in st.switched:
         return st.switched[d]
 
@@ -2463,12 +2613,18 @@ def _branch(ctx: GuardContext, st: _State, d: str) -> Optional[str]:
     return st.once(("branch", d), read)
 
 
-def _git_config(ctx: GuardContext, st: _State, d: str, key: str) -> Optional[str]:
+def _git_config(ctx: GuardContext, st: _State, d: Optional[str], key: str) -> Optional[str]:
+    if d is None:
+        return None
     return st.once(("config", d, key), lambda: ctx.git(["config", "--get", key], d))
 
 
 def _git_switch(c: _GitCall) -> Iterator[Block]:
-    """Track the branch a checkout/switch moves to; unknown outcomes fall back to reading HEAD."""
+    """Track the branch a checkout/switch moves to; unknown outcomes fall back to reading HEAD. In a checkout the
+    guard cannot name it may move any checkout's branch, the session's included: no branch is known after it."""
+    if c.d is None:
+        c.st.blind = True
+        return iter(())
     c.st.switched.pop(c.d, None)
     c.st.memo.pop(("branch", c.d), None)
     new = [c.args[k + 1] for k, a in enumerate(c.args[:-1]) if a in ("-b", "-B", "-c", "-C")]
@@ -2497,6 +2653,8 @@ def _git_commit(c: _GitCall) -> Iterator[Block]:
     if b in c.ctx.protected_branches:
         yield c.blk("protected_branches", f"commits on the protected branch {b} are not allowed",
                     "create a feature branch first (git switch -c <type>/<topic>) and commit there")
+    if c.d is None:
+        return  # _cmd_git logs the unknown checkout
     origin = c.st.once(("origin", c.d), lambda: c.ctx.git(["remote", "get-url", "origin"], c.d))
     slug = parse_origin(origin)
     if slug:
@@ -2612,6 +2770,8 @@ def _push_default_target(c: _GitCall, current: Optional[str], remote: Optional[s
     """A push with no refspec goes where the repo config says: remote.<name>.push, push.default and the
     branch's upstream. Block when that is a protected branch or cannot be told."""
     ctx, st, blk, d = c.ctx, c.st, c.blk, c.d
+    if c.blind:
+        return  # _cmd_git logs the unknown checkout
     if current is None:
         yield blk("protected_branches", "git push with no branch named, on a detached HEAD, cannot be checked",
                   "name the branch: git push origin <branch>")
@@ -2738,6 +2898,10 @@ def _git_push(c: _GitCall) -> Iterator[Block]:
         remote = (b and _git_config(ctx, st, d, f"branch.{b}.pushRemote")) \
             or _git_config(ctx, st, d, "remote.pushDefault") \
             or (b and _git_config(ctx, st, d, f"branch.{b}.remote")) or "origin"
+    if d is None:
+        yield _unknown_target(blk, f"the checkout of remote '{remote}' is not known",
+                              "write the git -C path out in full")
+        return
     out = st.once(("push-urls", d, remote), lambda: ctx.git(["remote", "get-url", "--push", "--all", remote], d))
     urls = [u.strip() for u in (out or "").splitlines() if u.strip()]
     if not urls:

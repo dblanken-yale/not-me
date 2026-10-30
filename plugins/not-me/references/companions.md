@@ -38,8 +38,8 @@ Example: `acme/app` (primary) and `acme/app-ui` (companion), both on
 
 1. Commit in each repo on its own branch, naming the checkout instead of changing
    into it: `git -C <checkout> add <paths>`, `git -C <checkout> commit -F <file>`.
-   The guard does not follow `cd`: it judges a git write in the session's working
-   directory, so a `cd` would make it check the wrong checkout.
+   The guard follows only a leading `cd` and logs a git write in a checkout it
+   cannot work out instead of checking it, so `git -C` keeps every write checked.
 2. Push companions first, in `repos` order, then the primary last.
 3. A push that fails in one repo stops the pushes after it. Log which repos were
    pushed and which were not; the next run resumes from there.

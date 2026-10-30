@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import subprocess
 import sys
@@ -28,9 +29,23 @@ class CheckSkillsTest(unittest.TestCase):
         self.assertEqual(code, 1)
         data = json.loads(out)
         rules = {v["rule"] for v in data["violations"]}
-        self.assertEqual(rules, {f"R{i}" for i in range(1, 16)})
+        self.assertEqual(rules, {f"R{i}" for i in range(1, 17)})
         for v in data["violations"]:
             self.assertGreaterEqual(v["line"], 1)
+
+    def test_cd_then_git_is_flagged(self):
+        """R16 (dblanken-yale/not-me#144): git runs with git -C, never after a cd in the same command."""
+        code, out, _ = run("dirty", "--only", "R16")
+        self.assertEqual(code, 1)
+        self.assertIn("plugins/not-me/skills/kitchen/SKILL.md:25: R16:", out)
+        self.assertEqual(run("clean", "--only", "R16")[0], 0)
+        spec = importlib.util.spec_from_file_location("check_skills", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        for line in ("cd <worktree> && git add x", "cd wt; git commit -F m", "(cd x && git push)"):
+            self.assertTrue(mod.CD_GIT.search(line), line)
+        for line in ("git -C <worktree> add x", "cd x && make test", "abcd x && git log"):
+            self.assertFalse(mod.CD_GIT.search(line), line)
 
     def test_text_line_format(self):
         code, out, _ = run("dirty")

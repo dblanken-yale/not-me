@@ -158,10 +158,10 @@ the effective verify doc; never invent a test or lint command, never run a perso
 
 ## Step 6: Commit, Checkpoint B, push
 
-1. Stage only the paths this unit touched, by name. Never a blanket add.
-2. Message per `standards.commit` (`conventional`: `fix(<N>): ...`, scope is the
-   linked issue number, else the PR number, lowercase present tense). Write it to a
-   file; when `attribution` is text, end the message with that line.
+1. Stage only the paths this unit touched, by name; never a blanket add. In a run worktree
+   name it on every git call (`git -C <worktree> add`, `commit`); never `cd` into it first.
+2. Message per `standards.commit` (`conventional`: `fix(<N>): ...`, scope is the linked issue
+   number, else the PR number, lowercase present tense), in a file; when `attribution` is text, end with that line.
 3. One commit per finding group, so each reply can cite its SHA:
 
 <!-- allowed-raw-write -->

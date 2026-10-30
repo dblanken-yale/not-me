@@ -601,45 +601,74 @@ class MessageTests(unittest.TestCase):
         msg = guard.render(Block("self_protect", "x", command="y"), self.ctx())
         self.assertNotIn("Relax this rule", msg)
 
-    def test_variable_git_path_says_spell_it_out(self):
+    def test_variable_git_dir_says_spell_it_out(self):
         ctx = self.ctx()
         ctx.git = lambda args, cwd: None
-        for cmd, opt in (("git -C $W commit -m x", "-C"), ('git -C "$W" push origin HEAD:refs/heads/x', "-C"),
-                         ("git --git-dir=$G commit -m x", "--git-dir"), ("git --work-tree `pwd` commit", "--work-tree"),
-                         ("git -C $W merge feature/y", "-C"), ("git -C $W reset --hard", "-C")):
+        for cmd, opt in (("git --git-dir=$G commit -m x", "--git-dir"), ("git --work-tree `pwd` commit", "--work-tree")):
             with self.subTest(cmd=cmd):
                 r = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": "."}, ctx)
                 self.assertIsInstance(r, Block)
                 self.assertEqual(r.rule, "protected_branches")  # other_repo is guided: the unknown branch blocks
                 self.assertIn(f"Why: the guard does not expand shell variables in a `git {opt}` path.", r.message)
-                if opt == "-C":
-                    self.assertIn("Instead: write the path out in full (`git -C /abs/path <sub> ...`); a rewritten "
-                                  "command is checked afresh, so this is not a retry.", r.message)
-                else:
-                    self.assertIn(f"Instead: drop {opt} and run `git -C /abs/path <sub> ...` with the path written "
-                                  "out in full; a rewritten command is checked afresh, so this is not a retry.",
-                                  r.message)
+                self.assertIn(f"Instead: drop {opt} and run `git -C /abs/path <sub> ...` with the path written "
+                              "out in full; a rewritten command is checked afresh, so this is not a retry.", r.message)
                 self.assertNotIn("Relax this rule", r.message)
-                self.assertNotIn("no github origin", r.message)
+
+    def test_unknown_git_c_path_is_guided_not_blocked(self):
+        """dblanken-yale/not-me#144: a git -C path the guard cannot work out is logged, never judged by the
+        session's directory."""
+        ctx = self.ctx()
+        ctx.git = lambda args, cwd: None
+        for cmd in ("git -C $W commit -m x", 'git -C "$W" push origin HEAD:refs/heads/x', "git -C $W merge feature/y",
+                    "git -C $W reset --hard", 'cd "$W" && git commit -m x'):
+            with self.subTest(cmd=cmd):
+                r = guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": "."}, ctx)
+                self.assertIsNone(r, getattr(r, "message", ""))
+                self.assertTrue(any("could not work out which checkout" in g.reason or "is not known" in g.reason
+                                    for g in ctx.guided), ctx.guided)
         # a literal path to a checkout with no github origin is guided, not blocked
         r = guard.decide({"tool_name": "Bash", "tool_input": {"command": "git -C /nowhere commit -m x"}, "cwd": "."},
                          ctx)
         self.assertIsNone(r)
         self.assertIn("no github origin", ctx.guided[0].reason)
-        # with other_repo off the unknown path is still a possible protected branch; with both off it passes
-        def off(*names: str) -> GuardContext:
-            c = GuardContext(write_ctx=writes.GuardContext(
-                origin_repo="acme/app", allowed_repos=("acme/app",), protected_branches=("main",),
-                rules={r: r not in names for r in guard.RULES}))
-            c.git = lambda args, cwd: None
-            return c
-        ev = {"tool_name": "Bash", "tool_input": {"command": "git -C $W merge x"}, "cwd": "."}
-        r = guard.decide(ev, off("other_repo"))
-        self.assertIsInstance(r, Block)
-        self.assertEqual(r.rule, "protected_branches")
-        self.assertIn("shell variables in a `git -C` path", r.message)
-        self.assertNotIn("Relax this rule", r.message)
-        self.assertIsNone(guard.decide(ev, off("other_repo", "protected_branches")))
+        # a rule the command breaks on its own still blocks
+        r = guard.decide({"tool_name": "Bash", "tool_input": {"command": "git -C $W push -f origin x"}, "cwd": "."}, ctx)
+        self.assertEqual(r.rule, "force_push")
+        # with protected_branches off there is nothing to log
+        c = GuardContext(write_ctx=writes.GuardContext(
+            origin_repo="acme/app", allowed_repos=("acme/app",), protected_branches=("main",),
+            rules={rule: rule != "protected_branches" for rule in guard.RULES}))
+        c.git = lambda args, cwd: None
+        self.assertIsNone(guard.decide({"tool_name": "Bash", "tool_input": {"command": "git -C $W merge x"},
+                                        "cwd": "."}, c))
+        self.assertEqual(c.guided, [])
+
+    def test_leading_cd_and_literal_variables_are_followed(self):
+        """dblanken-yale/not-me#144: git after a leading cd, or through a variable set to a literal path earlier in
+        the command, is judged on the branch checked out there."""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp).resolve()
+            for name, branch in (("main", "main"), ("wt", "feature/x")):
+                (d / name / ".git").mkdir(parents=True)
+                (d / name / ".git" / "HEAD").write_text(f"ref: refs/heads/{branch}\n", encoding="utf-8")
+            ctx = self.ctx()
+            ctx.git = lambda args, cwd: "https://github.com/acme/app.git" if args[:2] == ["remote", "get-url"] \
+                else None
+            main, wt = d / "main", d / "wt"
+
+            def run(cmd: str, cwd: Path) -> guard.Decision:
+                return guard.decide({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(cwd)}, ctx)
+            self.assertEqual(run("git commit -m x", main).rule, "protected_branches")
+            for cmd in (f"cd {wt} && git add x && git commit -F m", f"W={wt}; git -C $W commit -m x",
+                        f'W={wt}; git -C "$W" add x && git -C "${{W}}" commit -F m', f"cd {wt}; git commit -m x",
+                        "cd ../wt && git commit -m x"):
+                with self.subTest(cmd=cmd):
+                    self.assertIsNone(run(cmd, main))
+                    self.assertEqual(ctx.guided, [])
+            for cmd, cwd in ((f"cd {main} && git commit -m x", wt), (f"W={main}; git -C $W commit -m x", wt),
+                             (f"cd {wt} && git commit -m x & git commit -m y", main)):
+                with self.subTest(cmd=cmd):
+                    self.assertEqual(run(cmd, cwd).rule, "protected_branches")
 
     def test_decide_fills_message_and_tool(self):
         ctx = self.ctx()

@@ -94,8 +94,10 @@ the owner's say-so, not a cleanup.
    interpreter code that starts no process and names no git, gh, notme or
    GitHub API are guided, not blocked. The inactive path
    is fork-free. Block messages say what to do next in the session and never
-   send the operator to a terminal. The guard does not follow `cd`, and it is
-   not the last line: GitHub rulesets on protected branches (no deletion, no
+   send the operator to a terminal. For git and gh it follows only a leading
+   `cd <path>` and variables set to a literal path in the same command; a
+   directory it cannot work out is guided, never judged as the session's
+   (dblanken-yale/not-me#144). It is not the last line: GitHub rulesets on protected branches (no deletion, no
    force push, PR required) are the backstop the docs recommend.
 
 4. **The CLI's trust anchor is the checkout it runs in.** Restricted mode is

@@ -21,7 +21,7 @@ The rule groups only apply when not-me is in play:
 
 Anywhere else (outside any git repo, or in a git repo that is not a not-me project, such as one nested inside a not-me checkout) the rule groups are off and only [self-protection](#self-protection) is checked. Those checks start no process and read no config, and their blocks are not logged.
 
-It is also cheap. A Bash command that mentions none of `git`, `gh`, `rm`, a shell or interpreter, `$`, backticks, `&`, a path, a glob or the allow list's name is allowed after one text check, with no process started and no config read.
+It is also cheap. A Bash command that mentions none of `git`, `gh`, `rm`, a copy, move, link or extract program (`cp`, `mv`, `ln`, `rsync`, `install`, `ditto`, `tar`, `unzip`), a shell or interpreter, `$`, backticks, `&`, a path, a glob or the allow list's name is allowed after one text check, with no process started and no config read.
 
 ## Audit: what blocks, what guides
 
@@ -34,7 +34,8 @@ Decided by the owner on 2026-10-30 (dblanken-yale/not-me#141): guide runs to the
 | Commits, merges, rebases, cherry-picks, `am` and `git reset --hard` on a protected branch | keep | Breaks the process: work reaches protected branches only through a reviewed PR, and a hard reset throws work away. |
 | Pushes to a protected branch, `--all`, `--mirror`, a bare push whose upstream is protected, a refspec the shell fills in | keep | Same: lands on a protected branch without review. |
 | A push whose target the guard cannot see: `git -c` push or alias keys on a push, an alias or a git that runs other gits (`rebase`, `submodule`, `bisect`, `filter-branch`, `for-each-repo`, `difftool`, `mergetool`, `maintenance`, `worktree`); `GIT_DIR`/`GIT_CONFIG_*`/`--git-dir`/`--work-tree`/`HOME` on a write or on one of those; `git send-pack`, `git subtree push`, pushing submodules | keep (now `protected_branches`, was `other_repo`) | The branch it lands on cannot be checked, so it may be protected. A child git inherits `-c` and the variables. |
-| A git write through a `-C`/`--git-dir`/`--work-tree` path the shell fills in | keep (now `protected_branches` first) | The checkout it changes may be on a protected branch. |
+| A git write through a `--git-dir`/`--work-tree` path the shell fills in | keep (now `protected_branches` first) | The checkout it changes may be on a protected branch. |
+| A git write through a `-C` path, or after a leading `cd`, that the guard cannot work out | guide (changed by dblanken-yale/not-me#144; was keep) | Judging it by the session's directory blocked a run's commit in its own worktree. A variable set to a literal path earlier in the command is filled in, and a leading `cd <path>` is followed. A protected branch the command names, and a force push, still block. |
 | A ref update, contents write or merge without a pull request through the GitHub API, to a protected branch, the default branch or a branch the guard cannot read (`PATCH .../git/refs/heads/main`, `PUT .../contents/...` with no feature branch, `POST .../merges` and `.../merge-upstream` into a protected `base`/`branch`, any `@file` field value; `refs/heads/main`, `heads/main`, `refs/main` and trailing slashes all count as `main`, and any other ref under `refs/` (a tag, a remote) cannot be checked, so it blocks; the same for GitHub MCP tools; GraphQL `updateRef(s)`, `createRef`, `createCommitOnBranch`, `mergeBranch`, `revertPullRequest`) | keep (new) | A push in all but name. Before, only writes to repos off the allowed list were stopped. |
 | Force pushes, `+` refspecs, forced API ref updates, remote branch deletes, `gh pr merge\|close --delete-branch` | keep | Cannot be undone. |
 | GitHub settings, secrets, variables, rulesets and branch protection; repo edit, rename, archive and delete; release, label and issue deletes; `gh workflow disable`; any API `DELETE` | keep | Settings and secrets are a person's call, and deletes cannot be undone. |
@@ -114,7 +115,7 @@ git config remote.origin.pushurl https://github.com/acme/lib.git
 
 The process rule (`prohibitions.md`): a run writes only to the project's repos, through the `notme` CLI, whose write gate refuses anything else. In a session a person drives, an issue or comment on another repo is fine when that person asked for it, and always on the plugin's own repository. Setting `guard.other_repo: off` (with `confirm_guard_off`) stops the log lines and also lifts that write-gate check.
 
-The protected-branch and force-push rules still apply to a push to any repo. A push whose target the guard cannot see (a `-c` push key, `GIT_DIR` or `--git-dir`, `send-pack`, `subtree push`, pushing submodules) is blocked under `protected_branches`, as is a write through a `git -C` path the shell fills in.
+The protected-branch and force-push rules still apply to a push to any repo. A push whose target the guard cannot see (a `-c` push key, `GIT_DIR` or `--git-dir`, `send-pack`, `subtree push`, pushing submodules) is blocked under `protected_branches`, as is a write through a `--git-dir` or `--work-tree` path the shell fills in.
 
 A git alias is looked up and judged as the command it stands for; a shell alias (`!...`) is judged as [opaque text](#opaque-text). A program the guard does not know that is handed `git` or `gh` as a word (`watch git push`, `flock x git push`) is judged as that git or gh command.
 
@@ -257,17 +258,26 @@ See effective config: /not-me:config
 
 No block message tells the operator to open a terminal or paste a plugin path; each says what to do next in the session.
 
-A git write whose `-C`, `--git-dir` or `--work-tree` path is a shell variable (`git -C "$W" commit ...`) is blocked, because the guard does not expand variables. That covers every write the guard checks (commit, push, merge, rebase, cherry-pick, am, reset, branch changes, config writes, submodule and subtree commands, clean, checkout and switch), even when the path looks like the current checkout (`"$W/.."`). Checkout and switch count because the guard could not tell which checkout's branch changed, so a later commit in the same command would be judged on the wrong branch. Reads stay allowed: status, log and diff, `config --get`, `remote -v`, `remote show`, a plain branch list, `submodule status`, `clean -n`. A rule the command breaks on its own, such as force_push, is still named first. The block counts under protected_branches, since the unknown checkout may be on a protected branch; with protected_branches off it is guided under other_repo. Rewriting the command is the fix, so that message leaves out the "relax this rule" line:
+A git write whose `--git-dir` or `--work-tree` path is a shell variable (`git --git-dir=$G commit ...`) is blocked: a literal `--git-dir` on a write is blocked too, so the Instead line says to drop the option and run `git -C /abs/path <sub> ...` with the path written out. Rewriting the command is the fix, so that message leaves out the "relax this rule" line:
 
 ```
-not-me guard [protected_branches]: blocked `git -C $W commit -m x`.
-Why: the guard does not expand shell variables in a `git -C` path.
-Instead: write the path out in full (`git -C /abs/path <sub> ...`); a rewritten command is checked afresh, so this is not a retry.
+not-me guard [protected_branches]: blocked `git --git-dir=$G commit -m x`.
+Why: the guard does not expand shell variables in a `git --git-dir` path.
+Instead: drop --git-dir and run `git -C /abs/path <sub> ...` with the path written out in full; a rewritten command is checked afresh, so this is not a retry.
 Autonomous runs: do not retry; log a QUESTION naming the operator and continue.
 See effective config: /not-me:config
 ```
 
-For `--git-dir` or `--work-tree` the Instead line says to drop that option and use `git -C /abs/path` with the path written out, since a literal `--git-dir` on a write is blocked too. A git alias next to a variable path is blocked the same way, because the guard cannot look the alias up in a repo it cannot name; if the path resolves to the current checkout (`git -C "$W/.." fp`) and the alias is defined there, the alias's own rules (force push, protected branch) block first.
+### Where git runs: `git -C`, a leading `cd` and variables
+
+Since dblanken-yale/not-me#144 a git write is judged on the branch checked out where it runs:
+
+- `git -C <path>` names the checkout. A variable set to a literal path earlier in the same command is filled in: `W=/abs/wt; git -C "$W" commit ...` is judged in `/abs/wt`. That holds for plain assignments (and `export`) before any other command, until something may set the variable again (`read W`, `for W in`, `W=$(...)`, a prefix `W=x git ...`).
+- A leading `cd <path>` is followed: `cd /abs/wt && git add x && git commit -F m` is judged in `/abs/wt`. Leading means the first command, after any such assignments, joined to the rest by `&&`, `;` or a newline. A list ended by `&` runs in the background, so the commands after it are judged where the session is.
+- Any other `cd` (one in a subshell, a group, a pipeline, after another command) is not followed: the write is judged where the session is, or where `git -C` points.
+- A path the guard cannot work out (a variable it does not know, `$W/..`, a leading `cd` to a directory that does not exist, `cd -`, `cd` with options, a relative `cd` with `CDPATH` set, or any later `cd`, `pushd`, `popd`, `source`, `eval` or `trap` after a followed one) is not judged by the session's directory. The write runs and the guard log records it as guided under `protected_branches`. A checkout or switch there leaves every branch unknown for the rest of the command. A rule the command breaks on its own still blocks: a force push, a push to a protected branch it names, `clean -x`, a forced delete of a protected branch. A git alias there blocks, since the guard cannot look it up in a checkout it cannot name.
+
+Skills run git in a run worktree as `git -C <worktree> ...`, never after `cd` (`scripts/check-skills.py` rule R16).
 
 ## Allow a repo
 
@@ -350,16 +360,17 @@ A missing Python is the case the hook cannot report itself. The launcher exits w
 
 ## Honest limits
 
-The guard splits a command into words the way the shell does: quotes, backslashes, line continuations, `$(...)`, backticks, here-documents and redirections. It does not run anything, expand variables or follow `cd`. It is a net for an agent that follows the rules, kept small on purpose: an earlier version tried to prove every command safe and blocked so much ordinary work that not-me could not develop itself. The trade-off is that a determined or buggy program can get around it.
+The guard splits a command into words the way the shell does: quotes, backslashes, line continuations, `$(...)`, backticks, here-documents and redirections. It does not run anything. It fills in only variables set to a literal path in the same command and follows only a leading `cd`, and only for git and gh (see [Where git runs](#where-git-runs-git--c-a-leading-cd-and-variables)). It is a net for an agent that follows the rules, kept small on purpose: an earlier version tried to prove every command safe and blocked so much ordinary work that not-me could not develop itself. The trade-off is that a determined or buggy program can get around it.
 
 What it does not cover:
 
-- `cd`. A git write is judged in the session's working directory, or the `git -C` / `gh -R` it names. `cd ../other && git push` is judged as a push from the session's checkout. Name the checkout with `git -C` instead.
+- `cd` past the leading one. `true && cd ../other && git push` is judged as a push from the session's checkout, and a write where the guard cannot work out the checkout runs and is only logged. Name the checkout with `git -C` instead.
 - Programs it does not read. A script file is scanned only for the opaque-text words, the modules a script imports and the file arguments of `python3 -m` are not read, a file written and run in the same command is read before the write, and a script that builds its command from pieces will not match. Programs that run commands from their own arguments (`awk 'BEGIN{system(...)}'`, `sed e`, `vim -c '!...'`, `tar --to-command`, `less +!`) are not inspected.
 - Merges. The guard does not block them; the skills do not merge. See [Merging pull requests](#merging-pull-requests).
 - Writes to other repos. They are guided, not blocked: a run that ignores `prohibitions.md` and calls `gh` directly can write to any repo your token can reach. The CLI's write gate holds only for writes through `notme`, and the guard log shows the rest.
 - The default-branch check of the repo layer asks the `origin` remote which commit its default branch is at, so moving a local ref does not count. What remains trusted is the `origin` URL itself: a session that pointed `origin` at a repository it controls could make a name count. Changing where git pushes (remote URLs, `insteadOf`) is guided and logged, not blocked. The guard hook does not ask the remote at all; it only guides those writes.
-- A `cd` into the not-me home followed by a write with a relative path (`cd ~/.claude/not-me && echo x >> project.md`) is outside the path checks, since the guard does not follow `cd`.
+- A `cd` into the not-me home followed by a write with a relative path (`cd ~/.claude/not-me && echo x >> project.md`) is outside the path checks, since the path checks do not follow `cd`.
+- `tar` and `unzip` option parsing is best effort; unusual option forms may not be recognised.
 - The path guard follows literal paths and the working directory it tracks, not every program that can write a file: an editor, a pager's log option, a build tool or a script that opens the allow list or the global `project.md` itself is outside its view.
 - The operator commands. `notme allow-repo add`, `pause off` and `mode live` are not blocked; only `prohibitions.md` keeps a run from issuing them on its own. The settings ledger shows each change after the fact.
 - Pushes and writes through other tools. `curl` or any HTTP client to the GitHub API, a gh extension or alias, a git hook, an external `git-<name>` program, MCP tools other than GitHub ones, the repo a GitHub MCP tool writes to, and your own terminal are outside its view.

@@ -157,12 +157,12 @@ the effective verify doc; never invent a test or lint command, never run a perso
 
 ## Step 7: Commit
 
-1. Stage only the paths this unit touched, by name. Never a blanket add.
+1. Stage only the paths this unit touched, by name; never a blanket add. In a run worktree
+   name it on every git call (`git -C <worktree> add`, `commit`); never `cd` into it first.
 2. Message per `standards.commit` (`conventional`: `fix(<N>): ...` or
    `feat(<N>): ...`, scope is the issue number, lowercase present tense).
-3. Write the message to a file. When `attribution` is text, end the message with
-   that line; `inherit` adds nothing; `none` adds nothing at all.
-4. Commit locally from the file:
+3. Write the message to a file (when `attribution` is text, end it with that line;
+   `inherit` and `none` add nothing), then commit locally from the file:
 
 <!-- allowed-raw-write -->
 ```bash
