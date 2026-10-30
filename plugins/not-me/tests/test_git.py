@@ -56,8 +56,8 @@ class Repo(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(self.dir, ignore_errors=True))
         self.remote = self.dir / "origin.git"
         self.work = self.dir / "work"
-        shutil.copytree(str(self._template / "origin.git"), str(self.remote), symlinks=True)
-        shutil.copytree(str(self._template / "work"), str(self.work), symlinks=True)
+        shutil.copytree(str(self._template / "origin.git"), str(self.remote), symlinks=True, ignore=shutil.ignore_patterns("*.lock"))
+        shutil.copytree(str(self._template / "work"), str(self.work), symlinks=True, ignore=shutil.ignore_patterns("*.lock"))
         sh("remote", "set-url", "origin", str(self.remote), cwd=self.work)
 
     def commit(self, name, text, msg, cwd=None):

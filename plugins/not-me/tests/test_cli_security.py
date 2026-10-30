@@ -29,9 +29,14 @@ def git(cwd, *args):
     return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, env=env, check=True).stdout
 
 
+_NO_LOCKS = shutil.ignore_patterns("*.lock")
+
+
 def init_repo(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     git(path, "init", "-q", "-b", "main")
+    git(path, "config", "maintenance.auto", "false")  # no detached maintenance holding locks while setUp copies it
+    git(path, "config", "gc.auto", "0")
     (path / "a.txt").write_text("one\n", encoding="utf-8")
     git(path, "add", "a.txt")
     git(path, "commit", "-q", "-m", "init")
@@ -57,8 +62,8 @@ class UnderClaudeCase(unittest.TestCase):
     def setUp(self):
         self.tc = TempCase()
         self.addCleanup(self.tc.cleanup)
-        self.session = Path(shutil.copytree(str(self._template_repo), str(self.tc.root / "session"), symlinks=True))
-        self.other = Path(shutil.copytree(str(self._template_repo), str(self.tc.root / "other"), symlinks=True))
+        self.session = Path(shutil.copytree(str(self._template_repo), str(self.tc.root / "session"), symlinks=True, ignore=_NO_LOCKS))
+        self.other = Path(shutil.copytree(str(self._template_repo), str(self.tc.root / "other"), symlinks=True, ignore=_NO_LOCKS))
         user = self.tc.root / "user"
         patcher = mock.patch.dict(os.environ, {"HOME": str(user), "USERPROFILE": str(user)})
         patcher.start()
