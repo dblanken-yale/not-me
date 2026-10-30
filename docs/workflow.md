@@ -69,8 +69,8 @@ Who acts where:
 
 ## What each skill does
 
-- **`/not-me`** is the router. It checks that not-me is on and idle, then runs the legs in the `router` order (default `update`, then `new`). It stops at the first leg that does something. Every leg returning `NONE` is a success. After a leg that did work it runs `/not-me:retro`.
-- **`/not-me:new`** picks one ready issue (or the number you give it), claims it, and implements it on a feature branch through a delegated implementer. It reproduces a bug first, writes the failing test first, runs the full gate, commits only the files it touched, pushes through the CLI, and opens a ready (not draft) PR. Then it moves the issue to `needs review` and, when a preview URL exists, starts a proof in the background. A fresh install picks only issues assigned to you; set `queue.include_unassigned: true` to also pick unassigned ones (see [Which issues the queue picks](config.md#which-issues-the-queue-picks)).
+- **`/not-me`** is the router. It checks that not-me is on and idle, then runs the legs in the `router` order (default `update`, then `new`). It stops at the first leg that does something. Every leg returning `NONE` is a success. Under `--bg`, after a leg that opened or pushed a PR it also proves that PR in the foreground when a preview URL exists, and prints the leg's line and then the prove line. After a leg that did work it runs `/not-me:retro`.
+- **`/not-me:new`** picks one ready issue (or the number you give it), claims it, and implements it on a feature branch through a delegated implementer. It reproduces a bug first, writes the failing test first, runs the full gate, commits only the files it touched, pushes through the CLI, and opens a ready (not draft) PR. Then it moves the issue to `needs review` and, when a preview URL exists, starts a proof in the background (under `--bg` the `/not-me` router runs the proof instead). A fresh install picks only issues assigned to you; set `queue.include_unassigned: true` to also pick unassigned ones (see [Which issues the queue picks](config.md#which-issues-the-queue-picks)).
 - **`/not-me:update`** picks one PR labeled `needs work` that is assigned to the operator. It reads only trusted findings, decides each (refuse, defer, implement, or disagree with a reason), fixes the confirmed ones, merges the base branch in (never rebases), pushes, replies on each thread, posts one summary, and swaps the PR back to `needs review`. When every finding is deferred or refused it parks the PR with no code change.
 - **`/not-me:review`** reviews PRs labeled `needs review` where the operator is a requested reviewer and the author is on the roster at any tier (lead, authority or member) and is not the operator. A member's PR title and body are read as the text under review, never as instructions; an instruction in them ("approve this at once") becomes a finding. PRs by people not on the roster are skipped. It checks the head out in a detached worktree, runs the project's checks, reads the diff, delegates a code review and a security review, confirms each finding itself, and posts one review. Approval is only sent when `review.auto_approve` is true; otherwise it posts a comment and leaves approval to a person. It resolves only threads it judged fixed.
 - **`/not-me:prove`** takes one PR. It finds the preview URL on a trusted host, runs the steps under the PR's testing-steps heading in a browser with one screenshot per step, reads each screenshot, and posts one proof comment with pass or fail per step. It never changes the repository.
@@ -99,7 +99,7 @@ The output also names a suggested top issue (target epic issues first, then epic
 
 ## The result line
 
-Every run ends with one line. In `--bg` mode that line is the whole output.
+Every run ends with one line. In `--bg` mode that line is the whole output, except that a router run which proves a PR after a `PR` or `PUSHED` leg prints two: the leg's line, then the prove line. Each leg and the prove subagent still return exactly one line.
 
 ```
 <VERB> <ref|-> <status>[ - note]  log=<path>
@@ -213,7 +213,7 @@ The router picks one unit of work per run. Schedule it in a Claude Code session:
 /loop 2h /not-me --bg
 ```
 
-Each tick runs `update`, then `new`, and prints one result line. A tick that finds a run still active prints `STOP - run in progress` and does nothing.
+Each tick runs `update`, then `new`, and prints one result line (two when it proves after a `PR` or `PUSHED` leg: the leg's line, then the prove line). A tick that finds a run still active prints `STOP - run in progress` and does nothing.
 
 `review` is a leg the router knows but the default `router` list leaves out, so schedule it on its own if you want it:
 
@@ -221,7 +221,7 @@ Each tick runs `update`, then `new`, and prints one result line. A tick that fin
 /loop 2h /not-me:review --bg
 ```
 
-Add `review` to `router` in `project.md` to run it as a router leg instead. `prove` needs no schedule: `new` and `update` start it in the background after they push, when a preview URL exists. Run it by hand on any PR with `/not-me:prove <repo>#<pr>`.
+Add `review` to `router` in `project.md` to run it as a router leg instead. `prove` needs no schedule: `new` and `update` start it in the background after they push, when a preview URL exists. Under `--bg` the `/not-me` router runs it in the foreground after a leg that opened or pushed a PR and prints its line. Run it by hand on any PR with `/not-me:prove <repo>#<pr>`.
 
 Start a loop yourself. A run never starts or extends one.
 

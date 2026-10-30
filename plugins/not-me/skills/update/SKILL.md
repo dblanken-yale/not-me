@@ -219,8 +219,8 @@ Every body passes `notme check-text --file <f>` before it is posted.
 
 1. Return to the starting branch, clean. Restore a stash with `notme git unstash <sha>`.
 2. `notme log finish <path> --status "<result>"`.
-3. Pushed, and `notme prove-target <ref>` finds a URL: start `/not-me:prove <ref>`
-   in the background. No target: skip it.
+3. Pushed, without `--bg`, and `notme prove-target <ref>` finds a URL: start
+   `/not-me:prove <ref>` in the background. Under `--bg` the router proves.
 4. `notify.command` set and the result is not NONE: run it with the result line
    and the log path.
 5. Print the result line, one of:
