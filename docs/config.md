@@ -610,6 +610,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | Key | Default | What it does |
 | --- | --- | --- |
 | `schema` | `1` | Config format version |
+| `auto` | `true` | Start a proof on its own after `new` or `update` pushes, and after a router leg under `--bg`, when a preview URL is found. `false` means proof runs only when a person starts `/not-me:prove <ref>`, which ignores this key. The repo layer may turn it off, never on |
 | `target.strategy` | `[deployments, bot-comment, url-template, local]` | How to find the URL to test, tried in order |
 | `target.url_template` | `null` | URL pattern for the `url-template` strategy |
 | `target.bot_comment_regex` | `null` | Pattern that finds the URL in a bot comment, for the `bot-comment` strategy |

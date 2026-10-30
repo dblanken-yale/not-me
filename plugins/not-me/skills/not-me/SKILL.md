@@ -52,8 +52,8 @@ unchanged.
 ## Step 4: Prove (only under `--bg`)
 
 After a leg whose VERB is `PR` or `PUSHED`, and only under `--bg`, and only when the
-arguments do not include `--dry-run` (then skip this step: no `prove-target` call, no
-dispatch, no line):
+arguments do not include `--dry-run` and `prove.auto` is true in the `notme config` from
+Step 2 (otherwise skip this step: no `prove-target` call, no dispatch, no line):
 
 1. `notme prove-target <ref>`, with the `<ref>` from the leg's line. No URL: no
    prove step, no line, no error. Go to Step 5.
@@ -77,5 +77,5 @@ silently.
 - [ ] Read `router` from the config and ran only those legs, in order.
 - [ ] Forwarded `$ARGUMENTS`; under `--bg` each leg was its own subagent.
 - [ ] Stopped at the first non-`NONE` result and printed it exactly.
-- [ ] Under `--bg`, after a `PR` or `PUSHED` leg with a prove target, proved in a foreground subagent and printed both lines.
+- [ ] Under `--bg`, after a `PR` or `PUSHED` leg with a prove target and `prove.auto` true, proved in a foreground subagent and printed both lines.
 - [ ] Printed `NONE - nothing to do` only when every leg was `NONE`.

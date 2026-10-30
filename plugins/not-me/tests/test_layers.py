@@ -224,6 +224,35 @@ class LayerCaseTests(unittest.TestCase):
         cfg = self.global_and_repo("---\nqueue: {include_unassigned: true}\n---\n", "---\nschema: 1\n---\n")
         self.assertIs(cfg.meta["project"]["queue"]["include_unassigned"], True)
 
+    def prove_layers(self, global_text, repo_text):
+        tc = TempCase()
+        self.addCleanup(tc.cleanup)
+        if global_text is not None:
+            tc.write("global", "prove", global_text)
+        tc.write("repo", "prove", repo_text)
+        return tc.load()
+
+    def test_repo_may_turn_prove_auto_off(self):
+        cfg = self.prove_layers(None, "---\nauto: false\n---\n")
+        self.assertIs(cfg.meta["prove"]["auto"], False)
+        self.assertEqual([w for w in cfg.warnings if "only tighten" in w], [])
+        self.assertEqual(cfg.sources["prove.auto"]["layer"], "repo")
+        cfg = self.prove_layers(None, "---\nschema: 1\n---\n")
+        self.assertIs(cfg.meta["prove"]["auto"], True)  # the default
+        self.assertEqual(cfg.sources["prove.auto"]["layer"], "default")
+        cfg = self.prove_layers("---\nauto: false\n---\n", "---\nauto: null\n---\n")
+        self.assertIs(cfg.meta["prove"]["auto"], False)  # clearing a lower off is not turning it off
+        self.assertEqual(len([w for w in cfg.warnings if "only tighten" in w]), 1)
+
+    def test_repo_may_not_turn_prove_auto_on(self):
+        cfg = self.prove_layers("---\nauto: false\n---\n", "---\nauto: true\n---\n")
+        self.assertIs(cfg.meta["prove"]["auto"], False)
+        warned = [w for w in cfg.warnings if "only tighten" in w]
+        self.assertEqual(len(warned), 1, warned)
+        self.assertTrue(warned[0].startswith("repo .claude/not-me/prove.md:"), warned)
+        ignored = cfg.explain()["keys"]["prove.auto"]["ignored"]
+        self.assertEqual([i["layer"] for i in ignored], ["repo"])
+
     def test_repo_may_turn_stacking_off_but_never_on(self):
         cfg = self.global_and_repo(None, "---\nqueue: {stacking: off}\n---\n")
         self.assertEqual(cfg.meta["project"]["queue"]["stacking"], "off")  # declared to off tightens
