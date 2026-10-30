@@ -42,6 +42,9 @@ Solid boxes always run. Dashed boxes are optional: they run only when you call t
 ```mermaid
 flowchart TD
     trigger(["/not-me, a single leg, or /loop 2h /not-me --bg"])
+    parallel["/not-me --parallel N: up to N new runs at once,
+    one issue and one worktree each, one subagent per run
+    ⚙ limits.parallel_runs, workspace.new: worktree"]
     gate["Gate: enabled, not paused, no active run in this worktree
     (runs in other worktrees go in parallel), guard self-test passes"]
     stopped["STOP, nothing written"]
@@ -77,8 +80,9 @@ flowchart TD
         queue.stacking auto, when its open blockers all lead to that PR
         ⚙ queue, queue.stacking, picking, Picking work rules"]
         n2["Branch from the base: the default branch, an epic's branch,
-        or the open PR's branch for a stacked issue
-        ⚙ standards.md branch, protected_branches, queue.stacking"]
+        or the open PR's branch for a stacked issue; in a worktree of
+        its own when workspace.new is worktree
+        ⚙ standards.md branch, protected_branches, queue.stacking, workspace.new"]
         n3["Implement through a delegated subagent, failing test first
         ⚙ models, standards.md Delegation"]
         n3b["Baseline, skipped when the base CI is green
@@ -120,6 +124,8 @@ flowchart TD
     merge(["A person approves, if review did not, and merges"])
 
     router -.-> review
+    gate -. "--parallel N" .-> parallel
+    parallel -. "one per issue" .-> new
     n6 -. "preview URL found" .-> prove
     u5b --> retro
     n7 --> retro
@@ -132,7 +138,7 @@ flowchart TD
 
     classDef optional stroke-dasharray: 5 5
     classDef person fill:#fde7c8,stroke:#c77700,color:#000
-    class review,prove,notify,n4b,n3b,u3b,n7,u5b optional
+    class review,prove,notify,n4b,n3b,u3b,n7,u5b,parallel optional
     class live,merge person
 ```
 
@@ -140,7 +146,7 @@ flowchart TD
 
 | Command | What it does |
 | --- | --- |
-| `/not-me [--dry-run] [--bg]` | Router: runs the legs in `router` order (default `update`, then `new`) and stops at the first that does work |
+| `/not-me [--dry-run] [--bg] [--parallel N]` | Router: runs the legs in `router` order (default `update`, then `new`) and stops at the first that does work. `--parallel N` starts up to N new-issue runs at once, each in its own worktree |
 | `/not-me:new [issue#] [--base B] [--dry-run] [--bg]` | Pick up a ready issue, implement it through a delegated implementer, gate it, open a PR |
 | `/not-me:update [PR ref] [--dry-run] [--bg]` | Decide each review finding on a `needs work` PR, fix, push, reply, swap to `needs review` |
 | `/not-me:review [owner/repo#N ...] [--dry-run] [--bg]` | Review `needs review` PRs where you are a reviewer: approve, request changes, or ask a person. Never merges |
@@ -176,6 +182,7 @@ docs/                             documentation
 - [Configuration](docs/config.md)
 - [Guards](docs/guards.md)
 - [Workflow](docs/workflow.md)
+- [Parallel runs](docs/parallel-runs.md)
 - [CLI](docs/cli.md)
 - [Testing](docs/testing.md)
 - [Releases](docs/release.md)

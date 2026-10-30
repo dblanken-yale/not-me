@@ -2248,8 +2248,10 @@ def cmd_git_unstash(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
 
 
 WORKTREES_EXCLUDE = "/.claude/worktrees/"
-# review- keeps notme off the other worktrees in the same dir (Claude Code keeps its session worktrees there)
-WORKTREE_NAME_RE = re.compile(r"review-[A-Za-z0-9._-]{1,57}")
+# The review-, notme-new- and notme-update- prefixes keep notme off the other worktrees in the same dir (Claude Code
+# keeps its session worktrees there, under names a person picks)
+WORKTREE_NAME_RE = re.compile(r"(?:review|notme-new|notme-update)-[A-Za-z0-9._-]{1,57}")
+WORKTREE_NAME_HINT = "review-, notme-new- or notme-update- then [A-Za-z0-9._-]{1,57}"
 
 
 def worktrees_root(ctx: Context) -> Path:
@@ -2272,10 +2274,12 @@ def worktrees_root(ctx: Context) -> Path:
 
 
 def worktree_path(root: Path, path: Union[str, Path]) -> Path:
-    """`path` realpath'd when it is a review-* dir directly under `root` with no symlink on the way; else unsafe_path."""
+    """`path` realpath'd when it is a review-*, notme-new-* or notme-update-* dir directly under `root` with no symlink on the
+    way; else unsafe_path."""
     real = Path(os.path.realpath(str(path)))
     if real.parent != root or not WORKTREE_NAME_RE.fullmatch(real.name) or ".." in real.name:
-        raise fail(ExitCode.ERROR, "unsafe_path", "worktree path must be a review-* dir directly under <main checkout>/.claude/worktrees/")
+        raise fail(ExitCode.ERROR, "unsafe_path", "worktree path must be a review-*, notme-new-* or notme-update-* dir directly under "
+                   "<main checkout>/.claude/worktrees/")
     return real
 
 
@@ -2303,7 +2307,9 @@ def exclude_worktrees_root(ctx: Context) -> None:
 def cmd_git_worktree_add(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """Add a detached worktree at a sha at <main checkout>/.claude/worktrees/NAME; the CLI picks the path.
 
-    NAME defaults to review-<first 12 chars of SHA> and must match review-[A-Za-z0-9._-]{1,57} with no "..";
+    NAME defaults to review-<first 12 chars of SHA> and must be review-, notme-new- or notme-update- followed
+    by [A-Za-z0-9._-]{1,57} with no ".." (notme-new- and notme-update- name the worktree a run works in when
+    workspace is worktree);
     anything else, a symlinked .claude, .claude/worktrees, info or info/exclude, or a main checkout (via
     core.worktree) that does not share this repository's git dir, is refused as unsafe_path. An existing path is
     refused as path_exists. The git common dir's info/exclude gets /.claude/worktrees/ so the worktree never shows
@@ -2315,7 +2321,7 @@ def cmd_git_worktree_add(ctx: Context, args: argparse.Namespace) -> Dict[str, An
         raise fail(ExitCode.USAGE, "usage", f"invalid sha {args.sha!r}")
     name = f"review-{args.sha[:12]}" if args.name is None else args.name
     if not WORKTREE_NAME_RE.fullmatch(name) or ".." in name:
-        raise fail(ExitCode.ERROR, "unsafe_path", f"bad worktree name {name!r}: use review-[A-Za-z0-9._-]{{1,57}}")
+        raise fail(ExitCode.ERROR, "unsafe_path", f"bad worktree name {name!r}: use {WORKTREE_NAME_HINT}")
     root = worktrees_root(ctx)
     real = worktree_path(root, root / name)
     if os.path.lexists(str(real)):
@@ -2329,7 +2335,7 @@ def cmd_git_worktree_add(ctx: Context, args: argparse.Namespace) -> Dict[str, An
 
 @command("git worktree-remove", "remove a worktree notme made", args=[arg("path", metavar="PATH")])
 def cmd_git_worktree_remove(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Remove a worktree made by `git worktree-add`. PATH must be a review-* dir directly under
+    """Remove a worktree made by `git worktree-add`. PATH must be a review-*, notme-new-* or notme-update-* dir directly under
     <main checkout>/.claude/worktrees/; anything else, including Claude Code's own session worktrees there, is refused
     as unsafe_path.
 

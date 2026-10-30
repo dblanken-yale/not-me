@@ -12,6 +12,9 @@ the issue is chosen, how its text is read and screened, and how epics chain.
 2. **Resume.** `notme log last --skill new`. When it returns a `path`, read that
    log. A summary that says "committed but NOT PUSHED" names a branch: check it out,
    confirm its commits are still there, and continue at step 8 with that issue.
+   A summary that also names a worktree path (`workspace.new: worktree`): never
+   check the branch out in the main checkout; use that path as the run's worktree,
+   with `--project-dir` on every `notme` call (branching.md, worktrees rule 1).
    Anything else in the last log is history, not work.
 3. **Queue.** `notme pick-issue`. It already skips issues that carry `paused`,
    `blocked` or `epic`, lack the `labels.todo` label (or the board's To Do column),

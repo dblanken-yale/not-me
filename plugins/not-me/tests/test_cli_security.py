@@ -288,10 +288,23 @@ class PathTests(UnderClaudeCase):
         self.assertEqual(payload["path"], str(self._root() / "review-3-abc.1_x"))
         self.assertTrue(Path(payload["path"], "a.txt").is_file())
 
+    def test_worktree_add_takes_new_and_update_names_for_runs_in_their_own_worktree(self):
+        sha = self._sha()
+        for name in ("notme-new-139", "notme-update-42-2", "notme-new-" + "x" * 57, "notme-update-" + "x" * 57):
+            with self.subTest(name=name):
+                payload = self.ok("git", "worktree-add", sha, "--name", name)
+                self.assertEqual(payload["path"], str(self._root() / name))
+        removed = self.ok("git", "worktree-remove", str(self._root() / "notme-new-139"))
+        self.assertTrue(removed["removed"])
+        self.assertFalse((self._root() / "notme-new-139").exists())
+
     def test_worktree_add_refuses_a_bad_name(self):
         sha = self._sha()
         for name in ("../x", "a/b", ".hidden", "", "..", "a..b", "-x", "a\\b", "x" * 65, "feat-x", "worktree-foo",
-                     "review-", "review", "Review-x", "review-a..b", "review-a/b", "review-" + "x" * 58):
+                     "review-", "review", "Review-x", "review-a..b", "review-a/b", "review-" + "x" * 58,
+                     "new-1", "update-1", "notme-new-", "Notme-new-1", "notme-news-1", "notme-update",
+                     "notme-new-a..b", "notme-new-a/b", "notme-new-" + "x" * 58, "notme-update-" + "x" * 58,
+                     "notme-1", "prove-1"):
             with self.subTest(name=name):
                 code, payload, _ = self.cli("git", "worktree-add", sha, f"--name={name}")
                 self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))

@@ -93,6 +93,28 @@ When you must set aside local changes:
 2. Never commit in a review worktree.
 3. Remove only the worktree you created, at the end of the run.
 
+## Worktrees for new and update work
+
+`workspace.new` (or `workspace.update`) set to `worktree` runs the work in a worktree
+of its own, so several runs can start from one main checkout and none of them
+changes its branch or files. Inside a linked worktree already, work in place.
+
+1. Make it once the target is known, before `notme log start`: read the sha with
+   `git rev-parse HEAD`, then `notme git worktree-add <sha> --name notme-new-<N>`
+   (`notme-update-<N>` for rework). `path_exists`: add `-2`, `-3`. Keep the
+   returned `path`. A resumed run whose log names a path uses that path instead.
+   A lost claim removes the worktree (rule 4) before the next pick makes another.
+2. From then on pass `--project-dir <path>` to every `notme` call, so the run
+   marker, branch, checkpoints and push all land in that worktree. Run local git
+   as `git -C <path> ...`, never `cd <path> && git ...` (the guard does not follow
+   `cd`). Run each check with the worktree as its directory, and brief the
+   implementer with the absolute path.
+3. The worktree starts detached: there is nothing to stash. Branch with
+   `notme --project-dir <path> git branch-create <name> --base origin/<base>`.
+4. On every way out, after `notme log finish`, run `notme git worktree-remove <path>`
+   without `--project-dir`. Remove only the worktree this run made. A tree that will not come off clean stays: a `WARN` naming it.
+   "committed but NOT PUSHED": keep it and name the path in the log summary.
+
 ## Epics
 
 1. Work sub-issues in their listed order. Each sub-issue is its own branch and PR.
@@ -139,3 +161,4 @@ passes the same checks, held when a blocker has no open PR yet. Treat it the sam
 - [ ] Never force-pushed or amended a pushed commit.
 - [ ] Stashed with a unique message and restored by SHA.
 - [ ] Left the checkout clean on the branch it started on.
+- [ ] With `workspace` `worktree`: worked only in my own worktree, `--project-dir` on every `notme` call.

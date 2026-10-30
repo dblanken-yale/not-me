@@ -664,6 +664,10 @@ bash(A, None, "LC_ALL=C NO_COLOR=1 gh pr comment 1 --repo acme/app -b x")
 bash(A, None, "cd scripts && notme status")  # notme in a command that changes directory
 bash(A, None, "notme pause on")
 bash(A, None, "notme git worktree-add 0123456789abcdef --name review-feat-x")
+# A parallel run works in its own worktree from the main checkout: --project-dir names it on every call.
+bash(A, None, "notme git worktree-add 0123456789abcdef --name notme-new-139")
+bash(A, None, "notme --project-dir {F}/.claude/worktrees/notme-new-139 git branch-create 139-x --base origin/main")
+bash(A, None, "notme --project-dir {F}/.claude/worktrees/notme-new-139 git push 139-x --log x.md")
 bash(A, None, "notme --project-dir {F}/other status")
 bash(A, None, "notme --proj={F}/other status", "alloff")
 bash(A, None, "python3 {P}/cli/notme.py --project-dir {F}/other config")

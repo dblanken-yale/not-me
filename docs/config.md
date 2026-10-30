@@ -592,6 +592,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `limits.fix_loop` | `3` | Fix rounds before a run gives up and parks |
 | `limits.ci_wait_minutes` | `20` | Minutes to wait for CI on a pushed head. `0` means open the PR and do not wait; a red CI result is left to `/not-me:update` or a person |
 | `limits.claim_stale_hours` | `8` | Hours before an unfinished claim with no pushed branch is reported as stale. It is reported, never released automatically |
+| `limits.parallel_runs` | `3` | Most runs `/not-me --parallel N` starts at once; a larger N is lowered to this. See [Parallel runs](parallel-runs.md) |
 | `models.strategy` | `orchestrate` | `orchestrate` or `single`. See "The routing policy" |
 | `models.single_model` | `opus` | The model used for everything when `strategy` is `single` |
 | `models.bg` | `opus` | The model for `--bg` runs |

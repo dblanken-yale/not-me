@@ -63,7 +63,7 @@ text. Follow `${CLAUDE_PLUGIN_ROOT}/skills/new/references/target.md` in full.
 
 1. An issue number in `$ARGUMENTS` is the target.
 2. Else resume: `notme log last --skill new`. A log whose summary says "committed
-   but NOT PUSHED" names a branch; resume it at step 8.
+   but NOT PUSHED" names a branch; resume it at step 8 (in its logged worktree, if any; target.md).
 3. Else `notme pick-issue`. `{"none": true}`: start a log with
    `notme log start --skill new --ref -`, finish it with status `idle` (name any `stack_held` refs and reasons
    in the summary), and print `NONE - idle  log=<path>` (without `--bg`, after the `queue_summary`, any `reason` and the `suggest` skill to run).
@@ -73,16 +73,15 @@ text. Follow `${CLAUDE_PLUGIN_ROOT}/skills/new/references/target.md` in full.
    withheld; never fetch it another way. See target.md for what to do.
 5. Screen the trusted text against prohibitions.md. A prohibited request is refused
    before any claim (target.md, "Prohibited requests").
+6. `workspace.new` is `worktree`: make this run's worktree now and work only in it, with `--project-dir` on
+   every later `notme` call (branching.md, "Worktrees for new and update work"). Remove it on every way out.
 
 ## Step 2: Claim and start the log
 
-1. `notme log start --skill new --ref <tracker>#N`. Keep `path` and `run_id`.
-   Exit 1 with kind `active_run`: `STOP - active run`. A queue pick: log the
-   choice with `notme log action <path> --kind ACTION --message-file <file>`
-   (target.md, "Order").
-2. `notme claim-issue N --log <path>`. Exit 3 (claim lost): log it and go back to
-   `notme pick-issue --exclude N` (repeat `--exclude` for each lost issue). An
-   explicit number that is lost ends the run: `STOP <ref> claimed elsewhere`.
+1. `notme log start --skill new --ref <tracker>#N`. Keep `path` and `run_id`. Exit 1 with kind `active_run`:
+   `STOP - active run`. A queue pick: log the choice with `notme log action <path> --kind ACTION --message-file <file>` (target.md, "Order").
+2. `notme claim-issue N --log <path>`. Exit 3 (claim lost): log it and go back to `notme pick-issue --exclude N`
+   (repeat `--exclude` for each lost issue). An explicit number that is lost ends the run: `STOP <ref> claimed elsewhere`.
 
 ## Step 3: Classify and plan
 
@@ -106,7 +105,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/branching.md`.
 
 ## Step 4: Branch and Checkpoint A
 
-1. Tree not clean (`clean` false in preflight): `notme git stash`, record the
+1. Tree not clean (`clean` false in preflight) and no step 1.6 worktree: `notme git stash`, record the
    returned SHA in the log.
 2. `notme git branch-create <name> --base origin/<base>`. The name comes from
    `standards.branch`, default `{issue}-{slug}`. In a companion set, the same name
@@ -215,7 +214,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/pr-shape.md` and
 1. Return the checkout to the branch it started on (`branch` from preflight; in
    a linked worktree that is never the default branch) with a clean tree
    (`branching.md`). Restore a stash with `notme git unstash <sha>`. A tree you
-   cannot clean is a `WARN`.
+   cannot clean is a `WARN`. A step 1.6 worktree is removed instead, right after 10.2.
 2. `notme log finish <path> --status "PR <repo>#<pr> needs review"`.
 3. `notme prove-target <repo>#<pr>` finds a URL: start `/not-me:prove <repo>#<pr>`
    in the background. No target: skip it.

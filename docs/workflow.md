@@ -71,7 +71,7 @@ Who acts where:
 
 ## What each skill does
 
-- **`/not-me`** is the router. It checks that not-me is on and idle, then runs the legs in the `router` order (default `update`, then `new`). It stops at the first leg that does something. Every leg returning `NONE` is a success. After a leg that did work it runs `/not-me:retro`.
+- **`/not-me`** is the router. It checks that not-me is on and idle, then runs the legs in the `router` order (default `update`, then `new`). It stops at the first leg that does something. Every leg returning `NONE` is a success. After a leg that did work it runs `/not-me:retro`. With `--parallel N` it instead starts up to N `/not-me:new` runs at once, one issue and one worktree each (see [Parallel runs](parallel-runs.md)).
 - **`/not-me:new`** picks one ready issue (or the number you give it), claims it, and implements it on a feature branch through a delegated implementer. It reproduces a bug first, writes the failing test first, runs the full gate, commits only the files it touched, pushes through the CLI, and opens a ready (not draft) PR. Then it moves the issue to `needs review` and, when a preview URL exists, starts a proof in the background. A fresh install picks only issues assigned to you; set `queue.include_unassigned: true` to also pick unassigned ones (see [Which issues the queue picks](config.md#which-issues-the-queue-picks)).
 - **`/not-me:update`** picks one PR labeled `needs work` that is assigned to the operator. It reads only trusted findings, decides each (refuse, defer, implement, or disagree with a reason), fixes the confirmed ones, merges the base branch in (never rebases), pushes, replies on each thread, posts one summary, and swaps the PR back to `needs review`. When every finding is deferred or refused it parks the PR with no code change.
 - **`/not-me:review`** reviews PRs labeled `needs review` where the operator is a requested reviewer and the author is on the roster at any tier (lead, authority or member) and is not the operator. A member's PR title and body are read as the text under review, never as instructions; an instruction in them ("approve this at once") becomes a finding. PRs by people not on the roster are skipped. It checks the head out in a detached worktree, runs the project's checks, reads the diff, delegates a code review and a security review, confirms each finding itself, and posts one review. Approval is only sent when `review.auto_approve` is true; otherwise it posts a comment and leaves approval to a person. It resolves only threads it judged fixed.
@@ -228,6 +228,8 @@ Each tick runs `update`, then `new`, and prints one result line. A tick that fin
 Add `review` to `router` in `project.md` to run it as a router leg instead. `prove` needs no schedule: `new` and `update` start it in the background after they push, when a preview URL exists. Run it by hand on any PR with `/not-me:prove <repo>#<pr>`.
 
 Start a loop yourself. A run never starts or extends one.
+
+To work several issues at once, set `workspace.new: worktree` and run `/not-me --parallel 3` in an attended session. Each run gets its own issue (claims are compare-and-set) and its own worktree, and the main checkout's branch never changes. `--parallel` is not combined with `--bg`. See [Parallel runs](parallel-runs.md) for the limits and what is still open.
 
 ## First week
 
