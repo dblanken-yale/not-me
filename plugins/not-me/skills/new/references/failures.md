@@ -5,7 +5,10 @@
 Read this whenever `/not-me:new` cannot finish: a stop before work, a hold, a guard
 block, or a failure. It says which labels to write, whether to comment, and the
 result line. Parking rules are in `parking.md`; logging rules in
-`autonomy-and-logging.md`.
+`autonomy-and-logging.md`. A failure on our side (its cause is outside the issue:
+a `notme` error, a fetch or checkout failure, a missing tool or environment, a
+guard block, a dispatch with no fallback) follows "Failures on our side" there:
+release the claim, post nothing, add no label, and stop the run.
 
 ## Rules for every row
 
@@ -34,15 +37,19 @@ result line. Parking rules are in `parking.md`; logging rules in
 | Declared base missing | `todo`, `needs_human` | names the base, where it was declared, the issue author | `STOP <ref> blocked - base <b> not found` |
 | Cannot reproduce | `in_progress`, `question`, `needs_human` | what was run, on which SHA, what was seen | `HELD <ref> cannot-reproduce` |
 | Already fixed on the default branch | `in_progress`, `needs_human` | the commit that fixed it | `HELD <ref> already-fixed` |
-| Guard block that stops the item | release to `todo`, `needs_human` | names the operator and the blocked target | `FAILED <ref> blocked - <target>` |
+| Guard block | released to `todo` | none | `FAILED <ref> blocked - <target>`; run stops |
+| Other failure on our side before a push | released to `todo` | none | `FAILED <ref> <what>`; run stops |
 | Merge conflict at Checkpoint A | release to `todo`, `needs_human` | names the conflicting files | `FAILED <ref> merge-conflict` |
+| A check or CI job fails the same way on the base (`verification.md`, "A failure that is also on the base") | released to `todo` before a push; after a push, `in_progress` stays | none | `FAILED <ref> base-red - <check>`; run stops |
 | Implementation or gate fails after `models.max_tries` | release to `todo`, `needs_human` | names the failing check | `FAILED <ref> <check>` |
 | Push fails after commit | `in_progress` | none | `FAILED <ref> not-pushed` (log says "committed but NOT PUSHED") |
-| PR open fails after push | `in_progress`, `needs_human` | names the branch | `FAILED <ref> pr-open` |
+| PR open fails after push | `in_progress` (the branch is pushed) | none; the log names the branch | `FAILED <ref> pr-open`; run stops |
 | CI red at `limits.fix_loop` | issue `needs_review`; PR adds `needs_human` | names the failing job and test | `FAILED <ref> ci-red - <test>` |
 | CI wait times out | issue `needs_review` | none | `PR <ref> opened - ci pending` with a `WARN` |
 
 "Release" means `notme release-issue N --reason-file <reason> --log <path>` (the reason file holds one line on why the run gave up), then the `needs_human` add.
+On a failure on our side, "released" means the release alone: no `needs_human`,
+and the neutral reason line from `autonomy-and-logging.md`.
 For HELD, the issue keeps `in_progress` so loops skip it; add the extra labels
 with `labels-sync` and do not call `release-issue`.
 
@@ -50,8 +57,10 @@ with `labels-sync` and do not call `release-issue`.
 
 1. A block is final. Do not retry with another command shape, tool, or wrapper.
 2. Log `notme log question` naming the operator: "@<operator>: push to <repo> was
-   blocked; allow it with the allow-repo command if intended."
-3. Continue with any part of the work that does not need the blocked action.
+   blocked; allow it with the allow-repo command if intended." Log the block
+   message as a `WARN`.
+3. A block is a failure on our side: release the claim, post nothing, add no
+   label, end `FAILED <ref> blocked - <target>` and stop the run.
 
 ## Never
 
@@ -62,7 +71,8 @@ with `labels-sync` and do not call `release-issue`.
 
 ## Checklist
 
-- [ ] Wrote the labels in the row, and `needs_human` whenever the run stopped short.
+- [ ] Wrote the labels in the row, and `needs_human` whenever the run stopped short because of the work.
+- [ ] On a failure on our side: released the claim, posted nothing, added no label, stopped.
 - [ ] Posted at most one comment, upserted with the `new` marker.
 - [ ] Finished the log with the failing command and output.
 - [ ] Printed exactly the result line in the row.

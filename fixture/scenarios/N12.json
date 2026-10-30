@@ -26,7 +26,7 @@
   "expect": {
     "skill": "new",
     "result": "FAILED",
-    "note": "guard block that stops the item: release to the pick label and add needs human",
+    "note": "guard block is a failure on our side: release to the pick label, add no label, post nothing, stop",
     "pr_exists": {
       "count": 0,
       "repos": [
@@ -37,8 +37,7 @@
     "companion_untouched": true,
     "labels_exact": {
       "issue:both": [
-        "to do",
-        "needs human"
+        "to do"
       ]
     },
     "no_force_push": true,

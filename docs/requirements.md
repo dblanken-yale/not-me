@@ -60,7 +60,7 @@ Python 3.9 or newer, standard library only. The launcher `bin/notme-python` trie
 
 ### playwright-cli (optional)
 
-Used only to drive a browser for `/not-me:prove` and for visual checks on UI changes. A run that needs it and cannot find it logs `Visual check: not run (browser tool missing)` and carries on.
+Used only to drive a browser for `/not-me:prove` and for visual checks on UI changes. A visual check that cannot find it logs `Visual check: not run (browser tool missing)` and carries on. `/not-me:prove` without it posts nothing and ends `FAILED <ref> no browser tool`.
 
 ### bash on Windows
 
@@ -143,6 +143,8 @@ Ordinary commands that mention neither `git` nor `gh` cost tens of milliseconds.
 | `<git-common-dir>/not-me/logs/<skill>/<timestamp>-<ref>-<id>.md` | write | `notme`, one run log per run | No |
 | `<git-common-dir>/not-me/logs/intended-writes.jsonl` and `logs/payloads/<sha>.md` | write | `notme`, the dry-run ledger | No |
 | `<git-common-dir>/not-me/logs/guard.jsonl` | write | the hook, one line per block with the blocked input, redacted and capped | No |
+| `<main checkout>/.claude/worktrees/<name>/` | write, and removed after each PR | `notme git worktree-add` and `worktree-remove`, one detached worktree per PR a review checks out | No |
+| `<git-common-dir>/info/exclude` | one line appended, `/.claude/worktrees/`, once | `notme git worktree-add`, so review worktrees never show as untracked | No, it is git's local ignore file |
 | `not-me-<uid>/` under `$XDG_RUNTIME_DIR` or the system temp directory (mode 0700) | write | `notme`, body files and JSON payloads | No |
 | `${CLAUDE_PLUGIN_ROOT}` (the installed plugin) | read | Claude Code, on install and update | No |
 | `${CLAUDE_PLUGIN_DATA}` | none today | reserved | No |

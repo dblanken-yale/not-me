@@ -1574,8 +1574,8 @@ class GitTests(base.CliCase):
 
     def test_worktree_add_and_remove(self):
         sha = git(self.project, "rev-parse", "HEAD").strip()
-        wt = str(self.project / ".git" / "not-me" / "worktrees" / "wt")
-        self.ok("git", "worktree-add", wt, sha)
+        wt = self.ok("git", "worktree-add", sha, "--name", "review-wt")["path"]
+        self.assertEqual(Path(wt), Path(os.path.realpath(str(self.project))) / ".claude" / "worktrees" / "review-wt")
         self.assertTrue(Path(wt, "a.txt").exists())
         self.ok("git", "worktree-remove", wt)
         self.assertFalse(Path(wt).exists())

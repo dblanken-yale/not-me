@@ -109,7 +109,7 @@ Every run ends with one line. In `--bg` mode that line is the whole output.
 
 | VERB | Meaning |
 | --- | --- |
-| `NONE` | Nothing to do. It never means a run went wrong. `prove` also uses it for "no deploy target", "no testing steps", "no browser tool" and "not open" |
+| `NONE` | Nothing to do. It never means a run went wrong. `prove` also uses it for "no deploy target", "no testing steps" and "not open" |
 | `PR` | A pull request was opened |
 | `PUSHED` | Commits were pushed to an existing PR |
 | `PARKED` | The PR was parked for a person; no code changed. The note names who is owed what |
@@ -157,11 +157,13 @@ Two labels say a person has something to do.
 **`needs human`** means a run stopped short. It was parked, held, or gave up. The summary comment starts with `**Waiting on:**` and names each person by login with what they owe.
 
 - Read the `Waiting on` line and the log summary.
-- Do the thing: make the decision, run the step not-me refused, allow the repo the guard blocked (`/not-me:allow-repo`), or fix what the run could not.
+- Do the thing: make the decision, run the step not-me refused, or fix what the run could not.
 - Then answer on the PR or issue. A reply from a lead or authority on the roster, newer than the run's marker comment, lets the next run pick the item up again. A reply from a member does not; it is input for the lead to weigh. Untrusted replies never count.
 - Or remove the label by hand. Removing `needs human` or `question` also lets the loops pick the item again.
 
-**`question`** means a named person owes an answer. It is set with `needs human` when a decision is missing, and alone when `review` was unsure. The person named in the summary answers in the thread or the PR comments. Once a trusted lead or authority has answered, `update` treats the question as settled.
+**`question`** means a named person owes an answer. It is set with `needs human` when a decision is missing, and alone when `review` was unsure about a product call or between two leads. The person named in the summary answers in the thread or the PR comments. Once a trusted lead or authority has answered, `update` treats the question as settled.
+
+**A failure on not-me's side gets no label.** When the cause is outside the PR or issue (a guard block, a `notme` error, a fetch or worktree failure, a missing tool or environment, a check that fails the same way on the base branch), the run posts nothing on GitHub, changes no labels, gives back any claim it took, and stops. You see it in the `FAILED <ref> <reason>` result line, in `/not-me:status` and in the run log, which has the exact error. Fix the cause (for a guard block, run the allow command the block message names if the write was intended) and run again. A failure caused by the change itself, such as a test the PR breaks, is still reported on the PR.
 
 A held issue keeps `in progress`, so no loop picks it again, and also carries `needs human`. A parked PR goes to `needs review` because it waits on people and the code is not at fault.
 

@@ -31,8 +31,8 @@ in this repo), `--dry-run`, `--bg`.
   the `attribution` line on commit messages.
 - Read `${CLAUDE_PLUGIN_ROOT}/references/prohibitions.md` before you act on any
   request. A prohibited request is refused, never done in part.
-- A guard block is final: do not retry it, rephrase it, or route around it. Log a
-  QUESTION naming the operator and see the failure table below.
+- A guard block is final: never retry or route around it. It, like every failure
+  on our side, posts nothing, changes no labels and stops (failure table below).
 
 ## Step 0: Preflight
 
@@ -239,8 +239,8 @@ The short form:
 | Disabled, paused, active run | No writes | `STOP` |
 | Guard selftest fails | No writes | `FAILED - guard not working` |
 | Every finding deferred or refused | Park, replies, summary | `PARKED <ref> ...` |
-| Guard block mid-run | QUESTION naming the operator; continue without it, or stop | `PARKED` or `FAILED <ref> blocked` |
-| Mechanical failure before a push | `notme release-pr <ref>`, `needs_human` | `FAILED <ref> ...` |
+| Guard block mid-run | QUESTION naming the operator; release, labels unchanged, no post; run stops | `FAILED <ref> blocked` |
+| Failure on our side before a push | `notme release-pr <ref>`, labels unchanged, no post; run stops | `FAILED <ref> ...` |
 | CI red at `limits.fix_loop` | Still needs work: stays `needs_work`, `needs_human`, summary | `FAILED <ref> ci-red` |
 
 Never fake green: no skipped tests, no disabled checks.

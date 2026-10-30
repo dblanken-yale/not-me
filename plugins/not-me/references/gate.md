@@ -22,8 +22,8 @@ Run these in order. Log each as a `GATE` line with its result.
    `GATE code-review reviewer=pr-review-toolkit:code-reviewer pass` or
    `reviewer=general-purpose`. Decide from the available agent list before
    dispatching: the fallback applies only when the agent is not listed. A listed
-   agent whose dispatch fails or times out is a failed step: `WARN` with the exact
-   error, the gate is not claimed as passed, and no fallback. Do not rely on
+   agent whose dispatch fails or times out is a step that cannot run (see "When a
+   gate step cannot run"): `WARN` with the exact error, no fallback. Do not rely on
    `/code-review`: it may be user-invocation only.
 4. **Security review.** Run it as a foreground general-purpose subagent with a
    security review brief. Not through the Skill tool: a skill run there ends on its
@@ -57,14 +57,17 @@ follow-up for @octocat.
 
 ## When a gate step cannot run
 
-1. A tool or agent that is missing is a `WARN` line with the exact error. The
-   one exception is the optional code reviewer agent in step 3 when it is absent
-   from the agent list: the general-purpose fallback review counts as the step
-   having run, and the `reviewer=` field says so.
-2. The run does not claim the gate passed. The PR says which step did not run and
-   why.
+1. A tool or agent that is missing, or a dispatch that fails, is a `WARN` line
+   with the exact error. The one exception is the optional code reviewer agent in
+   step 3 when it is absent from the agent list: the general-purpose fallback
+   review counts as the step having run, and the `reviewer=` field says so.
+2. A step that cannot run is a failure on our side, not a gate result. The run
+   does not claim the gate passed, does not push or open a PR, posts nothing about
+   it, and stops as `autonomy-and-logging.md` says ("Failures on our side").
 3. A failed step is never retried by routing around it, for example by running a
    narrower lint.
+4. A step that fails the same way on the base is also on our side
+   (`verification.md`, "A failure that is also on the base").
 
 ## Order with the rest of the run
 

@@ -8,7 +8,7 @@ The guard is a small safety net for an agent that is trying to follow the rules.
 
 - Claude Code calls the hook before every `Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and read tool call, and before GitHub MCP tools. Other MCP tools are not judged.
 - The hook looks at the call and either lets it through (exit code 0) or blocks it (exit code 2, with a message that goes back to Claude).
-- A blocked call does not run. Claude reads the message, does not retry, and records a question for you.
+- A blocked call does not run. Claude reads the message, does not retry, and records a question for you. In a not-me run a block is a failure on not-me's side: the run posts nothing, changes no labels, gives back its claim and stops with `FAILED <ref> blocked - <target>` (see "When a person is needed" in [workflow.md](workflow.md)).
 - Every block in a not-me project is also appended to `<git-common-dir>/not-me/logs/guard.jsonl` with the time, tool, rule, reason, target, and `input`: what was blocked (the Bash command, the file path for file tools, else the tool's arguments without any content body at any depth). `input` is redacted before it is written (the operator token, the live-mode marker and epoch, values of variables, flags and argument keys named like a token, key, secret or password, the `--body`/`-b` or `<<<` value of `gh secret set` (not a value piped in), `Authorization` header values, passwords in URLs and in `curl -u user:pass`, and GitHub token shapes) and cut to 2000 characters. The file stays on your machine; nothing posts it to GitHub.
 
 ## Activation

@@ -663,7 +663,7 @@ bash(A, None, "LC_ALL=C git status")
 bash(A, None, "LC_ALL=C NO_COLOR=1 gh pr comment 1 --repo acme/app -b x")
 bash(A, None, "cd scripts && notme status")  # notme in a command that changes directory
 bash(A, None, "notme pause on")
-bash(A, None, "notme git worktree-add '{F}'/app/.git/not-me/worktrees/feat-x")
+bash(A, None, "notme git worktree-add 0123456789abcdef --name review-feat-x")
 bash(A, None, "notme --project-dir {F}/other status")
 bash(A, None, "notme --proj={F}/other status", "alloff")
 bash(A, None, "python3 {P}/cli/notme.py --project-dir {F}/other config")
@@ -687,8 +687,8 @@ bash(A, None, "NOT_ME_OPERATOR_CONFIRM=1 ls", "alloff")
 bash(B, SP, "notme pause off")
 bash(B, SP, "notme pause 'of'f", "alloff")
 bash(B, SP, "bash {P}/bin/notme pause --off")
-bash(A, None, "notme git worktree-add /tmp/wt")
-bash(A, None, "notme git worktree-add {F}/app/.git/not-me/worktrees/../../hooks")
+bash(A, None, "notme git worktree-add 0123456789abcdef")
+bash(A, None, "notme git worktree-add 0123456789abcdef --name ../../hooks")  # the CLI refuses the name
 bash(A, None, "notme git worktree-add")
 # VAR=value in front of gh, git or notme is fine, except variables that change where git pushes (GIT_DIR and the
 # like); a gh write still has to name its repo.
@@ -909,7 +909,7 @@ for _where in ("nogit", "app/vendor/nested"):
     bash(B, SP, "nohup notme pause off &", _where)
     bash(B, SP, "NOT_ME_OPERATOR_CONFIRM=x notme pause off", _where)
     bash(A, None, "cd {F}/app && notme status", _where)  # re-points the CLI at a not-me project
-    bash(A, None, "notme git worktree-add {F}/wt", _where)  # no not-me common dir to put it under
+    bash(A, None, "notme git worktree-add 0123456789abcdef", _where)
     # a command name taken from a variable cannot be checked: it blocks when it could drive notme
     bash(B, SP, "N=notme; $N pause off", _where)
     bash(B, SP, '"$CLAUDE_PLUGIN_ROOT/bin/notme" pause off', _where)

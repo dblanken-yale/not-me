@@ -5,7 +5,10 @@
 Read this whenever `/not-me:update` cannot finish: a stop before work, a park, a
 guard block, or a failure. It says which labels to write, whether to comment, and
 the result line. Parking rules are in `parking.md`; logging rules in
-`autonomy-and-logging.md`.
+`autonomy-and-logging.md`. A failure on our side (its cause is outside the PR: a
+`notme` error, a fetch or checkout failure, a missing tool or environment, a guard
+block, a dispatch with no fallback) follows "Failures on our side" there: release
+the claim, post nothing, change no labels, and stop the run.
 
 ## Rules for every row
 
@@ -32,9 +35,10 @@ the result line. Parking rules are in `parking.md`; logging rules in
 | PR author untrusted, or a fork | unchanged, claim released | none | `STOP <ref> untrusted-author` or `STOP <ref> fork` |
 | Head branch is protected | unchanged, claim released | none | `STOP <ref> protected-head` |
 | Every finding deferred or refused | `findings.md` park labels | summary and thread replies | `PARKED <ref> needs_review - waiting on @<login>` |
-| Guard block, other work can go on | outcome labels plus `needs_human` | names the operator and the blocked target | the normal result, note `blocked <target>` |
-| Guard block that stops the item | `needs_review`, `needs_human` | names the operator and the blocked target | `FAILED <ref> blocked - <target>` |
+| Guard block | unchanged, claim released | none | `FAILED <ref> blocked - <target>`; run stops |
+| Other failure on our side before a push | unchanged, claim released | none | `FAILED <ref> <what>`; run stops |
 | Merge conflict at Checkpoint A | `needs_work`, `needs_human`, claim released | names the conflicting files | `FAILED <ref> merge-conflict` |
+| A check or CI job fails the same way on the base (`verification.md`, "A failure that is also on the base") | unchanged; claim released before a push, kept after | none | `FAILED <ref> base-red - <check>`; run stops |
 | Implementation or gate fails after `models.max_tries` on every finding | `needs_work`, `needs_human`, claim released | names the failing check | `FAILED <ref> <check>` |
 | Push fails after commit | unchanged | none | `FAILED <ref> not-pushed` (log says "committed but NOT PUSHED") |
 | CI red at `limits.fix_loop` | still needs work: `needs_work` stays, add `needs_human` | summary naming the failing job and test | `FAILED <ref> ci-red - <test>` |
@@ -42,15 +46,17 @@ the result line. Parking rules are in `parking.md`; logging rules in
 
 "Release" means `notme release-pr <ref> --log <path>`, then the `needs_human` add.
 A mechanical failure (a command that errors, a checkout that will not switch)
-before any push is released this way and ends `FAILED <ref> <what>`.
+before any push is a failure on our side: `notme release-pr` alone, no
+`needs_human`, no post, and it ends `FAILED <ref> <what>`.
 
 ## Guard blocks
 
 1. A block is final. Do not retry with another command shape, tool, or wrapper.
 2. Log `notme log question` naming the operator: "@<operator>: push to <repo> was
-   blocked; allow it with the allow-repo command if intended."
-3. Continue with any part of the work that does not need the blocked action.
-   When nothing is left, stop with the row above.
+   blocked; allow it with the allow-repo command if intended." Log the block
+   message as a `WARN`.
+3. A block is a failure on our side: release the claim, post nothing, change no
+   labels, end `FAILED <ref> blocked - <target>` and stop the run.
 
 ## Never
 
@@ -61,7 +67,8 @@ before any push is released this way and ends `FAILED <ref> <what>`.
 
 ## Checklist
 
-- [ ] Wrote the labels in the row, and `needs_human` whenever a person must act.
+- [ ] Wrote the labels in the row, and `needs_human` whenever a person must act on the work.
+- [ ] On a failure on our side: released the claim, posted nothing, changed no labels, stopped.
 - [ ] Posted at most one summary, upserted with the `update` marker.
 - [ ] Finished the log with the failing command and output.
 - [ ] Printed exactly the result line in the row.

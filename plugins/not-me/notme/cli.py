@@ -2066,34 +2066,96 @@ def cmd_git_unstash(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     return {"restored": args.sha}
 
 
+WORKTREES_EXCLUDE = "/.claude/worktrees/"
+# review- keeps notme off the other worktrees in the same dir (Claude Code keeps its session worktrees there)
+WORKTREE_NAME_RE = re.compile(r"review-[A-Za-z0-9._-]{1,57}")
+
+
 def worktrees_root(ctx: Context) -> Path:
+    """<main checkout>/.claude/worktrees, found from the work dir's toplevel. Never inside the git common dir."""
+    work = ctx.need_work_dir()
+    top = paths.run_git(["rev-parse", "--show-toplevel"], work)
+    common = paths.git_common_dir(work)
+    if top is None or common is None:
+        raise fail(ExitCode.USAGE, "usage", "worktrees need a checkout with a working tree (not a bare repository)")
+    main = Path(os.path.realpath(str(paths.main_checkout(Path(top)))))
+    git_dir = Path(os.path.realpath(str(common)))
+    main_common = paths.git_common_dir(main)  # core.worktree can point main_checkout anywhere; it must share our git dir
+    if main_common is None or Path(os.path.realpath(str(main_common))) != git_dir:
+        raise fail(ExitCode.ERROR, "unsafe_path", f"the main checkout {main} does not belong to this repository")
+    root = main / ".claude" / "worktrees"
+    resolved = Path(os.path.realpath(str(root)))
+    if resolved == git_dir or git_dir in resolved.parents:
+        raise fail(ExitCode.ERROR, "unsafe_path", "the worktrees dir resolves inside the git directory")
+    return root
+
+
+def worktree_path(root: Path, path: Union[str, Path]) -> Path:
+    """`path` realpath'd when it is a review-* dir directly under `root` with no symlink on the way; else unsafe_path."""
+    real = Path(os.path.realpath(str(path)))
+    if real.parent != root or not WORKTREE_NAME_RE.fullmatch(real.name) or ".." in real.name:
+        raise fail(ExitCode.ERROR, "unsafe_path", "worktree path must be a review-* dir directly under <main checkout>/.claude/worktrees/")
+    return real
+
+
+def exclude_worktrees_root(ctx: Context) -> None:
+    """Add /.claude/worktrees/ to <git-common-dir>/info/exclude once, so a nested worktree never shows as untracked."""
     common = paths.git_common_dir(ctx.need_work_dir())
     if common is None:
         raise fail(ExitCode.USAGE, "usage", "not a git repository")
-    return Path(os.path.realpath(str(common))) / "not-me" / "worktrees"
+    info = Path(common) / "info"
+    exclude = info / "exclude"
+    if os.path.islink(str(info)) or os.path.islink(str(exclude)) or \
+            Path(os.path.realpath(str(exclude))).parent != Path(os.path.realpath(str(common))) / "info":
+        raise fail(ExitCode.ERROR, "unsafe_path", f"{exclude} is a symlink or resolves outside the git directory")
+    text = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+    if WORKTREES_EXCLUDE in (line.strip() for line in text.splitlines()):
+        return
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    sep = "\n" if text and not text.endswith("\n") else ""
+    with exclude.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(f"{sep}{WORKTREES_EXCLUDE}\n")
 
 
-@command("git worktree-add", "add a detached worktree", args=[arg("path", metavar="PATH"), arg("sha", metavar="SHA")])
+@command("git worktree-add", "add a detached worktree under .claude/worktrees",
+         args=[arg("sha", metavar="SHA"), arg("--name", metavar="NAME")])
 def cmd_git_worktree_add(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Add a detached worktree at a sha. PATH must be below <git-common-dir>/not-me/worktrees/.
+    """Add a detached worktree at a sha at <main checkout>/.claude/worktrees/NAME; the CLI picks the path.
 
-    Output: path, sha
+    NAME defaults to review-<first 12 chars of SHA> and must match review-[A-Za-z0-9._-]{1,57} with no "..";
+    anything else, a symlinked .claude, .claude/worktrees, info or info/exclude, or a main checkout (via
+    core.worktree) that does not share this repository's git dir, is refused as unsafe_path. An existing path is
+    refused as path_exists. The git common dir's info/exclude gets /.claude/worktrees/ so the worktree never shows
+    as untracked in the main checkout. Works the same from the main checkout or a linked worktree.
+
+    Output: path (absolute), sha
     """
+    if not git_mod._SHA_RE.fullmatch(args.sha):
+        raise fail(ExitCode.USAGE, "usage", f"invalid sha {args.sha!r}")
+    name = f"review-{args.sha[:12]}" if args.name is None else args.name
+    if not WORKTREE_NAME_RE.fullmatch(name) or ".." in name:
+        raise fail(ExitCode.ERROR, "unsafe_path", f"bad worktree name {name!r}: use review-[A-Za-z0-9._-]{{1,57}}")
     root = worktrees_root(ctx)
-    real = Path(os.path.realpath(args.path))
-    if root not in real.parents:
-        raise fail(ExitCode.ERROR, "unsafe_path", "worktree path must be under <git-common-dir>/not-me/worktrees/")
+    real = worktree_path(root, root / name)
+    if os.path.lexists(str(real)):
+        raise fail(ExitCode.ERROR, "path_exists", f"{real} already exists")
+    exclude_worktrees_root(ctx)
+    root.mkdir(parents=True, exist_ok=True)
+    real = worktree_path(root, root / name)  # again, after mkdir
     git_mod.worktree_add_detached(real, args.sha, ctx.need_work_dir())
-    return {"path": args.path, "sha": args.sha}
+    return {"path": str(real), "sha": args.sha}
 
 
-@command("git worktree-remove", "remove a worktree", args=[arg("path", metavar="PATH")])
+@command("git worktree-remove", "remove a worktree notme made", args=[arg("path", metavar="PATH")])
 def cmd_git_worktree_remove(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Remove a worktree.
+    """Remove a worktree made by `git worktree-add`. PATH must be a review-* dir directly under
+    <main checkout>/.claude/worktrees/; anything else, including Claude Code's own session worktrees there, is refused
+    as unsafe_path.
 
     Output: path, removed
     """
-    git_mod.worktree_remove(args.path, ctx.need_work_dir())
+    real = worktree_path(worktrees_root(ctx), args.path)
+    git_mod.worktree_remove(real, ctx.need_work_dir())
     return {"path": args.path, "removed": True}
 
 

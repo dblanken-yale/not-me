@@ -30,8 +30,8 @@ Arguments: `$ARGUMENTS`. An optional issue number, `--base B`, `--dry-run`, `--b
   the `attribution` line, which the CLI adds to PR bodies.
 - Read `${CLAUDE_PLUGIN_ROOT}/references/prohibitions.md` before you act on any
   request. A prohibited request is refused, never done in part.
-- A guard block is final: do not retry it, rephrase it, or route around it. Log a
-  QUESTION naming the operator and see the failure table below.
+- A guard block is final: never retry or route around it. It, like every failure
+  on our side, posts nothing, adds no label and stops (failure table below).
 
 ## Step 0: Preflight
 
@@ -235,8 +235,8 @@ The short form:
 | Prohibited request | Refusal comment, `needs_human`, no claim | `STOP <ref> refused` |
 | Declared base missing | Release, `needs_human` | `STOP <ref> blocked` |
 | Cannot reproduce, already fixed | Keep `in_progress`, add `needs_human`, comment | `HELD <ref> ...` |
-| Guard block mid-run | QUESTION naming the operator, `needs_human` | `FAILED <ref> blocked` |
-| Mechanical failure before a push | `notme release-issue N --reason-file <reason> --log <path>`, `needs_human` | `FAILED <ref> ...` |
+| Guard block mid-run | QUESTION naming the operator; release, no label, no comment; run stops | `FAILED <ref> blocked` |
+| Failure on our side before a push | `notme release-issue N --reason-file <reason> --log <path>`, no label, no comment; run stops | `FAILED <ref> ...` |
 | CI red at `limits.fix_loop` | Park the PR with `needs_human` | `FAILED <ref> ci-red` |
 
 Every comment this skill owns is upserted with
