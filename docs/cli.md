@@ -657,7 +657,7 @@ Output: number, url (both null in a dry run), parent
 
 ### `notme check-text`
 
-Lint a text bound for GitHub (bare #N, local paths, assistant mentions, TL;DR line). Exit 1 when it finds problems.
+Lint a text bound for GitHub (bare #N, local paths, assistant mentions, TL;DR line, an account of local trouble the run worked around). Exit 1 when it finds problems.
 
 ```
 notme check-text --file F [--summary]

@@ -23,7 +23,9 @@ Make one work directory in the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/
    - `## Summary`. For a chained sub-issue the first line is
      `Builds on <owner>/<repo>#<n>`.
    - `## Testing steps`: a checklist a person can follow. Tick only what this run
-     ran and saw pass. Never inside `<details>`.
+     ran and saw pass. Never inside `<details>`. Each check by its command and
+     result only, with no account of local trouble the run got past; that stays
+     in the run log as a `WARN` (autonomy-and-logging.md, "Failures on our side").
    - `## Companion PRs`, only in a companion set.
    - `## References`: the issue as `<owner>/<repo>#N`, with the closing keyword
      from `standards.closing_keyword` (`auto`: `Closes <owner>/<repo>#N` when the
@@ -78,6 +80,7 @@ during the run: log a `WARN`, leave it, and say so in the result note.
 
 - [ ] Title and body written to files and checked with `notme check-text`.
 - [ ] Body has Summary, uncollapsed Testing steps, References with the right keyword.
+- [ ] No account of local trouble anywhere in the body.
 - [ ] Opened ready for review, `needs_review` and reviewers on the completing PR only.
 - [ ] Companion sections written on every PR in the set.
 - [ ] Moved the issue from `in_progress` to `needs_review`.

@@ -12,9 +12,8 @@ Arguments: `$ARGUMENTS`. An optional issue number, `--base B`, `--dry-run`, `--b
 
 ## Ground rules
 
-- `${CLAUDE_PLUGIN_ROOT}` below is substituted at load time with this plugin's
-  directory. Read the files it names with the Read tool. It is not a shell
-  variable: never write `$CLAUDE_PLUGIN_ROOT` in a command.
+- `${CLAUDE_PLUGIN_ROOT}` below is substituted at load time with this plugin's directory. Read the files
+  it names with the Read tool. It is not a shell variable: never write `$CLAUDE_PLUGIN_ROOT` in a command.
 - Call the CLI as `notme` (the plugin's `bin/` is on the PATH). If the shell cannot
   find it, call `"${CLAUDE_PLUGIN_ROOT}/bin/notme"` with the same arguments. Every
   call prints one JSON object; read it and the exit code. `--help` on any
@@ -23,9 +22,8 @@ Arguments: `$ARGUMENTS`. An optional issue number, `--base B`, `--dry-run`, `--b
   if live and say `dry-run` in the result note.
 - Every GitHub write goes through `notme`. Text goes in files under the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/references/autonomy-and-logging.md` (Text to GitHub, rule 2), never in a shell argument.
 - After `notme log start`, every write call also passes `--log <path>`.
-- Label names in this file are the abstract keys of `labels` (for example
-  `needs_human`). When a command takes a repo label name, write the value the
-  `labels` map in the config gives for that key.
+- Label names in this file are the abstract keys of `labels` (for example `needs_human`). When a command
+  takes a repo label name, write the value the `labels` map in the config gives for that key.
 - Never mention an AI, a model or an assistant in any post. The only exception is
   the `attribution` line, which the CLI adds to PR bodies.
 - Read `${CLAUDE_PLUGIN_ROOT}/references/prohibitions.md` before you act on any
@@ -140,6 +138,9 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/delegation.md`.
 Read `${CLAUDE_PLUGIN_ROOT}/references/verification.md` and
 `${CLAUDE_PLUGIN_ROOT}/references/gate.md`. Commands come only from the body of
 the effective verify doc; never invent a test or lint command, never run a person-only one.
+Run each as the verify doc gives it. Changing its config, flags or environment to make it start
+is not allowed; a check that will not start as given is a failure on our side. Local trouble the run
+gets past is a `WARN` in the log, never in a post (autonomy-and-logging.md, "Failures on our side").
 
 1. Before any edit: `notme verify-plan --base <base>`, then the baseline as it
    says; log failures, or why it was skipped, as `CHECK` lines (verification.md).
@@ -224,8 +225,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/pr-shape.md` and
 
 ## Failure handling
 
-The full table is in `${CLAUDE_PLUGIN_ROOT}/skills/new/references/failures.md`.
-The short form:
+The short form; the full table is in `${CLAUDE_PLUGIN_ROOT}/skills/new/references/failures.md`.
 
 | Situation | What happens | Result |
 |-----------|--------------|--------|
@@ -255,6 +255,6 @@ checks. A clearly reported blocker is a correct outcome.
 - [ ] Delegated the unit, audited it myself, logged DELEGATE and AUDIT.
 - [ ] Ran verify-plan, the baseline, reproduction, red then green, and the full gate.
 - [ ] Committed only touched paths; pushed only through the CLI.
-- [ ] Opened the PR ready for review, moved the issue to `needs_review`, and left
-      one upserted `new` marker comment on the issue naming the PR.
+- [ ] Ran each check as the verify doc gives it; kept local trouble in the log, out of every post.
+- [ ] Opened the PR ready, moved the issue to `needs_review`, left one `new` marker comment naming it.
 - [ ] Left the checkout clean on its starting branch and finished the log.

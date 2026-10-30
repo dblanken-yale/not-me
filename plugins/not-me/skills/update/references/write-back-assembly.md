@@ -36,7 +36,10 @@ The CLI adds the kind and run markers and edits the earlier summary in place.
 3. Sections: Fixed, Deferred, Refused, Disagreed, each item with its thread or
    file and line. Plain PR comments that asked for a change are answered here.
 4. Verification and gate results inside `<details>`, with a blank line after the
-   `<summary>` line.
+   `<summary>` line: each check by its command and result only, with
+   no account of local trouble the run got past. That stays in the run log as a
+   `WARN` (autonomy-and-logging.md, "Failures on our side"). The same holds for
+   replies.
 5. Add `IGNORED n comment(s) from: <logins>` when `ignored_count` is above zero.
    Never quote them.
 
@@ -78,6 +81,7 @@ summary per PR, labels on each to match.
 ## Checklist
 
 - [ ] Every body checked with `notme check-text` before posting.
+- [ ] No account of local trouble in any reply or the summary.
 - [ ] One reply per finding thread; no thread resolved; no reply on untrusted threads.
 - [ ] One upserted summary with TL;DR first and the Waiting on list.
 - [ ] Testing steps appended when they changed.

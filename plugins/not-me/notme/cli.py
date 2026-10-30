@@ -1770,8 +1770,8 @@ def cmd_followup(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     arg("--file", required=True, metavar="F"),
     arg("--summary", action="store_true", help="the text is a run summary (needs a TL;DR line)")])
 def cmd_check_text(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Lint a text bound for GitHub (bare #N, local paths, assistant mentions, TL;DR line). Exit 1 when it finds
-    problems.
+    """Lint a text bound for GitHub (bare #N, local paths, assistant mentions, TL;DR line, an account of local trouble
+    the run worked around). Exit 1 when it finds problems.
 
     Output: ok, problems
     """

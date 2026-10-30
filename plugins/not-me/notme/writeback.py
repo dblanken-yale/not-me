@@ -602,6 +602,10 @@ _ISSUE_HEADING_RE = re.compile(
     r"^## \[(\d+: (?:\\.|[^\\\]])*)\]\(https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/\d+\)")
 _PATH_RE = re.compile("(?:/" + "Users/|/home/[^/\\s]+/|[A-Za-z]:\\\\" + "Users\\\\)")
 _AI_RES = (re.compile(r"\bAI\b"), re.compile("\\bCl" + "aude\\b", re.I), re.compile(r"\bmodels?\b", re.I))
+# A run's account of local trouble it worked around ("reran with ... off", "worked around the sandbox"). Narrow on
+# purpose: words like "worktree" or "sandbox" alone are fair in a PR about that tooling. Quoted text is skipped.
+_LOCAL_TROUBLE_RE = re.compile(r"\bre-?ran\b[^.\n]{0,40}?\bwith(?:out)?\b|\bworked around\b", re.I)
+_QUOTED_RE = re.compile(r'"[^"\n]*"|\u201c[^\u201d\n]*\u201d')
 
 
 def check_text(body: str, tracker: Optional[str] = None, repo: Optional[str] = None, attribution_text: str = "",
@@ -640,6 +644,12 @@ def check_text(body: str, tracker: Optional[str] = None, repo: Optional[str] = N
             m = pattern.search(ai_line)
             if m:
                 problems.append(f"line {number}: mentions {m.group(0)!r}")
+        prose = ref_lines[number - 1]
+        if not prose.lstrip().startswith(">"):
+            m = _LOCAL_TROUBLE_RE.search(_QUOTED_RE.sub("", prose))
+            if m:
+                problems.append(f"line {number}: reads like local trouble the run worked around ({m.group(0)!r}); "
+                                "keep it in the run log as a WARN, not in a post")
     for m in re.finditer(r"<details[^>]*>", text):
         rest = text[m.end():]
         s = re.match(r"\s*<summary>.*?</summary>", rest, re.S)

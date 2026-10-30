@@ -18,7 +18,10 @@ Make one work directory in the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/
    - `**Findings**`: one line per finding, level first, file and line, one
      sentence. Inline ones are summarised here too.
    - `**Earlier threads**`: fixed, answered, or still open, one line each.
-   - `**Checks**`: each command run on the head SHA and its result.
+   - `**Checks**`: each check by its command and result only, on the head SHA,
+     with no account of local trouble (a tool, worktree or sandbox problem the run
+     got past). That goes to the run log as a `WARN` (autonomy-and-logging.md,
+     "Failures on our side").
    - `**Follow-ups**`: each follow-up issue as `owner/repo#N`, non-blocking.
    - Long output in `<details>` with a blank line after the `<summary>` line.
 2. `comments.json`: a JSON list of `{"path", "line", "body"}`, one per finding
@@ -95,6 +98,7 @@ multiplying, so acme/app#12's criterion "mul(2, 3) is 6" fails.
 
 - [ ] Body leads with the marker and `**TL;DR:**`, people named by login.
 - [ ] Every inline comment has a path and a line in the diff.
+- [ ] Checks list command and result only, with no account of local trouble.
 - [ ] Both text files passed `notme check-text`.
 - [ ] Posted one review with `--labels-auto`, read back by the CLI.
 - [ ] Resolved only the operator's earlier threads judged fixed.
