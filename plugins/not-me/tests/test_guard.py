@@ -578,7 +578,11 @@ class MessageTests(unittest.TestCase):
         self.assertTrue(msg.startswith("not-me guard [force_push]: blocked `git push -f`: targeting acme/other."))
         self.assertIn("Why: force pushes rewrite published history.", msg)
         self.assertIn("Instead: push new commits on top instead.", msg)
-        self.assertIn("Autonomous runs: do not retry; log a QUESTION naming the operator and continue.", msg)
+        # dblanken-yale/not-me#132: one line that stops an autonomous run, matching "Failures on our side"
+        stop = "Autonomous runs: do not retry; log the block, end the run FAILED and post nothing."
+        self.assertIn(stop, msg)
+        self.assertEqual(sum(1 for ln in msg.splitlines() if ln.startswith("Autonomous runs:")), 1)
+        self.assertNotIn("continue", msg)
         # the repo layer cannot relax a rule, so the message names the global layer
         self.assertIn("set guard.force_push: off and confirm_guard_off: [force_push] in ~/.claude/not-me/project.md",
                       msg)

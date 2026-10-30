@@ -105,6 +105,9 @@ GitFn = Callable[[List[str], str], Optional[str]]
 ALLOW_WHY = "the not-me allow list changes only through /not-me:allow-repo, which shows and logs the change"
 ALLOW_HINT = "ask the operator to run /not-me:allow-repo"
 MODE_HINT = "ask the operator to run /not-me:mode"
+# a block is a failure on not-me's side: an autonomous run stops (references/autonomy-and-logging.md,
+# dblanken-yale/not-me#132)
+AUTONOMOUS_LINE = "Autonomous runs: do not retry; log the block, end the run FAILED and post nothing."
 
 # --- patterns --------------------------------------------------------------
 
@@ -1095,7 +1098,7 @@ def render(block: Block, ctx: GuardContext) -> str:
     lines.append(f"Why: {block.reason}.")
     if block.hint:
         lines.append(f"Instead: {block.hint}.")
-    lines.append("Autonomous runs: do not retry; log a QUESTION naming the operator and continue.")
+    lines.append(AUTONOMOUS_LINE)
     if block.rule in RULES and not block.no_relax:
         lines.append(f"Relax this rule (not recommended): set guard.{block.rule}: off and "
                      f"confirm_guard_off: [{block.rule}] in {GLOBAL_CONFIG_HINT}")

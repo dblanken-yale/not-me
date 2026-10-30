@@ -244,7 +244,7 @@ Every block says which rule fired, what was blocked, why, and what to do instead
 not-me guard [protected_branches]: blocked `git commit -m x`.
 Why: commits on the protected branch main are not allowed.
 Instead: create a feature branch first (git switch -c <type>/<topic>) and commit there.
-Autonomous runs: do not retry; log a QUESTION naming the operator and continue.
+Autonomous runs: do not retry; log the block, end the run FAILED and post nothing.
 Relax this rule (not recommended): set guard.protected_branches: off and confirm_guard_off: [protected_branches] in ~/.claude/not-me/project.md
 See effective config: /not-me:config
 ```
@@ -253,7 +253,7 @@ See effective config: /not-me:config
 not-me guard [force_push]: blocked `git push --force origin feature/x`.
 Why: force pushes rewrite published history.
 Instead: push new commits on top instead; ask the operator if a rewrite is really needed.
-Autonomous runs: do not retry; log a QUESTION naming the operator and continue.
+Autonomous runs: do not retry; log the block, end the run FAILED and post nothing.
 Relax this rule (not recommended): set guard.force_push: off and confirm_guard_off: [force_push] in ~/.claude/not-me/project.md
 See effective config: /not-me:config
 ```
@@ -266,7 +266,7 @@ A git write whose `--git-dir` or `--work-tree` path is a shell variable (`git --
 not-me guard [protected_branches]: blocked `git --git-dir=$G commit -m x`.
 Why: the guard does not expand shell variables in a `git --git-dir` path.
 Instead: drop --git-dir and run `git -C /abs/path <sub> ...` with the path written out in full; a rewritten command is checked afresh, so this is not a retry.
-Autonomous runs: do not retry; log a QUESTION naming the operator and continue.
+Autonomous runs: do not retry; log the block, end the run FAILED and post nothing.
 See effective config: /not-me:config
 ```
 
