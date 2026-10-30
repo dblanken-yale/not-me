@@ -262,3 +262,56 @@ class MarkerInMessageTests(TmpDirTestCase):
         self.assertEqual(again.status, "DONE")
         self.assertEqual(len(again.entries), 1)
         self.assertIn("## Timeline", again.entries[0]["message"])
+
+
+class WorktreeMarkerTests(TmpDirTestCase):
+    """Each worktree of a checkout has its own marker, so runs in different worktrees run side by side."""
+
+    def setUp(self):
+        super().setUp()
+        self.main = Path(self.tmp) / "main"
+        self.main.mkdir()
+        _git(self.main, "init", "-q")
+        _git(self.main, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty",
+             "-m", "i")
+        self.linked = Path(self.tmp) / "linked"
+        _git(self.main, "worktree", "add", "-q", "-b", "other", str(self.linked))
+        self.common = (self.main / ".git").resolve()
+        self.logs = runlog.log_root(self.main, None, {})
+
+    def test_main_marker_stays_in_the_common_dir_and_a_linked_one_in_its_own_git_dir(self):
+        self.assertEqual(runlog.default_marker_path(self.main), self.common / "not-me" / "active-run")
+        linked = runlog.default_marker_path(self.linked)
+        self.assertEqual(linked.parent.parent.parent, self.common / "worktrees")
+        self.assertEqual(linked.name, "active-run")
+
+    def test_runs_in_two_worktrees_start_side_by_side(self):
+        a = RunLog.start(self.logs, "new", "acme/app#1", project_dir=self.main)
+        b = RunLog.start(runlog.log_root(self.linked, None, {}), "new", "acme/app#2", project_dir=self.linked)
+        self.assertNotEqual(a.marker_path, b.marker_path)
+        self.assertEqual(a.path.parent, b.path.parent)  # one shared log root
+        self.assertEqual({m["run_id"] for m in runlog.active_runs(self.common)}, {a.run_id, b.run_id})
+        with self.assertRaises(runlog.ActiveRunError):  # still one run per worktree
+            RunLog.start(self.logs, "new", "acme/app#3", project_dir=self.linked)
+        b.finish("done")
+        self.assertEqual([m["run_id"] for m in runlog.active_runs(self.common)], [a.run_id])
+        self.assertIsNotNone(runlog.active_run(a.marker_path))
+
+    def test_a_stale_marker_in_a_linked_worktree_stops_counting(self):
+        RunLog.start(self.logs, "new", "r", now=NOW, project_dir=self.linked)
+        self.assertEqual(len(runlog.active_runs(self.common, now=NOW + timedelta(hours=5))), 1)
+        self.assertEqual(runlog.active_runs(self.common, now=NOW + timedelta(hours=6, minutes=1)), [])
+        later = RunLog.start(self.logs, "new", "r2", now=NOW + timedelta(hours=7), project_dir=self.linked)
+        self.assertEqual(runlog.active_run(later.marker_path, now=NOW + timedelta(hours=7))["run_id"], later.run_id)
+
+    def test_find_marker_names_the_worktree_that_holds_a_run(self):
+        b = RunLog.start(self.logs, "new", "r", project_dir=self.linked)
+        self.assertEqual(runlog.find_marker(self.main, b.run_id), b.marker_path)
+        self.assertIsNone(runlog.find_marker(self.main, "nobody"))
+        reopened = RunLog.open(b.path, project_dir=self.main)  # finishing from the main checkout clears it too
+        reopened.finish("done")
+        self.assertFalse(b.marker_path.exists())
+
+    def test_marker_paths_outside_git_is_the_project_marker(self):
+        plain = Path(self.tmp) / "plain"
+        self.assertEqual(runlog.checkout_marker_paths(plain), [plain / ".not-me" / "active-run"])

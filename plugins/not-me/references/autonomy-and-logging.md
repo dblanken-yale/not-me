@@ -36,6 +36,11 @@ UNDO change PAGE_SIZE in pager.py:12
 
 1. One log file per run under the log root (`logs.root`, or the not-me directory
    inside the git common dir). The CLI creates it; never pick the path yourself.
+   One run per worktree; runs in other worktrees of the checkout do not block it.
+   Write every `notme` call as its own Bash command, `notme` first and nothing
+   chained before or after it (no `cd x &&`, `;`, `|` or `$(...)`). From a
+   worktree the log sits under the main checkout's `.git`, and a sandbox lets
+   only a lone `notme` write there. Write message files with the Write tool.
 2. `## Summary` sits at the top. It leads with refusals and failures, then
    questions, then what was done.
 3. `## Timeline` holds one line per event, with one of these kinds:

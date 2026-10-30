@@ -184,7 +184,7 @@ Upgrading from an older version: if your global `project.md` already says `mode:
    | What | Where |
    | --- | --- |
    | Global config and allow list | `~/.claude/not-me/` (or the folder `NOT_ME_HOME` points to) |
-   | Logs, claims, ledger, active-run marker | `<git-common-dir>/not-me/` in each repo, for example `.git/not-me/` |
+   | Logs, claims, ledger, active-run markers, shared test environment lock | `<git-common-dir>/not-me/` in each repo, for example `.git/not-me/`, and `<git-common-dir>/worktrees/<id>/not-me/` for a linked worktree |
    | Private temp files | the `not-me-<uid>` folder in your system temp directory |
    | Repo config | `.claude/not-me/` in each repo. It is committed, so remove it in a pull request |
 

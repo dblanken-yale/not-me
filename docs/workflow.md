@@ -137,7 +137,9 @@ Two skills add a verb of their own. `/not-me:retro` ends with `RETRO <log> <n> l
 
 ## Run logs
 
-Each run writes one markdown file. The default place is `<git-common-dir>/not-me/logs/<skill>/<run id>.md`, which is `.git/not-me/logs/` in a normal clone. Set `logs.root` to move the logs; the active-run marker and the guard log never move. Logs are local and never committed.
+Each run writes one markdown file. The default place is `<git-common-dir>/not-me/logs/<skill>/<run id>.md`, which is `.git/not-me/logs/` in a normal clone. Set `logs.root` to move the logs; the active-run markers and the guard log never move. Logs are local and never committed.
+
+One worktree holds one run at a time, and runs in different worktrees of one checkout run side by side; claims keep two runs off the same item. When the checks need one test environment that every worktree shares, set `shared_env: true` in `verify.md`: the verify step then takes a lock on it, and a run that finds it busy waits or stops with a clear reason, never skipping verification. Run every `notme` command on its own, not chained to another command: a sandbox that allows `notme` by its first word lets it write the run log under the main checkout's `.git` from a worktree.
 
 Find the newest one with `/not-me:status`, which lists the last result and log file of each skill, or with `notme log last` (see [cli.md](cli.md)).
 

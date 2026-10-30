@@ -42,7 +42,8 @@ Solid boxes always run. Dashed boxes are optional: they run only when you call t
 ```mermaid
 flowchart TD
     trigger(["/not-me, a single leg, or /loop 2h /not-me --bg"])
-    gate["Gate: enabled, not paused, no active run, guard self-test passes"]
+    gate["Gate: enabled, not paused, no active run in this worktree
+    (runs in other worktrees go in parallel), guard self-test passes"]
     stopped["STOP, nothing written"]
     router["Router runs the legs in order, stops at the first that does work
     ⚙ router (default: update, then new)"]
@@ -57,8 +58,9 @@ flowchart TD
         refuse, defer, implement, or disagree"]
         u3["Implement through a delegated subagent
         ⚙ models, standards.md Delegation"]
-        u4["Verify and gate
-        ⚙ verify.md"]
+        u4["Verify and gate; a shared test environment is locked
+        for the verify step only
+        ⚙ verify.md, verify.md shared_env"]
         u5["Merge base in (the predecessor's branch on a stacked PR),
         send the branch up, reply on every thread, swap to 'needs review'"]
         u1 --> u2 --> u3 --> u4 --> u5
@@ -74,8 +76,9 @@ flowchart TD
         n3["Implement through a delegated subagent, failing test first
         ⚙ models, standards.md Delegation"]
         n4["Verify and gate: baseline, tests, simplify, code review,
-        security review, CI-parity lint
-        ⚙ verify.md, limits.fix_loop"]
+        security review, CI-parity lint; a shared test environment
+        is locked while the checks use it
+        ⚙ verify.md, verify.md shared_env, limits.fix_loop"]
         n4b["Gate additions and cross-model check
         ⚙ verify.md Gate additions, models.verifier"]
         n5["Commit and push through the CLI

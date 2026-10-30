@@ -904,6 +904,64 @@ class DoctorFixBoundaryTests(_Fixtures):
                 self.assertEqual(result.rule, "self_protect")
 
 
+class WorktreeRunTests(unittest.TestCase):
+    """A run in any worktree of a checkout makes the guard active, and the config read-only, in every worktree;
+    found from the git common dir alone, without reading config."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="notme-guard-wt-")).resolve()
+        self.addCleanup(shutil.rmtree, str(self.tmp), True)
+        self.main = self.tmp / "main"
+        self.main.mkdir()
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+        for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "i"],
+                     ["worktree", "add", "-q", "-b", "a", str(self.tmp / "wt-a")],
+                     ["worktree", "add", "-q", "-b", "b", str(self.tmp / "wt-b")]):
+            subprocess.run(git + args, cwd=str(self.main), check=True, capture_output=True)
+        self.home = self.tmp / "home"
+        self.home.mkdir()
+
+    def ctx(self, where):
+        def no_git(args, cwd):
+            raise AssertionError(f"git {args} called")
+        return GuardContext.from_project(where, home=self.home, env={}, git=no_git)
+
+    def test_a_run_in_one_worktree_activates_the_guard_in_all(self):
+        for where in (self.main, self.tmp / "wt-a", self.tmp / "wt-b"):
+            self.assertFalse(guard.is_active(self.ctx(where)))
+        logs = runlog.log_root(self.main, None, {})
+        log = runlog.RunLog.start(logs, "new", "r", project_dir=self.tmp / "wt-b")
+        for where in (self.main, self.tmp / "wt-a", self.tmp / "wt-b"):
+            with self.subTest(where=where.name):
+                ctx = self.ctx(where)
+                self.assertTrue(ctx.active_run)
+                self.assertTrue(guard.is_active(ctx))
+        log.finish("done")
+        self.assertFalse(guard.is_active(self.ctx(self.tmp / "wt-a")))
+
+    def test_a_stale_run_in_a_linked_worktree_does_not_activate(self):
+        marker = runlog.default_marker_path(self.tmp / "wt-a")
+        marker.parent.mkdir(parents=True)
+        marker.write_text(json.dumps({"run_id": "old", "started": "2020-01-01T00:00:00+00:00"}), encoding="utf-8")
+        self.assertFalse(guard.is_active(self.ctx(self.main)))
+
+    def test_main_checkout_config_is_read_only_from_a_worktree_with_its_own_copy(self):
+        for where in (self.main, self.tmp / "wt-a"):
+            cfg = where / ".claude" / "not-me"
+            cfg.mkdir(parents=True)
+            (cfg / "project.md").write_text("---\nschema: 1\n---\n# Project\n", encoding="utf-8")
+        runlog.RunLog.start(runlog.log_root(self.main, None, {}), "new", "r", project_dir=self.tmp / "wt-b")
+        ctx = self.ctx(self.tmp / "wt-a")
+        for target in (self.main, self.tmp / "wt-a"):
+            with self.subTest(target=target.name):
+                event = {"tool_name": "Edit", "cwd": str(self.tmp / "wt-a"),
+                         "tool_input": {"file_path": str(target / ".claude" / "not-me" / "project.md"),
+                                        "old_string": "# Project", "new_string": "# Project x"}}
+                block = guard.decide(event, ctx)
+                self.assertIsInstance(block, Block)
+                self.assertEqual(block.rule, "self_protect")
+
+
 class HookTests(_Fixtures):
     def event(self, tool, tin, variant="app"):
         cwd, _ = gc.variant_paths(self.root, variant)

@@ -1,5 +1,6 @@
 ---
 schema: 1                        # config format version
+shared_env: false                # true when verifying needs one test environment every worktree shares (a stack outside the worktree); runs then lock it for the verify step only
 ---
 # Verify
 

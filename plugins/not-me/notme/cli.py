@@ -260,6 +260,10 @@ def _toplevel(path: Any) -> Optional[Path]:
     return Path(top).resolve() if top else None
 
 
+def _run_fields(marker: Mapping[str, Any]) -> Dict[str, Any]:
+    return {k: marker.get(k) for k in ("run_id", "skill", "ref", "started")}
+
+
 class Context:
     """Trust anchor, config, write gate and GitHub client for one invocation (the last three built on use)."""
 
@@ -597,7 +601,7 @@ class Context:
         if root is None or root not in real.parents or real.suffix != ".md" or not real.is_file() \
                 or not runlog.is_run_log(real):
             raise fail(ExitCode.USAGE, "usage", "the log path must be an existing run log under the log root")
-        return runlog.RunLog.open(real, marker_path=runlog.default_marker_path(self.work_dir))
+        return runlog.RunLog.open(real, project_dir=self.work_dir)
 
     @property
     def run_id(self) -> str:
@@ -614,11 +618,21 @@ class Context:
         return self._run_id
 
     def active_run(self) -> Optional[Dict[str, Any]]:
+        """The run active in this worktree, or None."""
         try:
             marker = runlog.active_run(runlog.default_marker_path(self.work_dir))
         except (ValueError, OSError):
             return None
-        return {k: marker.get(k) for k in ("run_id", "skill", "ref", "started")} if marker else None
+        return _run_fields(marker) if marker else None
+
+    def active_runs(self) -> List[Dict[str, Any]]:
+        """Every run active in any worktree of this checkout, main worktree first."""
+        if self.work_dir is None:
+            return []
+        try:
+            return [_run_fields(m) for m in runlog.checkout_active_runs(self.work_dir)]
+        except (ValueError, OSError):
+            return []
 
     # --- input files ---
 
@@ -697,7 +711,7 @@ class Command:
 
 
 COMMANDS: List[Command] = []
-GROUPS = {"log": "run logs", "retro": "retro audits kept in the git directory", "allow-repo": "the global allow list of repos and boards", "guard": "the write guard",
+GROUPS = {"log": "run logs", "verify-lock": "the shared test environment lock (verify.md shared_env)", "retro": "retro audits kept in the git directory", "allow-repo": "the global allow list of repos and boards", "guard": "the write guard",
           "mode": "dry-run or live", "git": "git operations behind the write gate"}
 GLOBAL_FLAGS: List[Arg] = [
     arg("--project-dir", metavar="P", help="project directory (default: the git toplevel of the working "
@@ -993,8 +1007,9 @@ def cmd_suggest_issues(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]
 def cmd_assign_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
     """Add the operator, and only the operator, as the assignee of one tracker issue, so the queue picks it. For
     /not-me:suggest, after a person said yes to that issue. It takes no login, never removes an assignee and never
-    touches labels, the board or a comment. Refused with no read and no write while a not-me run is active (kind
-    active_run, with active_run {run_id, skill, ref, started}): autonomous runs never assign; only a person running
+    touches labels, the board or a comment. Refused with no read and no write while a not-me run is active in any
+    worktree of the checkout (kind active_run, with active_run {run_id, skill, ref, started}): autonomous runs never
+    assign; only a person running
     /not-me:suggest does. Refused with no write: an issue outside the tracker (kind not_tracker), assigned to anyone
     else (kind assigned_to_other), or not among the issues suggest-issues lists now (kind not_eligible: closed, not
     to do, held back in an epic, by an untrusted author...). The write goes through the write gate; a dry run records
@@ -1005,7 +1020,7 @@ def cmd_assign_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) 
     Output: repo, number, assignee (the operator), assigned (true when it added the assignment), already (true when
     the operator was the assignee before; nothing written)
     """
-    active = ctx.active_run()
+    active = ctx.active_run() or next(iter(ctx.active_runs()), None)
     if active:
         raise fail(ExitCode.ERROR, "active_run",
                    f"a not-me run is active ({active.get('skill')} on {active.get('ref')}); runs never assign "
@@ -1732,7 +1747,8 @@ def cmd_check_text(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     arg("--skill", required=True, metavar="S"), arg("--ref", required=True, metavar="R"),
     arg("--force", action="store_true", help="start even when another run looks active")])
 def cmd_log_start(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Start a run log and the active-run marker. Exit 1 (kind active_run) when another run is active.
+    """Start a run log and this worktree's active-run marker. Exit 1 (kind active_run) when another run is active
+    in this worktree; runs in other worktrees of the checkout do not block it.
 
     Output: path, run_id, skill, ref
     """
@@ -1776,7 +1792,8 @@ def cmd_log_question(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
 @command("log finish", "finish a run log", args=[
     arg("path", metavar="PATH"), arg("--status", required=True, metavar="S"), arg("--failures-file", metavar="F")])
 def cmd_log_finish(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Finish a run log: write its summary and clear the active-run marker.
+    """Finish a run log: write its summary, clear the run's active-run marker (in whichever worktree holds it) and
+    drop the shared test environment lock when this run holds it.
 
     Output: path, status, summary
     """
@@ -1786,7 +1803,10 @@ def cmd_log_finish(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
         text = ctx.read_input(args.failures_file)
         failures = [str(x) for x in json.loads(text)] if text.lstrip().startswith("[") \
             else [ln.strip() for ln in text.splitlines() if ln.strip()]
-    return {"path": args.path, "status": args.status, "summary": log.finish(args.status, failures=failures)}
+    summary = log.finish(args.status, failures=failures)
+    if ctx.work_dir is not None:
+        _drop_verify_lock(ctx, log.run_id)
+    return {"path": args.path, "status": args.status, "summary": summary}
 
 
 @command("log last", "the newest run log", args=[arg("--skill", metavar="S")])
@@ -1829,6 +1849,82 @@ def cmd_log_list(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
         out.append({"path": str(file), "run_id": log.run_id, "skill": log.skill, "ref": log.ref,
                     "status": log.status})
     return {"logs": out}
+
+
+# --- handlers: shared test environment lock ------------------------------------------
+
+VERIFY_LOCK_FILE = "verify.lock"
+MAX_LOCK_WAIT_SECONDS = 540  # under the 10-minute cap on one shell call; wait longer by calling again
+LOCK_POLL_SECONDS = 15
+
+
+def _verify_lock_path(ctx: Context) -> Path:
+    """<git-common-dir>/not-me/verify.lock: one lock for every worktree of the checkout."""
+    work = ctx.need_work_dir()
+    common = paths.git_common_dir(work)
+    return (common / "not-me" if common else work / ".not-me") / VERIFY_LOCK_FILE
+
+
+def _drop_verify_lock(ctx: Context, run_id: str) -> bool:
+    """Remove the lock only when run_id holds it. True when removed."""
+    path = _verify_lock_path(ctx)
+    held = claims.read_lock(path)
+    return held is not None and held.get("run_id") == run_id and claims.release_lock(path, run_id)
+
+
+@command("verify-lock acquire", "take the shared test environment for the verify step", args=[
+    arg("--log", required=True, metavar="PATH", help="this run's log"),
+    arg("--wait-seconds", type=int, default=0, metavar="N",
+        help=f"wait up to N seconds for it (at most {MAX_LOCK_WAIT_SECONDS}; default 0, try once)")])
+def cmd_verify_lock_acquire(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """Take the lock on the shared test environment for this run, when verify.md sets `shared_env: true`. One lock
+    covers every worktree of the checkout (<git-common-dir>/not-me/verify.lock). Hold it from environment start
+    through the last check, and only then; release it with `verify-lock release`. With `shared_env` false (the
+    default) it takes nothing and returns locked false: each worktree verifies on its own. Taking it again while
+    holding it is fine. A lock whose run is no longer active in any worktree, or older than
+    `limits.claim_stale_hours`, is taken over. Held by another active run: polls every 15 seconds for up to
+    --wait-seconds, then exits 1 (kind verify_locked, holder {run_id, since}, waited_seconds). Waiting never
+    means skipping verification. Local only: nothing is sent to GitHub.
+
+    Output: shared_env, locked, waited_seconds (when shared_env)
+    """
+    if not 0 <= args.wait_seconds <= MAX_LOCK_WAIT_SECONDS:
+        raise fail(ExitCode.USAGE, "usage", f"--wait-seconds must be between 0 and {MAX_LOCK_WAIT_SECONDS}")
+    log = ctx.open_log(args.log)
+    if (ctx.cfg.meta.get("verify") or {}).get("shared_env") is not True:
+        return {"shared_env": False, "locked": False}
+    path = _verify_lock_path(ctx)
+    stale_hours = float((ctx.meta.get("limits") or {}).get("claim_stale_hours", 8))
+    started = time.monotonic()
+    while True:
+        holder = (claims.read_lock(path) or {}).get("run_id")
+        if holder and holder != log.run_id and holder not in {r["run_id"] for r in ctx.active_runs()}:
+            claims.release_lock(path, str(holder))  # its run is over: free, unless someone took it meanwhile
+        try:
+            claims.acquire_lock(path, log.run_id, stale_hours)
+            return {"shared_env": True, "locked": True, "waited_seconds": round(time.monotonic() - started)}
+        except claims.ClaimLost:
+            pass
+        waited = time.monotonic() - started
+        if waited >= args.wait_seconds:
+            held = claims.read_lock(path) or {}
+            raise fail(ExitCode.ERROR, "verify_locked",
+                       f"the shared test environment is in use by run {held.get('run_id')}; wait and try again, "
+                       "never skip verification", holder={"run_id": held.get("run_id"), "since": held.get("ts")},
+                       waited_seconds=round(waited))
+        time.sleep(min(LOCK_POLL_SECONDS, max(args.wait_seconds - waited, 0)))
+
+
+@command("verify-lock release", "give the shared test environment back", args=[
+    arg("--log", required=True, metavar="PATH", help="this run's log")])
+def cmd_verify_lock_release(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """Release the shared test environment lock when this run holds it; another run's lock is left alone.
+    `log finish` releases it too. Local only.
+
+    Output: released
+    """
+    log = ctx.open_log(args.log)
+    return {"released": _drop_verify_lock(ctx, log.run_id)}
 
 
 # --- handlers: retro audits -------------------------------------------------------
@@ -2187,7 +2283,8 @@ def cmd_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     died before they finished, and the last run of each skill, and one line on how issues are picked. When GitHub
     cannot be read the items are left out with a warning. Creates nothing.
 
-    Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, queue (where the issue
+    Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run (the run in this worktree),
+    active_runs (every fresh run in any worktree of the checkout: [{run_id, skill, ref, started}]), queue (where the issue
     queue looks, as in config --explain), items, stale_claims, interrupted_runs (skill, run_id, ref, file), last_runs,
     picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and "; target epics:
     #N, ..." when set), queue_drift (when queue.board is set: [{number, url, label, status, skip}] of open issues
@@ -2200,18 +2297,19 @@ def cmd_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
         "enabled": ctx.meta.get("enabled") is not False,
         "paused": {"global": pauses.get("global", False), "project": pauses.get("project", False)},
         "mode": str(ctx.meta.get("mode") or "dry-run"), "repo": None, "tracker": None, "operator": None,
-        "active_run": ctx.active_run(), "queue": describe_queue(ctx.meta), "items": [], "stale_claims": [],
+        "active_run": ctx.active_run(), "active_runs": ctx.active_runs(), "queue": describe_queue(ctx.meta),
+        "items": [], "stale_claims": [],
         "interrupted_runs": [], "last_runs": {}, "picking": config_mod.picking_summary(ctx.cfg.picking()),
         "warnings": list(ctx.guard.warnings)}
     if board_ref(ctx.meta.get("queue") or {}) is not None:
         out["queue_drift"], out["queue_drift_truncated"] = [], False
     try:
         root = ctx.log_root()
-        active_id = (out["active_run"] or {}).get("run_id")
+        active_ids = {r["run_id"] for r in out["active_runs"]}
         for folder in sorted(p for p in root.iterdir() if p.is_dir()):
             log = runlog.last(root, folder.name)
             if log is not None:
-                if log.status is None and log.run_id != active_id and runlog.is_run_log(log.path):  # never finished
+                if log.status is None and log.run_id not in active_ids and runlog.is_run_log(log.path):  # died
                     out["interrupted_runs"].append({"skill": folder.name, "run_id": log.run_id, "ref": log.ref,
                                                     "file": log.path.name})
                 out["last_runs"][folder.name] = {"run_id": log.run_id, "ref": log.ref, "status": log.status,

@@ -68,6 +68,12 @@ def git_common_dir(path: PathLike) -> Optional[Path]:
     return _abs_git_path(path, out) if out else None
 
 
+def git_dir(path: PathLike) -> Optional[Path]:
+    """This worktree's own git directory (the common dir for the main worktree), or None outside git."""
+    out = run_git(["rev-parse", "--git-dir"], path)
+    return _abs_git_path(path, out) if out else None
+
+
 def main_checkout(path: PathLike) -> Path:
     """The main checkout for a linked worktree; the path itself otherwise.
 

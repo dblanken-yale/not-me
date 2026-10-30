@@ -45,6 +45,25 @@ Example: `CHECK baseline: 212 passed, 2 failed (test_tz_offset, test_locale_sort
 4. Use `## Environment start`, `## Health check` and `## Reset` as written when the
    change needs a running app.
 
+## Shared test environment
+
+Runs in different worktrees of one checkout run side by side. Each verifies in
+its own worktree unless `verify.md` sets `shared_env: true`: then the checks need
+one environment every worktree shares (a stack started outside the worktree).
+
+1. `shared_env` false (the default): take no lock.
+2. `shared_env` true: run `notme verify-lock acquire --log <path>` right before
+   the first command that uses the environment (environment start, the baseline,
+   a test run), and `notme verify-lock release --log <path>` right after the last
+   one. Hold it for nothing else: reading, editing, committing, pushing and
+   opening the PR never wait on it.
+3. Exit 1 with kind `verify_locked`: another run holds it. Log a `CHECK` line
+   naming the holder, then wait with `notme verify-lock acquire --log <path>
+   --wait-seconds 540`, again as needed, up to `limits.ci_wait_minutes` in all.
+   Still locked: a failure on our side (`autonomy-and-logging.md`), `FAILED <ref>
+   shared env busy`. Never skip or shorten verification to avoid the wait.
+4. `notme log finish` drops a lock the run still holds.
+
 ## Visual check
 
 UI diffs need a visual check line in the run log and another in the PR. The run
@@ -147,6 +166,7 @@ Before a check or CI job counts against the change (the `models.max_tries` or
 - [ ] Reproduced the bug, or held the issue when it could not be reproduced.
 - [ ] Saw each new test fail before the change and pass after it.
 - [ ] Ran every CI step locally with the project's own commands.
+- [ ] With `shared_env` true, held `notme verify-lock` only while using the environment.
 - [ ] Wrote a `Visual check:` line for UI diffs: path form in the log, words form in the PR.
 - [ ] Did the accessibility pass and flagged what was not auto-fixed.
 - [ ] Ran the cross-model claim check, or logged that `models.verifier` is `none`; verdict lines name the verifier.

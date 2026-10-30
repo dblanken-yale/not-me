@@ -142,7 +142,7 @@ Output: tracker, operator, dry_run (assign-issue would only record to the ledger
 
 ### `notme assign-issue`
 
-Add the operator, and only the operator, as the assignee of one tracker issue, so the queue picks it. For /not-me:suggest, after a person said yes to that issue. It takes no login, never removes an assignee and never touches labels, the board or a comment. Refused with no read and no write while a not-me run is active (kind active_run, with active_run {run_id, skill, ref, started}): autonomous runs never assign; only a person running /not-me:suggest does. Refused with no write: an issue outside the tracker (kind not_tracker), assigned to anyone else (kind assigned_to_other), or not among the issues suggest-issues lists now (kind not_eligible: closed, not to do, held back in an epic, by an untrusted author...). The write goes through the write gate; a dry run records it in the ledger and sends nothing. The assignees are read back after a real write: exit 5 when the operator is missing; exit 1 (kind assigned_to_other, assignees) when someone else is now assigned too. The operator stays assigned and nobody is unassigned; the queue will not pick the issue until a person sorts it out.
+Add the operator, and only the operator, as the assignee of one tracker issue, so the queue picks it. For /not-me:suggest, after a person said yes to that issue. It takes no login, never removes an assignee and never touches labels, the board or a comment. Refused with no read and no write while a not-me run is active in any worktree of the checkout (kind active_run, with active_run {run_id, skill, ref, started}): autonomous runs never assign; only a person running /not-me:suggest does. Refused with no write: an issue outside the tracker (kind not_tracker), assigned to anyone else (kind assigned_to_other), or not among the issues suggest-issues lists now (kind not_eligible: closed, not to do, held back in an epic, by an untrusted author...). The write goes through the write gate; a dry run records it in the ledger and sends nothing. The assignees are read back after a real write: exit 5 when the operator is missing; exit 1 (kind assigned_to_other, assignees) when someone else is now assigned too. The operator stays assigned and nobody is unassigned; the queue will not pick the issue until a person sorts it out.
 
 ```
 notme assign-issue N|REF
@@ -657,7 +657,7 @@ Output: ok, problems
 
 ### `notme log start`
 
-Start a run log and the active-run marker. Exit 1 (kind active_run) when another run is active.
+Start a run log and this worktree's active-run marker. Exit 1 (kind active_run) when another run is active in this worktree; runs in other worktrees of the checkout do not block it.
 
 ```
 notme log start --skill S --ref R [--force]
@@ -704,7 +704,7 @@ Output: path
 
 ### `notme log finish`
 
-Finish a run log: write its summary and clear the active-run marker.
+Finish a run log: write its summary, clear the run's active-run marker (in whichever worktree holds it) and drop the shared test environment lock when this run holds it.
 
 ```
 notme log finish PATH --status S [--failures-file F]
@@ -746,6 +746,30 @@ notme log list [--skill S] [--limit N]
 | `--limit N` | optional | at most N logs (default 20) (default 20) |
 
 Output: logs ([{path, run_id, skill, ref, status}])
+
+### `notme verify-lock acquire`
+
+Take the lock on the shared test environment for this run, when verify.md sets `shared_env: true`. One lock covers every worktree of the checkout (<git-common-dir>/not-me/verify.lock). Hold it from environment start through the last check, and only then; release it with `verify-lock release`. With `shared_env` false (the default) it takes nothing and returns locked false: each worktree verifies on its own. Taking it again while holding it is fine. A lock whose run is no longer active in any worktree, or older than `limits.claim_stale_hours`, is taken over. Held by another active run: polls every 15 seconds for up to --wait-seconds, then exits 1 (kind verify_locked, holder {run_id, since}, waited_seconds). Waiting never means skipping verification. Local only: nothing is sent to GitHub.
+
+```
+notme verify-lock acquire [--wait-seconds N]
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `--wait-seconds N` | optional | wait up to N seconds for it (at most 540; default 0, try once) |
+
+Output: shared_env, locked, waited_seconds (when shared_env)
+
+### `notme verify-lock release`
+
+Release the shared test environment lock when this run holds it; another run's lock is left alone. `log finish` releases it too. Local only.
+
+```
+notme verify-lock release
+```
+
+Output: released
 
 ### `notme retro save`
 
@@ -990,7 +1014,7 @@ A read-only summary: enabled and paused state, the active run, items needing a p
 notme status
 ```
 
-Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run, queue (where the issue queue looks, as in config --explain), items, stale_claims, interrupted_runs (skill, run_id, ref, file), last_runs, picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and "; target epics: #N, ..." when set), queue_drift (when queue.board is set: [{number, url, label, status, skip}] of open issues whose state label and board Status disagree, [] when they agree; skip is why queue-resync cannot fix one, else null), queue_drift_truncated (the board has more items than were read), warnings
+Output: enabled, paused (global, project), mode, repo, tracker, operator, active_run (the run in this worktree), active_runs (every fresh run in any worktree of the checkout: [{run_id, skill, ref, started}]), queue (where the issue queue looks, as in config --explain), items, stale_claims, interrupted_runs (skill, run_id, ref, file), last_runs, picking (one line: "impact default" or "rules from <layer> layer", then "; fields: ..." and "; target epics: #N, ..." when set), queue_drift (when queue.board is set: [{number, url, label, status, skip}] of open issues whose state label and board Status disagree, [] when they agree; skip is why queue-resync cannot fix one, else null), queue_drift_truncated (the board has more items than were read), warnings
 
 ### `notme pause`
 

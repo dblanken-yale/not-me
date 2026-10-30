@@ -42,6 +42,8 @@ log question
 log finish
 log last
 log list
+verify-lock acquire
+verify-lock release
 retro save
 retro reviewed
 retro is-reviewed

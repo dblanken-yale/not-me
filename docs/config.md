@@ -589,7 +589,8 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `schema` | `1` | Config format version. `verify.md` has no other keys. Its sections hold the commands, and leaving a section as is lets not-me discover them |
+| `schema` | `1` | Config format version. Its sections hold the commands, and leaving a section as is lets not-me discover them |
+| `shared_env` | `false` | `true` when the checks need one test environment that every worktree of the checkout shares (a stack started outside the worktree). Runs in other worktrees still run in parallel; only the verify step, from environment start through the last check, takes the lock (`notme verify-lock`), and a run that finds it busy waits or stops, never skipping verification. `false` means each worktree verifies on its own and nothing is locked. Setup detects it from the verify commands or asks |
 
 ### review.md
 

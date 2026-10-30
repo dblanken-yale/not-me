@@ -716,7 +716,7 @@ class StatusAndPauseTests(base.CliCase):
         things(self.fake)["3"]["labels"] = ["question", "paused"]
         payload = self.ok("status")
         self.assertEqual(set(payload), {"enabled", "paused", "mode", "repo", "tracker", "operator", "active_run",
-                                        "queue", "items", "stale_claims", "interrupted_runs", "last_runs", "picking",
+                                        "active_runs", "queue", "items", "stale_claims", "interrupted_runs", "last_runs", "picking",
                                         "warnings"})
         self.assertEqual(payload["picking"], "impact default")
         self.assertEqual(payload["queue"], {"source": "labels", "label": "to do", "opt_in_label": None, "ok": True,
@@ -1611,6 +1611,121 @@ class GitTests(base.CliCase):
     def test_push_check_fails_without_origin(self):
         code, payload, _ = self.cli("git", "push-check")
         self.assertEqual((code, payload["kind"]), (1, "push_check"))
+
+
+class ParallelRunTests(base.CliCase):
+    """Runs in two worktrees of one checkout go side by side; only a shared test environment is locked, and only
+    by the verify step."""
+
+    def setUp(self):
+        super().setUp()
+        init_repo(self.project)
+        self.wt = self.tc.root / "wt-b"
+        git(self.project, "worktree", "add", "-q", "-b", "b", str(self.wt))
+
+    def in_wt(self, *argv, **kw):
+        return self.cli("--project-dir", str(self.wt), *argv, project=False, **kw)
+
+    def ok_wt(self, *argv, **kw):
+        code, payload, err = self.in_wt(*argv, **kw)
+        self.assertEqual(code, 0, f"{argv}: {payload} {err}")
+        return payload
+
+    def shared(self, on=True):
+        self.tc.write("repo", "verify", f"---\nschema: 1\nshared_env: {'true' if on else 'false'}\n---\n# Verify\n")
+
+    def two_runs(self):
+        return (self.ok("log", "start", "--skill", "new", "--ref", "acme/app#1"),
+                self.ok_wt("log", "start", "--skill", "new", "--ref", "acme/app#2"))
+
+    def test_two_worktrees_start_runs_side_by_side(self):
+        a, b = self.two_runs()
+        self.assertEqual(Path(a["path"]).parent, Path(b["path"]).parent)  # one log root
+        self.assertEqual(self.ok("status")["active_run"]["run_id"], a["run_id"])
+        status = self.ok_wt("status")
+        self.assertEqual(status["active_run"]["run_id"], b["run_id"])
+        self.assertEqual({r["run_id"] for r in status["active_runs"]}, {a["run_id"], b["run_id"]})
+        self.assertEqual(status["interrupted_runs"], [])
+        code, payload, _ = self.in_wt("log", "start", "--skill", "new", "--ref", "acme/app#3")
+        self.assertEqual((code, payload["kind"]), (1, "active_run"))  # still one run per worktree
+        self.ok("log", "finish", b["path"], "--status", "done")  # finishing from another worktree clears it
+        self.assertEqual([r["run_id"] for r in self.ok("status")["active_runs"]], [a["run_id"]])
+        self.assertIsNone(self.ok_wt("status")["active_run"])
+
+    def test_two_runs_cannot_claim_the_same_issue(self):
+        self.fake.add_assignee(REPO, 1, "octocat")
+        self.fake.add_assignee(REPO, 2, "octocat")
+        things(self.fake)["2"]["labels"] = ["to do"]
+        a, b = self.two_runs()
+        self.assertEqual(self.ok("claim-issue", "1")["run_id"], a["run_id"])  # each run claims as itself
+        code, payload, _ = self.in_wt("claim-issue", "1")
+        self.assertEqual(code, 3, payload)
+        self.assertEqual(self.ok_wt("claim-issue", "2")["run_id"], b["run_id"])
+
+    def test_assign_is_refused_while_a_run_is_active_in_any_worktree(self):
+        things(self.fake)["2"]["labels"] = ["to do"]  # unassigned and eligible
+        b = self.ok_wt("log", "start", "--skill", "new", "--ref", "acme/app#2")
+        code, payload, _ = self.cli("assign-issue", "2")
+        self.assertEqual((code, payload["kind"]), (1, "active_run"))
+        self.assertEqual(payload["active_run"]["run_id"], b["run_id"])
+
+    def test_no_shared_environment_takes_no_lock(self):
+        a, b = self.two_runs()
+        for out in (self.ok("verify-lock", "acquire", "--log", a["path"]),
+                    self.ok_wt("verify-lock", "acquire", "--log", b["path"])):
+            self.assertEqual((out["shared_env"], out["locked"]), (False, False))
+        self.assertFalse((self.project / ".git" / "not-me" / "verify.lock").exists())
+
+    def test_a_shared_environment_is_locked_for_one_run_at_a_time(self):
+        self.shared()
+        a, b = self.two_runs()
+        got = self.ok("verify-lock", "acquire", "--log", a["path"])
+        self.assertEqual((got["shared_env"], got["locked"]), (True, True))
+        self.assertEqual(self.ok("verify-lock", "acquire", "--log", a["path"])["locked"], True)  # ours again
+        code, payload, _ = self.in_wt("verify-lock", "acquire", "--log", b["path"])
+        self.assertEqual((code, payload["kind"]), (1, "verify_locked"))
+        self.assertEqual(payload["holder"]["run_id"], a["run_id"])
+        self.assertFalse(self.ok_wt("verify-lock", "release", "--log", b["path"])["released"])  # not ours
+        self.assertTrue(self.ok("verify-lock", "release", "--log", a["path"])["released"])
+        self.assertTrue(self.ok_wt("verify-lock", "acquire", "--log", b["path"])["locked"])
+        self.ok_wt("log", "finish", b["path"], "--status", "done")  # finishing a run drops its lock
+        self.assertTrue(self.ok("verify-lock", "acquire", "--log", a["path"])["locked"])
+
+    def test_waiting_for_the_lock_polls_until_it_is_free(self):
+        self.shared()
+        a, b = self.two_runs()
+        self.ok("verify-lock", "acquire", "--log", a["path"])
+        lock = self.project / ".git" / "not-me" / "verify.lock"
+        with mock.patch("notme.cli.time.sleep", side_effect=lambda s: lock.unlink()) as slept:
+            got = self.ok_wt("verify-lock", "acquire", "--log", b["path"], "--wait-seconds", "60")
+        self.assertTrue(got["locked"])
+        self.assertTrue(slept.called)
+        self.assertIn("waited_seconds", got)
+
+    def test_waiting_runs_out_and_reports_who_holds_it(self):
+        self.shared()
+        a, b = self.two_runs()
+        self.ok("verify-lock", "acquire", "--log", a["path"])
+        clock = iter(range(0, 10000, 30))
+        with mock.patch("notme.cli.time.monotonic", side_effect=lambda: next(clock)), \
+                mock.patch("notme.cli.time.sleep") as slept:
+            code, payload, _ = self.in_wt("verify-lock", "acquire", "--log", b["path"], "--wait-seconds", "120")
+        self.assertEqual((code, payload["kind"]), (1, "verify_locked"))
+        self.assertTrue(slept.called)
+        self.assertEqual(payload["holder"]["run_id"], a["run_id"])
+
+    def test_a_lock_left_by_a_finished_run_is_taken_over(self):
+        self.shared()
+        a, b = self.two_runs()
+        self.ok("verify-lock", "acquire", "--log", a["path"])
+        runlog.default_marker_path(self.project).unlink()  # run a died: its marker is gone, the lock is not
+        self.assertTrue(self.ok_wt("verify-lock", "acquire", "--log", b["path"])["locked"])
+
+    def test_wait_is_capped(self):
+        self.shared()
+        a, _ = self.two_runs()
+        code, payload, _ = self.cli("verify-lock", "acquire", "--log", a["path"], "--wait-seconds", "100000")
+        self.assertEqual((code, payload["kind"]), (2, "usage"))
 
 
 if __name__ == "__main__":
