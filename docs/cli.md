@@ -931,7 +931,7 @@ Output: restored
 
 ### `notme git worktree-add`
 
-Add a detached worktree at a sha at <main checkout>/.claude/worktrees/NAME; the CLI picks the path. NAME defaults to review-<first 12 chars of SHA> and must match review-[A-Za-z0-9._-]{1,57} with no ".."; anything else, or a symlinked .claude or .claude/worktrees, is refused as unsafe_path. An existing path is refused as path_exists. The git common dir's info/exclude gets /.claude/worktrees/ so the worktree never shows as untracked in the main checkout. Works the same from the main checkout or a linked worktree.
+Add a detached worktree at a sha at <main checkout>/.claude/worktrees/NAME; the CLI picks the path. NAME defaults to review-<first 12 chars of SHA> and must match review-[A-Za-z0-9._-]{1,57} with no ".."; anything else, a symlinked .claude, .claude/worktrees, info or info/exclude, or a main checkout (via core.worktree) that does not share this repository's git dir, is refused as unsafe_path. An existing path is refused as path_exists. The git common dir's info/exclude gets /.claude/worktrees/ so the worktree never shows as untracked in the main checkout. Works the same from the main checkout or a linked worktree.
 
 ```
 notme git worktree-add SHA [--name NAME]

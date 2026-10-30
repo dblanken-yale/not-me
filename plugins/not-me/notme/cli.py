@@ -2078,8 +2078,13 @@ def worktrees_root(ctx: Context) -> Path:
     common = paths.git_common_dir(work)
     if top is None or common is None:
         raise fail(ExitCode.USAGE, "usage", "worktrees need a checkout with a working tree (not a bare repository)")
-    root = Path(os.path.realpath(str(paths.main_checkout(Path(top))))) / ".claude" / "worktrees"
-    resolved, git_dir = Path(os.path.realpath(str(root))), Path(os.path.realpath(str(common)))
+    main = Path(os.path.realpath(str(paths.main_checkout(Path(top)))))
+    git_dir = Path(os.path.realpath(str(common)))
+    main_common = paths.git_common_dir(main)  # core.worktree can point main_checkout anywhere; it must share our git dir
+    if main_common is None or Path(os.path.realpath(str(main_common))) != git_dir:
+        raise fail(ExitCode.ERROR, "unsafe_path", f"the main checkout {main} does not belong to this repository")
+    root = main / ".claude" / "worktrees"
+    resolved = Path(os.path.realpath(str(root)))
     if resolved == git_dir or git_dir in resolved.parents:
         raise fail(ExitCode.ERROR, "unsafe_path", "the worktrees dir resolves inside the git directory")
     return root
@@ -2098,7 +2103,11 @@ def exclude_worktrees_root(ctx: Context) -> None:
     common = paths.git_common_dir(ctx.need_work_dir())
     if common is None:
         raise fail(ExitCode.USAGE, "usage", "not a git repository")
-    exclude = Path(common) / "info" / "exclude"
+    info = Path(common) / "info"
+    exclude = info / "exclude"
+    if os.path.islink(str(info)) or os.path.islink(str(exclude)) or \
+            Path(os.path.realpath(str(exclude))).parent != Path(os.path.realpath(str(common))) / "info":
+        raise fail(ExitCode.ERROR, "unsafe_path", f"{exclude} is a symlink or resolves outside the git directory")
     text = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
     if WORKTREES_EXCLUDE in (line.strip() for line in text.splitlines()):
         return
@@ -2114,12 +2123,15 @@ def cmd_git_worktree_add(ctx: Context, args: argparse.Namespace) -> Dict[str, An
     """Add a detached worktree at a sha at <main checkout>/.claude/worktrees/NAME; the CLI picks the path.
 
     NAME defaults to review-<first 12 chars of SHA> and must match review-[A-Za-z0-9._-]{1,57} with no "..";
-    anything else, or a symlinked .claude or .claude/worktrees, is refused as unsafe_path. An existing path is
+    anything else, a symlinked .claude, .claude/worktrees, info or info/exclude, or a main checkout (via
+    core.worktree) that does not share this repository's git dir, is refused as unsafe_path. An existing path is
     refused as path_exists. The git common dir's info/exclude gets /.claude/worktrees/ so the worktree never shows
     as untracked in the main checkout. Works the same from the main checkout or a linked worktree.
 
     Output: path (absolute), sha
     """
+    if not git_mod._SHA_RE.fullmatch(args.sha):
+        raise fail(ExitCode.USAGE, "usage", f"invalid sha {args.sha!r}")
     name = f"review-{args.sha[:12]}" if args.name is None else args.name
     if not WORKTREE_NAME_RE.fullmatch(name) or ".." in name:
         raise fail(ExitCode.ERROR, "unsafe_path", f"bad worktree name {name!r}: use review-[A-Za-z0-9._-]{{1,57}}")

@@ -317,6 +317,81 @@ class PathTests(UnderClaudeCase):
                 if claude.is_dir():
                     claude.rmdir()
 
+    def test_worktree_add_refuses_a_main_checkout_moved_by_core_worktree(self):
+        sha = self._sha()
+        linked = self.tc.root / "linked"
+        git(self.session, "worktree", "add", "-q", "--detach", str(linked))
+        decoy = self.tc.root / "decoy"
+        decoy.mkdir()
+        cases = (
+            ("common", lambda: git(self.session, "config", "core.worktree", str(decoy)),
+             lambda: git(self.session, "config", "--unset", "core.worktree")),
+            ("per-worktree", lambda: (git(self.session, "config", "extensions.worktreeConfig", "true"),
+                                      git(linked, "config", "--worktree", "core.worktree", str(decoy))),
+             lambda: git(linked, "config", "--worktree", "--unset", "core.worktree")),
+        )
+        for label, setup, undo in cases:
+            with self.subTest(case=label):
+                setup()
+                try:
+                    code, payload, _ = self.cli("git", "worktree-add", sha, "--name", "review-x", cwd=linked)
+                finally:
+                    undo()
+                if label == "common":  # reaches the common-dir check
+                    self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
+                else:  # git already fails to find a toplevel here; refused either way
+                    self.assertIn((code, payload["kind"]), ((1, "unsafe_path"), (2, "usage")))
+                self.assertEqual(list(decoy.iterdir()), [])
+                self.assertFalse((self.session / ".claude").exists())
+
+    def _exclude(self):
+        return self.session / ".git" / "info" / "exclude"
+
+    def _link(self, link, target, is_dir=False):
+        try:
+            link.symlink_to(target, target_is_directory=is_dir)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+
+    def test_worktree_add_refuses_a_symlinked_exclude(self):
+        outside = self.tc.root / "outside-exclude"
+        outside.write_text("keep\n", encoding="utf-8")
+        self._exclude().unlink()
+        self._link(self._exclude(), outside)
+        code, payload, _ = self.cli("git", "worktree-add", self._sha())
+        self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
+        self.assertEqual(outside.read_text(encoding="utf-8"), "keep\n")
+        self.assertFalse((self.session / ".claude" / "worktrees").exists())
+
+    def test_worktree_add_refuses_a_dangling_exclude_link(self):
+        target = self.tc.root / "made-by-append"
+        self._exclude().unlink()
+        self._link(self._exclude(), target)
+        code, payload, _ = self.cli("git", "worktree-add", self._sha())
+        self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
+        self.assertFalse(os.path.lexists(str(target)))
+
+    def test_worktree_add_refuses_a_symlinked_info_dir(self):
+        info = self.session / ".git" / "info"
+        elsewhere = self.tc.root / "info-elsewhere"
+        elsewhere.mkdir()
+        for child in info.iterdir():
+            child.unlink()
+        info.rmdir()
+        self._link(info, elsewhere, is_dir=True)
+        code, payload, _ = self.cli("git", "worktree-add", self._sha())
+        self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_worktree_add_with_a_bad_sha_changes_nothing(self):
+        before = self._exclude().read_bytes()
+        for sha in ("not-a-sha", "abc", "-x", "0123456789abcdef^"):
+            with self.subTest(sha=sha):
+                code, payload, _ = self.cli("git", "worktree-add", f"{sha}", "--name", "review-x")
+                self.assertEqual((code, payload["kind"]), (2, "usage"))
+        self.assertEqual(self._exclude().read_bytes(), before)
+        self.assertFalse((self.session / ".claude").exists())
+
     def test_worktree_add_is_hidden_from_the_main_checkout(self):
         sha = self._sha()
         self.ok("git", "worktree-add", sha, "--name", "review-3")
