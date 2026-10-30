@@ -16,9 +16,9 @@ nothing the operator did not pick.
    and "required" or "optional". Failed required checks first.
 3. Under every failed check, print its `hint` exactly as given, when it is not
    null. Do not restate or invent a hint.
-4. Run `notme guard selftest`. Report `ok` and `active`. Exit 8 means the guard is
-   enabled but not working: every run stops with `FAILED - guard not working`.
+4. Run `notme guard selftest`. Report `ok` and `active`. Exit 8 means the guard is enabled but not working: every run stops with `FAILED - guard not working`.
 5. A failed `pass labels` check: recommend `/not-me:setup project` to create them.
+   A failed `permissions` check: its hint holds the JSON the operator adds; never edit settings for it.
 6. Run `notme config --check`; print each error (role.md ones too) with its layer,
    file and line. Exit 4 means the config is invalid. Run `notme config --explain`
    only if the operator asks about a warning, and print its `warnings`.

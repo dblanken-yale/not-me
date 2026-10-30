@@ -214,6 +214,7 @@ Keep every other section's default text. Do not invent sections.
    ledger and nothing is sent, until the user runs `/not-me:mode live`.
 4. Print the next commands: `/not-me:doctor`, `/not-me --dry-run`, and each
    `/not-me:allow-repo` confirmation from Step 4.
+5. Once, point to `docs/permissions.md` for the allow rules that keep auto mode from refusing routine work; edit no settings.
 
 ## Queue mode (`project --queue`)
 

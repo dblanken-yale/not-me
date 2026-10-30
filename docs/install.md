@@ -118,6 +118,8 @@ Open a session in the Code tab and type the same two slash commands. The plugin,
 
 Auto mode is supported. The guard hook runs before every matching tool call in every permission mode, so a blocked command is still blocked, and Claude still sees the message and the reason. Auto mode does not turn the hook off.
 
+In auto mode the session's own permission check may refuse routine not-me work, such as closing or commenting on an issue, as an external write. [permissions.md](permissions.md) lists the allow rules to add to your `~/.claude/settings.json` so that work runs without a stop, and `/not-me:doctor` reports the ones you are missing.
+
 ### Optional: pr-review-toolkit
 
 The `pr-review-toolkit` plugin is optional. When it is installed, the gate runs its `code-reviewer` agent for the code review step. Without it, the gate runs the same review in a general-purpose subagent. The run log names which reviewer ran, on the `GATE code-review` line.

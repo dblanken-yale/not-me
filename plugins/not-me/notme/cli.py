@@ -2566,7 +2566,9 @@ def cmd_doctor(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     not confirmed by `notme mode live`), config files (a warning when neither the global nor the repo layer holds a not-me config file), gh auth
     and scopes, pass labels (advice when role.md names any: the missing ones, for `labels-ensure`), the queue
     source (a warning when the pick label is missing, the board is not confirmed or not found, or a
-    board_states column is not a status option; not run without gh), guard self-test, spawn depth.
+    board_states column is not a status option; not run without gh), guard self-test, spawn depth, permissions
+    (advice: the recommended permissions.allow rules missing from the user and project settings files, with the JSON
+    to add in its hint; doctor never writes settings).
     Exit 7 when the only failed required checks are gh, gh auth or gh scopes; exit 1 when another
     required check fails. --init-token instead creates <not-me home>/operator-token (random, mode 0600) and shows
     it once; only a person may run it (kind human_only otherwise), and an existing token is never replaced
@@ -2580,12 +2582,23 @@ def cmd_doctor(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
                             ctx.guard_state, ctx.env,
                             doctor_mod.mode_check(ctx.meta.get("mode"), ctx.cfg.live_unconfirmed),
                             config_files=ctx.cfg.layers.files, pass_labels=lambda: _pass_label_check(ctx),
-                            queue=lambda: _doctor_queue(ctx), drift=lambda: _doctor_drift(ctx))
+                            queue=lambda: _doctor_queue(ctx), drift=lambda: _doctor_drift(ctx),
+                            permissions=lambda: doctor_mod.permissions_check(_settings_files(ctx), launcher_path()))
     verdict = doctor_mod.exit_kind(checks)
     if verdict:
         code = ExitCode.DEPENDENCY if verdict == "dependency" else ExitCode.ERROR
         raise CliExit(code, {"error": "a required check failed", "kind": "doctor", "ok": False, "checks": checks})
     return {"ok": True, "checks": checks}
+
+
+def _settings_files(ctx: Context) -> List[Path]:
+    """The Claude Code settings files whose permissions.allow doctor reads: the user's settings.json
+    (CLAUDE_CONFIG_DIR, else ~/.claude) and this checkout's .claude/settings.json and settings.local.json."""
+    user = Path(ctx.env.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    files = [user / "settings.json"]
+    if ctx.work_dir:
+        files += [Path(ctx.work_dir) / ".claude" / "settings.json", Path(ctx.work_dir) / ".claude" / "settings.local.json"]
+    return files
 
 
 def _pass_label_check(ctx: Context) -> Optional[Dict[str, Any]]:

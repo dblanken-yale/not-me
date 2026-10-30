@@ -1152,7 +1152,7 @@ class DoctorAndPreflightTests(base.CliCase):
         names = [c["name"] for c in payload["checks"]]
         self.assertEqual(names, ["python", "git", "gh", "config", "config files", "mode", "gh auth", "gh scopes",
                                  "queue",
-                                 "guard", "spawn depth"])
+                                 "guard", "spawn depth", "permissions"])
         self.assertTrue(payload["ok"])
         files = payload["checks"][4]
         self.assertTrue(files["ok"], files)
