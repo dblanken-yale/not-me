@@ -89,9 +89,8 @@ author's, so nothing about it reaches GitHub.
 1. Post nothing: no review, no comment, no reply, no summary.
 2. Change no labels. Do not add `needs_human` or `question`.
 3. Release a claim this run took, so the item is back where it was before the
-   run: `notme release-issue N --reason-file <reason> --log <path>` for an issue
-   (the CLI records the state change in one comment; keep the reason to "Run
-   stopped before any change; claim released." and never put the error there),
+   run: `notme release-issue N --no-comment --log <path>` for an issue (it
+   posts nothing; the timeline shows the unassign and the label change),
    `notme release-pr <ref> --log <path>` for a PR. The one exception: once a
    commit is pushed, the claim stays so the next run resumes it. Still no label
    and no post.

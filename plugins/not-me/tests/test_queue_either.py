@@ -340,6 +340,28 @@ class ReasonCommentTests(base.CliCase):
         self.assertEqual(len(new), 1, new)
         self.assertIn("Moved from `in progress` to `blocked` (board column `Blocked`)", new[0])
 
+    def test_a_release_with_no_comment_gives_the_claim_back_and_posts_nothing(self):
+        issue = cli_things(self.fake)["1"]
+        issue["assignees"] = []
+        self.ok("claim-issue", "1")
+        before = len(self.comments())
+        released = self.ok("release-issue", "1", "--no-comment")
+        self.assertEqual((released["released"], released["commented"]), (True, False))
+        self.assertEqual(len(self.comments()), before, self.comments())  # the claim marker is edited, not added to
+        self.assertEqual(issue["labels"], ["to do"])
+        self.assertEqual(issue["assignees"], [])
+        self.assertEqual(self.fake.state["board"]["items"][0]["status"], "To Do")
+        claim = [c["body"] for c in issue["comments"] if "not-me:claim" in c["body"]]
+        self.assertEqual(len(claim), 1, claim)
+        self.assertIn("state=released", claim[0])
+
+    def test_a_release_with_no_comment_still_checks_a_reason_file_it_is_given(self):
+        self.ok("claim-issue", "1")
+        empty = self.write_file("empty.txt", "\n")
+        code, payload, _ = self.cli("release-issue", "1", "--no-comment", "--reason-file", empty)
+        self.assertEqual(code, 2, payload)
+        self.assertEqual(cli_things(self.fake)["1"]["labels"], ["in progress"])
+
     def test_a_transition_posts_one_comment(self):
         payload = self.ok("transition", "3", "--kind", "pr", "--from", "needs_review", "--to", "needs_work",
                           "--reason-file", self.reason)

@@ -236,7 +236,7 @@ The short form; the full table is in `${CLAUDE_PLUGIN_ROOT}/skills/new/reference
 | Declared base missing | Release, `needs_human` | `STOP <ref> blocked` |
 | Cannot reproduce, already fixed | Keep `in_progress`, add `needs_human`, comment | `HELD <ref> ...` |
 | Guard block mid-run | QUESTION naming the operator; release, no label, no comment; run stops | `FAILED <ref> blocked` |
-| Failure on our side before a push | `notme release-issue N --reason-file <reason> --log <path>`, no label, no comment; run stops | `FAILED <ref> ...` |
+| Failure on our side before a push | `notme release-issue N --no-comment --log <path>`, no label, no comment; run stops | `FAILED <ref> ...` |
 | CI red at `limits.fix_loop` | Park the PR with `needs_human` | `FAILED <ref> ci-red` |
 
 Every comment this skill owns is upserted with

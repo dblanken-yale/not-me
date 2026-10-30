@@ -417,6 +417,8 @@ queue:
 
 `notme move-issue`, `notme release-issue` and `notme transition` take a required `--reason-file` (the text goes through a file, never a shell argument). After the state change succeeds they post one comment on the item: "Moved from `in progress` to `needs review` (board column `In review`): <reason>", with the run marker. When labels and the board are both written, the one comment names both; the mirror posts none of its own. A claim already leaves its marker comment, so `claim-issue` posts no second one. A comment that fails to post is a warning in the command's output and the run log; the state change stands.
 
+`notme release-issue --no-comment` is the exception: it unassigns, moves the state back and marks the claim released as usual, posts no comment and needs no `--reason-file`. A run that stops on a failure on not-me's own side uses it, so nothing about that failure reaches GitHub; the run log and the `FAILED` result line carry the error.
+
 The reason is one line (at most 500 characters), it may not contain an HTML comment, so it can never carry a not-me marker, and it must pass the same text check as any other post.
 
 Other changes to a state label are explained too, so none is silent:
@@ -425,7 +427,7 @@ Other changes to a state label are explained too, so none is silent:
 - `notme review-post` posts that comment after the review when its labels change a state label (for example `needs review` to `needs work`). The reason is the first line of its optional `--reason-file`, else "a <EVENT> review was posted": the review just posted is the explanation.
 - `notme pr-open` posts it on the new PR when `--labels` names a state label, with the reason from its optional `--reason-file`, else "pull request opened". A dry run posts none, since there is no PR number.
 
-`scripts/check-skills.py` rule R15 flags a skill or reference call to `move-issue`, `release-issue`, `transition` or `labels-sync` without `--reason-file`.
+`scripts/check-skills.py` rule R15 flags a skill or reference call to `move-issue`, `release-issue`, `transition` or `labels-sync` without `--reason-file`, except `release-issue --no-comment` and `labels-sync --check`.
 
 ## Companion sets
 

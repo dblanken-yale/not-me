@@ -174,17 +174,18 @@ Output: number, previous, now, marker_comment_id, run_id; warnings when a queue.
 
 ### `notme release-issue`
 
-Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released, then post one comment with the old state, the new state (and the board column when the board follows) and the text of --reason-file. A comment that fails is a warning; the release stands. With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning.
+Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released, then post one comment with the old state, the new state (and the board column when the board follows) and the text of --reason-file. A comment that fails is a warning; the release stands. With queue.sync, the side queue.source does not read follows; a failed mirror write is a warning. --no-comment releases the same way and posts nothing (the timeline already shows the unassign and the label change); --reason-file is then optional.
 
 ```
-notme release-issue N [--to TO] --reason-file F
+notme release-issue N [--to TO] [--reason-file F] [--no-comment]
 ```
 
 | Argument | Required | Meaning |
 |----------|----------|---------|
 | `N` | required |  |
 | `--to TO {todo|blocked}` | optional | (default todo) |
-| `--reason-file F` | required | file holding one line that says why; posted as one comment on the item |
+| `--reason-file F` | optional | file holding one line that says why; posted as one comment on the item; required unless --no-comment |
+| `--no-comment` | optional | post no comment: for a run that stops on a failure on not-me's own side |
 
 Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 

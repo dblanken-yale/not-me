@@ -42,7 +42,8 @@ ALLOW_MARKER = "<!-- allowed-raw-write -->"
 # A notme call as skill prose writes it: notme, "${CLAUDE_PLUGIN_ROOT}/bin/notme" or "$NOTME", then the command.
 _CALL = r"(?:\bnotme\b\"?|\$\{?NOTME\}?\"?)\s+(?P<cmd>[a-z][a-z-]*)"
 CALL_RE = re.compile(_CALL)
-# Commands whose every call must say why. labels-sync is exempt with --check, which writes nothing.
+# Commands whose every call must say why. labels-sync is exempt with --check, which writes nothing, and
+# release-issue with --no-comment, which a failure on not-me's own side uses.
 REASON_COMMANDS = {"move-issue", "release-issue", "transition", "labels-sync"}
 
 
@@ -60,7 +61,8 @@ def reason_violations(text: str) -> List[Tuple[int, str]]:
         if nxt:
             ends.append(nxt.start())
         span = rest[:min(ends)] if ends else rest
-        if "--reason-file" in span or (m.group("cmd") == "labels-sync" and "--check" in span):
+        if "--reason-file" in span or (m.group("cmd") == "labels-sync" and "--check" in span) \
+                or (m.group("cmd") == "release-issue" and "--no-comment" in span):
             continue
         out.append((text[:m.start()].count("\n") + 1, text[m.start():m.end()]))
     return out

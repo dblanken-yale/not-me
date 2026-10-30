@@ -1070,22 +1070,32 @@ def cmd_claim_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -
 
 
 @command("release-issue", "give a claimed issue back", writes=True, ref="tracker", args=[
-    number_arg, arg("--to", choices=("todo", "blocked"), default="todo"), reason_file_arg])
+    number_arg, arg("--to", choices=("todo", "blocked"), default="todo"),
+    arg("--reason-file", metavar="F", help="file holding one line that says why; posted as one comment on the item; "
+                                           "required unless --no-comment"),
+    arg("--no-comment", action="store_true", help="post no comment: for a run that stops on a failure on not-me's "
+                                                  "own side")])
 def cmd_release_issue(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
     """Give an issue back: unassign, move from in progress to todo or blocked, mark the claim released, then post
     one comment with the old state, the new state (and the board column when the board follows) and the text of
     --reason-file. A comment that fails is a warning; the release stands. With queue.sync, the side queue.source
     does not read follows; a failed mirror write is a warning.
 
+    --no-comment releases the same way and posts nothing (the timeline already shows the unassign and the label
+    change); --reason-file is then optional.
+
     Output: number, to, released, commented; warnings when a queue.sync mirror write or the comment failed
     """
-    reason = ctx.read_reason(args.reason_file, repo)
+    if not args.reason_file and not args.no_comment:
+        raise fail(ExitCode.USAGE, "usage", "pass --reason-file with one line saying why, or --no-comment")
+    reason = ctx.read_reason(args.reason_file, repo) if args.reason_file else None
     queue = ctx.queue()
     try:
         queue.release(n, args.to)
     finally:  # a mirror warning stands even when a later step failed
         ctx.sync_warnings(queue)
-    commented = ctx.say_why(repo, n, queue.change, reason) if queue.change else False
+    commented = ctx.say_why(repo, n, queue.change, reason) if queue.change and reason and not args.no_comment \
+        else False
     return {"number": n, "to": args.to, "released": True, "commented": commented}
 
 
