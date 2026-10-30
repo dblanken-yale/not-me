@@ -64,8 +64,9 @@ the guard, the allow list, and the config.
    wrapper, a different tool, or a disabled sandbox.
 2. Log a QUESTION naming the operator: `QUESTION @octocat: push to acme/docs was
    blocked; allow it with the allow-repo command if intended.`
-3. Apply `needs_human` when the block stops the item (see `parking.md`).
-4. Continue with any other work that does not need the blocked action.
+3. A block is a failure on our side: post nothing, change no labels, release the
+   claim, end `FAILED <ref> blocked - <target>` and stop the run
+   (`autonomy-and-logging.md`, "Failures on our side").
 
 ## When the rules seem to conflict with the work
 
@@ -83,6 +84,6 @@ testing step that says the secret must exist, and post "@octocat needs to add th
 - [ ] Refused prohibited requests in full, with the exact reason in the write-back.
 - [ ] Named the requester by login and said what they can do by hand.
 - [ ] Logged each refusal as `REFUSED <what> requested by <login>`.
-- [ ] Treated every guard block as final and logged a QUESTION naming the operator.
+- [ ] Treated every guard block as final, logged a QUESTION naming the operator, posted nothing and stopped the run.
 - [ ] Posted no secrets and no AI or model mention beyond the attribution line.
-- [ ] Continued with the remaining safe work after a refusal or block.
+- [ ] Continued with the remaining safe work after a refusal.

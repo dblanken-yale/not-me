@@ -122,10 +122,24 @@ Before you post, check the claims this run originated with a second model.
    to `limits.ci_wait_minutes`.
 2. CI red: read the failing job's log, fix, run the same step locally, push again.
 3. Each push after a red run is one round. Stop at `limits.fix_loop` rounds.
-4. At the cap, the outcome is "still needs work": the PR keeps `needs_work`, gains `needs_human`,
+4. At the cap, and once the failure is not also on the base (next section), the outcome is "still needs work": the PR keeps `needs_work`, gains `needs_human`,
    gets a summary that says what is still red, and the result line is `FAILED <ref> ci-red`
    (see `parking.md`) and name the failing job and test.
 5. A CI wait that times out is a `WARN`, not a pass.
+
+## A failure that is also on the base
+
+Before a check or CI job counts against the change (the `models.max_tries` or
+`limits.fix_loop` outcomes), make sure it is not failing on the base too.
+
+1. The baseline already shows the same failure: it is on the base.
+2. Else run the same command on the base: `git rev-parse origin/<base>` (a read),
+   `notme git worktree-add <base sha> --name review-base-<short sha>`, run it in
+   the returned `path`, then `notme git worktree-remove <path>`.
+3. Same failure on the base: it is a failure on our side, not the change's.
+   Follow "Failures on our side" in `autonomy-and-logging.md`: no label, no post,
+   `FAILED <ref> base-red - <check>`, stop.
+4. Passes on the base: the change caused it. Go on with the normal outcome.
 
 ## Checklist
 
@@ -137,3 +151,4 @@ Before you post, check the claims this run originated with a second model.
 - [ ] Did the accessibility pass and flagged what was not auto-fixed.
 - [ ] Ran the cross-model claim check, or logged that `models.verifier` is `none`; verdict lines name the verifier.
 - [ ] Waited on CI for the pushed head and stopped at `limits.fix_loop`.
+- [ ] Ran a failing check on the base before counting it against the change.

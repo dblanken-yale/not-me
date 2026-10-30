@@ -931,7 +931,7 @@ Output: restored
 
 ### `notme git worktree-add`
 
-Add a detached worktree at a sha at <main checkout>/.claude/worktrees/NAME; the CLI picks the path. NAME defaults to review-<first 12 chars of SHA> and must match [A-Za-z0-9][A-Za-z0-9._-]{0,63} with no ".."; anything else, or a symlinked .claude or .claude/worktrees, is refused as unsafe_path. An existing path is refused as path_exists. The git common dir's info/exclude gets /.claude/worktrees/ so the worktree never shows as untracked in the main checkout. Works the same from the main checkout or a linked worktree.
+Add a detached worktree at a sha at <main checkout>/.claude/worktrees/NAME; the CLI picks the path. NAME defaults to review-<first 12 chars of SHA> and must match review-[A-Za-z0-9._-]{1,57} with no ".."; anything else, or a symlinked .claude or .claude/worktrees, is refused as unsafe_path. An existing path is refused as path_exists. The git common dir's info/exclude gets /.claude/worktrees/ so the worktree never shows as untracked in the main checkout. Works the same from the main checkout or a linked worktree.
 
 ```
 notme git worktree-add SHA [--name NAME]
@@ -946,7 +946,7 @@ Output: path (absolute), sha
 
 ### `notme git worktree-remove`
 
-Remove a worktree made by `git worktree-add`. PATH must sit directly under <main checkout>/.claude/worktrees/.
+Remove a worktree made by `git worktree-add`. PATH must be a review-* dir directly under <main checkout>/.claude/worktrees/; anything else, including Claude Code's own session worktrees there, is refused as unsafe_path.
 
 ```
 notme git worktree-remove PATH

@@ -266,13 +266,16 @@ class PathTests(UnderClaudeCase):
         payload = self.ok("git", "worktree-add", sha)
         self.assertEqual(payload, {"path": str(self._root() / f"review-{sha[:12]}"), "sha": sha})
         self.assertTrue(Path(payload["path"], "a.txt").is_file())
+        payload = self.ok("git", "worktree-add", sha, "--name", "review-" + "x" * 57)
+        self.assertEqual(Path(payload["path"]).name, "review-" + "x" * 57)
         payload = self.ok("git", "worktree-add", sha, "--name", "review-3-abc.1_x")
         self.assertEqual(payload["path"], str(self._root() / "review-3-abc.1_x"))
         self.assertTrue(Path(payload["path"], "a.txt").is_file())
 
     def test_worktree_add_refuses_a_bad_name(self):
         sha = self._sha()
-        for name in ("../x", "a/b", ".hidden", "", "..", "a..b", "-x", "a\\b", "x" * 65):
+        for name in ("../x", "a/b", ".hidden", "", "..", "a..b", "-x", "a\\b", "x" * 65, "feat-x", "worktree-foo",
+                     "review-", "review", "Review-x", "review-a..b", "review-a/b", "review-" + "x" * 58):
             with self.subTest(name=name):
                 code, payload, _ = self.cli("git", "worktree-add", sha, f"--name={name}")
                 self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
@@ -281,8 +284,8 @@ class PathTests(UnderClaudeCase):
 
     def test_worktree_add_refuses_an_existing_path(self):
         sha = self._sha()
-        self.ok("git", "worktree-add", sha, "--name", "r1")
-        code, payload, _ = self.cli("git", "worktree-add", sha, "--name", "r1")
+        self.ok("git", "worktree-add", sha, "--name", "review-r1")
+        code, payload, _ = self.cli("git", "worktree-add", sha, "--name", "review-r1")
         self.assertEqual((code, payload["kind"]), (1, "path_exists"))
 
     def test_worktree_add_refuses_a_bare_repository(self):
@@ -307,7 +310,7 @@ class PathTests(UnderClaudeCase):
                     link.symlink_to(target, target_is_directory=True)
                 except (OSError, NotImplementedError):
                     self.skipTest("symlinks unavailable")
-                code, payload, _ = self.cli("git", "worktree-add", sha, "--name", "r1")
+                code, payload, _ = self.cli("git", "worktree-add", sha, "--name", "review-r1")
                 self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
                 self.assertEqual(list((elsewhere / "worktrees").iterdir()), [])
                 link.unlink()
@@ -335,7 +338,7 @@ class PathTests(UnderClaudeCase):
 
     def test_worktree_remove_refuses_a_path_it_did_not_make(self):
         sha = self._sha()
-        made = Path(self.ok("git", "worktree-add", sha, "--name", "r1")["path"])
+        made = Path(self.ok("git", "worktree-add", sha, "--name", "review-r1")["path"])
         outside = self.tc.root / "outside"
         git(self.session, "worktree", "add", "-q", "--detach", str(outside))
         for target in (outside, made / "sub", self._root(), self._root() / ".." / "worktrees" / ".." / "x",
@@ -344,6 +347,11 @@ class PathTests(UnderClaudeCase):
                 code, payload, _ = self.cli("git", "worktree-remove", str(target))
                 self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
         self.assertTrue((outside / "a.txt").is_file())
+        session_wt = self._root() / "worktree-foo"  # a Claude Code session worktree in the same dir
+        git(self.session, "worktree", "add", "-q", "--detach", str(session_wt))
+        code, payload, _ = self.cli("git", "worktree-remove", str(session_wt))
+        self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
+        self.assertTrue((session_wt / "a.txt").is_file())
         self.ok("git", "worktree-remove", str(made))
         self.assertFalse(made.exists())
 

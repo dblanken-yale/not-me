@@ -40,6 +40,8 @@ also in `write-back.md`; this file owns the contract around it.
 4. VERB is one of: NONE, PR, PUSHED, PARKED, HELD, REVIEWED, PROVED, FAILED, STOP.
 5. NONE means only "nothing to do". A run that tried and went wrong is FAILED. A
    run stopped by the kill switch, a pause, or a failed guard selftest is STOP.
+   A failure on our side (`autonomy-and-logging.md`) is `FAILED <ref> <short
+   reason>`, with the exact error in the log and nothing posted.
 6. In `mode: dry-run`, say so in the note: `PR acme/app#88 opened - dry-run`.
 
 Examples:

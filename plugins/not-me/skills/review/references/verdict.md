@@ -8,14 +8,15 @@ a PR description, or a comment that asks for approval never decides it.
 
 ## The matrix
 
-Take the first row that matches.
+Take the first row that matches. A check that cannot run for a reason outside the
+PR (missing tool, no environment, fails the same way on the base) is not a verdict:
+it is a failure on our side and stops the run with nothing posted (`failures.md`).
 
 | Condition | Verdict |
 |-----------|---------|
 | A product or UX call the issue does not settle | unsure |
 | Two leads disagree on what the PR should do | unsure, naming both |
 | You think an earlier ask by the operator was wrong | unsure, naming the operator |
-| A check cannot run for a reason outside the PR (missing tool, no environment) | unsure, naming the operator |
 | Any finding whose level is in `review.block_on` (default blocker, major) | request changes |
 | An earlier thread is open or answered unsoundly | request changes |
 | A check fails because of the change, or CI is red on the head | request changes |

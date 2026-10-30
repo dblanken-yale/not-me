@@ -2067,7 +2067,8 @@ def cmd_git_unstash(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
 
 
 WORKTREES_EXCLUDE = "/.claude/worktrees/"
-WORKTREE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+# review- keeps notme off the other worktrees in the same dir (Claude Code keeps its session worktrees there)
+WORKTREE_NAME_RE = re.compile(r"review-[A-Za-z0-9._-]{1,57}")
 
 
 def worktrees_root(ctx: Context) -> Path:
@@ -2085,10 +2086,10 @@ def worktrees_root(ctx: Context) -> Path:
 
 
 def worktree_path(root: Path, path: Union[str, Path]) -> Path:
-    """`path` realpath'd when it sits directly under `root` with no symlink on the way; unsafe_path otherwise."""
+    """`path` realpath'd when it is a review-* dir directly under `root` with no symlink on the way; else unsafe_path."""
     real = Path(os.path.realpath(str(path)))
     if real.parent != root or not WORKTREE_NAME_RE.fullmatch(real.name) or ".." in real.name:
-        raise fail(ExitCode.ERROR, "unsafe_path", "worktree path must be directly under <main checkout>/.claude/worktrees/")
+        raise fail(ExitCode.ERROR, "unsafe_path", "worktree path must be a review-* dir directly under <main checkout>/.claude/worktrees/")
     return real
 
 
@@ -2112,7 +2113,7 @@ def exclude_worktrees_root(ctx: Context) -> None:
 def cmd_git_worktree_add(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """Add a detached worktree at a sha at <main checkout>/.claude/worktrees/NAME; the CLI picks the path.
 
-    NAME defaults to review-<first 12 chars of SHA> and must match [A-Za-z0-9][A-Za-z0-9._-]{0,63} with no "..";
+    NAME defaults to review-<first 12 chars of SHA> and must match review-[A-Za-z0-9._-]{1,57} with no "..";
     anything else, or a symlinked .claude or .claude/worktrees, is refused as unsafe_path. An existing path is
     refused as path_exists. The git common dir's info/exclude gets /.claude/worktrees/ so the worktree never shows
     as untracked in the main checkout. Works the same from the main checkout or a linked worktree.
@@ -2121,7 +2122,7 @@ def cmd_git_worktree_add(ctx: Context, args: argparse.Namespace) -> Dict[str, An
     """
     name = f"review-{args.sha[:12]}" if args.name is None else args.name
     if not WORKTREE_NAME_RE.fullmatch(name) or ".." in name:
-        raise fail(ExitCode.ERROR, "unsafe_path", f"bad worktree name {name!r}: use [A-Za-z0-9][A-Za-z0-9._-]{{0,63}}")
+        raise fail(ExitCode.ERROR, "unsafe_path", f"bad worktree name {name!r}: use review-[A-Za-z0-9._-]{{1,57}}")
     root = worktrees_root(ctx)
     real = worktree_path(root, root / name)
     if os.path.lexists(str(real)):
@@ -2135,7 +2136,9 @@ def cmd_git_worktree_add(ctx: Context, args: argparse.Namespace) -> Dict[str, An
 
 @command("git worktree-remove", "remove a worktree notme made", args=[arg("path", metavar="PATH")])
 def cmd_git_worktree_remove(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Remove a worktree made by `git worktree-add`. PATH must sit directly under <main checkout>/.claude/worktrees/.
+    """Remove a worktree made by `git worktree-add`. PATH must be a review-* dir directly under
+    <main checkout>/.claude/worktrees/; anything else, including Claude Code's own session worktrees there, is refused
+    as unsafe_path.
 
     Output: path, removed
     """
