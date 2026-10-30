@@ -2109,6 +2109,39 @@ mcp(A, None, "mcp__github__get_secret_scanning_alert", {"owner": "acme", "repo":
 mcp(A, None, "mcp__github__create_branch", {"owner": "acme", "repo": "app", "branch": "feature/y"})
 REVIEW_END = len(CASES)
 
+# Fix round 2: GraphQL block strings read as the spec reads them, and branch refs in every spelling.
+ROUND_B_START = len(CASES)
+_T, _BS = '"' * 3, "\\"
+
+
+def _gql(body: str, after: str = "") -> str:
+    """A gh api graphql call (single-quoted for the shell) whose addComment body is the given block string text."""
+    return f"gh api graphql -f query='mutation {{ addComment(input:{{body:{body}}}) {{ id }} {after}}}'"
+
+
+# \""" is the only escape in a block string, so a field after it is still inside the string (or the string never
+# ends): either way the guard may not read a mutation field there as safe
+bash(B, DG, _gql(_T + "a" + _BS + _T + " deleteRepository ", ""))  # unterminated: never ends
+bash(B, DG, _gql(_T + "a" + _BS + _BS + _T, "deleteRepository(input:{}) { x } "))  # \\""" is \ then \""": no end
+bash(B, DG, _gql(_T + "a" + _BS + "b" + _BS + _T + "c" + _T, "deleteRepository(input:{}) { x } "))
+# the escape keeps the string open to the last """, so the field really is text inside it, as GitHub reads it
+bash(G, OR, _gql(_T + "a" + _BS + _T + "}) { id } deleteRepository(input:{}) { x } " + _T, ""))
+bash(G, OR, _gql(_T + "a" + _BS + "n" + _BS + "b" + _T))  # plain backslashes: the string ends at the first """
+# branch refs in every spelling; any other ref under refs/ cannot be checked
+bash(B, PB, "gh api -X PUT repos/acme/app/contents/x.md -f message=x -f content=eA== -f branch=heads/main")
+bash(B, PB, "gh api -X PUT repos/acme/app/contents/x.md -f message=x -f content=eA== -f branch=refs/heads/main/")
+bash(B, PB, "gh api -X PUT repos/acme/app/contents/x.md -f message=x -f content=eA== -f branch=refs/main")
+bash(B, PB, "gh api -X PUT repos/acme/app/contents/x.md -f message=x -f content=eA== -f branch=refs/tags/v1")
+bash(B, PB, "gh api -X PATCH repos/acme/app/git/refs/heads/main/ -f sha=abc")
+bash(B, PB, "gh api -X POST repos/acme/app/merges -f base=heads/main -f head=feature/x")
+bash(A, None, "gh api -X PUT repos/acme/app/contents/x.md -f message=x -f content=eA== -f branch=refs/heads/feature/x")
+mcp(B, PB, "mcp__github__push_files", {"owner": "acme", "repo": "app", "branch": "heads/main", "files": []})
+mcp(B, PB, "mcp__github__push_files", {"owner": "acme", "repo": "app", "branch": "refs/heads/main/", "files": []})
+mcp(B, PB, "mcp__github__create_or_update_file", {"owner": "acme", "repo": "app", "path": "x", "branch": "refs/main"})
+mcp(B, PB, "mcp__github__update_ref", {"owner": "acme", "repo": "app", "ref": "refs/remotes/origin/x"})
+mcp(A, None, "mcp__github__push_files", {"owner": "acme", "repo": "app", "branch": "refs/heads/feature/x", "files": []})
+ROUND_B_END = len(CASES)
+
 # Substrings a block message must contain, by case id. Guided cases print no message; test_guard checks their rule.
 MESSAGE_CHECKS: Dict[str, List[str]] = {
     _mode_edit_id: ["/not-me:mode live"],

@@ -142,8 +142,10 @@ _SECRETS = re.compile(r"/(actions|dependabot|codespaces)/(secrets|variables)(/|$
 _RULESETS = re.compile(r"/rulesets(/|$)")
 # GraphQL, read the way GraphQL reads it: block strings, strings, # comments, names, punctuation; commas and
 # whitespace are skipped. A lone quote is an unterminated string.
-_GQL_TOKEN = re.compile(r'"""(?:[^"\\]|\\.|"(?!""))*"""|"(?:[^"\\\n]|\\.)*"|#[^\n\r]*|[A-Za-z_][A-Za-z0-9_]*'
-                        r'|\.\.\.|[^\s,]')
+# In a block string ("""...""") only \""" is an escape; any other backslash is an ordinary character (GraphQL spec).
+# A backslash before """ may only be read as that escape (no backtracking into a plain backslash and a close).
+_GQL_TOKEN = re.compile(r'"""(?:\\"""|(?!""")(?!\\""")[\s\S])*"""|"(?:[^"\\\n]|\\.)*"|#[^\n\r]*'
+                        r'|[A-Za-z_][A-Za-z0-9_]*|\.\.\.|[^\s,]')
 _GQL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # top-level mutation fields that delete or change settings or rulesets (lowercased names)
 _GQL_DESTRUCTIVE = re.compile(r"^(?:delete.*|.*(?:branchprotectionrule|ruleset).*|updaterepository|archiverepository"
@@ -1429,9 +1431,8 @@ def _mcp(tool: str, tin: Mapping[str, Any], ctx: GuardContext) -> Iterator[Block
                   "push new commits on top instead; ask the operator if a rewrite is really needed")
         return
     raw = next((tin.get(k) for k in ("branch", "ref", "base") if isinstance(tin.get(k), str) and tin.get(k)), "")
-    branch = _branch_name(str(raw))
-    if not branch or branch in ctx.protected_branches:
-        yield blk("protected_branches", f"{name} changes {branch or 'the default branch'}, which may be protected",
+    if _may_be_protected(str(raw), ctx):
+        yield blk("protected_branches", f"{name} changes {raw or 'the default branch'}, which may be protected",
                   "pass a feature branch, or push one and open a pull request")
 
 
@@ -2945,8 +2946,9 @@ def _gql_mutation_fields(query: str) -> Optional[List[str]]:
         if t.startswith("#"):
             continue
         if t.startswith('"'):
-            if len(t) < 2 or not t.endswith('"'):
-                return None
+            if len(t) < 2 or not t.endswith('"') or query.startswith('"""', m.start()) and not (
+                    len(t) >= 6 and t.startswith('"""')):
+                return None  # an unterminated string or block string
             t = '"'
         toks.append(t)
     fields: List[str] = []
@@ -2981,8 +2983,26 @@ def _gql_mutation_fields(query: str) -> Optional[List[str]]:
     return None if depth or paren or pending else fields
 
 
-def _branch_name(value: str) -> str:
-    return value[len("refs/heads/"):] if value.startswith("refs/heads/") else value
+def _branch_name(value: str) -> Optional[str]:
+    """The branch a ref names, as protected_branches spells it: without refs/heads/, heads/ or a leading refs/, and
+    without trailing slashes. None for any other ref under refs/ (a tag, a remote, a note): no branch to check."""
+    v = value.strip().rstrip("/")
+    for prefix in ("refs/heads/", "heads/"):
+        if v.startswith(prefix):
+            return v[len(prefix):].rstrip("/")
+    if v.startswith("refs/"):
+        rest = v[len("refs/"):]
+        return None if "/" in rest or not rest else rest
+    return v
+
+
+def _may_be_protected(value: str, ctx: GuardContext) -> bool:
+    """value names a protected branch, nothing (the default branch), a ref that is not a branch, or a value from a
+    file or the shell: the guard cannot rule out a protected branch."""
+    if not value.strip() or value.startswith("@") or _unresolved(value):
+        return True
+    branch = _branch_name(value)
+    return branch is None or not branch or branch in ctx.protected_branches
 
 
 def _api_branch_writes(method: str, ep: str, fields: List[str], inputs: List[str], ctx: GuardContext,
@@ -3003,19 +3023,19 @@ def _api_branch_writes(method: str, ep: str, fields: List[str], inputs: List[str
         elif values.get("force", "").lower() not in ("", "false", "0"):
             yield blk("force_push", "a forced ref update rewrites published history",
                       "push new commits on top instead; ask the operator if a rewrite is really needed")
-        elif _branch_name(ref.group(1).strip("/")) in ctx.protected_branches:
+        elif _may_be_protected("refs/heads/" + ref.group(1), ctx):
             yield blk("protected_branches", f"updates to the protected branch {ref.group(1)} are not allowed",
                       "push a feature branch and open a pull request")
     if _CONTENTS_PATH.match(ep) and method in ("PUT", "POST", "PATCH"):
-        branch = _branch_name(values.get("branch", ""))
-        if inputs or not branch or unreadable(branch) or branch in ctx.protected_branches:
+        branch = values.get("branch", "")
+        if inputs or _may_be_protected(branch, ctx):
             yield blk("protected_branches", f"gh api {method} {ep} commits to "
                                             f"{branch or 'the default branch'}, which may be protected",
                       "commit on a feature branch and git push origin <branch>, or pass -f branch=<feature branch>")
     for pattern, key in _MERGE_PATHS:
         if pattern.match(ep) and method in ("POST", "PUT", "PATCH"):
-            branch = _branch_name(values.get(key, ""))
-            if inputs or not branch or unreadable(branch) or branch in ctx.protected_branches:
+            branch = values.get(key, "")
+            if inputs or _may_be_protected(branch, ctx):
                 yield blk("protected_branches", f"gh api {method} {ep} merges into "
                                                 f"{branch or 'a branch the guard cannot read'}, which may be protected",
                           "merge through a pull request, which a person merges")
