@@ -472,6 +472,25 @@ Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
 
 Output: repo, number, id, created or updated
 
+### `notme comment-edit`
+
+Replace the body of a conversation comment, review or inline review comment on an issue or PR, which the operator must have written. --id takes a URL whose fragment (#issuecomment-N, #pullrequestreview-N or #discussion_rN) names the kind, or a bare id with --kind; a URL for another item is refused (exit 2). The text must pass `check-text` and hold no not-me marker (exit 1, kind text_lint). The target is read first and refused unless the logged-in gh user wrote it and is the operator (exit 1, kind not_own); either way nothing is written. Every not-me marker in the old body that the new text lacks is appended back, and the configured attribution is kept when the old body had it.
+
+```
+notme comment-edit REF --id ID [--kind KIND] --body-file F
+```
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `REF` | required |  |
+| `--id ID` | required | the comment or review id (with --kind), or its URL |
+| `--kind KIND {issue|review|inline}` | optional | issue (a conversation comment), review (a review body) or inline (a review comment on a line) |
+| `--body-file F` | required |  |
+
+Writes to GitHub: honours `--dry-run`; takes `--log PATH`.
+
+Output: repo, number, kind, id, updated
+
 ### `notme request-review`
 
 Request review from the given logins.

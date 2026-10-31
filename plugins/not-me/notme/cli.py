@@ -175,6 +175,7 @@ ERRORS: List[Tuple[Matcher, ExitCode, str, Optional[Callable[[Any], Dict[str, An
     (gh_mod.ReadbackMismatch, ExitCode.READBACK, "readback_mismatch",
      lambda e: {"expected": e.expected, "actual": e.actual}),
     (writeback.WritebackMismatch, ExitCode.READBACK, "readback_mismatch", None),
+    (writeback.NotOwnTarget, ExitCode.ERROR, "not_own", None),
     (states.LabelCollision, ExitCode.CONFIG, "config_invalid", lambda e: {"errors": [str(e)]}),
     (_gh_missing, ExitCode.DEPENDENCY, "missing_dependency",
      lambda e: {"error": "gh is not installed or not on PATH", "dependency": "gh"}),
@@ -1439,6 +1440,60 @@ def cmd_comment_upsert(ctx: Context, args: argparse.Namespace, repo: str, n: int
     return {"repo": repo, "number": n, **result}
 
 
+_EDIT_FRAGMENTS = {"issuecomment-": "issue", "pullrequestreview-": "review", "discussion_r": "inline"}
+_EDIT_URL_RE = re.compile(r"^https?://[^/\s]+/(?P<slug>[^/\s]+/[^/\s]+)/(?:pull|issues)/(?P<n>\d+)(?:/[^#?\s]*)?"
+                          r"(?:\?[^#\s]*)?#(?P<prefix>issuecomment-|pullrequestreview-|discussion_r)(?P<id>\d+)$")
+
+
+def _edit_target_ref(value: str, kind: Optional[str], repo: str, n: int) -> Tuple[str, int]:
+    """(kind, id) from --id (a bare id, or a URL whose fragment names the kind) and --kind. A URL must name
+    repo#n, and a --kind given with it must match its fragment."""
+    text = str(value).strip()
+    if text.isdigit() and int(text) > 0:
+        if not kind:
+            raise fail(ExitCode.USAGE, "usage", "a bare --id needs --kind issue, review or inline")
+        return kind, int(text)
+    m = _EDIT_URL_RE.match(text)
+    if not m:
+        raise fail(ExitCode.USAGE, "usage", f"cannot read {text!r} as a comment: use an id with --kind, or a URL "
+                                            "ending in #issuecomment-N, #pullrequestreview-N or #discussion_rN")
+    if m.group("slug").lower() != repo.lower() or int(m.group("n")) != n:
+        raise fail(ExitCode.USAGE, "usage", f"{text} is not on {repo}#{n}")
+    found = _EDIT_FRAGMENTS[m.group("prefix")]
+    if kind and kind != found:
+        raise fail(ExitCode.USAGE, "usage", f"--kind {kind} does not match the URL, which names a {found} comment")
+    return found, int(m.group("id"))
+
+
+@command("comment-edit", "edit a comment or review body the operator posted", writes=True, ref="repo", args=[
+    ref_arg, arg("--id", required=True, metavar="ID", help="the comment or review id (with --kind), or its URL"),
+    arg("--kind", choices=writeback.EDIT_KINDS,
+        help="issue (a conversation comment), review (a review body) or inline (a review comment on a line)"),
+    body_file_arg])
+def cmd_comment_edit(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
+    """Replace the body of a conversation comment, review or inline review comment on an issue or PR, which the
+    operator must have written. --id takes a URL whose fragment (#issuecomment-N, #pullrequestreview-N or
+    #discussion_rN) names the kind, or a bare id with --kind; a URL for another item is refused (exit 2). The text
+    must pass `check-text` and hold no not-me marker (exit 1, kind text_lint). The target is read first and
+    refused unless the logged-in gh user wrote it and is the operator (exit 1, kind not_own); either way nothing
+    is written. Every not-me marker in the old body that the new text lacks is appended back, and the configured
+    attribution is kept when the old body had it.
+
+    Output: repo, number, kind, id, updated
+    """
+    kind, target_id = _edit_target_ref(args.id, args.kind, repo, n)
+    text = ctx.read_input(args.body_file)
+    attribution = writeback.attribution(ctx.cfg)
+    problems = writeback.check_text(text, ctx.tracker, repo, attribution, False)
+    if writeback.ANY_MARKER_RE.search(text):
+        problems.append("the text holds a not-me marker; only the markers already in the old body are kept")
+    if problems:
+        raise CliExit(ExitCode.ERROR, {"error": f"{len(problems)} problem(s) in the text", "kind": "text_lint",
+                                       "ok": False, "problems": problems})
+    result = writeback.comment_edit(ctx.gh, repo, n, kind, target_id, text, ctx.operator, attribution)
+    return {"repo": repo, "number": n, **result}
+
+
 @command("request-review", "request review from logins", writes=True, ref="repo", args=[
     ref_arg, arg("--reviewers", required=True, metavar="a,b")])
 def cmd_request_review(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
@@ -1643,9 +1698,6 @@ def cmd_resolve_threads(ctx: Context, args: argparse.Namespace, repo: str, n: in
     return {"repo": repo, "number": n, "resolved": writeback.resolve_fixed_threads(ctx.gh, repo, n, ids)}
 
 
-_MARKER_RE = re.compile(r"<!--\s*not-me:.*?-->", re.S)
-
-
 def _same_body(a: str, b: str) -> bool:
     """Equal apart from line endings and trailing whitespace."""
     def norm(text: str) -> str:
@@ -1676,7 +1728,7 @@ def cmd_issue_body(ctx: Context, args: argparse.Namespace, repo: str, n: int) ->
         raise fail(ExitCode.ERROR, "untrusted_author",
                    f"{repo}#{n} is by {author or 'an unknown author'}, who is not trusted; its body is not replaced")
     body = with_attribution(ctx, text)
-    missing = [m for m in _MARKER_RE.findall(issue.get("body") or "") if m not in body]
+    missing = [m for m in writeback.ANY_MARKER_RE.findall(issue.get("body") or "") if m not in body]
     if missing:
         body = body.rstrip("\n") + "\n\n" + "\n".join(missing) + "\n"
     with gh_mod.tmp_text_file(body, prefix="not-me-cli-") as path:

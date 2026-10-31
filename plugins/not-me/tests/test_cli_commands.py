@@ -1090,6 +1090,97 @@ class PullRequestTests(base.CliCase):
         second = self.ok("comment-upsert", "3", "--marker", "status", "--body-file", body)
         self.assertTrue(first["created"] and second["updated"])
 
+    def test_comment_edit_by_url_for_each_kind(self):
+        cid = self.fake.post_comment(REPO, 3, "octocat", "Old\n\n<!-- not-me:status -->")
+        things(self.fake)["3"]["reviews"].append({"id": 900, "event": "COMMENT", "body": "Old review"})
+        things(self.fake)["3"]["threads"][0]["comments"].append(
+            {"id": "PRRC_901", "databaseId": 901, "author": "octocat", "authorAssociation": "OWNER", "body": "Old",
+             "path": "src/widget.py", "line": 12, "url": f"https://github.com/{REPO}/pull/3#discussion_r901"})
+        body = self.write_file("body.md", "Edited text\n")
+        base = f"https://github.com/{REPO}/pull/3"
+        for url, kind, target in ((f"{base}#issuecomment-{cid}", "issue", cid),
+                                  (f"{base}#pullrequestreview-900", "review", 900),
+                                  (f"{base}/files#discussion_r901", "inline", 901)):
+            with self.subTest(kind):
+                payload = self.ok("comment-edit", "3", "--id", url, "--body-file", body)
+                self.assertEqual(payload, {"repo": REPO, "number": 3, "kind": kind, "id": target, "updated": True})
+        pr = things(self.fake)["3"]
+        self.assertEqual(pr["comments"][-1]["body"].count("<!-- not-me:status -->"), 1)
+        self.assertTrue(pr["comments"][-1]["body"].startswith("Edited text"))
+        self.assertEqual(pr["reviews"][-1]["body"].strip(), "Edited text")
+        self.assertEqual(pr["threads"][0]["comments"][-1]["body"].strip(), "Edited text")
+
+    def test_comment_edit_by_bare_id_needs_a_kind(self):
+        cid = self.fake.post_comment(REPO, 1, "octocat", "Old")
+        body = self.write_file("body.md", "Edited\n")
+        code, payload, _ = self.cli("comment-edit", "1", "--id", str(cid), "--body-file", body)
+        self.assertEqual((code, payload["kind"]), (2, "usage"))
+        payload = self.ok("comment-edit", "1", "--id", str(cid), "--kind", "issue", "--body-file", body)
+        self.assertEqual((payload["kind"], payload["id"]), ("issue", cid))
+        self.assertEqual(things(self.fake)["1"]["comments"][-1]["body"].strip(), "Edited")
+
+    def test_comment_edit_refuses_bad_urls_and_kinds_without_reading(self):
+        cid = self.fake.post_comment(REPO, 3, "octocat", "Old")
+        body = self.write_file("body.md", "Edited\n")
+        for bad in ([f"https://github.com/acme/other/pull/3#issuecomment-{cid}"],
+                    [f"https://github.com/{REPO}/pull/4#issuecomment-{cid}"],
+                    [f"https://github.com/{REPO}/pull/3"],
+                    [f"https://github.com/{REPO}/pull/3#issuecomment-{cid}", "--kind", "inline"],
+                    [f"https://github.com/{REPO}/pull/3#commitcomment-{cid}"],
+                    ["12x", "--kind", "issue"], ["0", "--kind", "issue"]):
+            with self.subTest(bad):
+                self.fake.calls.clear()
+                code, payload, _ = self.cli("comment-edit", "3", "--id", *bad, "--body-file", body)
+                self.assertEqual((code, payload["kind"]), (2, "usage"))
+                self.assertEqual(self.fake.writes_made(), [])
+        self.assertEqual(things(self.fake)["3"]["comments"][-1]["body"], "Old")
+
+    def test_comment_edit_refuses_another_authors_comment(self):
+        cid = self.fake.post_comment(REPO, 3, "hubot", "Theirs")
+        body = self.write_file("body.md", "Edited\n")
+        for argv in (["--id", str(cid), "--kind", "issue"], ["--id", "501", "--kind", "inline"]):
+            with self.subTest(argv):
+                code, payload, _ = self.cli("comment-edit", "3", *argv, "--body-file", body)
+                self.assertEqual((code, payload["kind"]), (1, "not_own"))
+        self.assertEqual(self.fake.writes_made(), [])
+        self.assertEqual(things(self.fake)["3"]["comments"][-1]["body"], "Theirs")
+
+    def test_comment_edit_refuses_a_target_the_gh_user_did_not_write(self):
+        # project.operator names hubot (a repo file can set it); gh is logged in as octocat
+        self.tc.write("global", "project", base.GLOBAL_PROJECT.replace("operator: octocat", "operator: hubot"))
+        cid = self.fake.post_comment(REPO, 3, "hubot", "Theirs")
+        body = self.write_file("body.md", "Edited\n")
+        code, payload, _ = self.cli("comment-edit", "3", "--id", str(cid), "--kind", "issue", "--body-file", body)
+        self.assertEqual((code, payload["kind"]), (1, "not_own"))
+        self.assertEqual(self.fake.writes_made(), [])
+        self.assertEqual(things(self.fake)["3"]["comments"][-1]["body"], "Theirs")
+
+    def test_comment_edit_refuses_text_with_a_marker_without_reading(self):
+        cid = self.fake.post_comment(REPO, 3, "octocat", "Old")
+        body = self.write_file("body.md", "Edited\n\n<!-- not-me:claim=octocat:r-9 -->\n")
+        self.fake.calls.clear()
+        code, payload, _ = self.cli("comment-edit", "3", "--id", str(cid), "--kind", "issue", "--body-file", body)
+        self.assertEqual((code, payload["kind"]), (1, "text_lint"))
+        self.assertTrue(any("marker" in p for p in payload["problems"]))
+        self.assertEqual(self.fake.writes_made(), [])
+        self.assertEqual(things(self.fake)["3"]["comments"][-1]["body"], "Old")
+
+    def test_comment_edit_refuses_text_that_fails_the_check(self):
+        cid = self.fake.post_comment(REPO, 3, "octocat", "Old")
+        body = self.write_file("body.md", "See /Users/someone/notes.md\n")
+        code, payload, _ = self.cli("comment-edit", "3", "--id", str(cid), "--kind", "issue", "--body-file", body)
+        self.assertEqual((code, payload["kind"]), (1, "text_lint"))
+        self.assertTrue(payload["problems"])
+        self.assertEqual(self.fake.writes_made(), [])
+
+    def test_comment_edit_dry_run_writes_nothing(self):
+        cid = self.fake.post_comment(REPO, 3, "octocat", "Old")
+        body = self.write_file("body.md", "Edited\n")
+        payload = self.ok("comment-edit", "3", "--id", str(cid), "--kind", "issue", "--body-file", body, "--dry-run")
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(self.fake.writes_made(), [])
+        self.assertEqual(things(self.fake)["3"]["comments"][-1]["body"], "Old")
+
     def test_pr_body_testing_steps_and_companions(self):
         body = self.write_file("body.md", "## Summary\n\nNew body.\n")
         self.ok("pr-body", "3", "--body-file", body)

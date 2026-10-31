@@ -133,6 +133,69 @@ def reply_thread(gh: Any, repo: str, n: int, reply_to: int, body_text: str, run_
         return gh.reply_thread(repo, n, reply_to, path)
 
 
+class NotOwnTarget(Exception):
+    """The comment or review to edit was not written by the operator."""
+
+
+EDIT_KINDS = ("issue", "review", "inline")
+ANY_MARKER_RE = re.compile(r"<!--\s*not-me:.*?-->", re.S)
+
+
+def _edit_target(gh: Any, repo: str, n: int, kind: str, target_id: int) -> Dict[str, Any]:
+    """Read the comment or review to edit; LookupError when it is not on repo#n."""
+    if kind == "issue":
+        found, link, path = gh.issue_comment(repo, target_id), "issue_url", f"/repos/{repo}/issues/{n}"
+    elif kind == "inline":
+        found, link, path = gh.review_comment(repo, target_id), "pull_request_url", f"/repos/{repo}/pulls/{n}"
+    else:  # read through pulls/{n}, and its own pull_request_url must name this PR too
+        found, link, path = gh.review(repo, n, target_id), "pull_request_url", f"/repos/{repo}/pulls/{n}"
+    if not str(found.get(link) or "").lower().endswith(path.lower()):
+        raise LookupError(f"{kind} comment {target_id} is not on {repo}#{n}")
+    return found
+
+
+def comment_edit(gh: Any, repo: str, n: int, kind: str, target_id: int, body_text: str, operator: str,
+                 attribution_text: str = "") -> Dict[str, Any]:
+    """Replace the body of the operator's own issue comment, review or inline review comment on repo#n.
+
+    New text holding a not-me marker raises ValueError before any read; only old markers are carried over.
+    The target is read first; unless its author is both the logged-in gh user and the operator (a repo file can
+    set the operator), NotOwnTarget is raised before any write. Every not-me marker in the old body that the new
+    text lacks is appended back. The attribution line is kept when the old body had it and the new text does
+    not; it is never added to a body that lacked it.
+    """
+    if kind not in EDIT_KINDS:
+        raise ValueError(f"invalid kind {kind!r}: use one of {', '.join(EDIT_KINDS)}")
+    if ANY_MARKER_RE.search(body_text):
+        raise ValueError("the new text holds a not-me marker; only markers already in the old body are kept")
+    target_id = _gh._num(target_id)
+    found = _edit_target(gh, repo, n, kind, target_id)
+    author = (_gh.login_of(found.get("user")) or "").lower()
+    me = str(gh.me() or "").lower()
+    if not author or not me or author != me or author != str(operator or "").lower():
+        raise NotOwnTarget(f"{kind} {target_id} on {repo}#{n} is by {author or 'an unknown author'}, not "
+                           f"{me or 'the gh user'} as operator {operator or '(unset)'}; it is not edited")
+    old = found.get("body") or ""
+    body = body_text
+    text = attribution_text.strip()
+    if text and text in old and text not in body:
+        body = body.rstrip() + "\n\n" + text + "\n"
+    missing = [m for m in ANY_MARKER_RE.findall(old) if m not in body]
+    if missing:
+        body = _ensure_markers(body, missing)
+    with _tmp_file(body) as path:
+        if kind == "issue":
+            result = gh.comment_update(repo, target_id, path)
+        elif kind == "review":
+            result = gh.review_update(repo, n, target_id, path)
+        else:
+            result = gh.review_comment_update(repo, target_id, path)
+    out: Dict[str, Any] = {"kind": kind, "id": target_id, "updated": True}
+    if isinstance(result, dict) and result.get("dry_run"):
+        out["dry_run"] = True
+    return out
+
+
 def resolve_fixed_threads(gh: Any, repo: str, n: int, thread_ids: Sequence[str]) -> List[str]:
     """Resolve review threads the review skill confirmed as fixed. Only threads of this PR are touched."""
     known = {t["id"] for t in gh.review_threads(repo, n)}
