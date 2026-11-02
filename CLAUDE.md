@@ -63,7 +63,7 @@ the owner's say-so, not a cleanup.
    secrets, rulesets, releases and deletions, `rm -rf .git`, `clean -x` and
    forced deletes of a protected branch. Text it does not parse (a `bash -c`
    body too deep, inline code, a script file, a command it cannot lex) is
-   allowed unless it holds one of a few words (`push`, `reset --hard`, a GitHub
+   allowed unless it holds one of a few words (a push that is forced or reaches a protected branch, `reset --hard`, a GitHub
    secrets action, a protected path name and the like), then blocked under the first relevant rule
    that is on. Self-protection is always on: the operator token, the live-mode
    epoch and marker and the allow list by path;

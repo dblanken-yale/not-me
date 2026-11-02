@@ -375,7 +375,8 @@ class TokenizerTests(unittest.TestCase):
         import time
         ctx = GuardContext(cwd="/nonexistent/app", root="/nonexistent/app", active_run=True, env={},
                            home="/nonexistent/home", plugin_root="/nonexistent/plugin", git=lambda a, c: None,
-                           write_ctx=writes.GuardContext(origin_repo="acme/app", allowed_repos=("acme/app",)))
+                           write_ctx=writes.GuardContext(origin_repo="acme/app", allowed_repos=("acme/app",),
+                                                          protected_branches=("main",)))
         # the hook's watchdog is 8 s; Windows runners are slower per call, so they get more of that budget
         limit = 3.0 if os.name == "nt" else 1.0
         n = 100 * 1024

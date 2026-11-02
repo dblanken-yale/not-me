@@ -158,7 +158,8 @@ Opaque text is allowed unless its decoded text (quotes and backslashes removed, 
 
 | Text | Rule it reports |
 | --- | --- |
-| `push` as a word | `protected_branches`, else `force_push`, else `other_repo` |
+| `push` as a word, with a force or delete option (`--force`, `--mirror`, `--delete`, `-f`, `+ref`) after it on the same line | `force_push` |
+| `push` as a word, with a protected branch name after it on the same line, or run while the checkout is on a protected branch | `protected_branches` |
 | `reset --hard` | `protected_branches` |
 | `-X DELETE`, `--method DELETE`, `secret set`, `secret delete`, `secret remove`, a secrets API path (`/actions/secrets`, `/dependabot/secrets`, `/codespaces/secrets`, `/environments/<name>/secrets`), `branch -D`, `clean -x` (also `-fdx`), `rm -r... .git` | `destructive_git` |
 | `operator-token`, `mode-live.sig`, `mode-live.epoch`, `allowed-repos.json` | self-protection, always |
