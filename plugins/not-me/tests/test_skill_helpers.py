@@ -16,7 +16,7 @@ VERBS = "NONE | PR | PUSHED | PARKED | HELD | REVIEWED | PROVED | FAILED | STOP"
 BARE = re.compile(r'(?:^|(?<=[`(|&;$\s]))notme\s+([A-Za-z][A-Za-z-]*)')
 LONG = re.compile(r'\$\{CLAUDE_PLUGIN_ROOT\}/bin/notme"?\s+([A-Za-z][A-Za-z-]*)')
 WRITES = re.compile(r"notme\W+(?:claim-|release-|move-issue|transition|labels-|reply-thread|"
-                    r"comment-upsert|request-review|pr-|review-post|resolve-threads|followup|"
+                    r"comment-(?:upsert|edit)|request-review|pr-|review-post|resolve-threads|followup|"
                     r"log (?:start|action|question|finish)|pause|git push)|\bgh\s+(?:pr|issue|api)\b")
 
 

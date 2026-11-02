@@ -26,6 +26,7 @@ queue-resync
 labels-ensure
 reply-thread
 comment-upsert
+comment-edit
 request-review
 pr-body
 pr-open

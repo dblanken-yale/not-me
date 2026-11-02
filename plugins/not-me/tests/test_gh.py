@@ -383,6 +383,11 @@ class ValidationTests(Base):
         for call in (lambda: c.issue("acme/app", "1 --web"), lambda: c.labels("acme/app", "1; rm"),
                      lambda: c.pr("acme/app", "-1x"), lambda: c.comment_update("acme/app", "5 -f x", self.body()),
                      lambda: c.reply_thread("acme/app", 3, "1/../x", self.body()),
+                     lambda: c.issue_comment("acme/app", "5/../x"), lambda: c.review("acme/app", 3, "7 -f x"),
+                     lambda: c.review("acme/app", "3/x", 7), lambda: c.review_comment("acme/app", "1?x"),
+                     lambda: c.review_update("acme/app", 3, "7 -f x", self.body()),
+                     lambda: c.review_update("acme/app", "3 x", 7, self.body()),
+                     lambda: c.review_comment_update("acme/app", "5 -f x", self.body()),
                      lambda: c.review_threads("acme/app", "1){x}"), lambda: c.board_item_status("acme", "6){x"),
                      lambda: c.labels_set("acme/app", "1 x", []), lambda: c.request_review("acme/app", "x", [])):
             with self.assertRaises(ValueError):
@@ -554,6 +559,42 @@ class PrWriteTests(Base):
         c.comment_update("acme/app", cid, self.body("two", "b2.md"))
         self.assertEqual(c.comments("acme/app", 1)[0]["body"], "two")
         self.assertIn(f"repos/acme/app/issues/comments/{cid}", self.fake.calls[-2])
+
+    def test_issue_comment_read_by_id(self):
+        c = self.client()
+        c.comment_create("acme/app", 1, self.body("one"))
+        cid = c.comments("acme/app", 1)[0]["id"]
+        got = c.issue_comment("acme/app", cid)
+        self.assertEqual((got["id"], got["body"], got["user"]["login"]), (cid, "one", "octocat"))
+        self.assertTrue(got["issue_url"].endswith("/repos/acme/app/issues/1"))
+        self.assertEqual(self.fake.calls[-1], ["api", f"repos/acme/app/issues/comments/{cid}"])
+
+    def test_review_update_puts_the_body(self):
+        c = self.client()
+        c.review_post("acme/app", 3, "COMMENT", self.body("Looks fine."))
+        [review] = c.reviews("acme/app", 3)
+        c.review_update("acme/app", 3, review["id"], self.body("Looks fine now.", "b2.md"))
+        argv = self.fake.calls[-1]
+        self.assertEqual(argv[:4], ["api", "-X", "PUT", f"repos/acme/app/pulls/3/reviews/{review['id']}"])
+        got = c.review("acme/app", 3, review["id"])
+        self.assertEqual(got["body"], "Looks fine now.")
+
+    def test_review_comment_update_patches_an_inline_comment(self):
+        c = self.client()
+        got = c.review_comment("acme/app", 501)
+        self.assertEqual((got["id"], got["user"]["login"]), (501, "hubot"))
+        self.assertTrue(got["pull_request_url"].endswith("/repos/acme/app/pulls/3"))
+        c.review_comment_update("acme/app", 501, self.body("Renamed it."))
+        self.assertEqual(self.fake.calls[-1][:4], ["api", "-X", "PATCH", "repos/acme/app/pulls/comments/501"])
+        self.assertEqual(c.review_comment("acme/app", 501)["body"], "Renamed it.")
+
+    def test_edit_writes_are_gated_on_the_repo(self):
+        c = self.client()
+        for call in (lambda: c.review_update("evil/repo", 3, 7, self.body()),
+                     lambda: c.review_comment_update("evil/repo", 501, self.body())):
+            with self.assertRaises(WriteBlocked):
+                call()
+        self.assertEqual(self.fake.writes_made(), [])
 
     def test_review_post_via_input_json(self):
         comments = self.project / "c.json"

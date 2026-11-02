@@ -317,9 +317,14 @@ class FakeGitHub:
             ("GET", r + r"/issues/(\d+)/timeline", self._r_timeline),
             ("GET", r + r"/issues/(\d+)/reactions", self._r_reactions),
             ("GET", r + r"/issues/(\d+)/dependencies/(blocked_by|blocking)", self._r_dependencies),
+            ("GET", r + r"/issues/comments/(\d+)", self._r_comment_get),
             ("PATCH", r + r"/issues/comments/(\d+)", self._r_comment_edit),
             ("POST", r + r"/pulls/(\d+)/comments/(\d+)/replies", self._r_reply),
+            ("GET", r + r"/pulls/comments/(\d+)", self._r_inline_get),
+            ("PATCH", r + r"/pulls/comments/(\d+)", self._r_inline_edit),
             ("GET", r + r"/pulls/(\d+)/reviews", self._r_reviews),
+            ("GET", r + r"/pulls/(\d+)/reviews/(\d+)", self._r_review_get),
+            ("PUT", r + r"/pulls/(\d+)/reviews/(\d+)", self._r_review_edit),
             ("POST", r + r"/pulls/(\d+)/reviews", self._r_review),
             ("POST", r + r"/pulls/(\d+)/requested_reviewers", self._r_request_review),
             ("GET", r + r"/deployments", self._r_deployments),
@@ -401,6 +406,45 @@ class FakeGitHub:
         comment["body"] = self._body_field(flags)
         self._event(g[0], thing["number"], "comment_edited", id=comment["id"])
         return {"id": comment["id"], "body": comment["body"]}
+
+    def _r_comment_get(self, g, flags):
+        thing, c = self._find_comment(g[0], int(g[1]))
+        return {"id": c["id"], "user": {"login": c["user"]}, "body": c["body"],
+                "issue_url": f"https://api.github.com/repos/{g[0]}/issues/{thing['number']}",
+                "html_url": f"https://github.com/{g[0]}/issues/{thing['number']}#issuecomment-{c['id']}"}
+
+    def _find_inline(self, slug: str, comment_id: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        _, pr, thread = self._find_thread(comment_id=comment_id, slug=slug)
+        return pr, next(c for c in thread["comments"] if c["databaseId"] == comment_id)
+
+    def _r_inline_get(self, g, flags):
+        pr, c = self._find_inline(g[0], int(g[1]))
+        return {"id": c["databaseId"], "node_id": c["id"], "user": {"login": c["author"]}, "body": c["body"],
+                "pull_request_url": f"https://api.github.com/repos/{g[0]}/pulls/{pr['number']}",
+                "html_url": c["url"]}
+
+    def _r_inline_edit(self, g, flags):
+        pr, c = self._find_inline(g[0], int(g[1]))
+        c["body"] = self._body_field(flags)
+        self._event(g[0], pr["number"], "inline_edited", id=c["databaseId"])
+        return {"id": c["databaseId"], "body": c["body"]}
+
+    def _review_of(self, slug: str, n: str, review_id: str) -> Dict[str, Any]:
+        for r in self._thing(slug, n)["reviews"]:
+            if r["id"] == int(review_id):
+                return r
+        raise KeyError("HTTP 404: Not Found (review)")
+
+    def _r_review_get(self, g, flags):
+        self._review_of(*g)  # 404 when the review is not on this PR
+        review = next(r for r in self._r_reviews(g[:2], flags) if r["id"] == int(g[2]))
+        return {**review, "pull_request_url": f"https://api.github.com/repos/{g[0]}/pulls/{g[1]}"}
+
+    def _r_review_edit(self, g, flags):
+        review = self._review_of(*g)
+        review["body"] = self._body_field(flags)
+        self._event(g[0], g[1], "review_edited", id=review["id"])
+        return {"id": review["id"], "body": review["body"]}
 
     def _r_reply(self, g, flags):
         slug, n, comment_id = g
