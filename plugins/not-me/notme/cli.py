@@ -1440,16 +1440,16 @@ def cmd_comment_upsert(ctx: Context, args: argparse.Namespace, repo: str, n: int
     return {"repo": repo, "number": n, **result}
 
 
-_EDIT_FRAGMENTS = {"issuecomment-": "issue", "pullrequestreview-": "review", "discussion_r": "inline"}
-_EDIT_URL_RE = re.compile(r"^https?://[^/\s]+/(?P<slug>[^/\s]+/[^/\s]+)/(?:pull|issues)/(?P<n>\d+)(?:/[^#?\s]*)?"
-                          r"(?:\?[^#\s]*)?#(?P<prefix>issuecomment-|pullrequestreview-|discussion_r)(?P<id>\d+)$")
+_EDIT_FRAGMENTS = {"issuecomment-": "issue", "pullrequestreview-": "review", "discussion_r": "inline", "r": "inline"}
+_EDIT_URL_RE = re.compile(r"^https?://[^/\s]+/(?P<slug>[^/\s]+/[^/\s]+)/(?:pull|issues)/(?P<n>[0-9]+)(?:/[^#?\s]*)?"
+                          r"(?:\?[^#\s]*)?#(?P<prefix>issuecomment-|pullrequestreview-|discussion_r|r)(?P<id>[0-9]+)$")
 
 
 def _edit_target_ref(value: str, kind: Optional[str], repo: str, n: int) -> Tuple[str, int]:
     """(kind, id) from --id (a bare id, or a URL whose fragment names the kind) and --kind. A URL must name
     repo#n, and a --kind given with it must match its fragment."""
     text = str(value).strip()
-    if text.isdigit() and int(text) > 0:
+    if re.fullmatch(r"[0-9]+", text) and int(text) > 0:
         if not kind:
             raise fail(ExitCode.USAGE, "usage", "a bare --id needs --kind issue, review or inline")
         return kind, int(text)

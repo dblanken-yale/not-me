@@ -1100,7 +1100,8 @@ class PullRequestTests(base.CliCase):
         base = f"https://github.com/{REPO}/pull/3"
         for url, kind, target in ((f"{base}#issuecomment-{cid}", "issue", cid),
                                   (f"{base}#pullrequestreview-900", "review", 900),
-                                  (f"{base}/files#discussion_r901", "inline", 901)):
+                                  (f"{base}/files#discussion_r901", "inline", 901),
+                                  (f"{base}/files#r901", "inline", 901)):
             with self.subTest(kind):
                 payload = self.ok("comment-edit", "3", "--id", url, "--body-file", body)
                 self.assertEqual(payload, {"repo": REPO, "number": 3, "kind": kind, "id": target, "updated": True})
