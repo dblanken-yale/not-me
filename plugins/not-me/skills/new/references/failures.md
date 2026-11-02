@@ -19,7 +19,10 @@ release the claim, post nothing, add no label, and stop the run.
    The body leads with `**Waiting on:**` and a login, never "you".
 3. Finish the log with `notme log finish <path> --status "<result>"`. Pass the
    failing commands and their output with `--failures-file`.
-4. Return the checkout to the branch it started on and restore any stash.
+4. Remove the run worktree whatever the outcome; uncommitted edits in it are saved
+   with `notme --project-dir <wt> git save-patch` first (`branching.md`, "Run
+   worktrees"). The checkout the run started in was never switched or stashed.
+5. Never edit, stash, reset or commit in a worktree this run did not create.
 
 ## Table
 
@@ -42,6 +45,8 @@ release the claim, post nothing, add no label, and stop the run.
 | Merge conflict at Checkpoint A | release to `todo`, `needs_human` | names the conflicting files | `FAILED <ref> merge-conflict` |
 | A check or CI job fails the same way on the base (`verification.md`, "A failure that is also on the base") | released to `todo` before a push; after a push, `in_progress` stays | none | `FAILED <ref> base-red - <check>`; run stops |
 | Implementation or gate fails after `models.max_tries` | release to `todo`, `needs_human` | names the failing check | `FAILED <ref> <check>` |
+| Commit blocked or failed | released to `todo` | none | `notme --project-dir <wt> git save-patch`, `WARN` with the patch `path`; `FAILED <ref> not-committed`; run stops |
+| Run worktree cannot be made (`branch_in_use`, the branch already exists elsewhere) | released to `todo` | none; a `WARN` naming the worktree | `FAILED <ref> branch-held`; run stops |
 | Push fails after commit | `in_progress` | none | `FAILED <ref> not-pushed` (log says "committed but NOT PUSHED") |
 | PR open fails after push | `in_progress` (the branch is pushed) | none; the log names the branch | `FAILED <ref> pr-open`; run stops |
 | CI red at `limits.fix_loop` | issue `needs_review`; PR adds `needs_human` | names the failing job and test | `FAILED <ref> ci-red - <test>` |

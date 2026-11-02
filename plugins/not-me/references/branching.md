@@ -78,13 +78,39 @@ When you must set aside local changes:
 
 ## Leave the checkout clean
 
-1. At the end of every run, success or not, return the checkout to the branch
-   it started on (`branch` in the preflight output) with a clean tree. In the
-   main checkout that is usually the default branch. A linked git worktree
-   cannot check out a branch another worktree holds, so it goes back to its
-   own starting branch, never to the default branch.
-2. Restore any stash you made at the start.
+1. Update and new runs never switch, stash or edit the checkout they start in;
+   they work in a run worktree (below). At the end of every run, success or not,
+   that checkout is on the branch it started on (`branch` in the preflight
+   output), as it was.
+2. A run that did stash in its starting checkout restores that stash by SHA.
 3. A checkout you cannot clean is a `WARN` with the `git status` output.
+
+## Run worktrees
+
+Each update and new run works in its own worktree, so a run that dies leaves
+nothing in the operator's checkout and holds a branch only for its own life.
+
+1. Make it: `notme git worktree-add --branch <branch>` for an existing branch
+   (fetch it first), or `--branch <name> --base origin/<base>` for a new one. The
+   CLI picks a unique `run-*` path under `.claude/worktrees/` and returns it as
+   `path`; call it `<wt>` and log it. `branch_in_use` means another worktree
+   holds the branch: that PR or branch is skipped, never forced.
+2. Work only in `<wt>`: `notme --project-dir <wt> git ...` for the CLI's git
+   commands, `git -C <wt> ...` for raw reads, merges and the commit, and every
+   implementer, verify and gate command runs with `<wt>` as its directory.
+3. At the end, whatever the outcome, remove it: uncommitted edits left (a commit
+   that was blocked or failed, a run that stopped mid-unit) are saved first with
+   `notme --project-dir <wt> git save-patch`, which writes a patch under
+   `<git-common-dir>/not-me/patches/` and resets only that run worktree. Log the
+   returned `path` as a `WARN`. Then `notme git worktree-remove <wt>`. The
+   branch stays.
+4. A saved patch is not lost work: a later run on the same branch reads the
+   `WARN` in the previous log, applies it with `git -C <wt> apply <patch>` when
+   it applies cleanly, and audits it like any unit's diff; otherwise it redoes
+   the work.
+5. Never edit, stash, reset or commit in a worktree you did not create: the main
+   checkout, a person's worktree, a session worktree. `save-patch` and
+   `worktree-remove` refuse anything but a `run-*` or `review-*` worktree.
 
 ## Worktrees for review
 
@@ -95,27 +121,16 @@ When you must set aside local changes:
 
 ## Worktrees for new and update work
 
-`workspace.new` (or `workspace.update`) set to `worktree` runs the work in a worktree
-of its own, so several runs can start from one main checkout and none of them
-changes its branch or files. Inside a linked worktree already, work in place.
+`workspace.new` or `workspace.update` set to `worktree` (and `--parallel N`) makes the run's worktree before `notme log start`. Already in a linked worktree: work in place.
 
-1. Make it once the target is known, before `notme log start`: read the sha with
-   `git rev-parse HEAD`, then `notme git worktree-add <sha> --name notme-new-<N>`
-   (`notme-update-<N>` for rework). `path_exists`: add `-2`, `-3`. Keep the
-   returned `path`. A resumed run whose log names a path uses that path instead.
-   A lost claim keeps the worktree, its log and run marker: still detached with
-   nothing done, it serves the next pick as is. Never remove it mid-run, since
-   that deletes the marker with it; make no second one.
-2. From then on pass `--project-dir <path>` to every `notme` call, so the run
-   marker, branch, checkpoints and push all land in that worktree. Run local git
-   as `git -C <path> ...`, never `cd <path> && git ...` (the guard does not follow
-   `cd`). Run each check with the worktree as its directory, and brief the
-   implementer with the absolute path.
-3. The worktree starts detached: there is nothing to stash. Branch with
-   `notme --project-dir <path> git branch-create <name> --base origin/<base>`.
-4. Only when the run ends, after `notme log finish`, run `notme git worktree-remove <path>`
-   without `--project-dir`. Remove only the worktree this run made. A tree that will not come off clean stays: a `WARN` naming it.
-   "committed but NOT PUSHED": keep it and name the path in the log summary.
+1. `notme git worktree-add <sha> --name notme-new-<N>` (`notme-update-<N>` for rework), the sha from
+   `git rev-parse HEAD`. `path_exists`: add `-2`, `-3`. A lost claim keeps the worktree, its log and run marker
+   for the next pick. Never remove it mid-run, since that deletes the marker; make no second one.
+2. From then on pass `--project-dir <path>` to every `notme` call, so the marker, branch and checkpoints land
+   there. Run local git as `git -C <path> ...`, never `cd`; run checks with it as their directory.
+3. It starts detached: nothing to stash. `notme --project-dir <path> git branch-create <name> --base origin/<base>`.
+4. Only when the run ends, after `notme log finish`, run `notme git worktree-remove <path>` without
+   `--project-dir`. A tree that will not come off clean stays, with a `WARN`; "committed but NOT PUSHED": keep it.
 
 ## Epics
 
@@ -161,7 +176,5 @@ passes the same checks, held when a blocker has no open PR yet. Treat it the sam
 - [ ] Named the branch from `standards.branch`, the same in every companion repo.
 - [ ] Merged the base in at Checkpoint A and Checkpoint B; rebased nothing.
 - [ ] Never force-pushed or amended a pushed commit.
-- [ ] Stashed with a unique message and restored by SHA.
-- [ ] Left the checkout clean on the branch it started on.
-- [ ] With `workspace` `worktree`: worked only in my own worktree, `--project-dir` on every `notme` call.
-- [ ] Kept that one worktree through a lost claim; removed it only after `notme log finish`.
+- [ ] Worked in a run worktree made by the CLI, saved any leftover edits as a patch, and removed it at the end.
+- [ ] Touched no worktree this run did not create; left the starting checkout on its branch.

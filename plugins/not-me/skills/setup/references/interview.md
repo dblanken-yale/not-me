@@ -17,7 +17,7 @@ doc is not in scope for this run.
 | 5 | Which sibling checkouts are companions, and in what push order? | `repos` | project |
 | 6 | Per state: create, map to an existing label, or skip (see `labels.md`) | `labels` | project |
 | 7 | Which branches beyond main, master and develop are protected? | `protected_branches` (add only) | project |
-| 8 | Orchestrate across models, or one model for everything? | `models.strategy`, `models.single_model` | project |
+| 8 | Orchestrate across models, or one model for everything? Write code in the run itself, or hand it to implementer subagents? | `models.strategy`, `models.single_model`, `models.implementation` | project |
 | 9 | Are these the test, lint and build commands? | verify sections | verify |
 | 9a | Do the checks need one test environment every worktree shares? Ask only when detection was unsure | `shared_env` | verify |
 | 10 | Which units need the most capable model? (paths or kinds) | `## Delegation` | standards |

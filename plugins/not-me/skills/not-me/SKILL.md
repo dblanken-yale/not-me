@@ -45,37 +45,37 @@ unchanged.
 2. Without `--bg`, the leg runs in this session and ends with its own result line.
 3. The line starts with a VERB:
    `NONE | PR | PUSHED | PARKED | HELD | REVIEWED | PROVED | FAILED | STOP`.
-4. Stop at the first result whose VERB is not `NONE`. A `FAILED` or `STOP` leg also
-   ends the run. Later legs never run.
-5. Every leg returned `NONE`: print `NONE - nothing to do` and finish. That is a
-   success, not a failure.
+4. `NONE` (including `NONE - idle - skipped ...`, where every candidate's branch was
+   held by another worktree) and `FAILED <ref>` (a failure tied to one item, with a
+   ref) go on to the next leg. Stop at the first other result: work done (`PR`,
+   `PUSHED`, `PARKED`, `HELD`, ...), any `STOP`, a `FAILED -` with no ref such as
+   `FAILED - config invalid` or `FAILED - guard not working`, or a guard block
+   (`FAILED <ref> blocked ...`: the same block would hit the next leg). Later legs never run.
+5. Print the line of the leg that stopped the run; when an earlier leg returned
+   `FAILED <ref>`, add it to the note, for example
+   `PR acme/app#88 opened - update FAILED acme/app#57 not-committed  log=<path>`.
+   No leg stopped it: print the last `FAILED <ref>` line if there was one, else
+   `NONE - nothing to do`, which is a success, not a failure.
 
 ## Parallel runs
 
-`--parallel N` starts up to N `/not-me:new` runs at once, one issue each, each in
-its own worktree. After Step 1 it runs instead of Steps 2 to 4.
+`--parallel N` starts up to N `/not-me:new` runs at once, one issue and worktree each, in place of Steps 2 to 4.
 
-1. Refuse it with `--bg` (a `--bg` result is one line) and when N is not a whole
-   number of 1 or more. Lower N to `limits.parallel_runs` (default 3) with a note.
-2. `workspace.new` must be `worktree` in `notme config`; otherwise every run would
-   switch the one main checkout. Print `STOP - parallel needs workspace.new: worktree`.
-3. `notme pick-issue`. `{"none": true}`: print `NONE - nothing to do`. Otherwise
-   choose up to N distinct issues from `issues` by the `picking` rules, as
-   `/not-me:new` would; never a `held_back` one. Fewer ready issues: fewer runs.
-4. Dispatch one subagent per issue, all in one message so they run together.
-   Start each in this checkout without worktree isolation (the session harness
-   refuses `notme git` calls from an isolated worktree) and have it run
-   `/not-me:new <issue>`, plus `--dry-run` when given, and return its result line.
-5. Each run claims its own issue (compare-and-set), so two runs never take one
-   issue: a lost claim ends that run with `STOP <ref> claimed elsewhere` and the
-   others go on. Never retry a run or reuse an issue another run took.
-6. Print each run's result line exactly, in issue order. Skip the retro;
-   `/not-me:retro <log>` on each log afterwards is the operator's call.
+1. Refuse it with `--bg` and when N is not a whole number of 1 or more. Lower N to `limits.parallel_runs` (default 3), with a note.
+2. `workspace.new` must be `worktree` in `notme config`, else `STOP - parallel needs workspace.new: worktree`.
+3. `notme pick-issue`; `{"none": true}` prints `NONE - nothing to do`. Else choose up to N distinct issues by the
+   `picking` rules, never a `held_back` one.
+4. Dispatch one subagent per issue, all in one message, started here without worktree isolation (the harness
+   refuses `notme git` from an isolated one), each running `/not-me:new <issue>` (plus `--dry-run`).
+5. Each run claims its issue by compare-and-set: a lost claim ends that run with `STOP <ref> claimed elsewhere`;
+   the rest go on. Never retry a run.
+6. Print each result line exactly, in issue order. Skip the retro.
 
 ## Step 4: Retro
 
-After a leg that did work (any VERB other than `NONE`, `STOP`), run `/not-me:retro`
-when available. If that skill is not installed, skip it silently.
+After each leg that did work (any VERB other than `NONE`, `STOP`; a `FAILED <ref>`
+leg counts), run `/not-me:retro` on that leg's log, once per leg. If that skill is
+not installed, skip it silently.
 
 ## Checklist
 
@@ -83,7 +83,7 @@ when available. If that skill is not installed, skip it silently.
 - [ ] Checked `notme status` before any leg: disabled, paused, run in progress.
 - [ ] Read `router` from the config and ran only those legs, in order.
 - [ ] Forwarded `$ARGUMENTS`; under `--bg` each leg was its own subagent.
-- [ ] Stopped at the first non-`NONE` result and printed it exactly.
+- [ ] Went on past `NONE` and `FAILED <ref>`; stopped at work done, `STOP` or a run-wide `FAILED -`, and printed it exactly.
 - [ ] Printed `NONE - nothing to do` only when every leg was `NONE`.
 - [ ] `--parallel N`: capped at `limits.parallel_runs`, needed `workspace.new: worktree`,
   one unisolated subagent per distinct issue, printed every run's line.

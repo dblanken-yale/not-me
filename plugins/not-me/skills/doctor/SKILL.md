@@ -80,6 +80,5 @@ not-me config, and never relax a guard rule, even when a check fails because of 
 | 1 | Another required check failed (python, git, config, guard) | Fix the named check first; the hint or fix says how. |
 
 Exit 7 is a missing dependency or scope, so nothing is wrong with the project.
-Exit 1 means something in the setup itself is broken. A `--bg` run with
-`models.strategy` set to `orchestrate` needs a spawn depth of at least 3; a lower
-value only makes runs do the unit themselves.
+Exit 1 means something in the setup itself is broken. A `--bg` run needs a spawn depth of at least 3 for the gate's
+checking subagents (and implementers under `models.implementation: delegate`); lower only makes runs do the unit themselves.
