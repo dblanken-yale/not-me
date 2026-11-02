@@ -10,7 +10,7 @@ screenshot becomes a result, and what to do when the browser or the target fails
 
 1. Load the `playwright-cli` skill with the Skill tool and follow it for every
    browser action. Not available: log a `WARN` naming the missing tool, write
-   nothing on the PR, and end with `NONE <ref> no browser tool`.
+   nothing on the PR, end with `FAILED <ref> no browser tool` and stop.
 2. Start each browser command with the tool's own name. No `cd` prefix, wrapper,
    or shell function around it, and never a disabled sandbox.
 3. Use one named browser session for the run, so a crash in another session does
@@ -71,7 +71,7 @@ the target is a preview, not production. Never anything a step does not ask for.
 | The target stops answering after some steps ran | Remaining steps `not run (target down)` | post the proof as usual |
 | The browser crashes | Restart the session once and redo the step | |
 | It crashes again | `WARN` with the error, no comment | `FAILED <ref> browser` |
-| A guard block | QUESTION naming the operator, no retry | `FAILED <ref> blocked - <target>` |
+| A guard block | QUESTION naming the operator, no retry, no comment, labels unchanged; run stops | `FAILED <ref> blocked - <target>` |
 
 ## Checklist
 

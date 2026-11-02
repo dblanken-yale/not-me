@@ -176,7 +176,7 @@ class SkillProveTest(unittest.TestCase):
 
     def test_result_lines(self):
         for line in ("PROVED <ref> pass n/m", "PROVED <ref> fail n/m", "NONE <ref> no deploy target",
-                     "NONE <ref> no testing steps", "NONE <ref> no browser tool"):
+                     "NONE <ref> no testing steps", "FAILED <ref> no browser tool"):
             self.assertIn(line, self.body)
 
     def test_browser_and_visual_check(self):

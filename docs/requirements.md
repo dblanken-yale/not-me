@@ -22,8 +22,10 @@ not-me runs these git operations and nothing else:
 - `fetch` of named refs from `origin`.
 - `merge --ff --no-edit <base>` to bring a base branch into a feature branch. It never rebases. If the merge stops on conflicts, not-me reports that and carries on from there.
 - `checkout --no-track -b <branch> <base>` to start a branch.
-- `stash push --include-untracked` and `stash apply` by commit id, to keep your uncommitted work safe while it switches branches.
+- `stash push --include-untracked` and `stash apply` by commit id, to keep uncommitted work safe when a branch must be set aside.
 - `worktree add --detach` and `worktree remove` for review runs, which use a separate worktree by default.
+- `worktree add <path> <branch>` (or `--no-track -b <branch> <path> <base>`), `worktree list --porcelain` and `worktree remove` for the run worktree each update and new run works in, so your own checkout is never switched.
+- In a run worktree that could not commit, and only there: `add --intent-to-add` and `diff --binary HEAD` to save a patch under `.git/not-me/patches/`, then `reset --hard HEAD` and `clean -f -d` (never `-x`) to free the branch.
 - `push --dry-run` to a throwaway ref name, to test that a push would work. Nothing is sent.
 - `push -- origin refs/heads/<name>:refs/heads/<name>`.
 
@@ -60,7 +62,7 @@ Python 3.9 or newer, standard library only. The launcher `bin/notme-python` trie
 
 ### playwright-cli (optional)
 
-Used only to drive a browser for `/not-me:prove` and for visual checks on UI changes. A run that needs it and cannot find it logs `Visual check: not run (browser tool missing)` and carries on.
+Used only to drive a browser for `/not-me:prove` and for visual checks on UI changes. A visual check that cannot find it logs `Visual check: not run (browser tool missing)` and carries on. `/not-me:prove` without it posts nothing and ends `FAILED <ref> no browser tool`.
 
 ### bash on Windows
 
@@ -143,6 +145,8 @@ Ordinary commands that mention neither `git` nor `gh` cost tens of milliseconds.
 | `<git-common-dir>/not-me/logs/<skill>/<timestamp>-<ref>-<id>.md` | write | `notme`, one run log per run | No |
 | `<git-common-dir>/not-me/logs/intended-writes.jsonl` and `logs/payloads/<sha>.md` | write | `notme`, the dry-run ledger | No |
 | `<git-common-dir>/not-me/logs/guard.jsonl` | write | the hook, one line per block with the blocked input, redacted and capped | No |
+| `<main checkout>/.claude/worktrees/<name>/` | write, and removed after each PR | `notme git worktree-add` and `worktree-remove`, one detached worktree per PR a review checks out | No |
+| `<git-common-dir>/info/exclude` | one line appended, `/.claude/worktrees/`, once | `notme git worktree-add`, so review worktrees never show as untracked | No, it is git's local ignore file |
 | `not-me-<uid>/` under `$XDG_RUNTIME_DIR` or the system temp directory (mode 0700) | write | `notme`, body files and JSON payloads | No |
 | `${CLAUDE_PLUGIN_ROOT}` (the installed plugin) | read | Claude Code, on install and update | No |
 | `${CLAUDE_PLUGIN_DATA}` | none today | reserved | No |

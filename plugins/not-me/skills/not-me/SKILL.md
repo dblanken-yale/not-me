@@ -44,10 +44,17 @@ unchanged.
 2. Without `--bg`, the leg runs in this session and ends with its own result line.
 3. The line starts with a VERB:
    `NONE | PR | PUSHED | PARKED | HELD | REVIEWED | PROVED | FAILED | STOP`.
-4. Stop at the first result whose VERB is not `NONE`. A `FAILED` or `STOP` leg also
-   ends the run. Later legs never run.
-5. Every leg returned `NONE`: print `NONE - nothing to do` and finish. That is a
-   success, not a failure.
+4. `NONE` (including `NONE - idle - skipped ...`, where every candidate's branch was
+   held by another worktree) and `FAILED <ref>` (a failure tied to one item, with a
+   ref) go on to the next leg. Stop at the first other result: work done (`PR`,
+   `PUSHED`, `PARKED`, `HELD`, ...), any `STOP`, a `FAILED -` with no ref such as
+   `FAILED - config invalid` or `FAILED - guard not working`, or a guard block
+   (`FAILED <ref> blocked ...`: the same block would hit the next leg). Later legs never run.
+5. Print the line of the leg that stopped the run; when an earlier leg returned
+   `FAILED <ref>`, add it to the note, for example
+   `PR acme/app#88 opened - update FAILED acme/app#57 not-committed  log=<path>`.
+   No leg stopped it: print the last `FAILED <ref>` line if there was one, else
+   `NONE - nothing to do`, which is a success, not a failure.
 
 ## Step 4: Prove (only under `--bg`)
 
@@ -66,9 +73,9 @@ dispatch, no line):
 
 ## Step 5: Retro
 
-After a leg that did work (any VERB other than `NONE`, `STOP`), run `/not-me:retro`
-when available, once, after the prove step. If that skill is not installed, skip it
-silently.
+After each leg that did work (any VERB other than `NONE`, `STOP`; a `FAILED <ref>`
+leg counts), run `/not-me:retro` on that leg's log, once per leg, after the prove step. If that skill is
+not installed, skip it silently.
 
 ## Checklist
 
@@ -76,6 +83,6 @@ silently.
 - [ ] Checked `notme status` before any leg: disabled, paused, run in progress.
 - [ ] Read `router` from the config and ran only those legs, in order.
 - [ ] Forwarded `$ARGUMENTS`; under `--bg` each leg was its own subagent.
-- [ ] Stopped at the first non-`NONE` result and printed it exactly.
+- [ ] Went on past `NONE` and `FAILED <ref>`; stopped at work done, `STOP` or a run-wide `FAILED -`, and printed it exactly.
 - [ ] Under `--bg`, after a `PR` or `PUSHED` leg with a prove target, proved in a foreground subagent and printed both lines.
 - [ ] Printed `NONE - nothing to do` only when every leg was `NONE`.

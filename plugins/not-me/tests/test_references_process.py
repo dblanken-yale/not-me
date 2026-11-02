@@ -135,6 +135,38 @@ class ProcessReferenceDocsTest(unittest.TestCase):
     def test_branching(self):
         self._check("branching.md")
 
+    def test_branching_run_worktrees(self):
+        text = (REFS / "branching.md").read_text(encoding="utf-8")
+        section = text.split("## Run worktrees", 1)[1].split("\n## ", 1)[0]
+        for part in ("notme git worktree-add --branch", "notme git worktree-remove", "git save-patch",
+                     "whatever the outcome", "git -C <wt> apply"):
+            self.assertIn(part, section)
+        self.assertIn("never edit, stash, reset or commit in a worktree you did not create", section.lower())
+
+    def test_router_goes_on_past_a_skipped_or_failed_item(self):
+        bg = (REFS / "bg-mode.md").read_text(encoding="utf-8")
+        router = bg.split("## The router", 1)[1].split("\n## ", 1)[0]
+        self.assertNotIn("A FAILED or STOP leg also ends the router", router)
+        self.assertIn("`FAILED <ref>`", router)
+        self.assertIn("NONE - idle - skipped", bg)
+        skill = (PLUGIN / "skills" / "not-me" / "SKILL.md").read_text(encoding="utf-8")
+        step3 = skill.split("## Step 3", 1)[1].split("## Step 4", 1)[0]
+        self.assertIn("`FAILED <ref>`", step3)
+        self.assertIn("`FAILED - config invalid`", step3)
+        self.assertNotIn("A `FAILED` or `STOP` leg also\n   ends the run", step3)
+
+    def test_implementation_is_inline_unless_delegate(self):
+        delegation = (REFS / "delegation.md").read_text(encoding="utf-8")
+        self.assertNotIn("always dispatched", delegation.lower())
+        self.assertIn("`models.implementation`", delegation)
+        for skill in ("new", "update"):
+            body = (PLUGIN / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+            step5 = body.split("## Step 5", 1)[1].split("## Step 6", 1)[0]
+            self.assertNotIn("Always dispatch", step5, skill)
+            self.assertNotIn("overrides any operator preference", step5, skill)
+            self.assertIn("`models.implementation` `inline` (default)", step5, skill)
+            self.assertIn("`delegate`", step5, skill)
+
     def test_autonomy_and_logging(self):
         self._check("autonomy-and-logging.md")
 

@@ -934,6 +934,43 @@ class PullRequestTests(base.CliCase):
         self.assertEqual(payload["number"], 3)
         self.assertNotIn("answered", payload)
 
+    def test_pick_needs_work_reports_the_worktree_holding_each_head_branch(self):
+        init_repo(self.project)
+        things(self.fake)["3"].update({"labels": ["needs work"], "assignees": ["octocat"], "author": "octocat"})
+        self.add_pr(5, labels=["needs work"], assignees=["octocat"], author="octocat")
+        held = self.tc.root / "held"
+        git(self.project, "worktree", "add", "-q", "-b", "feat/widget", str(held))
+        (held / "a.txt").write_text("edited\n", encoding="utf-8")
+        payload = self.ok("pick-needs-work")
+        self.assertEqual((payload["number"], payload["others"]), (3, [5]))
+        wt = payload["worktree"]
+        self.assertEqual(Path(wt["path"]).resolve(), held.resolve())
+        self.assertEqual((wt["dirty"], wt["status"], wt["run_worktree"]), (True, "1 changed", False))
+        self.assertEqual([(c["number"], c["head_ref"]) for c in payload["candidates"]],
+                         [(3, "feat/widget"), (5, "feat/p5")])
+        self.assertEqual(payload["candidates"][0]["worktree"], wt)
+        self.assertIsNone(payload["candidates"][1]["worktree"])
+        (held / "a.txt").write_text("one\n", encoding="utf-8")
+        self.assertEqual(self.ok("pick-needs-work")["worktree"]["dirty"], False)  # held but clean is still held
+        self.assertIs(payload["worktree"]["prunable"], False)
+        shutil.rmtree(held)  # directory deleted by hand, not pruned: still listed, flagged prunable
+        gone = self.ok("pick-needs-work")["worktree"]
+        self.assertEqual((gone["status"], gone["prunable"]), ("missing", True))
+
+    def test_pick_needs_work_reports_no_worktree_for_a_fork_pr_sharing_a_local_branch_name(self):
+        init_repo(self.project)
+        things(self.fake)["3"].update({"labels": ["needs work"], "assignees": ["octocat"], "author": "octocat",
+                                       "headRefName": "main", "isCrossRepository": True})
+        payload = self.ok("pick-needs-work")
+        self.assertEqual(payload["number"], 3)
+        self.assertIsNone(payload["worktree"])
+
+    def test_pick_needs_work_outside_git_reports_no_worktree(self):
+        things(self.fake)["3"].update({"labels": ["needs work"], "assignees": ["octocat"], "author": "octocat"})
+        payload = self.ok("pick-needs-work")
+        self.assertIsNone(payload["worktree"])
+        self.assertEqual(payload["candidates"], [{"number": 3, "head_ref": "feat/widget", "worktree": None}])
+
     def test_pr_children_lists_stacked_prs_and_skips_untrusted_and_forks(self):
         self.add_pr(5, baseRefName="feat/widget", author="hubot")
         self.add_pr(6, baseRefName="feat/widget", author="mallory")
@@ -1574,11 +1611,137 @@ class GitTests(base.CliCase):
 
     def test_worktree_add_and_remove(self):
         sha = git(self.project, "rev-parse", "HEAD").strip()
-        wt = str(self.project / ".git" / "not-me" / "worktrees" / "wt")
-        self.ok("git", "worktree-add", wt, sha)
+        wt = self.ok("git", "worktree-add", sha, "--name", "review-wt")["path"]
+        self.assertEqual(Path(wt), Path(os.path.realpath(str(self.project))) / ".claude" / "worktrees" / "review-wt")
         self.assertTrue(Path(wt, "a.txt").exists())
         self.ok("git", "worktree-remove", wt)
         self.assertFalse(Path(wt).exists())
+
+    def test_run_worktree_new_branch_from_base_is_unique_and_removable(self):
+        root = Path(os.path.realpath(str(self.project))) / ".claude" / "worktrees"
+        first = self.ok("git", "worktree-add", "--branch", "feat/run", "--base", "main")
+        self.assertEqual((first["branch"], first["base"]), ("feat/run", "main"))
+        self.assertEqual(Path(first["path"]).parent, root)
+        self.assertRegex(Path(first["path"]).name, r"^run-[0-9a-f]{12}$")
+        self.assertEqual(git(first["path"], "branch", "--show-current").strip(), "feat/run")
+        self.assertEqual(git(self.project, "branch", "--show-current").strip(), "main")  # main checkout untouched
+        self.ok("git", "worktree-remove", first["path"])
+        self.assertFalse(Path(first["path"]).exists())
+        self.assertIn("feat/run", git(self.project, "branch", "--list", "feat/run"))  # the branch stays
+        second = self.ok("git", "worktree-add", "--branch", "feat/run")  # the existing branch, a fresh path
+        self.assertNotEqual(second["path"], first["path"])
+        self.assertIsNone(second["base"])
+        self.assertEqual(git(second["path"], "branch", "--show-current").strip(), "feat/run")
+        self.ok("git", "worktree-remove", second["path"])
+
+    def test_run_worktree_takes_a_branch_only_origin_has(self):
+        origin = self.tc.root / "origin.git"
+        git(self.tc.root, "init", "-q", "--bare", "-b", "main", str(origin))
+        git(self.project, "remote", "add", "origin", str(origin))
+        git(self.project, "branch", "feat/r")
+        git(self.project, "push", "-q", "origin", "main", "feat/r")
+        git(self.project, "fetch", "-q", "origin")
+        git(self.project, "branch", "-D", "feat/r")
+        wt = self.ok("git", "worktree-add", "--branch", "feat/r")["path"]
+        self.assertEqual(git(wt, "branch", "--show-current").strip(), "feat/r")
+        self.ok("git", "worktree-remove", wt)
+
+    def test_run_worktree_refuses_protected_held_and_misnamed(self):
+        code, payload, _ = self.cli("git", "worktree-add", "--branch", "main")
+        self.assertEqual((code, payload["kind"]), (1, "protected_branch"))
+        for variant in ("Main", "MAIN"):  # on a case-insensitive filesystem this is the ref `main`
+            with self.subTest(variant=variant):
+                code, payload, _ = self.cli("git", "worktree-add", "--branch", variant)
+                self.assertEqual((code, payload["kind"]), (1, "protected_branch"))
+        held = self.tc.root / "held"
+        git(self.project, "worktree", "add", "-q", "-b", "feat/held", str(held))
+        code, payload, _ = self.cli("git", "worktree-add", "--branch", "feat/held")
+        self.assertEqual((code, payload["kind"]), (1, "branch_in_use"))
+        self.assertEqual(Path(payload["path"]).resolve(), held.resolve())
+        for name in ("review-x", "run-../x", "x", "run-a/b"):
+            with self.subTest(name=name):
+                code, payload, _ = self.cli("git", "worktree-add", "--branch", "feat/n", "--base", "main",
+                                            "--name", name)
+                self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
+        sha = git(self.project, "rev-parse", "HEAD").strip()
+        code, payload, _ = self.cli("git", "worktree-add", sha, "--name", "run-x")  # detached is review-* only
+        self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
+        for argv in ((sha, "--branch", "feat/n"), ("--base", "main"), ()):
+            with self.subTest(argv=argv):
+                code, payload, _ = self.cli("git", "worktree-add", *argv)
+                self.assertEqual((code, payload["kind"]), (2, "usage"))
+        self.assertNotIn("feat/n", git(self.project, "branch", "--list"))
+
+    def test_save_patch_saves_the_work_and_frees_the_run_worktree(self):
+        wt = self.ok("git", "worktree-add", "--branch", "feat/s", "--base", "main")["path"]
+        Path(wt, "a.txt").write_text("edited\n", encoding="utf-8")
+        Path(wt, "new.txt").write_text("brand new\n", encoding="utf-8")
+        saved = self.cli("--project-dir", wt, "git", "save-patch", project=False)[1]
+        patches = Path(os.path.realpath(str(self.project))) / ".git" / "not-me" / "patches"
+        self.assertEqual(Path(saved["path"]).parent, patches)
+        self.assertEqual((saved["branch"], saved["reset"]), ("feat/s", True))
+        self.assertEqual(sorted(saved["files"]), ["a.txt", "new.txt"])
+        self.assertEqual(saved["head_sha"], git(wt, "rev-parse", "HEAD").strip())
+        self.assertEqual(git(wt, "status", "--porcelain"), "")  # free: nothing left to block the next run
+        if os.name == "posix":  # the patch may hold secrets: owner only
+            self.assertEqual(os.stat(saved["path"]).st_mode & 0o077, 0)
+            self.assertEqual(os.stat(Path(saved["path"]).parent).st_mode & 0o077, 0)
+        git(wt, "apply", saved["path"])  # the next run can bring the work back
+        self.assertEqual(Path(wt, "new.txt").read_text(encoding="utf-8"), "brand new\n")
+        self.cli("--project-dir", wt, "git", "save-patch", project=False)
+        self.ok("git", "worktree-remove", wt)
+        empty = self.ok("git", "worktree-add", "--branch", "feat/s")["path"]
+        self.assertEqual(self.cli("--project-dir", empty, "git", "save-patch", project=False)[1],
+                         {"path": None, "branch": "feat/s", "head_sha": git(empty, "rev-parse", "HEAD").strip(),
+                          "files": [], "reset": False})
+
+    def test_save_patch_applies_whatever_the_users_diff_config(self):
+        git(self.project, "config", "diff.noprefix", "true")
+        git(self.project, "config", "diff.mnemonicPrefix", "true")
+        wt = self.ok("git", "worktree-add", "--branch", "feat/p", "--base", "main")["path"]
+        Path(wt, "sub").mkdir()
+        Path(wt, "sub", "x.txt").write_text("deep\n", encoding="utf-8")
+        saved = self.cli("--project-dir", wt, "git", "save-patch", project=False)[1]
+        git(wt, "apply", "--check", saved["path"])  # plain apply: a/ and b/ prefixes, paths intact
+        git(wt, "apply", saved["path"])
+        self.assertEqual(Path(wt, "sub", "x.txt").read_text(encoding="utf-8"), "deep\n")
+
+    def test_save_patch_refuses_a_worktree_mid_merge(self):
+        wt = self.ok("git", "worktree-add", "--branch", "feat/m", "--base", "main")["path"]
+        git(wt, "checkout", "-q", "-b", "other")
+        Path(wt, "a.txt").write_text("other\n", encoding="utf-8")
+        git(wt, "commit", "-qam", "other")
+        git(wt, "checkout", "-q", "feat/m")
+        Path(wt, "a.txt").write_text("mine\n", encoding="utf-8")
+        git(wt, "commit", "-qam", "mine")
+        merged = subprocess.run(["git", "merge", "--no-ff", "--no-edit", "other"], cwd=wt, capture_output=True)  # conflicts on a.txt
+        self.assertNotEqual(merged.returncode, 0, merged.stdout)
+        code, payload, _ = self.cli("--project-dir", wt, "git", "save-patch", project=False)
+        self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
+        self.assertIn("UU", git(wt, "status", "--porcelain"))  # nothing was reset
+
+    def test_save_patch_refuses_any_checkout_it_did_not_create(self):
+        (self.project / "a.txt").write_text("main edit\n", encoding="utf-8")
+        code, payload, _ = self.cli("git", "save-patch")  # the main checkout
+        self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
+        sha = git(self.project, "rev-parse", "HEAD").strip()
+        review = self.ok("git", "worktree-add", sha, "--name", "review-r")["path"]
+        Path(review, "a.txt").write_text("review edit\n", encoding="utf-8")
+        code, payload, _ = self.cli("--project-dir", review, "git", "save-patch", project=False)
+        self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
+        other = self.tc.root / "run-elsewhere"
+        git(self.project, "worktree", "add", "-q", "-b", "feat/o", str(other))
+        Path(other, "a.txt").write_text("other edit\n", encoding="utf-8")
+        code, payload, _ = self.cli("--project-dir", str(other), "git", "save-patch", project=False)
+        self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
+        plain = self.project / ".claude" / "worktrees" / "run-plain"
+        plain.mkdir(parents=True)
+        code, payload, _ = self.cli("--project-dir", str(plain), "git", "save-patch", project=False)
+        self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
+        self.assertEqual((self.project / "a.txt").read_text(encoding="utf-8"), "main edit\n")
+        self.assertEqual(Path(review, "a.txt").read_text(encoding="utf-8"), "review edit\n")
+        self.assertEqual(Path(other, "a.txt").read_text(encoding="utf-8"), "other edit\n")
+        self.assertFalse((self.project / ".git" / "not-me" / "patches").exists())
 
     def test_push_refuses_protected_branches(self):
         code, payload, _ = self.cli("git", "push", "main")
