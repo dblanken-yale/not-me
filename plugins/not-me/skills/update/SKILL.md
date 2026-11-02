@@ -101,7 +101,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/branching.md`.
    naming a saved patch: apply it now (branching.md, "Run worktrees").
 2. `notme --project-dir <wt> git checkpoint --base <base> --fetch` (Checkpoint A). Merge, never
    rebase; on a stacked PR `<base>` is the predecessor's branch (findings.md, "Stacked PRs").
-   Conflicts you cannot resolve with confidence: abort the merge, log the files, fail (failure table).
+   Conflicts: resolve and document them (branching.md, "Resolving conflicts"); abort and fail only as it says.
 3. Rebuild or restart the app when the project's verify doc says a branch switch
    needs it (`## Environment start`, `## Build`).
 
