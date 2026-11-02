@@ -409,7 +409,8 @@ def stage_workspace(case: str, workspace: Path, home: Path, state: Path = STATE,
         raise ScaffoldError(f"scenario {sid}: " + "; ".join(problems))
 
     workspace.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(str(stage / "repo"), str(workspace), symlinks=True, dirs_exist_ok=True)
+    shutil.copytree(str(stage / "repo"), str(workspace), symlinks=True, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("*.lock"))
     git_dir = workspace / ".git"
     exclude = git_dir / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
@@ -421,7 +422,8 @@ def stage_workspace(case: str, workspace: Path, home: Path, state: Path = STATE,
     companion_name = companion.split("/")[1] if companion else ""
     if companion:
         dest = workspace / COMPANION_DIR / companion_name
-        shutil.copytree(str(stage / "companion"), str(dest), symlinks=True)
+        shutil.copytree(str(stage / "companion"), str(dest), symlinks=True,
+                        ignore=shutil.ignore_patterns("*.lock"))
         _identity(dest, info, runner)
 
     values = {"repo": info["repo"], "companion": companion or "", "companion_name": companion_name,
