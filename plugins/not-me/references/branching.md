@@ -75,13 +75,39 @@ When you must set aside local changes:
 
 ## Leave the checkout clean
 
-1. At the end of every run, success or not, return the checkout to the branch
-   it started on (`branch` in the preflight output) with a clean tree. In the
-   main checkout that is usually the default branch. A linked git worktree
-   cannot check out a branch another worktree holds, so it goes back to its
-   own starting branch, never to the default branch.
-2. Restore any stash you made at the start.
+1. Update and new runs never switch, stash or edit the checkout they start in;
+   they work in a run worktree (below). At the end of every run, success or not,
+   that checkout is on the branch it started on (`branch` in the preflight
+   output), as it was.
+2. A run that did stash in its starting checkout restores that stash by SHA.
 3. A checkout you cannot clean is a `WARN` with the `git status` output.
+
+## Run worktrees
+
+Each update and new run works in its own worktree, so a run that dies leaves
+nothing in the operator's checkout and holds a branch only for its own life.
+
+1. Make it: `notme git worktree-add --branch <branch>` for an existing branch
+   (fetch it first), or `--branch <name> --base origin/<base>` for a new one. The
+   CLI picks a unique `run-*` path under `.claude/worktrees/` and returns it as
+   `path`; call it `<wt>` and log it. `branch_in_use` means another worktree
+   holds the branch: that PR or branch is skipped, never forced.
+2. Work only in `<wt>`: `notme --project-dir <wt> git ...` for the CLI's git
+   commands, `git -C <wt> ...` for raw reads, merges and the commit, and every
+   implementer, verify and gate command runs with `<wt>` as its directory.
+3. At the end, whatever the outcome, remove it: uncommitted edits left (a commit
+   that was blocked or failed, a run that stopped mid-unit) are saved first with
+   `notme --project-dir <wt> git save-patch`, which writes a patch under
+   `<git-common-dir>/not-me/patches/` and resets only that run worktree. Log the
+   returned `path` as a `WARN`. Then `notme git worktree-remove <wt>`. The
+   branch stays.
+4. A saved patch is not lost work: a later run on the same branch reads the
+   `WARN` in the previous log, applies it with `git -C <wt> apply <patch>` when
+   it applies cleanly, and audits it like any unit's diff; otherwise it redoes
+   the work.
+5. Never edit, stash, reset or commit in a worktree you did not create: the main
+   checkout, a person's worktree, a session worktree. `save-patch` and
+   `worktree-remove` refuse anything but a `run-*` or `review-*` worktree.
 
 ## Worktrees for review
 
@@ -131,5 +157,5 @@ returns `stack_on`, and `notme pick-issue` leaves out an issue whose `stack_on` 
 - [ ] Named the branch from `standards.branch`, the same in every companion repo.
 - [ ] Merged the base in at Checkpoint A and Checkpoint B; rebased nothing.
 - [ ] Never force-pushed or amended a pushed commit.
-- [ ] Stashed with a unique message and restored by SHA.
-- [ ] Left the checkout clean on the branch it started on.
+- [ ] Worked in a run worktree made by the CLI, saved any leftover edits as a patch, and removed it at the end.
+- [ ] Touched no worktree this run did not create; left the starting checkout on its branch.

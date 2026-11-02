@@ -119,6 +119,24 @@ class CheckTests(unittest.TestCase):
                 self.assertIn(key, errors[0])
                 self.assertTrue(errors[0].startswith("repo .claude/not-me/project.md:2: "), errors[0])
 
+    def test_models_implementation_defaults_to_inline_and_takes_delegate_from_any_layer(self):
+        tc = TempCase()
+        self.addCleanup(tc.cleanup)
+        self.assertEqual(tc.load().meta["project"]["models"]["implementation"], "inline")
+        for layer in ("global", "repo"):
+            with self.subTest(layer=layer):
+                other = TempCase()
+                self.addCleanup(other.cleanup)
+                other.write(layer, "project", "---\nmodels: {implementation: delegate}\n---\n")
+                cfg = other.load()
+                self.assertEqual(cfg.check(), [])
+                self.assertEqual(cfg.meta["project"]["models"]["implementation"], "delegate")
+
+    def test_models_implementation_rejects_other_values(self):
+        errors = self.run_check("---\nmodels: {implementation: always}\n---\n")
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("models.implementation", errors[0])
+
     def test_valid_overrides_pass(self):
         errors = self.run_check("---\nmode: live\nrepos: [{name: acme/app}, {name: acme/app-ui, role: companion}]\n"
                                 "models: {strategy: single}\nlimits: {fix_loop: 2}\n---\n")

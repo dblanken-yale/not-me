@@ -7,6 +7,16 @@ result comes back. It says which model gets which unit, how to brief it, how to
 check its work, and when to stop delegating and do the unit yourself. The running
 skill is the orchestrator for its own run.
 
+## Who writes the code
+
+`models.implementation` decides who makes a code change:
+
+1. `inline` (default): the run writes each change itself, in its run worktree,
+   failing test first and red then green. Log it as an `ACTION`; no `DELEGATE` or
+   `AUDIT` line is needed. Gate reviewers and the verifier are still dispatched.
+2. `delegate`: every code change goes to an implementer subagent, classified,
+   briefed, audited and retried as below.
+
 ## Strategy
 
 1. `models.strategy: single`: every subagent and the run itself use
@@ -15,13 +25,6 @@ skill is the orchestrator for its own run.
    the model for its class.
 
 A unit is one finding, one sub-issue, one verification pass, or one search.
-
-**Implementation is always dispatched.** Every code change goes to an implementer
-subagent, even a one-line or one-character fix. This rule takes precedence over
-any general operator preference about delegation size (for example "do not
-delegate what is smaller than the brief"). Under `single` the subagent runs on
-`models.single_model`; the only time you make a change yourself is after
-`models.max_tries` (see the retry ladder).
 
 ## Classify the unit
 
@@ -113,7 +116,7 @@ A subagent may draft text. You read it, own it, and decide whether it goes out.
 ## Checklist
 
 - [ ] Used `models.single_model` for everything when the strategy was `single`.
-- [ ] Dispatched every code change to a subagent, however small.
+- [ ] Wrote code changes inline under `models.implementation: inline`, and dispatched every one under `delegate`.
 - [ ] Classified each unit as triage, review, or implement before dispatch.
 - [ ] Wrote a self-contained brief with goal, files, conventions, scope, acceptance.
 - [ ] Audited by reading the diff and running the checks myself.

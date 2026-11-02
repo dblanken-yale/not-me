@@ -19,13 +19,20 @@ the claim, post nothing, change no labels, and stop the run.
    body leads with `**Waiting on:**` and a login, never "you".
 3. Finish the log with `notme log finish <path> --status "<result>"`. Pass the
    failing commands and their output with `--failures-file`.
-4. Return the checkout to the branch it started on and restore any stash.
+4. Remove the run worktree whatever the outcome; uncommitted edits in it are saved
+   with `notme --project-dir <wt> git save-patch` first (`branching.md`, "Run
+   worktrees"). The checkout the run started in was never switched or stashed.
+5. Never edit, stash, reset or commit in a worktree this run did not create.
 
 ## Table
 
 | Situation | Labels after | Comment | Result line |
 |-----------|--------------|---------|-------------|
 | Nothing to pick | unchanged | none | `NONE - idle` |
+| Picked PR's head branch is held by another worktree (`worktree` not null) | unchanged, nothing claimed | none; a `WARN` naming the worktree `path` and `status` | skip it, take the next candidate |
+| Every candidate's head branch is held by another worktree | unchanged, nothing claimed | none; one `WARN` per skip | `NONE - idle - skipped <refs> (branch held)`; the router goes on |
+| Explicit PR whose head branch is held (`branch_in_use`) | unchanged, claim released | none; a `WARN` naming the worktree | `STOP <ref> branch-held` |
+| Commit blocked or failed | unchanged, claim released | none | `notme --project-dir <wt> git save-patch`, `WARN` with the patch `path`; `FAILED <ref> not-committed`; run stops |
 | `enabled` false | unchanged | none | `STOP - disabled` |
 | `PAUSED` file | unchanged | none | `STOP - paused` |
 | Another run active | unchanged | none | `STOP - active run` |
@@ -49,6 +56,19 @@ A mechanical failure (a command that errors, a checkout that will not switch)
 before any push is a failure on our side: `notme release-pr` alone, no
 `needs_human`, no post, and it ends `FAILED <ref> <what>`.
 
+## Held branches
+
+A held head branch is a fact about one PR, not a failure of the run: someone (a
+person, or an earlier run that died) has it checked out with or without edits.
+
+1. Skip the PR before claiming it. Never edit, stash, reset, commit in or remove
+   that worktree to free the branch, even a clean `run-*` one: it may hold ignored
+   files, or be open in someone's editor. A person removes it.
+2. Log one `WARN` per skip: `skipped <ref>: head branch held by <path> (<status>)`.
+3. The next run picks the PR up again once the branch is free. A run's own leftover
+   edits never block it, because every run saves them as a patch and removes its
+   worktree at the end.
+
 ## Guard blocks
 
 1. A block is final. Do not retry with another command shape, tool, or wrapper.
@@ -69,6 +89,8 @@ before any push is a failure on our side: `notme release-pr` alone, no
 
 - [ ] Wrote the labels in the row, and `needs_human` whenever a person must act on the work.
 - [ ] On a failure on our side: released the claim, posted nothing, changed no labels, stopped.
+- [ ] Skipped PRs whose head branch another worktree holds, with a `WARN` each; touched no worktree I did not create.
+- [ ] Saved leftover edits with `git save-patch` and removed the run worktree, whatever the outcome.
 - [ ] Posted at most one summary, upserted with the `update` marker.
 - [ ] Finished the log with the failing command and output.
 - [ ] Printed exactly the result line in the row.

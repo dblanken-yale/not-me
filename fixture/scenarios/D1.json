@@ -1,5 +1,5 @@
 {
-  "description": "delegation: a multi-line fix (new edge case in mean) is dispatched to the implement model and audited before the push",
+  "description": "delegation (models.implementation: delegate in the repo layer): a multi-line fix (new edge case in mean) is dispatched to the implement model and audited before the push",
   "patches": [
     {
       "path": "tests/test_core.py",
@@ -22,6 +22,11 @@
     }
   ],
   "prs": [],
+  "config": {
+    "repo": {
+      "project.md": "---\nschema: 1\nextends: default\nmodels: {implementation: delegate}\n---\n"
+    }
+  },
   "expect": {
     "skill": "new",
     "result": "PR",
