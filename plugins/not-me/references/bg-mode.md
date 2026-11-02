@@ -67,8 +67,8 @@ The `/not-me` router runs its legs in `router` order, each as its own run.
 5. After a leg whose VERB is PR or PUSHED, run `notme prove-target <ref>`. A URL:
    dispatch `/not-me:prove <ref> --bg` as its own foreground subagent, the way a leg is
    dispatched, and print its line after the leg's line. No URL: no prove step, no
-   line, no error. When the router's arguments include `--dry-run`, skip this step
-   entirely: no prove-target call, no dispatch, no line. A FAILED prove line does
+   line, no error. When the router's arguments include `--dry-run`, or `prove.auto`
+   is false, skip this step entirely: no prove-target call, no dispatch, no line. A FAILED prove line does
    not change the leg's result. Print nothing after the two lines, then go on to
    retro, which prints nothing. Only the router does this; `new` and `update` do not start
    prove under `--bg`.

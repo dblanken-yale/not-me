@@ -1,5 +1,6 @@
 ---
 schema: 1                        # config format version
+auto: true                       # start a proof after new/update push when a target is found; false = only by hand
 target: {strategy: [deployments, bot-comment, url-template, local], url_template: null, bot_comment_regex: null, hosts: null, bots: []}  # how to find the URL to test, tried in order; hosts: preview host suffixes (null = DEFAULT_HOSTS in notme/prove.py), bots: logins whose preview comments are read; both count from the default and global layers only
 steps_heading: "(Functional )?[Tt]esting steps"  # regex for the PR heading that holds testing steps
 fail_label: needs_work           # labels key applied when proof fails

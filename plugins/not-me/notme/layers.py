@@ -91,6 +91,10 @@ SCHEMA["review"] = {
                         tighten_only="superset"),
 }
 
+SCHEMA["prove"] = {
+    "auto": KeySpec(tighten_only="false"),  # true lets new, update and the router post proofs unasked
+}
+
 _DEFAULT_SPEC = KeySpec()
 
 
