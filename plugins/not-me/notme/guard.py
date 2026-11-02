@@ -1487,7 +1487,7 @@ def _opaque_push(v: str, ctx: Optional[GuardContext], st: Optional[_State]) -> O
         return _FP, f"holds `{_short(forced, 40)}`, a forced or deleting push"
     names = sorted(ctx.protected_branches, key=len, reverse=True)
     if names:
-        named = _then(_PUSH_WORD, re.compile(r"(?<![A-Za-z0-9_./-])(?:%s)(?![A-Za-z0-9_-])"
+        named = _then(_PUSH_WORD, re.compile(r"(?:(?<=refs/heads/)|(?<![A-Za-z0-9_./-]))(?:%s)(?![A-Za-z0-9_-])"
                                              % "|".join(re.escape(n) for n in names)))(v)
         if named:
             return _PB, f"holds `{_short(named, 40)}`, a push naming a protected branch"

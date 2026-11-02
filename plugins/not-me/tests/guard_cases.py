@@ -586,6 +586,7 @@ bash(B, OR, "sudo -u bot gh pr comment 1 -R acme/other -b x")
 # 3. inline interpreter code.
 bash(A, None, "node -e 'require(\"child_process\").execSync(\"git push\")'")  # from a feature branch: runs
 bash(B, PB, "node -e 'require(\"child_process\").execSync(\"git push origin main\")'")
+bash(B, PB, "node -e 'require(\"child_process\").execSync(\"git push origin HEAD:refs/heads/main\")'")  # refs/heads/ names the branch too
 bash(B, PB, "python3 -c 'import os; os.system(\"git push origin develop\")'")
 bash(B, FP, "python3 -c 'import os; os.system(\"git push --force origin feature/x\")'")
 bash(B, FP, "node -e 'require(\"child_process\").execSync(\"git push origin +feature/x\")'")
