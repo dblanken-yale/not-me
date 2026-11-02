@@ -52,27 +52,31 @@ flowchart TD
     gate -- passes --> router
 
     subgraph update ["update leg: rework a PR"]
-        u1["Pick a 'needs work' PR assigned to you, claim it"]
+        u1["Pick a 'needs work' PR assigned to you, claim it;
+        skip a PR whose branch another worktree holds (WARN), try the next"]
+        u1w["Check the branch out in a new run worktree;
+        your own checkout is never switched"]
         u2["Read trusted findings only, decide each:
         refuse, defer, implement, or disagree"]
-        u3["Implement through a delegated subagent
-        ⚙ models, standards.md Delegation"]
+        u3["Implement: the run writes the code, or a delegated subagent
+        ⚙ models.implementation, models, standards.md Delegation"]
         u4["Verify and gate
         ⚙ verify.md"]
         u5["Merge base in (the predecessor's branch on a stacked PR),
         send the branch up, reply on every thread, swap to 'needs review'"]
-        u1 --> u2 --> u3 --> u4 --> u5
+        u1 --> u1w --> u2 --> u3 --> u4 --> u5
     end
 
     subgraph new ["new leg: implement an issue"]
         n1["Pick a ready issue and claim it; an issue that waits on one open PR
         is ready when its trusted 'Stack on:' line names it
         ⚙ queue, queue.stacking, picking, Picking work rules"]
-        n2["Branch from the base: the default branch, an epic's branch,
-        or the open PR's branch for a stacked issue
+        n2["Branch from the base in a new run worktree: the default branch,
+        an epic's branch, or the open PR's branch for a stacked issue
         ⚙ standards.md branch, protected_branches, queue.stacking"]
-        n3["Implement through a delegated subagent, failing test first
-        ⚙ models, standards.md Delegation"]
+        n3["Implement, failing test first: the run writes the code,
+        or a delegated subagent
+        ⚙ models.implementation, models, standards.md Delegation"]
         n4["Verify and gate: baseline, tests, simplify, code review,
         security review, CI-parity lint
         ⚙ verify.md, limits.fix_loop"]
@@ -86,7 +90,7 @@ flowchart TD
     end
 
     router -- "first" --> update
-    router -- "no 'needs work' PR" --> new
+    router -- "NONE (no PR, or every PR skipped: branch held) or FAILED on one PR" --> new
 
     review["review leg: review PRs you are asked to review,
     approve, request changes, or ask a person
@@ -103,6 +107,8 @@ flowchart TD
     live(["A person turns on live mode
     in their own terminal"])
     merge(["A person approves, if review did not, and merges"])
+    cleanup["End of every update or new run, whatever the outcome:
+    edits it could not commit saved as a patch, run worktree removed"]
 
     router -.-> review
     n6 -. "preview URL found" .-> prove
@@ -112,6 +118,8 @@ flowchart TD
     retro -.-> notify
     update --> writes
     new --> writes
+    update --> cleanup
+    new --> cleanup
     live -.-> writes
     review -- "'ready to merge', only with review.auto_approve" --> merge
 
@@ -126,7 +134,7 @@ flowchart TD
 | Command | What it does |
 | --- | --- |
 | `/not-me [--dry-run] [--bg]` | Router: runs the legs in `router` order (default `update`, then `new`) and stops at the first that does work |
-| `/not-me:new [issue#] [--base B] [--dry-run] [--bg]` | Pick up a ready issue, implement it through a delegated implementer, gate it, open a PR |
+| `/not-me:new [issue#] [--base B] [--dry-run] [--bg]` | Pick up a ready issue, implement it in its own run worktree (inline by default, or through a delegated implementer), gate it, open a PR |
 | `/not-me:update [PR ref] [--dry-run] [--bg]` | Decide each review finding on a `needs work` PR, fix, push, reply, swap to `needs review` |
 | `/not-me:review [owner/repo#N ...] [--dry-run] [--bg]` | Review `needs review` PRs where you are a reviewer: approve, request changes, or ask a person. Never merges |
 | `/not-me:prove <pr-ref> [--dry-run] [--bg]` | Run a PR's testing steps in a browser on its preview and post a proof comment |

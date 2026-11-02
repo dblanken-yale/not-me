@@ -31,7 +31,7 @@
     "no_force_push": true,
     "protected_unchanged": ["develop"],
     "marker_count": 1,
-    "log_lines": ["DELEGATE", "AUDIT"],
+    "log_lines": ["ACTION", "GATE"],
     "pr_open_not_merged": true
   }
 }

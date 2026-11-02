@@ -7,7 +7,7 @@ import re
 import secrets
 import subprocess
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from . import paths
 from .redact import redact
@@ -209,5 +209,81 @@ def worktree_add_detached(path: Any, sha: str, cwd: Any = None) -> None:
     _run(["worktree", "add", "--detach", "--", str(path), sha], cwd)
 
 
+def worktree_add_branch(path: Any, branch: str, base: Optional[str] = None, cwd: Any = None) -> None:
+    """A worktree at path with `branch` checked out: a new branch from `base` (no tracking) when base is given,
+    else the existing branch (git makes it from origin/<branch> when only the remote has it)."""
+    name = _branch(branch)
+    if base is None:
+        _run(["worktree", "add", "--", str(path), name], cwd)
+    else:
+        _run(["worktree", "add", "--no-track", "-b", name, "--", str(path), _branch(base)], cwd)
+
+
 def worktree_remove(path: Any, cwd: Any = None) -> None:
     _run(["worktree", "remove", "--", str(path)], cwd)
+
+
+def worktree_list(cwd: Any = None) -> List[Dict[str, Any]]:
+    """Every worktree of the repository (`git worktree list --porcelain`): path, branch (short name, None when
+    detached or bare), head, prunable."""
+    found: List[Dict[str, Any]] = []
+    entry: Dict[str, Any] = {}
+    for line in _run(["worktree", "list", "--porcelain"], cwd).stdout.splitlines() + [""]:
+        key, _, value = line.partition(" ")
+        if not line:
+            if entry.get("path"):
+                found.append(entry)
+            entry = {}
+        elif key == "worktree":
+            entry = {"path": value, "branch": None, "head": None, "prunable": False}
+        elif key == "HEAD":
+            entry["head"] = value
+        elif key == "branch":
+            entry["branch"] = value[len("refs/heads/"):] if value.startswith("refs/heads/") else value
+        elif key == "prunable":
+            entry["prunable"] = True
+    return found
+
+
+def worktree_state(path: Any) -> Dict[str, Any]:
+    """dirty and a short status summary of a worktree (`git status --porcelain` in it). A path that is gone or
+    not readable as a checkout: dirty None, status "missing"."""
+    if not os.path.isdir(str(path)):
+        return {"dirty": None, "status": "missing"}
+    # --no-optional-locks: a read of someone else's worktree must not take its index.lock
+    proc = _run(["--no-optional-locks", "status", "--porcelain"], path, check=False)
+    if proc.returncode != 0:
+        return {"dirty": None, "status": "missing"}
+    lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    if not lines:
+        return {"dirty": False, "status": "clean"}
+    conflicted = sum(1 for ln in lines if ln[:2] in ("DD", "AU", "UD", "UA", "DU", "AA", "UU"))
+    untracked = sum(1 for ln in lines if ln.startswith("??"))
+    changed = len(lines) - conflicted - untracked
+    parts = [f"{n} {what}" for n, what in ((changed, "changed"), (untracked, "untracked"),
+                                           (conflicted, "conflicted")) if n]
+    return {"dirty": True, "status": ", ".join(parts)}
+
+
+def uncommitted_patch(cwd: Any = None) -> bytes:
+    """A binary patch of every uncommitted change against HEAD: tracked edits (staged or not) and untracked files
+    that are not ignored. Untracked files are marked intent-to-add first, so the index changes; callers reset."""
+    untracked = [p for p in _run(["ls-files", "--others", "--exclude-standard", "-z"], cwd).stdout.split("\0") if p]
+    if untracked:
+        _run(["add", "--intent-to-add", "--", *untracked], cwd)
+    env = {**os.environ, "LC_ALL": "C"}
+    # pinned so a user's diff config (noprefix, external diff, textconv) cannot make a patch `git apply` rejects
+    proc = subprocess.run(["git", "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "diff", "--binary",
+                           "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/",
+                           "HEAD", "--"], cwd=str(cwd) if cwd else None,
+                          capture_output=True, env=env)
+    if proc.returncode != 0:
+        raise GitError(["diff", "--binary", "HEAD"], proc.returncode, proc.stderr.decode("utf-8", "replace"))
+    return proc.stdout
+
+
+def discard_changes(cwd: Any = None) -> None:
+    """Drop every uncommitted change: reset the index and tree to HEAD and delete untracked files that are not
+    ignored (never -x). Only for a run worktree whose work was saved first."""
+    _run(["reset", "--hard", "--quiet", "HEAD"], cwd)
+    _run(["clean", "-f", "-d", "--quiet"], cwd)

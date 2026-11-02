@@ -58,6 +58,7 @@ git stash
 git unstash
 git worktree-add
 git worktree-remove
+git save-patch
 git remote-branch-exists
 git status
 status

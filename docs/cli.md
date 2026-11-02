@@ -225,7 +225,7 @@ Output: repo, number, title, state, url, author, author_trusted, labels, status,
 
 ### `notme pick-needs-work`
 
-The lowest-numbered open PR labeled needs work and assigned to the operator, by a trusted author. With --include-answered, a PR labeled question (assigned to the operator) whose newest lead or authority comment is newer than the last not-me marker also counts, and carries answered: true.
+The lowest-numbered open PR labeled needs work and assigned to the operator, by a trusted author. With --include-answered, a PR labeled question (assigned to the operator) whose newest lead or authority comment is newer than the last not-me marker also counts, and carries answered: true. Each candidate's head branch is checked against the local worktrees (read-only git): worktree is null when no worktree of this repository has it checked out, else {path, dirty, status, run_worktree}: the holder's path, whether it has uncommitted changes (null when the path is gone), a short status summary, and whether it is a run-* worktree notme made. Facts only; the skill decides what to skip.
 
 ```
 notme pick-needs-work [--include-answered] [--exclude N]
@@ -236,7 +236,7 @@ notme pick-needs-work [--include-answered] [--exclude N]
 | `--include-answered` | optional | also PRs labeled question that a lead or authority has answered since our last marker |
 | `--exclude N` | optional | skip this PR (repeatable) |
 
-Output: repo, number, title, url, head_ref, labels, answered (only when true), others; or none (with reason when paused)
+Output: repo, number, title, url, head_ref, labels, answered (only when true), others, worktree, candidates ([{number, head_ref, worktree}], the pick first, then others); or none (with reason when paused)
 
 ### `notme pr-children`
 
@@ -931,22 +931,24 @@ Output: restored
 
 ### `notme git worktree-add`
 
-Add a detached worktree at a sha at <main checkout>/.claude/worktrees/NAME; the CLI picks the path. NAME defaults to review-<first 12 chars of SHA> and must match review-[A-Za-z0-9._-]{1,57} with no ".."; anything else, a symlinked .claude, .claude/worktrees, info or info/exclude, or a main checkout (via core.worktree) that does not share this repository's git dir, is refused as unsafe_path. An existing path is refused as path_exists. The git common dir's info/exclude gets /.claude/worktrees/ so the worktree never shows as untracked in the main checkout. Works the same from the main checkout or a linked worktree.
+Add a worktree at <main checkout>/.claude/worktrees/NAME; the CLI picks the path. Give SHA or --branch. Review mode (SHA): detached at the sha. NAME defaults to review-<first 12 chars of SHA> and must match review-[A-Za-z0-9._-]{1,57}. Run mode (--branch): the branch checked out, for one update or new run; --base B creates BRANCH from B without tracking, else the existing branch is used (git makes it from origin/BRANCH when only the remote has it). NAME defaults to run-<12 random hex> and must match run-[A-Za-z0-9._-]{1,57}. A protected BRANCH is refused as protected_branch; a BRANCH another worktree has checked out is refused as branch_in_use (with its path). Remove it with `git worktree-remove` at the end of the run, whatever the outcome; the branch stays. Either way a NAME with "..", a symlinked .claude, .claude/worktrees, info or info/exclude, or a main checkout (via core.worktree) that does not share this repository's git dir, is refused as unsafe_path. An existing path is refused as path_exists. The git common dir's info/exclude gets /.claude/worktrees/ so the worktree never shows as untracked in the main checkout. Works the same from the main checkout or a linked worktree.
 
 ```
-notme git worktree-add SHA [--name NAME]
+notme git worktree-add SHA [--name NAME] [--branch BRANCH] [--base B]
 ```
 
 | Argument | Required | Meaning |
 |----------|----------|---------|
-| `SHA` | required |  |
+| `SHA` | optional |  |
 | `--name NAME` | optional |  |
+| `--branch BRANCH` | optional | run mode: check out this branch instead of a detached SHA |
+| `--base B` | optional | run mode: create BRANCH from B (no tracking) |
 
-Output: path (absolute), sha
+Output: path (absolute), sha (review mode); path, branch, base (null without --base) (run mode)
 
 ### `notme git worktree-remove`
 
-Remove a worktree made by `git worktree-add`. PATH must be a review-* dir directly under <main checkout>/.claude/worktrees/; anything else, including Claude Code's own session worktrees there, is refused as unsafe_path.
+Remove a worktree made by `git worktree-add`. PATH must be a review-* or run-* dir directly under <main checkout>/.claude/worktrees/; anything else, including Claude Code's own session worktrees there, is refused as unsafe_path. git refuses a worktree with uncommitted changes (git_error): save them with `git save-patch` first. The branch of a run worktree stays.
 
 ```
 notme git worktree-remove PATH
@@ -957,6 +959,16 @@ notme git worktree-remove PATH
 | `PATH` | required |  |
 
 Output: path, removed
+
+### `notme git save-patch`
+
+Save every uncommitted change in the run worktree (the work dir: run it with --project-dir <run worktree>) as a binary patch under <git-common-dir>/not-me/patches/, then reset that worktree to HEAD and delete its untracked files (ignored files stay), so its branch is free for the next run. Use it when a run cannot commit. The work dir must be a run-* worktree that `git worktree-add --branch` made: directly under <main checkout>/.claude/worktrees/, registered with git, on a branch that is not protected. The main checkout, a review-* worktree, any other worktree or directory is refused as unsafe_path and nothing is touched. Bring the work back with `git apply <path>` in a later run worktree on the same branch.
+
+```
+notme git save-patch
+```
+
+Output: path (null when there was nothing to save), branch, head_sha, files, reset
 
 ### `notme git remote-branch-exists`
 

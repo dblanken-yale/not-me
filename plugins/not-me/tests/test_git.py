@@ -153,6 +153,52 @@ class BasicTests(Repo):
         with self.assertRaises(ValueError):
             git.worktree_add_detached(wt, "main; rm", cwd=self.work)
 
+    def test_worktree_list_names_branch_holders_and_their_state(self):
+        wt = self.dir / "held"
+        sh("worktree", "add", "-q", "-b", "feat/held", str(wt), cwd=self.work)
+        listed = {Path(w["path"]).resolve(): w for w in git.worktree_list(cwd=self.work)}
+        self.assertEqual(listed[self.work]["branch"], "main")
+        self.assertEqual(listed[wt.resolve()]["branch"], "feat/held")
+        self.assertEqual(git.worktree_state(wt), {"dirty": False, "status": "clean"})
+        (wt / "a.txt").write_text("changed\n", encoding="utf-8")
+        (wt / "new.txt").write_text("new\n", encoding="utf-8")
+        self.assertEqual(git.worktree_state(wt), {"dirty": True, "status": "1 changed, 1 untracked"})
+        shutil.rmtree(wt)
+        self.assertEqual(git.worktree_state(wt), {"dirty": None, "status": "missing"})
+
+    def test_worktree_add_branch_new_from_base_and_existing(self):
+        new = self.dir / "new"
+        git.worktree_add_branch(new, "feat/new", base="main", cwd=self.work)
+        self.assertEqual(git.current_branch(cwd=new), "feat/new")
+        self.assertEqual(subprocess.run(["git", "config", "branch.feat/new.merge"], cwd=str(self.work),
+                                        capture_output=True).returncode, 1)  # --no-track
+        sh("branch", "feat/old", cwd=self.work)
+        old = self.dir / "old"
+        git.worktree_add_branch(old, "feat/old", cwd=self.work)
+        self.assertEqual(git.current_branch(cwd=old), "feat/old")
+        with self.assertRaises(GitError):  # git refuses a branch another worktree holds
+            git.worktree_add_branch(self.dir / "again", "feat/old", cwd=self.work)
+        for bad in ("-b", "a..b", "x:y"):
+            with self.assertRaises(ValueError):
+                git.worktree_add_branch(self.dir / "bad", bad, cwd=self.work)
+
+    def test_uncommitted_patch_holds_tracked_and_untracked_and_discard_cleans(self):
+        (self.work / "a.txt").write_text("two\n", encoding="utf-8")
+        (self.work / "sub").mkdir()
+        (self.work / "sub" / "b.txt").write_text("bee\n", encoding="utf-8")
+        patch = git.uncommitted_patch(cwd=self.work)
+        self.assertIn(b"+two", patch)
+        self.assertIn(b"sub/b.txt", patch)
+        git.discard_changes(cwd=self.work)
+        self.assertTrue(git.is_clean(cwd=self.work))
+        self.assertEqual((self.work / "a.txt").read_text(encoding="utf-8"), "one\n")
+        saved = self.dir / "saved.patch"
+        saved.write_bytes(patch)
+        sh("apply", str(saved), cwd=self.work)
+        self.assertEqual((self.work / "sub" / "b.txt").read_text(encoding="utf-8"), "bee\n")
+        git.discard_changes(cwd=self.work)
+        self.assertEqual(git.uncommitted_patch(cwd=self.work), b"")
+
 
 class MergeTests(Repo):
     def test_clean_merge_returns_false(self):

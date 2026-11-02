@@ -144,6 +144,17 @@ them without asking him.
    merging is a person's call). No skill merges and runs never merge; a person
    merges by hand or by asking Claude directly. The guard does not block
    merges. Design in `docs/guards.md` "Merging pull requests".
+9. **Update and new runs work in their own run worktree** (`notme git
+   worktree-add --branch`, a `run-*` dir under `.claude/worktrees/`), never in
+   the operator's checkout, and remove it at the end whatever the outcome. Edits
+   a run could not commit are saved with `notme git save-patch` (a patch under
+   `<git-common-dir>/not-me/patches/`, then a reset of that run worktree only).
+   `pick-needs-work` reports which worktree holds each head branch; update skips
+   a held PR with a `WARN`, and when every candidate is held it ends `NONE - idle
+   - skipped ...`. The router goes on to the next leg after `NONE` and after
+   `FAILED <ref>`; only a run-wide failure (config invalid, guard not working) or
+   a `STOP` ends it. Code is written inline by default
+   (`models.implementation: inline`); `delegate` restores implementer subagents.
 
 ## How to work here (the orchestration loop that built this)
 
