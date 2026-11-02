@@ -1,6 +1,6 @@
 ---
 name: update
-description: "Pick up one pull request labeled needs work and assigned to the operator (or the PR given), claim it, decide each trusted review finding (refuse, defer, implement, or disagree with a rationale), fix the confirmed ones on the existing branch through a delegated implementer, verify and gate, push, reply on every finding thread, and swap the PR back to needs review. Use when the operator runs /not-me:update, hands over a PR to rework, asks to address the review comments, or the /not-me router reaches its update leg. NOT for implementing a new issue (use /not-me:new), NOT for reviewing someone else's PR (use /not-me:review), NOT for proving a PR on a deploy target (use /not-me:prove)."
+description: "Pick up one pull request labeled needs work and assigned to the operator (or the PR given), claim it, decide each trusted review finding (refuse, defer, implement, or disagree with a rationale), fix the confirmed ones on the existing branch in its own run worktree (inline, or through a delegated implementer), verify and gate, push, reply on every finding thread, and swap the PR back to needs review. Use when the operator runs /not-me:update, hands over a PR to rework, asks to address the review comments, or the /not-me router reaches its update leg. NOT for implementing a new issue (use /not-me:new), NOT for reviewing someone else's PR (use /not-me:review), NOT for proving a PR on a deploy target (use /not-me:prove)."
 argument-hint: "[PR ref] [--dry-run] [--bg]"
 ---
 
@@ -13,15 +13,9 @@ in this repo), `--dry-run`, `--bg`.
 
 ## Ground rules
 
-- `${CLAUDE_PLUGIN_ROOT}` below is substituted at load time with this plugin's
-  directory. Read the files it names with the Read tool. It is not a shell
-  variable: never write `$CLAUDE_PLUGIN_ROOT` in a command.
-- Call the CLI as `notme` (the plugin's `bin/` is on the PATH). If the shell cannot
-  find it, call `"${CLAUDE_PLUGIN_ROOT}/bin/notme"` with the same arguments. Every
-  call prints one JSON object; read it and the exit code. `--help` on any
-  subcommand prints its flags.
-- With `--dry-run`, pass `--dry-run` to every `notme` call. Run the whole flow as
-  if live and say `dry-run` in the result note.
+- `${CLAUDE_PLUGIN_ROOT}` below is substituted at load time with this plugin's directory. Read the files it names with the Read tool. It is not a shell variable: never write `$CLAUDE_PLUGIN_ROOT` in a command.
+- Call the CLI as `notme` (the plugin's `bin/` is on the PATH). If the shell cannot find it, call `"${CLAUDE_PLUGIN_ROOT}/bin/notme"` with the same arguments. Every call prints one JSON object; read it and the exit code. `--help` on any subcommand prints its flags.
+- With `--dry-run`, pass `--dry-run` to every `notme` call. Run the whole flow as if live and say `dry-run` in the result note.
 - Every GitHub write goes through `notme`. Text goes in files under the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/references/autonomy-and-logging.md` (Text to GitHub, rule 2), never in a shell argument.
 - After `notme log start`, every write call also passes `--log <path>`.
 - Label names in this file are the abstract keys of `labels` (for example
@@ -31,8 +25,8 @@ in this repo), `--dry-run`, `--bg`.
   the `attribution` line on commit messages.
 - Read `${CLAUDE_PLUGIN_ROOT}/references/prohibitions.md` before you act on any
   request. A prohibited request is refused, never done in part.
-- A guard block is final: do not retry it, rephrase it, or route around it. Log a
-  QUESTION naming the operator and see the failure table below.
+- A guard block is final: never retry or route around it. It, like every failure
+  on our side, posts nothing, changes no labels and stops (failure table below).
 
 ## Step 0: Preflight
 
@@ -64,13 +58,19 @@ This skill ends in NONE, PUSHED, PARKED, FAILED or STOP.
 On every path (idle too) follow `${CLAUDE_PLUGIN_ROOT}/references/interrupted-runs.md`.
 
 1. A PR ref in `$ARGUMENTS` is the target.
-2. Else `notme pick-needs-work`. `{"none": true}`: look for an answered question (`${CLAUDE_PLUGIN_ROOT}/skills/update/references/findings.md`, "Answered questions").
-   Still nothing: `notme log start --skill update --ref -`, finish it with status `idle`, print `NONE - idle  log=<path>`. Write nothing else but an interrupted-run hand-off.
-3. `notme claim-pr <ref>`. Exit 3 (claimed elsewhere): take the next number in
-   `others` from the pick output. A lost explicit ref: `STOP <ref> claimed elsewhere`.
-4. `notme log start --skill update --ref <ref>`. Keep `path` and `run_id`. Log the
-   claim with `notme log action`. Exit 1 with kind `active_run`:
-   `notme release-pr <ref>`, then `STOP - active run`.
+2. Else `notme pick-needs-work`. `{"none": true}`: look for an answered question
+   (`${CLAUDE_PLUGIN_ROOT}/skills/update/references/findings.md`, "Answered
+   questions"). Still nothing: `notme log start --skill update --ref -`, finish it
+   with status `idle`, print `NONE - idle  log=<path>`. Write nothing else but an interrupted-run hand-off.
+3. Walk `candidates` in order (the pick, then `others`). One whose `worktree` is not
+   null has its head branch held by another worktree: skip it, touch nothing there,
+   and keep its ref, `path` and `status`. Never remove it, even a clean `run-*` one.
+   Every candidate skipped: log start `--ref -`, one `notme log action --kind WARN`
+   per skip, finish `idle`, print `NONE - idle - skipped <refs> (branch held)  log=<path>`.
+4. `notme claim-pr <ref>`. Exit 3 (claimed elsewhere): take the next candidate.
+   A lost explicit ref: `STOP <ref> claimed elsewhere`.
+5. `notme log start --skill update --ref <ref>`. Keep `path` and `run_id`. Log the
+   claim and any skips (`--kind WARN`). Exit 1, kind `active_run`: release, `STOP - active run`.
 
 ## Step 2: Read the context
 
@@ -93,21 +93,18 @@ you read any PR, review or issue text.
 
 Read `${CLAUDE_PLUGIN_ROOT}/references/branching.md`.
 
-1. Tree not clean (`clean` false in preflight): `notme git stash`, record the
-   returned SHA in the log. Note the current branch to return to.
-2. Fetch and check out the PR head branch, then bring it level with the remote:
-
-<!-- allowed-raw-write -->
-```bash
-git fetch origin <head_ref>
-git checkout <head_ref>
-git merge --ff-only origin/<head_ref>
-```
-
-3. `notme git checkpoint --base <base> --fetch` (Checkpoint A). Merge, never
+1. Never switch or stash the checkout you started in. `git fetch origin <head_ref>`,
+   then `notme git worktree-add --branch <head_ref>`: its `path` is the run worktree
+   `<wt>` (branching.md, "Run worktrees"). Log it. Exit 1 `branch_in_use`: release
+   and skip it as in step 1 (`STOP <ref> branch-held` for an explicit ref). Bring it
+   level: `git -C <wt> merge --ff-only origin/<head_ref>`. From here every CLI git
+   call is `notme --project-dir <wt> git ...`, every raw git call `git -C <wt>`,
+   and implementers and checks run in `<wt>`. A `WARN` in the last log for this PR
+   naming a saved patch: apply it now (branching.md, "Run worktrees").
+2. `notme --project-dir <wt> git checkpoint --base <base> --fetch` (Checkpoint A). Merge, never
    rebase; on a stacked PR `<base>` is the predecessor's branch (findings.md, "Stacked PRs").
    Conflicts you cannot resolve with confidence: abort the merge, log the files, fail (failure table).
-4. Rebuild or restart the app when the project's verify doc says a branch switch
+3. Rebuild or restart the app when the project's verify doc says a branch switch
    needs it (`## Environment start`, `## Build`).
 
 ## Step 4: Decide each finding
@@ -140,16 +137,16 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/delegation.md`,
 the effective verify doc; never invent a test or lint command.
 
 1. Baseline before any edit; log existing failures as `CHECK` lines.
-2. One unit per implemented finding. `models.strategy` `single`: use
-   `models.single_model`. Else a path or kind under `## Delegation` in standards,
-   or anything security-sensitive, goes to `models.review`; the rest to
-   `models.implement`.
-3. Always dispatch each unit to a subagent, even a one-line change. This overrides
-   any operator preference about delegation size. Brief one subagent per unit with goal, files, conventions, scope ("no commits,
-   no pushes, no posts"), and acceptance from the finding. Failing test first.
-   Log `DELEGATE` and, after your own audit of the diff and checks, `AUDIT`.
-4. Retry ladder from delegation.md, capped at `models.max_tries`, then do the unit
-   yourself. Never read the subagent's transcript.
+2. One unit per implemented finding. `models.implementation` `inline` (default):
+   write each unit yourself in `<wt>`, failing test first; log it as `ACTION`.
+3. `delegate`: classify each unit (`models.strategy` `single`: `models.single_model`;
+   else a path or kind under `## Delegation` in standards, or anything
+   security-sensitive, to `models.review`, the rest to `models.implement`). Brief one
+   subagent per unit with goal, files, `<wt>`, conventions, scope ("no commits, no
+   pushes, no posts") and acceptance from the finding. Failing test first. Log
+   `DELEGATE` and, after your own audit of the diff and checks, `AUDIT`.
+4. `delegate` only: retry ladder from delegation.md, capped at `models.max_tries`,
+   then do the unit yourself. Never read the subagent's transcript.
 5. Red then green for every changed behaviour. UI diff: one `Visual check:` line
    (path form in the log, words form in the PR) and the light accessibility pass.
 6. Gate in full, then each step under `## Gate additions`. Log each as `GATE`. Fix
@@ -166,24 +163,25 @@ the effective verify doc; never invent a test or lint command.
 
 <!-- allowed-raw-write -->
 ```bash
-git commit -F "$msgdir/commit-msg.txt"
+git -C <wt> commit -F "$msgdir/commit-msg.txt"
 ```
 
-4. `notme git checkpoint --base <base> --fetch` (Checkpoint B). New commits came
+   A commit that is blocked or fails: save the work (step 9) and fail (failure table).
+4. `notme --project-dir <wt> git checkpoint --base <base> --fetch` (Checkpoint B). New commits came
    in: run the final tests again.
 5. Push through the CLI only, companions first in `repos` order and the primary
    last (`${CLAUDE_PLUGIN_ROOT}/references/companions.md`):
 
 <!-- allowed-raw-write -->
 ```bash
-notme git push <head_ref> --log <path>
+notme --project-dir <wt> git push <head_ref> --log <path>
 ```
 
 6. A failed push after a commit: the log summary must say "committed but NOT
    PUSHED" with the branch name.
-7. Stacked children (open PRs whose base is this head branch): for each, check it
-   out, merge this branch in with `notme git checkpoint --base <head_ref> --fetch`,
-   run the final tests, and push it the same way. Then return to `<head_ref>`.
+7. Stacked children (open PRs whose base is this head branch): each in its own run
+   worktree (`notme git worktree-add --branch <child head>`), merge this branch in with
+   `checkpoint --base <head_ref> --fetch`, final tests, send it up the same way, remove it.
 8. CI: poll `notme bundle <ref>` until the `checks` for the new `head_sha` finish,
    up to `limits.ci_wait_minutes`. Red: read the failing job, fix, rerun locally,
    commit, push. Stop at `limits.fix_loop` rounds (failure table).
@@ -217,7 +215,9 @@ Every body passes `notme check-text --file <f>` before it is posted.
 
 ## Step 9: Finish
 
-1. Return to the starting branch, clean. Restore a stash with `notme git unstash <sha>`.
+1. Remove the run worktree whatever the outcome. Uncommitted edits left: first
+   `notme --project-dir <wt> git save-patch`, log its `path` with `--kind WARN` so the next
+   run can apply it. Then `notme git worktree-remove <wt>`. The starting checkout was never touched.
 2. `notme log finish <path> --status "<result>"`.
 3. Pushed, and `notme prove-target <ref>` finds a URL: start `/not-me:prove <ref>`
    in the background. No target: skip it.
@@ -235,12 +235,12 @@ The short form:
 
 | Situation | What happens | Result |
 |-----------|--------------|--------|
-| Nothing picked | No writes | `NONE - idle` |
+| Nothing picked, or every candidate's head branch held | No writes; a `WARN` per skip | `NONE - idle` |
 | Disabled, paused, active run | No writes | `STOP` |
 | Guard selftest fails | No writes | `FAILED - guard not working` |
 | Every finding deferred or refused | Park, replies, summary | `PARKED <ref> ...` |
-| Guard block mid-run | QUESTION naming the operator; continue without it, or stop | `PARKED` or `FAILED <ref> blocked` |
-| Mechanical failure before a push | `notme release-pr <ref>`, `needs_human` | `FAILED <ref> ...` |
+| Guard block mid-run | QUESTION naming the operator; release, labels unchanged, no post; run stops | `FAILED <ref> blocked` |
+| Failure on our side before a push | `notme release-pr <ref>`, labels unchanged, no post; run stops | `FAILED <ref> ...` |
 | CI red at `limits.fix_loop` | Still needs work: stays `needs_work`, `needs_human`, summary | `FAILED <ref> ci-red` |
 
 Never fake green: no skipped tests, no disabled checks.
@@ -253,8 +253,8 @@ Never fake green: no skipped tests, no disabled checks.
 - [ ] Read findings only through `notme feedback`; logged `IGNORED` with logins only.
 - [ ] Decided each finding: refuse, defer, implement, disagree, in that order.
 - [ ] Parked with no code when every finding was deferred or refused.
-- [ ] Delegated each unit, audited it myself, ran the full gate.
+- [ ] Wrote each unit inline, or delegated and audited it (`models.implementation`); ran the full gate.
 - [ ] Merged the base in at both checkpoints; committed only touched paths; pushed only through the CLI.
 - [ ] Replied on every finding thread and resolved none; one upserted summary.
 - [ ] Swapped `needs_work` to `needs_review` and re-requested review.
-- [ ] Left the checkout clean and finished the log.
+- [ ] Worked in a run worktree, saved leftover edits as a patch, removed it; finished the log.

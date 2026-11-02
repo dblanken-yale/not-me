@@ -44,11 +44,14 @@ Do this before the pick and before `notme log start`. After the start,
 1. A `ref` of `-` (an idle run), or an explicit target equal to the interrupted ref (a person chose it): add no label and post no comment. Log the `ACTION`, go to the last rule, then carry on as normal.
 2. Add `needs_human` for the qualified ref:
    `notme labels-sync <ref> --add <name> --reason-file <reason> --log <path>`.
-   `<name>` is the repo label name that `labels` maps `needs_human` to.
+   `<name>` is the repo label name that `labels` maps `needs_human` to. The reason
+   file holds this one fixed line, so the notifying comment reads the same every
+   run: `the last <skill> run on this stopped before it finished`.
 3. Read the old log for its branch name. If it names none, say so.
-4. Write a short comment in the run's temp directory: the branch, the old log's
-   base file name (never a local path), and that the work there was never
-   committed or pushed. Run `notme check-text --file <f>`, then
+4. Write a short comment in the run's temp directory. It starts with
+   `**Waiting on:** <operator login>` (`failures.md` rule 2), then the branch, the
+   old log's base file name (never a local path), and that the work there was
+   never committed or pushed. Run `notme check-text --file <f>`, then
    `notme comment-upsert <ref> --marker <skill> --body-file <f> --log <path>`.
    The marker is the skill name, `new` or `update`.
 5. Close the old log:

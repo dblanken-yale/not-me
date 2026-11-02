@@ -34,6 +34,10 @@ Arguments: `$ARGUMENTS`. A PR reference (`N` or `owner/repo#N`, required),
   step. A prohibited step is refused, never done in part.
 - A guard block is final: do not retry it, rephrase it, or route around it. Log a
   QUESTION naming the operator and see the failure table.
+- A failure on our side (a `notme` error, a guard block, a browser crash) posts
+  nothing, changes no labels, ends `FAILED <ref> <reason>` and stops the run. See
+  `${CLAUDE_PLUGIN_ROOT}/references/autonomy-and-logging.md`, "Failures on our
+  side".
 - Never mention an AI, a model or an assistant in the proof comment.
 
 ## Step 0: Preflight
@@ -67,7 +71,7 @@ PROVED <ref> pass n/m
 PROVED <ref> fail n/m
 NONE <ref> no deploy target
 NONE <ref> no testing steps
-NONE <ref> no browser tool
+FAILED <ref> no browser tool
 NONE <ref> not open
 FAILED <ref> <reason>
 STOP - <reason>
@@ -107,7 +111,7 @@ Follow `${CLAUDE_PLUGIN_ROOT}/skills/prove/references/steps.md`.
 Follow `${CLAUDE_PLUGIN_ROOT}/skills/prove/references/browser-run.md`.
 
 1. Load the `playwright-cli` skill with the Skill tool. Not available: log a
-   `WARN`, write nothing, and end with `NONE <ref> no browser tool`.
+   `WARN`, write nothing, end with `FAILED <ref> no browser tool` and stop.
 2. Screenshots go in a directory beside the run log, named like the log without
    `.md`. One screenshot per step.
 3. Log in as `## Logging in to the target` says, then run each step as
@@ -157,9 +161,9 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/write-back.md`. Follow
 | PR not open | none | `NONE <ref> not open` |
 | No target, or target unreachable | none | `NONE <ref> no deploy target` |
 | Untrusted author, no heading, no items | none | `NONE <ref> no testing steps` |
-| Browser tool missing | none | `NONE <ref> no browser tool` |
+| Browser tool missing | none; run stops | `FAILED <ref> no browser tool` |
 | Browser crash | none | `FAILED <ref> browser` |
-| Guard block | QUESTION naming the operator | `FAILED <ref> blocked - <target>` |
+| Guard block | QUESTION naming the operator; no comment, labels unchanged; run stops | `FAILED <ref> blocked - <target>` |
 | PR not at `needs_review` on a fail | comment only, `WARN` | `PROVED <ref> fail n/m` |
 | `check-text` keeps failing | none | `FAILED <ref> comment` |
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/dblanken-yale/not-me/compare/not-me-v0.6.0...not-me-v0.6.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* keep review worktrees out of .git and never post about not-me's own errors ([#129](https://github.com/dblanken-yale/not-me/issues/129)) ([485b7ac](https://github.com/dblanken-yale/not-me/commit/485b7ac184ee61aed62603a2c6302e2560e2e009))
+
 ## [0.6.0](https://github.com/dblanken-yale/not-me/compare/not-me-v0.5.0...not-me-v0.6.0) (2026-10-28)
 
 

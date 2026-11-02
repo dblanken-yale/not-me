@@ -12,8 +12,8 @@ also in `write-back.md`; this file owns the contract around it.
 1. Strip `--bg` from the arguments. Keep every other argument as given.
 2. Dispatch one foreground subagent on `models.bg`. Pass it the full skill text and
    the remaining arguments. Wait for it.
-3. Run it in place, in the current checkout. Use a worktree only when the skill
-   itself says to (for example `workspace` is `worktree` for that work kind).
+3. Dispatch it from the current checkout. Make no worktree yourself: update and
+   new make their own run worktree, review its detached one (`branching.md`).
 4. Print the subagent's result line exactly as returned. Then stop. No summary, no
    follow-up work, no second dispatch.
 
@@ -38,8 +38,12 @@ also in `write-back.md`; this file owns the contract around it.
 2. The separator before the note is a plain hyphen with one space on each side.
 3. Two spaces before `log=`. The path is the run log the CLI created.
 4. VERB is one of: NONE, PR, PUSHED, PARKED, HELD, REVIEWED, PROVED, FAILED, STOP.
-5. NONE means only "nothing to do". A run that tried and went wrong is FAILED. A
+5. NONE means only "nothing to do": no candidate, or every candidate skipped
+   because its branch is held elsewhere (the note names them,
+   `NONE - idle - skipped acme/app#57 (branch held)`). A run that tried and went wrong is FAILED. A
    run stopped by the kill switch, a pause, or a failed guard selftest is STOP.
+   A failure on our side (`autonomy-and-logging.md`) is `FAILED <ref> <short
+   reason>`, with the exact error in the log and nothing posted.
 6. In `mode: dry-run`, say so in the note: `PR acme/app#88 opened - dry-run`.
 
 Examples:
@@ -58,16 +62,23 @@ STOP - paused  log=<path>
 
 The `/not-me` router runs its legs in `router` order, each as its own run.
 
-1. The first leg that returns anything other than NONE wins. Print its line and
-   stop; later legs do not run.
-2. Every leg NONE is a success, and the router's result is NONE.
-3. A FAILED or STOP leg also ends the router. Do not try the next leg.
-4. One unit of work per router run.
+1. A NONE leg, and a `FAILED <ref>` leg (a failure tied to one item, already in
+   that leg's log), hand over to the next leg. A held branch is not a failure:
+   update ends `NONE - idle - skipped <refs> (branch held)` and new runs next.
+2. The first leg that does work (PR, PUSHED, PARKED, HELD, REVIEWED, PROVED), any
+   STOP, and a `FAILED -` with no ref (config invalid, guard not working) end the
+   router: print that line and stop; later legs do not run.
+3. An earlier `FAILED <ref>` goes into the note of the line printed, for example
+   `PR acme/app#88 opened - update FAILED acme/app#57 not-committed`. No leg ended
+   the router: print the last `FAILED <ref>` line, else NONE (a success).
+4. At most one leg per router run finishes its work; a leg that failed on one item
+   before it may also have left that item partly done (its log says what).
 
 ## Spawn depth
 
-With `models.strategy` on `orchestrate`, a `--bg` run nests three deep: the parent,
-the skill subagent, and its implementer subagents.
+A `--bg` run nests three deep: the parent, the skill subagent, and the subagents it
+dispatches (the gate's reviewers always; implementers too when
+`models.implementation` is `delegate`).
 
 1. That needs `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` of at least 3. The doctor
    skill checks it.
@@ -88,7 +99,7 @@ inside a run.
 ## Checklist
 
 - [ ] Stripped `--bg` and dispatched one foreground subagent on `models.bg`.
-- [ ] Ran in place unless the skill asked for a worktree.
+- [ ] Dispatched from the current checkout and left worktrees to the skill.
 - [ ] Asked no questions; logged QUESTION, DECISION, UNDO for each default taken.
 - [ ] Returned exactly one result line in the grammar above.
 - [ ] Used NONE only for "nothing to do" and FAILED for a run that went wrong.

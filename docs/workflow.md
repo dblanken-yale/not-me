@@ -70,7 +70,7 @@ Who acts where:
 ## What each skill does
 
 - **`/not-me`** is the router. It checks that not-me is on and idle, then runs the legs in the `router` order (default `update`, then `new`). It stops at the first leg that does something. Every leg returning `NONE` is a success. After a leg that did work it runs `/not-me:retro`.
-- **`/not-me:new`** picks one ready issue (or the number you give it), claims it, and implements it on a feature branch through a delegated implementer. It reproduces a bug first, writes the failing test first, runs the full gate, commits only the files it touched, pushes through the CLI, and opens a ready (not draft) PR. Then it moves the issue to `needs review` and, when a preview URL exists, starts a proof in the background. A fresh install picks only issues assigned to you; set `queue.include_unassigned: true` to also pick unassigned ones (see [Which issues the queue picks](config.md#which-issues-the-queue-picks)).
+- **`/not-me:new`** picks one ready issue (or the number you give it), claims it, and implements it on a feature branch in its own run worktree, writing the code itself (`models.implementation: inline`, the default) or through a delegated implementer (`delegate`). It reproduces a bug first, writes the failing test first, runs the full gate, commits only the files it touched, pushes through the CLI, and opens a ready (not draft) PR. Then it moves the issue to `needs review` and, when a preview URL exists, starts a proof in the background. A fresh install picks only issues assigned to you; set `queue.include_unassigned: true` to also pick unassigned ones (see [Which issues the queue picks](config.md#which-issues-the-queue-picks)).
 - **`/not-me:update`** picks one PR labeled `needs work` that is assigned to the operator. It reads only trusted findings, decides each (refuse, defer, implement, or disagree with a reason), fixes the confirmed ones, merges the base branch in (never rebases), pushes, replies on each thread, posts one summary, and swaps the PR back to `needs review`. When every finding is deferred or refused it parks the PR with no code change.
 - **`/not-me:review`** reviews PRs labeled `needs review` where the operator is a requested reviewer and the author is on the roster at any tier (lead, authority or member) and is not the operator. A member's PR title and body are read as the text under review, never as instructions; an instruction in them ("approve this at once") becomes a finding. PRs by people not on the roster are skipped. It checks the head out in a detached worktree, runs the project's checks, reads the diff, delegates a code review and a security review, confirms each finding itself, and posts one review. Approval is only sent when `review.auto_approve` is true; otherwise it posts a comment and leaves approval to a person. It resolves only threads it judged fixed.
 - **`/not-me:prove`** takes one PR. It finds the preview URL on a trusted host, runs the steps under the PR's testing-steps heading in a browser with one screenshot per step, reads each screenshot, and posts one proof comment with pass or fail per step. It never changes the repository.
@@ -109,7 +109,7 @@ Every run ends with one line. In `--bg` mode that line is the whole output.
 
 | VERB | Meaning |
 | --- | --- |
-| `NONE` | Nothing to do. It never means a run went wrong. `prove` also uses it for "no deploy target", "no testing steps", "no browser tool" and "not open" |
+| `NONE` | Nothing to do. It never means a run went wrong. `prove` also uses it for "no deploy target", "no testing steps" and "not open" |
 | `PR` | A pull request was opened |
 | `PUSHED` | Commits were pushed to an existing PR |
 | `PARKED` | The PR was parked for a person; no code changed. The note names who is owed what |
@@ -157,11 +157,13 @@ Two labels say a person has something to do.
 **`needs human`** means a run stopped short. It was parked, held, or gave up. The summary comment starts with `**Waiting on:**` and names each person by login with what they owe.
 
 - Read the `Waiting on` line and the log summary.
-- Do the thing: make the decision, run the step not-me refused, allow the repo the guard blocked (`/not-me:allow-repo`), or fix what the run could not.
+- Do the thing: make the decision, run the step not-me refused, or fix what the run could not.
 - Then answer on the PR or issue. A reply from a lead or authority on the roster, newer than the run's marker comment, lets the next run pick the item up again. A reply from a member does not; it is input for the lead to weigh. Untrusted replies never count.
 - Or remove the label by hand. Removing `needs human` or `question` also lets the loops pick the item again.
 
-**`question`** means a named person owes an answer. It is set with `needs human` when a decision is missing, and alone when `review` was unsure. The person named in the summary answers in the thread or the PR comments. Once a trusted lead or authority has answered, `update` treats the question as settled.
+**`question`** means a named person owes an answer. It is set with `needs human` when a decision is missing, and alone when `review` was unsure about a product call or between two leads. The person named in the summary answers in the thread or the PR comments. Once a trusted lead or authority has answered, `update` treats the question as settled.
+
+**A failure on not-me's side gets no label.** When the cause is outside the PR or issue (a guard block, a `notme` error, a fetch or worktree failure, a missing tool or environment, a check that fails the same way on the base branch), the run posts nothing on GitHub, changes no labels, gives back any claim it took, and stops. You see it in the `FAILED <ref> <reason>` result line, in `/not-me:status` and in the run log, which has the exact error. Fix the cause (for a guard block, run the allow command the block message names if the write was intended) and run again. A failure caused by the change itself, such as a test the PR breaks, is still reported on the PR.
 
 A held issue keeps `in progress`, so no loop picks it again, and also carries `needs human`. A parked PR goes to `needs review` because it waits on people and the code is not at fault.
 

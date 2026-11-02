@@ -457,7 +457,9 @@ repos:
 
 Related keys: `models.bg` is the model for `--bg` runs. `models.verifier` is the model that double-checks claims before posting: `auto` (the default) picks a different model than the one running: a run on `opus` is checked by `sonnet`, a run on any other model by `opus`. Nothing is asked of you. Leave it on. `none` skips the check and logs that it was skipped; it is reasonable when no good verifier model is available or people verify the work themselves. Pin `models.verifier` to a model name (for example `verifier: sonnet`) only when you want that model instead of the auto choice. Set it in your global layer, `~/.claude/not-me/project.md`, for a personal preference across repos, or in the repo layer, `.claude/not-me/project.md`, for a team-wide choice. Either layer may set it. `models.max_tries` is how many tries a unit gets before the orchestrator does it itself: first the dispatched agent, then a fresh agent on the same model with the exact failure, then a fresh agent one tier up.
 
-The accepted values for `models.strategy` are `orchestrate` and `single`. The other model keys take the model names your Claude Code client accepts.
+`models.implementation` decides who writes the code for new and update runs. `inline` (the default) has the run write each change itself, failing test first, which costs fewer tokens than briefing a subagent. `delegate` sends every code change to an implementer subagent chosen by `models.strategy`, then audits it and follows the retry ladder. The gate's code review, security review and the verifier are dispatched either way. Any layer may set it; it does not change what a run may touch.
+
+The accepted values for `models.strategy` are `orchestrate` and `single`, and for `models.implementation` `inline` and `delegate`. The other model keys take the model names your Claude Code client accepts.
 
 ## Kill switch, pause, and the `paused` label
 
@@ -546,9 +548,9 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `labels.paused` | `paused` | Label that makes runs skip an item |
 | `reviewers.default` | `[]` | GitHub logins requested as reviewers. Add keys named after a repo to override per repo |
 | `router` | `[update, new]` | Order in which `/not-me` tries work kinds |
-| `workspace.new` | `checkout` | `checkout` or `worktree` for new work |
-| `workspace.update` | `checkout` | `checkout` or `worktree` for rework |
-| `workspace.review` | `worktree` | `checkout` or `worktree` for reviews |
+| `workspace.new` | `worktree` | New work always runs in its own run worktree (`notme git worktree-add --branch`), removed at the end; `checkout` is no longer honoured |
+| `workspace.update` | `worktree` | Rework always runs in its own run worktree, removed at the end; `checkout` is no longer honoured |
+| `workspace.review` | `worktree` | Reviews run in a detached worktree |
 | `guard.other_repo` | `on` | `on` or `off`. Writes may only target allowed repos |
 | `guard.protected_branches` | `on` | `on` or `off`. No commits, pushes, or merges on protected branches |
 | `guard.force_push` | `on` | `on` or `off`. No history rewrites or remote branch deletion |
@@ -562,6 +564,7 @@ Every key of every doc, with its shipped default. Keys inside maps are written w
 | `limits.ci_wait_minutes` | `20` | Minutes to wait for CI on a pushed head |
 | `limits.claim_stale_hours` | `8` | Hours before an unfinished claim with no pushed branch is reported as stale. It is reported, never released automatically |
 | `models.strategy` | `orchestrate` | `orchestrate` or `single`. See "The routing policy" |
+| `models.implementation` | `inline` | `inline` (the run writes the code) or `delegate` (implementer subagents) |
 | `models.single_model` | `opus` | The model used for everything when `strategy` is `single` |
 | `models.bg` | `opus` | The model for `--bg` runs |
 | `models.implement` | `sonnet` | The model for ordinary implementation units |
