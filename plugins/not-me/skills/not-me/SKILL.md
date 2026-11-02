@@ -30,7 +30,7 @@ Arguments: `$ARGUMENTS`. Only `--dry-run` and `--bg` are accepted.
 
 ## Step 2: Choose the legs
 
-1. `notme config` and read `router`. Default `[update, new]`.
+1. `notme config` and read `router` and `prove.auto`. Default `[update, new]`.
 2. Legs are `update`, `new` and `review`. An unknown name is skipped with a note.
 
 ## Step 3: Run the legs in order

@@ -216,7 +216,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/pr-shape.md` and
    (`branching.md`). Restore a stash with `notme git unstash <sha>`. A tree you
    cannot clean is a `WARN`.
 2. `notme log finish <path> --status "PR <repo>#<pr> needs review"`.
-3. Without `--bg`, `prove.auto` true, and `notme prove-target <repo>#<pr>` finds a URL: start
+3. Without `--bg`, `prove.auto` (`notme config`) true, and `notme prove-target <repo>#<pr>` finds a URL: start
    `/not-me:prove <repo>#<pr>` in the background. `prove.auto` false: no proof. Under `--bg` the router proves.
 4. `notify.command` set and the result is not NONE: run it with the result line
    and the log path.
