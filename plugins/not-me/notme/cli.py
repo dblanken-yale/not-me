@@ -2030,24 +2030,24 @@ def cmd_verify_lock_acquire(ctx: Context, args: argparse.Namespace) -> Dict[str,
         return {"shared_env": False, "locked": False}
     path = _verify_lock_path(ctx)
     stale_hours = float((ctx.meta.get("limits") or {}).get("claim_stale_hours", 8))
-    started = time.monotonic()
+    started = ctx.deps.clock()
     while True:
         holder = (claims.read_lock(path) or {}).get("run_id")
         if holder and holder != log.run_id and holder not in {r["run_id"] for r in ctx.active_runs()}:
             claims.release_lock(path, str(holder))  # its run is over: free, unless someone took it meanwhile
         try:
             claims.acquire_lock(path, log.run_id, stale_hours)
-            return {"shared_env": True, "locked": True, "waited_seconds": round(time.monotonic() - started)}
+            return {"shared_env": True, "locked": True, "waited_seconds": round(ctx.deps.clock() - started)}
         except claims.ClaimLost:
             pass
-        waited = time.monotonic() - started
+        waited = ctx.deps.clock() - started
         if waited >= args.wait_seconds:
             held = claims.read_lock(path) or {}
             raise fail(ExitCode.ERROR, "verify_locked",
                        f"the shared test environment is in use by run {held.get('run_id')}; wait and try again, "
                        "never skip verification", holder={"run_id": held.get("run_id"), "since": held.get("ts")},
                        waited_seconds=round(waited))
-        time.sleep(min(LOCK_POLL_SECONDS, max(args.wait_seconds - waited, 0)))
+        ctx.deps.sleep(min(LOCK_POLL_SECONDS, max(args.wait_seconds - waited, 0)))
 
 
 @command("verify-lock release", "give the shared test environment back", args=[

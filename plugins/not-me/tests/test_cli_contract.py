@@ -85,7 +85,8 @@ class CliCase(unittest.TestCase):
         """A --reason-file for the commands that change a state."""
         return self.write_file("reason.txt", "Because the test says so\n")
 
-    def cli(self, *argv, stdin="", runner=None, hook_cmd=None, env=None, repo=True, project=True, prompt=None):
+    def cli(self, *argv, stdin="", runner=None, hook_cmd=None, env=None, repo=True, project=True, prompt=None,
+            sleep=None, clock=None):
         """(exit code, parsed stdout object, stderr text). Fails the test unless stdout is exactly one object.
         prompt stands in for the hidden operator-token prompt (none by default)."""
         out, err = io.StringIO(), io.StringIO()
@@ -95,7 +96,8 @@ class CliCase(unittest.TestCase):
         if repo:
             args = ["--repo", REPO] + args
         code = cli.main(args, runner=runner or self.fake, env=env or self.env, stdin=TtyIO(stdin), stdout=out,
-                        stderr=err, hook_cmd=hook_cmd, process_check=lambda: False, prompt=prompt)
+                        stderr=err, hook_cmd=hook_cmd, process_check=lambda: False, prompt=prompt,
+                        sleep=sleep, clock=clock)
         text = out.getvalue()
         self.assertEqual(text.count("\n"), 1, f"stdout must be one line, got {text!r}")
         payload = json.loads(text)

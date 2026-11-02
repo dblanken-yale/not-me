@@ -1777,8 +1777,8 @@ class ParallelRunTests(base.CliCase):
         a, b = self.two_runs()
         self.ok("verify-lock", "acquire", "--log", a["path"])
         lock = self.project / ".git" / "not-me" / "verify.lock"
-        with mock.patch("notme.cli.time.sleep", side_effect=lambda s: lock.unlink()) as slept:
-            got = self.ok_wt("verify-lock", "acquire", "--log", b["path"], "--wait-seconds", "60")
+        slept = mock.Mock(side_effect=lambda s: lock.unlink())
+        got = self.ok_wt("verify-lock", "acquire", "--log", b["path"], "--wait-seconds", "60", sleep=slept)
         self.assertTrue(got["locked"])
         self.assertTrue(slept.called)
         self.assertIn("waited_seconds", got)
@@ -1788,9 +1788,9 @@ class ParallelRunTests(base.CliCase):
         a, b = self.two_runs()
         self.ok("verify-lock", "acquire", "--log", a["path"])
         clock = iter(range(0, 10000, 30))
-        with mock.patch("notme.cli.time.monotonic", side_effect=lambda: next(clock)), \
-                mock.patch("notme.cli.time.sleep") as slept:
-            code, payload, _ = self.in_wt("verify-lock", "acquire", "--log", b["path"], "--wait-seconds", "120")
+        slept = mock.Mock()
+        code, payload, _ = self.in_wt("verify-lock", "acquire", "--log", b["path"], "--wait-seconds", "120",
+                                      sleep=slept, clock=lambda: next(clock))
         self.assertEqual((code, payload["kind"]), (1, "verify_locked"))
         self.assertTrue(slept.called)
         self.assertEqual(payload["holder"]["run_id"], a["run_id"])
