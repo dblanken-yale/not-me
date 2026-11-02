@@ -1536,7 +1536,7 @@ def _command(c: SimpleCommand, st: _State, ctx: GuardContext) -> Iterator[Block]
     if handler is not None:
         yield from handler(t, c, st, ctx, blk)
     elif word.startswith(("./", "../", ".\\", "..\\")) or word.endswith(SCRIPT_SUFFIXES):
-        yield from _script_file(word, st, blk)
+        yield from _script_file(word, st, ctx, blk)
     elif _INTERP.match(_prog(word)):
         yield from _interp(_prog(word), list(t[1:]), c, st, ctx, blk)
     elif _prog(word) not in _NAMES_ONLY:
@@ -2014,9 +2014,24 @@ def _cmd_notme(args: List[str], blk: Blk) -> Iterator[Block]:
 # --- shells, scripts and interpreters --------------------------------------------------
 
 
-def _script_file(path: str, st: _State, blk: Blk) -> Iterator[Block]:
+# $TMPDIR, $HOME and $NOT_ME_HOME in a script path, each as a whole name: a script under one of them, or at a
+# literal path (such as the session scratchpad), is read
+_SCRIPT_VARS = re.compile(r"\$(?:\{(TMPDIR|HOME|NOT_ME_HOME)\}|(TMPDIR|HOME|NOT_ME_HOME)(?![A-Za-z0-9_]))")
+
+
+def _script_path(path: str, ctx: GuardContext) -> str:
+    """path with $TMPDIR, $HOME and $NOT_ME_HOME filled in from the hook's environment, so a script written there
+    is read like any other; a variable that is not set, and any other variable, stays as typed (not read)."""
+    def fill(m: "re.Match[str]") -> str:
+        name = m.group(1) or m.group(2)
+        value = str(ctx.home) if name == "NOT_ME_HOME" else ctx.env.get(name)
+        return value or m.group(0)
+    return _SCRIPT_VARS.sub(fill, path)
+
+
+def _script_file(path: str, st: _State, ctx: GuardContext, blk: Blk) -> Iterator[Block]:
     """A script file runs text the guard does not parse: judged as opaque text (a file it cannot read is allowed)."""
-    text = _read_script(_norm(path, st.dir), st)
+    text = _read_script(_norm(_script_path(path, ctx), st.dir), st)
     if text is not None:
         yield from _opaque(text, blk, f"{_short(path, 60)} is a script the guard does not parse", inline=False)
 
@@ -2061,11 +2076,12 @@ def _from_input(c: SimpleCommand, st: _State, ctx: GuardContext, blk: Blk, what:
     whole command's text to judge."""
     if c.bodies:
         for b in c.bodies:
-            yield from (_body(b, st, ctx, blk, what) if shell else _opaque(b, blk, what))
+            yield from (_body(b, st, ctx, blk, what) if shell
+                        else _opaque(b, blk, f"{what} runs code the guard does not parse"))
         return
     files = [target for op, target in c.redirs if op == "<"]
     for f in files:
-        yield from _script_file(f, st, blk)
+        yield from _script_file(f, st, ctx, blk)
     if not files:
         yield from _opaque(st.raw, blk, f"{what} reads its program from a pipe")
 
@@ -2082,7 +2098,7 @@ def _cmd_shell(t, c, st, ctx, blk):
     else:  # source and .
         script = next((a for a in args if a != "--"), None)
     if script is not None and script != "-":
-        yield from _script_file(script, st, blk)
+        yield from _script_file(script, st, ctx, blk)
     else:
         yield from _from_input(c, st, ctx, blk, head)
 
@@ -2119,7 +2135,7 @@ def _interp(prog: str, args: List[str], c: SimpleCommand, st: _State, ctx: Guard
     if family == "pwsh":
         low = [a.lower() for a in args]
         if "-file" in low and low.index("-file") + 1 < len(args):
-            yield from _script_file(args[low.index("-file") + 1], st, blk)
+            yield from _script_file(args[low.index("-file") + 1], st, ctx, blk)
         else:
             yield from _opaque(" ".join(args), blk, what)
         return
@@ -2141,7 +2157,7 @@ def _interp(prog: str, args: List[str], c: SimpleCommand, st: _State, ctx: Guard
     if family == "deno" and rest[:1] == ["run"]:
         rest = _positionals(rest[1:])
     if rest and rest[0] != "-":
-        yield from _script_file(rest[0], st, blk)
+        yield from _script_file(rest[0], st, ctx, blk)
     else:
         yield from _from_input(c, st, ctx, blk, prog, shell=False)
 
@@ -2648,8 +2664,13 @@ def _git_push(c: _GitCall) -> Iterator[Block]:
     out = st.once(("push-urls", d, remote), lambda: ctx.git(["remote", "get-url", "--push", "--all", remote], d))
     urls = [u.strip() for u in (out or "").splitlines() if u.strip()]
     if not urls:
-        b = blk("other_repo", f"remote '{remote}' has no push URL here",
-                "push to a remote that exists and points at an allowed repo")
+        if _unresolved(remote):
+            b = blk("other_repo", "the guard does not expand shell variables or substitutions, so the remote "
+                                  f"{_short(remote, 40)} cannot be checked",
+                    "write the remote name out (`git push origin <branch>`)")
+        else:
+            b = blk("other_repo", f"remote '{remote}' has no push URL here",
+                    "push to a remote that exists and points at an allowed repo")
         b.no_checkout = True
         yield b
     for url in urls:
