@@ -1149,7 +1149,8 @@ def cmd_pick_needs_work(ctx: Context, args: argparse.Namespace) -> Dict[str, Any
         return {"none": True}
     holder = branch_holders(ctx)
     candidates = [{"number": c["pr"]["number"], "head_ref": c["pr"].get("headRefName"),
-                   "worktree": holder(c["pr"].get("headRefName"))} for c in found]
+                   "worktree": None if c["pr"].get("isCrossRepository") else holder(c["pr"].get("headRefName"))}
+                  for c in found]
     top = found[0]
     pr = top["pr"]
     return {"repo": ctx.repo, "number": pr["number"], "title": pr.get("title"), "url": pr.get("url"),
@@ -1182,7 +1183,7 @@ def branch_holders(ctx: Context) -> Callable[[Optional[str]], Optional[Dict[str,
         path = entry["path"]
         if path not in states:
             real = Path(os.path.realpath(path))
-            states[path] = {"path": path, **git_mod.worktree_state(path),
+            states[path] = {"path": path, **git_mod.worktree_state(path), "prunable": bool(entry.get("prunable")),
                             "run_worktree": run_root is not None and real.parent == run_root
                             and RUN_NAME_RE.fullmatch(real.name) is not None}
         return dict(states[path])

@@ -952,6 +952,18 @@ class PullRequestTests(base.CliCase):
         self.assertIsNone(payload["candidates"][1]["worktree"])
         (held / "a.txt").write_text("one\n", encoding="utf-8")
         self.assertEqual(self.ok("pick-needs-work")["worktree"]["dirty"], False)  # held but clean is still held
+        self.assertIs(payload["worktree"]["prunable"], False)
+        shutil.rmtree(held)  # directory deleted by hand, not pruned: still listed, flagged prunable
+        gone = self.ok("pick-needs-work")["worktree"]
+        self.assertEqual((gone["status"], gone["prunable"]), ("missing", True))
+
+    def test_pick_needs_work_reports_no_worktree_for_a_fork_pr_sharing_a_local_branch_name(self):
+        init_repo(self.project)
+        things(self.fake)["3"].update({"labels": ["needs work"], "assignees": ["octocat"], "author": "octocat",
+                                       "headRefName": "main", "isCrossRepository": True})
+        payload = self.ok("pick-needs-work")
+        self.assertEqual(payload["number"], 3)
+        self.assertIsNone(payload["worktree"])
 
     def test_pick_needs_work_outside_git_reports_no_worktree(self):
         things(self.fake)["3"].update({"labels": ["needs work"], "assignees": ["octocat"], "author": "octocat"})

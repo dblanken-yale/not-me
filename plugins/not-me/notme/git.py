@@ -253,7 +253,7 @@ def worktree_state(path: Any) -> Dict[str, Any]:
     # --no-optional-locks: a read of someone else's worktree must not take its index.lock
     proc = _run(["--no-optional-locks", "status", "--porcelain"], path, check=False)
     if proc.returncode != 0:
-        return {"dirty": None, "status": "missing"}
+        return {"dirty": None, "status": "unreadable"}
     lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
     if not lines:
         return {"dirty": False, "status": "clean"}

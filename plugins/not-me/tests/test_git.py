@@ -165,6 +165,8 @@ class BasicTests(Repo):
         self.assertEqual(git.worktree_state(wt), {"dirty": True, "status": "1 changed, 1 untracked"})
         shutil.rmtree(wt)
         self.assertEqual(git.worktree_state(wt), {"dirty": None, "status": "missing"})
+        wt.mkdir()  # a directory git cannot read as a checkout is not a gone one
+        self.assertEqual(git.worktree_state(wt)["status"], "unreadable")
 
     def test_worktree_add_branch_new_from_base_and_existing(self):
         new = self.dir / "new"
