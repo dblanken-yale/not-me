@@ -77,7 +77,8 @@ The `attribution` key in `project.md` sets one policy.
 
 ## Result line for --bg runs
 
-A `--bg` run ends with exactly one line:
+A `--bg` run ends with one line. The one exception is the `/not-me` router, which may
+print a second, prove line after a `PR` or `PUSHED` leg (`bg-mode.md`, The router):
 
 ```
 <VERB> <ref|-> <status>[ <sep> note]  log=<path>
@@ -138,4 +139,4 @@ Examples: `PR acme/app#57 opened  log=<path>`, `NONE - idle  log=<path>`.
 - [ ] References are `owner/repo#N` unless the tracker is the same repo.
 - [ ] Attribution only on PR bodies and commits; no AI or model mention elsewhere.
 - [ ] Screenshots kept to logs unless a screenshots branch is configured.
-- [ ] A `--bg` run ended with exactly one result line in the grammar above.
+- [ ] A `--bg` run ended with one result line in the grammar above (the router: the leg line, plus a prove line when it proved).

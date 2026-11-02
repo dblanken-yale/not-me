@@ -221,7 +221,7 @@ Each tick runs `update`, then `new`, and prints one result line (two when it pro
 /loop 2h /not-me:review --bg
 ```
 
-Add `review` to `router` in `project.md` to run it as a router leg instead. `prove` needs no schedule: `new` and `update` start it in the background after they push, when a preview URL exists. Under `--bg` the `/not-me` router runs it in the foreground after a leg that opened or pushed a PR and prints its line. Run it by hand on any PR with `/not-me:prove <repo>#<pr>`.
+Add `review` to `router` in `project.md` to run it as a router leg instead. `prove` needs no schedule: `new` and `update` start it in the background after they push, when a preview URL exists. Under `--bg` the `/not-me` router runs it in the foreground after a leg that opened or pushed a PR and prints its line. A `/not-me:new` or `/not-me:update` run started directly with `--bg` does not prove; run `/not-me:prove` yourself or go through the router. Run it by hand on any PR with `/not-me:prove <repo>#<pr>`.
 
 Start a loop yourself. A run never starts or extends one.
 

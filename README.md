@@ -112,6 +112,7 @@ flowchart TD
 
     router -.-> review
     n6 -. "preview URL found; under --bg the router proves after a PR or PUSHED leg" .-> prove
+    u5 -. "preview URL found; under --bg the router proves after a PUSHED leg" .-> prove
     u5 --> retro
     n6 --> retro
     review --> retro
