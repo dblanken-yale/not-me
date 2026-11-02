@@ -200,6 +200,35 @@ class SkillUpdateTest(unittest.TestCase):
                 self.assertIn("`needs_human`", row, f"PARKED outcome without needs_human: {row}")
         self.assertIn("needs_human", self.body.split("## Step 4", 1)[1].split("## Step 5", 1)[0])
 
+    def test_held_head_branch_is_skipped_never_touched(self):
+        step1 = self.body.split("## Step 1", 1)[1].split("## Step 2", 1)[0]
+        for part in ("`candidates`", "`worktree`", "`status`", "skip", "--kind WARN"):
+            self.assertIn(part, step1)
+        self.assertLess(step1.find("`worktree`"), step1.find("notme claim-pr"), "check the holder before claiming")
+        failures = text(SKILL_DIR / "references" / "failures.md")
+        self.assertIn("never edit, stash, reset or commit in a worktree this run did not create", failures.lower())
+
+    def test_every_candidate_skipped_ends_none_so_the_router_goes_on(self):
+        failures = text(SKILL_DIR / "references" / "failures.md")
+        row = next(r for r in failures.splitlines() if r.startswith("| Every candidate's head branch is held"))
+        self.assertIn("`NONE - idle - skipped", row)
+        self.assertIn("NONE - idle - skipped", self.body.split("## Step 1", 1)[1].split("## Step 2", 1)[0])
+
+    def test_blocked_commit_saves_a_patch_and_frees_the_branch(self):
+        failures = text(SKILL_DIR / "references" / "failures.md")
+        row = next(r for r in failures.splitlines() if r.startswith("| Commit blocked or failed"))
+        self.assertIn("git save-patch", row)
+        self.assertIn("git save-patch", self.body.split("## Step 9", 1)[1])
+
+    def test_run_worktree_made_at_checkout_and_removed_whatever_the_outcome(self):
+        step3 = self.body.split("## Step 3", 1)[1].split("## Step 4", 1)[0]
+        self.assertIn("notme git worktree-add --branch <head_ref>", step3)
+        finish = self.body.split("## Step 9", 1)[1].split("## Failure handling", 1)[0]
+        self.assertIn("notme git worktree-remove <wt>", finish)
+        self.assertIn("whatever the outcome", finish)
+        self.assertNotIn("notme git stash", self.body)
+        self.assertNotIn("\ngit checkout <head_ref>", self.body)  # the main checkout is never switched
+
     def test_ci_red_at_cap_still_needs_work(self):
         failures = text(SKILL_DIR / "references" / "failures.md")
         row = next(r for r in failures.splitlines() if r.startswith("| CI red at"))

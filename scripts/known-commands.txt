@@ -27,6 +27,7 @@ queue-resync
 labels-ensure
 reply-thread
 comment-upsert
+comment-edit
 request-review
 pr-body
 pr-open
@@ -59,6 +60,7 @@ git stash
 git unstash
 git worktree-add
 git worktree-remove
+git save-patch
 git remote-branch-exists
 git status
 status

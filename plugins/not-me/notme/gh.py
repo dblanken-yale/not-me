@@ -518,6 +518,21 @@ class GhClient:
         self._repo(repo)
         return self.read(["api", f"repos/{repo}/pulls/{_num(n)}/reviews?per_page=100"]) or []
 
+    def issue_comment(self, repo: str, comment_id: int) -> Dict[str, Any]:
+        """One issue or PR conversation comment as the REST API returns it (issue_url names its item)."""
+        self._repo(repo)
+        return self.read(["api", f"repos/{repo}/issues/comments/{_num(comment_id)}"]) or {}
+
+    def review(self, repo: str, n: int, review_id: int) -> Dict[str, Any]:
+        """One review of PR n as the REST API returns it."""
+        self._repo(repo)
+        return self.read(["api", f"repos/{repo}/pulls/{_num(n)}/reviews/{_num(review_id)}"]) or {}
+
+    def review_comment(self, repo: str, comment_id: int) -> Dict[str, Any]:
+        """One inline review comment as the REST API returns it (pull_request_url names its PR)."""
+        self._repo(repo)
+        return self.read(["api", f"repos/{repo}/pulls/comments/{_num(comment_id)}"]) or {}
+
     def review_threads(self, repo: str, n: int) -> List[Dict[str, Any]]:
         owner, _, name = self._repo(repo).slug.partition("/")
         query = _THREADS_QUERY.replace("{n}", str(_num(n)))
@@ -572,6 +587,18 @@ class GhClient:
         n, comment_id = _num(n), _num(comment_id)
         return self._api_body(repo, "POST", f"repos/{repo}/pulls/{n}/comments/{comment_id}/replies", body_file,
                               f"reply on {repo}#{n}")
+
+    def review_update(self, repo: str, n: int, review_id: int, body_file: Any) -> Any:
+        """Replace the body of review review_id on PR n."""
+        n, review_id = _num(n), _num(review_id)
+        return self._api_body(repo, "PUT", f"repos/{repo}/pulls/{n}/reviews/{review_id}", body_file,
+                              f"edit review {review_id} on {repo}#{n}")
+
+    def review_comment_update(self, repo: str, comment_id: int, body_file: Any) -> Any:
+        """Replace the body of an inline review comment."""
+        comment_id = _num(comment_id)
+        return self._api_body(repo, "PATCH", f"repos/{repo}/pulls/comments/{comment_id}", body_file,
+                              f"edit inline comment {comment_id} on {repo}")
 
     def pr_edit_body(self, repo: str, n: int, body_file: Any) -> Any:
         n = _num(n)

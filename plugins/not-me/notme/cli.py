@@ -156,6 +156,7 @@ ERRORS: List[Tuple[Matcher, ExitCode, str, Optional[Callable[[Any], Dict[str, An
     (gh_mod.ReadbackMismatch, ExitCode.READBACK, "readback_mismatch",
      lambda e: {"expected": e.expected, "actual": e.actual}),
     (writeback.WritebackMismatch, ExitCode.READBACK, "readback_mismatch", None),
+    (writeback.NotOwnTarget, ExitCode.ERROR, "not_own", None),
     (states.LabelCollision, ExitCode.CONFIG, "config_invalid", lambda e: {"errors": [str(e)]}),
     (_gh_missing, ExitCode.DEPENDENCY, "missing_dependency",
      lambda e: {"error": "gh is not installed or not on PATH", "dependency": "gh"}),
@@ -485,7 +486,8 @@ class Context:
 
     def protected(self, branch: str) -> bool:
         patterns = self.guard.protected_branches if self.guard.rules.get("protected_branches", True) else ()
-        return any(fnmatch.fnmatchcase(branch, p) for p in patterns)
+        # case-folded: on a case-insensitive filesystem `Main` is the ref `main`
+        return any(fnmatch.fnmatchcase(branch.casefold(), p.casefold()) for p in patterns)
 
     def ref(self, value: str, default_repo: Optional[str] = None) -> Tuple[str, int]:
         """(repo, number) from `N`, `#N`, `owner/name#N` or an issue or pull request URL."""
@@ -1096,8 +1098,13 @@ def cmd_pick_needs_work(ctx: Context, args: argparse.Namespace) -> Dict[str, Any
     With --include-answered, a PR labeled question (assigned to the operator) whose newest lead or authority
     comment is newer than the last not-me marker also counts, and carries answered: true.
 
-    Output: repo, number, title, url, head_ref, labels, answered (only when true), others; or none (with reason
-    when paused)
+    Each candidate's head branch is checked against the local worktrees (read-only git): worktree is null when no
+    worktree of this repository has it checked out, else {path, dirty, status, run_worktree}: the holder's path,
+    whether it has uncommitted changes (null when the path is gone), a short status summary, and whether it is a
+    run-* worktree notme made. Facts only; the skill decides what to skip.
+
+    Output: repo, number, title, url, head_ref, labels, answered (only when true), others, worktree, candidates
+    ([{number, head_ref, worktree}], the pick first, then others); or none (with reason when paused)
     """
     legacy = (ctx.meta.get("markers") or {}).get("legacy") or []
     found = feedback_mod.needs_work_candidates(ctx.gh, ctx.repo, ctx.operator, ctx.roster, ctx.labels,
@@ -1105,11 +1112,47 @@ def cmd_pick_needs_work(ctx: Context, args: argparse.Namespace) -> Dict[str, Any
                                                legacy_markers=legacy)
     if not found:
         return {"none": True}
+    holder = branch_holders(ctx)
+    candidates = [{"number": c["pr"]["number"], "head_ref": c["pr"].get("headRefName"),
+                   "worktree": None if c["pr"].get("isCrossRepository") else holder(c["pr"].get("headRefName"))}
+                  for c in found]
     top = found[0]
     pr = top["pr"]
     return {"repo": ctx.repo, "number": pr["number"], "title": pr.get("title"), "url": pr.get("url"),
             "head_ref": pr.get("headRefName"), "labels": top["labels"],
-            **({"answered": True} if top["answered"] else {}), "others": [c["pr"]["number"] for c in found[1:]]}
+            **({"answered": True} if top["answered"] else {}), "others": [c["pr"]["number"] for c in found[1:]],
+            "worktree": candidates[0]["worktree"], "candidates": candidates}
+
+
+def branch_holders(ctx: Context) -> Callable[[Optional[str]], Optional[Dict[str, Any]]]:
+    """A lookup from branch name to the worktree that has it checked out ({path, dirty, status, run_worktree}),
+    or None. One `git worktree list` for every lookup; outside a git checkout every lookup is None."""
+    listed: List[Dict[str, Any]] = []
+    run_root: Optional[Path] = None
+    if ctx.work_dir is not None:
+        try:
+            listed = git_mod.worktree_list(ctx.work_dir)
+        except git_mod.GitError:
+            listed = []
+        if listed:
+            try:
+                run_root = Path(os.path.realpath(str(worktrees_root(ctx))))
+            except CliExit:
+                run_root = None
+    states: Dict[str, Dict[str, Any]] = {}
+
+    def lookup(branch: Optional[str]) -> Optional[Dict[str, Any]]:
+        entry = next((w for w in listed if branch and w.get("branch") == branch), None)
+        if entry is None:
+            return None
+        path = entry["path"]
+        if path not in states:
+            real = Path(os.path.realpath(path))
+            states[path] = {"path": path, **git_mod.worktree_state(path), "prunable": bool(entry.get("prunable")),
+                            "run_worktree": run_root is not None and real.parent == run_root
+                            and RUN_NAME_RE.fullmatch(real.name) is not None}
+        return dict(states[path])
+    return lookup
 
 
 @command("pr-children", "open PRs stacked on a PR's branch", ref="repo", args=[ref_arg])
@@ -1452,6 +1495,60 @@ def cmd_comment_upsert(ctx: Context, args: argparse.Namespace, repo: str, n: int
     return {"repo": repo, "number": n, **result}
 
 
+_EDIT_FRAGMENTS = {"issuecomment-": "issue", "pullrequestreview-": "review", "discussion_r": "inline", "r": "inline"}
+_EDIT_URL_RE = re.compile(r"^https?://[^/\s]+/(?P<slug>[^/\s]+/[^/\s]+)/(?:pull|issues)/(?P<n>[0-9]+)(?:/[^#?\s]*)?"
+                          r"(?:\?[^#\s]*)?#(?P<prefix>issuecomment-|pullrequestreview-|discussion_r|r)(?P<id>[0-9]+)$")
+
+
+def _edit_target_ref(value: str, kind: Optional[str], repo: str, n: int) -> Tuple[str, int]:
+    """(kind, id) from --id (a bare id, or a URL whose fragment names the kind) and --kind. A URL must name
+    repo#n, and a --kind given with it must match its fragment."""
+    text = str(value).strip()
+    if re.fullmatch(r"[0-9]+", text) and int(text) > 0:
+        if not kind:
+            raise fail(ExitCode.USAGE, "usage", "a bare --id needs --kind issue, review or inline")
+        return kind, int(text)
+    m = _EDIT_URL_RE.match(text)
+    if not m:
+        raise fail(ExitCode.USAGE, "usage", f"cannot read {text!r} as a comment: use an id with --kind, or a URL "
+                                            "ending in #issuecomment-N, #pullrequestreview-N or #discussion_rN")
+    if m.group("slug").lower() != repo.lower() or int(m.group("n")) != n:
+        raise fail(ExitCode.USAGE, "usage", f"{text} is not on {repo}#{n}")
+    found = _EDIT_FRAGMENTS[m.group("prefix")]
+    if kind and kind != found:
+        raise fail(ExitCode.USAGE, "usage", f"--kind {kind} does not match the URL, which names a {found} comment")
+    return found, int(m.group("id"))
+
+
+@command("comment-edit", "edit a comment or review body the operator posted", writes=True, ref="repo", args=[
+    ref_arg, arg("--id", required=True, metavar="ID", help="the comment or review id (with --kind), or its URL"),
+    arg("--kind", choices=writeback.EDIT_KINDS,
+        help="issue (a conversation comment), review (a review body) or inline (a review comment on a line)"),
+    body_file_arg])
+def cmd_comment_edit(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
+    """Replace the body of a conversation comment, review or inline review comment on an issue or PR, which the
+    operator must have written. --id takes a URL whose fragment (#issuecomment-N, #pullrequestreview-N or
+    #discussion_rN) names the kind, or a bare id with --kind; a URL for another item is refused (exit 2). The text
+    must pass `check-text` and hold no not-me marker (exit 1, kind text_lint). The target is read first and
+    refused unless the logged-in gh user wrote it and is the operator (exit 1, kind not_own); either way nothing
+    is written. Every not-me marker in the old body that the new text lacks is appended back, and the configured
+    attribution is kept when the old body had it.
+
+    Output: repo, number, kind, id, updated
+    """
+    kind, target_id = _edit_target_ref(args.id, args.kind, repo, n)
+    text = ctx.read_input(args.body_file)
+    attribution = writeback.attribution(ctx.cfg)
+    problems = writeback.check_text(text, ctx.tracker, repo, attribution, False)
+    if writeback.ANY_MARKER_RE.search(text):
+        problems.append("the text holds a not-me marker; only the markers already in the old body are kept")
+    if problems:
+        raise CliExit(ExitCode.ERROR, {"error": f"{len(problems)} problem(s) in the text", "kind": "text_lint",
+                                       "ok": False, "problems": problems})
+    result = writeback.comment_edit(ctx.gh, repo, n, kind, target_id, text, ctx.operator, attribution)
+    return {"repo": repo, "number": n, **result}
+
+
 @command("request-review", "request review from logins", writes=True, ref="repo", args=[
     ref_arg, arg("--reviewers", required=True, metavar="a,b")])
 def cmd_request_review(ctx: Context, args: argparse.Namespace, repo: str, n: int) -> Dict[str, Any]:
@@ -1656,9 +1753,6 @@ def cmd_resolve_threads(ctx: Context, args: argparse.Namespace, repo: str, n: in
     return {"repo": repo, "number": n, "resolved": writeback.resolve_fixed_threads(ctx.gh, repo, n, ids)}
 
 
-_MARKER_RE = re.compile(r"<!--\s*not-me:.*?-->", re.S)
-
-
 def _same_body(a: str, b: str) -> bool:
     """Equal apart from line endings and trailing whitespace."""
     def norm(text: str) -> str:
@@ -1689,7 +1783,7 @@ def cmd_issue_body(ctx: Context, args: argparse.Namespace, repo: str, n: int) ->
         raise fail(ExitCode.ERROR, "untrusted_author",
                    f"{repo}#{n} is by {author or 'an unknown author'}, who is not trusted; its body is not replaced")
     body = with_attribution(ctx, text)
-    missing = [m for m in _MARKER_RE.findall(issue.get("body") or "") if m not in body]
+    missing = [m for m in writeback.ANY_MARKER_RE.findall(issue.get("body") or "") if m not in body]
     if missing:
         body = body.rstrip("\n") + "\n\n" + "\n".join(missing) + "\n"
     with gh_mod.tmp_text_file(body, prefix="not-me-cli-") as path:
@@ -2094,8 +2188,10 @@ def cmd_git_unstash(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
 
 
 WORKTREES_EXCLUDE = "/.claude/worktrees/"
-# review- keeps notme off the other worktrees in the same dir (Claude Code keeps its session worktrees there)
-WORKTREE_NAME_RE = re.compile(r"review-[A-Za-z0-9._-]{1,57}")
+# review- and run- keep notme off the other worktrees in the same dir (Claude Code keeps its session worktrees there)
+REVIEW_NAME_RE = re.compile(r"review-[A-Za-z0-9._-]{1,57}")
+RUN_NAME_RE = re.compile(r"run-[A-Za-z0-9._-]{1,57}")
+WORKTREE_NAME_RE = re.compile(f"{REVIEW_NAME_RE.pattern}|{RUN_NAME_RE.pattern}")
 
 
 def worktrees_root(ctx: Context) -> Path:
@@ -2118,10 +2214,12 @@ def worktrees_root(ctx: Context) -> Path:
 
 
 def worktree_path(root: Path, path: Union[str, Path]) -> Path:
-    """`path` realpath'd when it is a review-* dir directly under `root` with no symlink on the way; else unsafe_path."""
+    """`path` realpath'd when it is a review-* or run-* dir directly under `root` with no symlink on the way; else
+    unsafe_path."""
     real = Path(os.path.realpath(str(path)))
     if real.parent != root or not WORKTREE_NAME_RE.fullmatch(real.name) or ".." in real.name:
-        raise fail(ExitCode.ERROR, "unsafe_path", "worktree path must be a review-* dir directly under <main checkout>/.claude/worktrees/")
+        raise fail(ExitCode.ERROR, "unsafe_path",
+                   "worktree path must be a review-* or run-* dir directly under <main checkout>/.claude/worktrees/")
     return real
 
 
@@ -2144,46 +2242,139 @@ def exclude_worktrees_root(ctx: Context) -> None:
         fh.write(f"{sep}{WORKTREES_EXCLUDE}\n")
 
 
-@command("git worktree-add", "add a detached worktree under .claude/worktrees",
-         args=[arg("sha", metavar="SHA"), arg("--name", metavar="NAME")])
+@command("git worktree-add", "add a review or run worktree under .claude/worktrees",
+         args=[arg("sha", metavar="SHA", nargs="?"), arg("--name", metavar="NAME"),
+               arg("--branch", metavar="BRANCH", help="run mode: check out this branch instead of a detached SHA"),
+               arg("--base", metavar="B", help="run mode: create BRANCH from B (no tracking)")])
 def cmd_git_worktree_add(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Add a detached worktree at a sha at <main checkout>/.claude/worktrees/NAME; the CLI picks the path.
+    """Add a worktree at <main checkout>/.claude/worktrees/NAME; the CLI picks the path. Give SHA or --branch.
 
-    NAME defaults to review-<first 12 chars of SHA> and must match review-[A-Za-z0-9._-]{1,57} with no "..";
-    anything else, a symlinked .claude, .claude/worktrees, info or info/exclude, or a main checkout (via
-    core.worktree) that does not share this repository's git dir, is refused as unsafe_path. An existing path is
-    refused as path_exists. The git common dir's info/exclude gets /.claude/worktrees/ so the worktree never shows
-    as untracked in the main checkout. Works the same from the main checkout or a linked worktree.
+    Review mode (SHA): detached at the sha. NAME defaults to review-<first 12 chars of SHA> and must match
+    review-[A-Za-z0-9._-]{1,57}.
+    Run mode (--branch): the branch checked out, for one update or new run; --base B creates BRANCH from B without
+    tracking, else the existing branch is used (git makes it from origin/BRANCH when only the remote has it). NAME
+    defaults to run-<12 random hex> and must match run-[A-Za-z0-9._-]{1,57}. A protected BRANCH is refused as
+    protected_branch; a BRANCH another worktree has checked out is refused as branch_in_use (with its path).
+    Remove it with `git worktree-remove` at the end of the run, whatever the outcome; the branch stays.
 
-    Output: path (absolute), sha
+    Either way a NAME with "..", a symlinked .claude, .claude/worktrees, info or info/exclude, or a main checkout
+    (via core.worktree) that does not share this repository's git dir, is refused as unsafe_path. An existing path
+    is refused as path_exists. The git common dir's info/exclude gets /.claude/worktrees/ so the worktree never
+    shows as untracked in the main checkout. Works the same from the main checkout or a linked worktree.
+
+    Output: path (absolute), sha (review mode); path, branch, base (null without --base) (run mode)
     """
-    if not git_mod._SHA_RE.fullmatch(args.sha):
-        raise fail(ExitCode.USAGE, "usage", f"invalid sha {args.sha!r}")
-    name = f"review-{args.sha[:12]}" if args.name is None else args.name
-    if not WORKTREE_NAME_RE.fullmatch(name) or ".." in name:
-        raise fail(ExitCode.ERROR, "unsafe_path", f"bad worktree name {name!r}: use review-[A-Za-z0-9._-]{{1,57}}")
+    if args.branch is not None:
+        if args.sha is not None:
+            raise fail(ExitCode.USAGE, "usage", "give a SHA (review worktree) or --branch (run worktree), not both")
+        try:
+            branch = git_mod.valid_branch(args.branch)
+            base = None if args.base is None else git_mod.valid_branch(args.base)
+        except ValueError as exc:
+            raise fail(ExitCode.USAGE, "usage", str(exc)) from None
+        if ctx.protected(branch):
+            raise fail(ExitCode.ERROR, "protected_branch", f"refusing a run worktree on protected branch {branch!r}")
+        name, pattern = (f"run-{secrets.token_hex(6)}" if args.name is None else args.name), RUN_NAME_RE
+    else:
+        if args.sha is None or args.base is not None:
+            raise fail(ExitCode.USAGE, "usage", "give a SHA (review worktree) or --branch [--base B] (run worktree)")
+        if not git_mod._SHA_RE.fullmatch(args.sha):
+            raise fail(ExitCode.USAGE, "usage", f"invalid sha {args.sha!r}")
+        name, pattern = (f"review-{args.sha[:12]}" if args.name is None else args.name), REVIEW_NAME_RE
+    if not pattern.fullmatch(name) or ".." in name:
+        raise fail(ExitCode.ERROR, "unsafe_path", f"bad worktree name {name!r}: use {pattern.pattern}")
     root = worktrees_root(ctx)
     real = worktree_path(root, root / name)
     if os.path.lexists(str(real)):
         raise fail(ExitCode.ERROR, "path_exists", f"{real} already exists")
+    if args.branch is not None:
+        held = branch_holders(ctx)(branch)
+        if held is not None:
+            raise fail(ExitCode.ERROR, "branch_in_use", f"{branch} is checked out in {held['path']}",
+                       path=held["path"], dirty=held["dirty"], status=held["status"])
     exclude_worktrees_root(ctx)
     root.mkdir(parents=True, exist_ok=True)
     real = worktree_path(root, root / name)  # again, after mkdir
-    git_mod.worktree_add_detached(real, args.sha, ctx.need_work_dir())
-    return {"path": str(real), "sha": args.sha}
+    if args.branch is None:
+        git_mod.worktree_add_detached(real, args.sha, ctx.need_work_dir())
+        return {"path": str(real), "sha": args.sha}
+    git_mod.worktree_add_branch(real, branch, base, ctx.need_work_dir())
+    return {"path": str(real), "branch": branch, "base": base}
 
 
 @command("git worktree-remove", "remove a worktree notme made", args=[arg("path", metavar="PATH")])
 def cmd_git_worktree_remove(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Remove a worktree made by `git worktree-add`. PATH must be a review-* dir directly under
+    """Remove a worktree made by `git worktree-add`. PATH must be a review-* or run-* dir directly under
     <main checkout>/.claude/worktrees/; anything else, including Claude Code's own session worktrees there, is refused
-    as unsafe_path.
+    as unsafe_path. git refuses a worktree with uncommitted changes (git_error): save them with `git save-patch`
+    first. The branch of a run worktree stays.
 
     Output: path, removed
     """
     real = worktree_path(worktrees_root(ctx), args.path)
     git_mod.worktree_remove(real, ctx.need_work_dir())
     return {"path": args.path, "removed": True}
+
+
+@command("git save-patch", "save a run worktree's uncommitted work as a patch, then reset that worktree")
+def cmd_git_save_patch(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
+    """Save every uncommitted change in the run worktree (the work dir: run it with --project-dir <run worktree>)
+    as a binary patch under <git-common-dir>/not-me/patches/, then reset that worktree to HEAD and delete its
+    untracked files (ignored files stay), so its branch is free for the next run. Use it when a run cannot commit.
+
+    The work dir must be a run-* worktree that `git worktree-add --branch` made: directly under
+    <main checkout>/.claude/worktrees/, registered with git, on a branch that is not protected. The main checkout,
+    a review-* worktree, any other worktree or directory is refused as unsafe_path and nothing is touched. Bring the
+    work back with `git apply <path>` in a later run worktree on the same branch.
+
+    Output: path (null when there was nothing to save), branch, head_sha, files, reset
+    """
+    work = ctx.need_work_dir()
+    top = paths.run_git(["rev-parse", "--show-toplevel"], work)
+    if top is None:
+        raise fail(ExitCode.ERROR, "unsafe_path", "not a git checkout: save-patch works only in a run worktree")
+    real = worktree_path(worktrees_root(ctx), top)
+    registered = {os.path.realpath(w["path"]) for w in git_mod.worktree_list(work)}
+    if not RUN_NAME_RE.fullmatch(real.name) or str(real) not in registered:
+        raise fail(ExitCode.ERROR, "unsafe_path", f"{real} is not a run worktree made by `notme git worktree-add "
+                                                  "--branch`; save-patch resets nothing else")
+    branch = git_mod.current_branch(real)
+    if branch is None:
+        raise fail(ExitCode.ERROR, "unsafe_path", f"{real} has no branch checked out")
+    if ctx.protected(branch):
+        raise fail(ExitCode.ERROR, "protected_branch", f"refusing to reset the protected branch {branch!r}")
+    head = git_mod._run(["rev-parse", "HEAD"], real).stdout.strip()
+    if (git_mod._run(["ls-files", "-u"], real).stdout.strip()
+            or paths.run_git(["rev-parse", "-q", "--verify", "MERGE_HEAD"], real)):
+        raise fail(ExitCode.ERROR, "unsafe_path", f"{real} is mid-merge: save-patch would lose the merge state, "
+                                                  "so it resets nothing")
+    patch = git_mod.uncommitted_patch(real)
+    if not patch:
+        return {"path": None, "branch": branch, "head_sha": head, "files": [], "reset": False}
+    files = [p for p in git_mod._run(["diff", "--name-only", "-z", "HEAD", "--"], real).stdout.split("\0") if p]
+    target = patches_dir(ctx) / (f"{re.sub(r'[^A-Za-z0-9._-]+', '-', branch)}-"
+                                 f"{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}.patch")
+    fd = os.open(str(target), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)  # never overwrite; owner only (may hold secrets)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(patch)
+    git_mod.discard_changes(real)
+    return {"path": str(target), "branch": branch, "head_sha": head, "files": files, "reset": True}
+
+
+def patches_dir(ctx: Context) -> Path:
+    """<git-common-dir>/not-me/patches, created; unsafe_path when a part is a symlink or resolves outside."""
+    common = paths.git_common_dir(ctx.need_work_dir())
+    if common is None:
+        raise fail(ExitCode.USAGE, "usage", "not a git repository")
+    git_dir = Path(os.path.realpath(str(common)))
+    target = git_dir / "not-me" / "patches"
+    for part in (git_dir / "not-me", target):
+        if os.path.islink(str(part)):
+            raise fail(ExitCode.ERROR, "unsafe_path", f"{part} is a symlink")
+    target.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if Path(os.path.realpath(str(target))) != target:
+        raise fail(ExitCode.ERROR, "unsafe_path", f"{target} resolves outside the git directory")
+    return target
 
 
 @command("git remote-branch-exists", "does origin have a branch", args=[arg("name", metavar="NAME")])

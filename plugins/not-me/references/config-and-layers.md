@@ -55,6 +55,10 @@ A repo layer is committed by anyone with push access, so it may only tighten:
 The CLI drops a loosening value and reports it as shadowed. Report it in the log as
 a `WARN`; do not try to honour it.
 
+Keys that only change how a run works, not what it may touch, are open to every
+layer: `models.implementation` (`inline`, the default, or `delegate`),
+`models.strategy` and the model names.
+
 The tracker, companion repos in `repos` and a project board declared only in the
 repo layer take effect when the same names are in that file on the default branch
 (the commit `git ls-remote origin HEAD` reports, as fetched into the main checkout), or when the operator's allow list confirms them.

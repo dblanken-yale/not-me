@@ -125,6 +125,19 @@ class TrustAnchorTests(UnderClaudeCase):
         env = dict(self.env, CLAUDE_PROJECT_DIR=str(self.session))
         self.assertEqual(self.ok("git", "status", env=env, cwd=wt)["branch"], "main")
 
+    def test_a_session_runs_in_its_own_run_worktree_and_saves_only_there(self):
+        made = self.ok("git", "worktree-add", "--branch", "feat/run", "--base", "main")
+        wt = made["path"]
+        self.assertEqual(self.ok("--project-dir", wt, "git", "status")["branch"], "feat/run")
+        Path(wt, "a.txt").write_text("edited\n", encoding="utf-8")
+        saved = self.ok("--project-dir", wt, "git", "save-patch")
+        self.assertTrue(saved["reset"])
+        (self.session / "a.txt").write_text("session edit\n", encoding="utf-8")
+        code, payload, _ = self.cli("git", "save-patch")  # never the session checkout
+        self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
+        self.assertEqual((self.session / "a.txt").read_text(encoding="utf-8"), "session edit\n")
+        self.ok("git", "worktree-remove", wt)
+
     def test_input_file_in_another_checkout_is_refused(self):
         body = self.write(self.other, "body.md", "planted\n")
         code, payload, _ = self.cli("comment-upsert", "3", "--marker", "status", "--body-file", body)

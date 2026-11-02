@@ -121,7 +121,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual({k.split()[0] for k in known}, found)
         for name in ("me", "config", "preflight", "pick-issue", "claim-issue", "release-issue", "move-issue", "issue",
                      "pick-needs-work", "pr-children", "pr-by-head", "wait-checks", "verify-plan", "issue-body", "retro", "claim-pr", "release-pr", "bundle", "feedback", "transition", "labels-sync",
-                     "labels-ensure", "reply-thread", "comment-upsert", "request-review", "pr-body", "pr-open",
+                     "labels-ensure", "reply-thread", "comment-upsert", "comment-edit", "request-review", "pr-body", "pr-open",
                      "companion-prs", "testing-steps", "review-post", "resolve-threads", "pick-reviews",
                      "prove-target", "followup", "check-text", "log", "allow-repo", "guard", "git", "status",
                      "pause", "doctor"):
@@ -188,7 +188,7 @@ class ExitCodeTests(CliCase):
                      ["move-issue", "1", "--to", "nope"], ["pr-by-head"], ["pr-by-head", "a..b"],
                      ["pr-by-head", "-x"], ["pr-children"], ["wait-checks", "3", "--minutes", "-1"],
                      ["wait-checks", "3", "--minutes", "soon"], ["retro", "save"], ["retro", "save", "--run-id", "r"],
-                     ["retro", "is-reviewed"], ["log", "list", "--limit", "x"], ["issue-body", "1"], ["git", "remote-branch-exists"],
+                     ["retro", "is-reviewed"], ["log", "list", "--limit", "x"], ["issue-body", "1"], ["comment-edit", "3", "--body-file", "b.md"], ["git", "remote-branch-exists"],
                      ["git", "remote-branch-exists", "a..b"], ["pick-needs-work", "--exclude", "x"]):
             with self.subTest(argv=argv):
                 code, payload, _ = self.cli(*argv)
@@ -328,6 +328,7 @@ class DryRunTests(CliCase):
         things(self.fake)["4"] = {"number": 4, "title": "Fourth", "body": "", "state": "OPEN", "labels": ["to do"],
                                   "assignees": [], "author": "octocat", "comments": [], "kind": "issue"}
         self.fake.post_comment(REPO, 3, "octocat", claims.marker_body("octocat", "r-1", "2026-01-01T00:00:00Z"))
+        own = self.fake.post_comment(REPO, 3, "octocat", "An earlier note")
         body = self.write_file("body.md", "Body text\n")
         title = self.write_file("title.txt", "A title\n")
         self.write_file("companions.json", json.dumps([{"repo": "acme/app-ui", "number": 9}]))
@@ -349,6 +350,7 @@ class DryRunTests(CliCase):
             "queue-resync": ["queue-resync"],
             "reply-thread": ["reply-thread", "3", "--to", "501", "--body-file", body],
             "comment-upsert": ["comment-upsert", "3", "--marker", "status", "--body-file", body],
+            "comment-edit": ["comment-edit", "3", "--id", str(own), "--kind", "issue", "--body-file", body],
             "request-review": ["request-review", "3", "--reviewers", "hubot"],
             "pr-body": ["pr-body", "3", "--body-file", body],
             "pr-open": ["pr-open", "--head", "feat/x", "--base", "main", "--title-file", title, "--body-file", body,

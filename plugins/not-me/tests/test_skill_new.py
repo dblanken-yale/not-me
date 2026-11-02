@@ -104,7 +104,7 @@ class SkillNewTest(unittest.TestCase):
         for path in (SKILL, PLUGIN / "skills" / "update" / "SKILL.md"):
             for line in text(path).splitlines():
                 if re.match(r"\s*git\s+(?:.*\s)?commit\s", line):
-                    self.assertTrue(re.match(r"\s*git -C <checkout> ", line), f"{path.parent.name}: {line}")
+                    self.assertTrue(re.match(r"\s*git -C <wt> ", line), f"{path.parent.name}: {line}")
 
     def test_commands_exist(self):
         known = known_commands()
@@ -188,6 +188,21 @@ class SkillNewTest(unittest.TestCase):
             for line in text(path).splitlines():
                 if "AskUserQuestion" in line:
                     self.assertIn("--bg", line, f"{path.name}: AskUserQuestion without --bg guidance")
+
+    def test_run_worktree_made_for_the_branch_and_removed_whatever_the_outcome(self):
+        step4 = self.body.split("## Step 4", 1)[1].split("## Step 5", 1)[0]
+        self.assertIn("notme git worktree-add --branch <name> --base origin/<base>", step4)
+        finish = self.body.split("## Step 10", 1)[1].split("## Failure handling", 1)[0]
+        self.assertIn("notme git worktree-remove <wt>", finish)
+        self.assertIn("whatever the outcome", finish)
+        self.assertIn("git save-patch", finish)
+        self.assertNotIn("notme git stash", self.body)
+        self.assertNotIn("notme git branch-create", self.body)
+
+    def test_blocked_commit_saves_a_patch(self):
+        failures = text(SKILL_DIR / "references" / "failures.md")
+        row = next(r for r in failures.splitlines() if r.startswith("| Commit blocked or failed"))
+        self.assertIn("git save-patch", row)
 
 
 if __name__ == "__main__":

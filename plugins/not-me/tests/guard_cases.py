@@ -46,6 +46,12 @@ SCRIPTS = {
     "plainenv.sh": "export LC_ALL=C\n",
     "setenv.sh": "export GIT_DIR=../other/.git\n",
 }
+# scripts written into {F}/tmp, which the hook's TMPDIR points at (a session scratchpad lives under it)
+TMP_SCRIPTS = {
+    "check.py": "import json, sys\nprint(json.load(sys.stdin)['mode'])\n",
+    "ship.py": "import subprocess\nsubprocess.run(['git', 'push', 'origin', 'main'])\n",
+    "token.py": "print(open('/x/allowed-repos.json').read())\n",
+}
 
 # --- fixtures --------------------------------------------------------------
 
@@ -219,6 +225,11 @@ def build_fixtures(root: Path) -> Dict[str, str]:
             body = "schema: 1\n" + (front + "\n" if front else "")
             (cfg / "project.md").write_text(f"---\n{body}---\n# Project\n", encoding="utf-8")
     # outside a not-me project: a plain directory, and a git repo nested in a not-me checkout without its own config
+    tmp = root / "tmp"
+    tmp.mkdir(exist_ok=True)
+    for script, text in TMP_SCRIPTS.items():
+        (tmp / script).write_text(text, encoding="utf-8")
+    env["TMPDIR"] = str(tmp)
     (root / "nogit").mkdir(exist_ok=True)
     (root / "nogit" / "README.md").write_text("# plain\n", encoding="utf-8")
     nested = root / "app" / "vendor" / "nested"
@@ -2171,6 +2182,70 @@ bash(G, OR, "a[0]=1 gh pr comment 1 --repo acme/other -b x")
 bash(G, OR, "X+=1 gh pr comment 1 --repo acme/other -b x")
 for cmd in ("a[0]=1 git push origin feature/x", "a[0]=1 git reset --hard HEAD~1"):
     cd_case(cmd)
+    bash(A, None, cmd)
+
+# Read-only shapes an earlier guard could not check (dblanken-yale/not-me#79), outside a run and inside one. Each row
+# passes; the same shape still blocks when its text holds an opaque-text word or a write, and that message names a
+# rewrite the guard then allows.
+_ISSUE79_READS = (
+    # 1. sed e, and sed reads that are not e
+    "sed -n '1e' README.md", "sed 's/a/b/e' README.md", "sed -n '/^---$/,/^---$/p' README.md",
+    # 2. an interpreter handed a program name, not a script file
+    "python3.9 uv run pytest", "uv run python3 scripts/tool.py",
+    # 3. inline code parsing JSON from notme or gh
+    "notme config --json | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"mode\"])'",
+    "gh pr view 5 --json state | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"state\"])'",
+    # 4. code on stdin
+    "python3 - <<'EOF'\nimport json\nprint(json.dumps({}))\nEOF",
+    "notme status | python3 -",
+    # 5. eval of words the shell fills in
+    'eval "$(ssh-agent -s)"', 'eval "$X"', 'eval "$(git rev-parse --git-common-dir)"',
+    # 6. environment in front of python3
+    "PYTHONPATH=plugins/not-me python3 -m unittest discover",
+    "PYTHONPATH=plugins/not-me python3 -c 'import notme; print(1)'",
+    "PYTHONSTARTUP=x.py python3 scripts/tool.py",
+    # 7. a script under TMPDIR or a session scratchpad: read and judged when its path is known, else not read
+    "python3 {F}/tmp/check.py", 'python3 "$TMPDIR/check.py"', "python3 ${TMPDIR}/check.py",
+    'notme config --json | python3 "$TMPDIR"/check.py', "python3 $S/check.py", 'S=/x; python3 "$S/check.py"',
+    "python3 $TMPDIR/missing.py",
+    # 8. read-only git inside $(...)
+    'cat "$(git rev-parse --git-common-dir)/not-me/active-run"',
+    'cat "$(git -C {F}/app rev-parse --git-common-dir)/HEAD"', "ls $(git rev-parse --show-toplevel)",
+    "echo `git rev-parse HEAD`", 'git log "$(git merge-base HEAD main)"..HEAD',
+)
+for _where in ("app", "running"):
+    for cmd in _ISSUE79_READS:
+        bash(A, None, cmd, _where)
+# 3 and 4 holding a push: blocked as opaque text; the named rewrite, the git command itself, passes
+_ISSUE79_INLINE_ID = f"G{len(CASES) + 1:03d}"
+bash(B, PB, "python3 -c 'import subprocess; subprocess.run([\"git\", \"push\", \"origin\", \"feature/x\"])'")
+_ISSUE79_STDIN_ID = f"G{len(CASES) + 1:03d}"
+bash(B, PB, "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['git', 'push', 'origin', 'feature/x'])\nEOF")
+bash(A, None, "git push origin feature/x")
+# 5. eval of a push whose remote the shell fills in: the message says to write the remote out, which passes
+_ISSUE79_EVAL_ID = f"G{len(CASES) + 1:03d}"
+bash(B, PB, 'eval "git push $R HEAD"')
+bash(G, OR, "git push $R HEAD")
+_ISSUE79_SUBST_REMOTE_ID = f"G{len(CASES) + 1:03d}"
+bash(G, OR, "git push $(echo origin) HEAD")
+bash(G, OR, "git push `echo origin` HEAD")
+bash(A, None, "git push origin HEAD")
+# 7. a script under TMPDIR is read like any other: one that pushes or names a protected file blocks
+_ISSUE79_TMP_ID = f"G{len(CASES) + 1:03d}"
+bash(B, PB, 'python3 "$TMPDIR/ship.py"')
+bash(B, PB, "python3 ${TMPDIR}/ship.py")
+bash(B, PB, "python3 {F}/tmp/ship.py")
+bash(B, PB, ". $TMPDIR/ship.py")
+for _where in ("app", "nogit"):
+    bash(B, SP, 'python3 "$TMPDIR/token.py"', _where)
+    bash(B, SP, "python3 {F}/tmp/token.py", _where)
+bash(A, None, 'python3 "$TMPDIR/ship.py"', "nogit")  # outside not-me only self-protection applies
+bash(A, None, "python3 $TMPDIRX/ship.py")  # another variable: not read
+# 8. a write inside $(...) is judged like any other
+_ISSUE79_SUBST_ID = f"G{len(CASES) + 1:03d}"
+bash(B, PB, 'echo "$(git commit -m x)"', "main")
+bash(A, None, "git switch -c fix/x && git commit -m x", "main")
+bash(G, OR, 'echo "$(git -C {F}/other push)"')
 KEEP_END = len(CASES)
 
 # dblanken-yale/not-me#141: guide to the right process, hard-block only what breaks it or cannot be undone.
@@ -2332,4 +2407,12 @@ MESSAGE_CHECKS: Dict[str, List[str]] = {
                       "Instead: write the path out in full (`git -C /abs/path <sub> ...`), or run the command the "
                       "alias stands for; a rewritten command is checked afresh, so this is not a retry."],
     _VAR_C_ALIAS_HERE_ID: ["cannot look up the alias git pp"],
+    _ISSUE79_INLINE_ID: ["python3 runs code the guard does not parse, and it holds `push`",
+                         "Instead: run the git, gh or notme command directly, with every word spelled out"],
+    _ISSUE79_STDIN_ID: ["python3 runs code the guard does not parse, and it holds `push`",
+                        "Instead: run the git, gh or notme command directly, with every word spelled out"],
+    _ISSUE79_TMP_ID: ["is a script the guard does not parse, and it holds `push`",
+                      "Instead: run the git, gh or notme command directly, with every word spelled out"],
+    _ISSUE79_SUBST_ID: ["commits on the protected branch main are not allowed",
+                        "Instead: create a feature branch first (git switch -c <type>/<topic>)"],
 }

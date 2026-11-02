@@ -235,7 +235,22 @@ EOF
 
 Interpreter code (inline, or a here-document fed to an interpreter) that starts no process and names no `git`, `gh`, `notme` or GitHub API runs none of those commands. A word from the list in it is guided under `process`: the call runs and the guard log records it. Code counts as starting a process when it holds words such as `system`, `exec`, `spawn`, `popen`, `subprocess`, `child_process`, `shell`, `eval`, `run(`, `fetch`, `request` or `http`, so splitting `"g"+"it push"` across strings inside `os.system` still blocks. `rm -r .git` and the allow list's name block either way. Shell text, script files and code read from a pipe are judged by their words as before. The process rule: run git, gh and notme directly, never from interpreter code.
 
-With the three hard rules off, opaque text is blocked only for the self-protection words.
+A script file is read from its path. In that path the guard fills in `$TMPDIR`, `$HOME` and `$NOT_ME_HOME`, written as `$NAME` or `${NAME}`, so a script under one of them, or at a literal path (such as the session scratchpad), is read: `python3 "$TMPDIR/check.py"` is judged like `python3 /abs/path/check.py`. A path built from any other variable (`python3 "$S/check.py"`) and a file that does not exist are not read, and the call is allowed. To have such a script checked, write it to a literal path or under `$TMPDIR`. The guard takes these three values from the hook's own environment, so a command that reassigns or exports `TMPDIR`, `HOME` or `NOT_ME_HOME` before using it (`TMPDIR=/x; python3 "$TMPDIR/s.py"`) is judged against the hook's value, not the new one. The file is read when the guard checks the command and could change before it runs (see [Honest limits](#honest-limits)).
+
+Read-only shapes that an earlier guard blocked as "cannot check" all pass now, outside a run and inside one, unless their text holds a word from the table:
+
+```
+sed -n '1e' README.md                                         # sed is not inspected (see Honest limits)
+python3.9 uv run pytest                                       # 'uv' is not a file: nothing to read
+notme config --json | python3 -c 'import json,sys; ...'       # inline code: nothing in the list
+python3 - <<'EOF' ... EOF                                     # code on stdin: nothing in the list
+eval "$(ssh-agent -s)"                                        # eval body parsed; nothing it can judge
+PYTHONPATH=plugins/not-me python3 -m unittest discover        # interpreter environment is not judged
+python3 "$TMPDIR/check.py"                                    # read and judged: nothing in the list
+cat "$(git rev-parse --git-common-dir)/not-me/active-run"     # the inner git rev-parse is a read
+```
+
+With all four rules off, opaque text is blocked only for the self-protection words.
 
 ## The block message
 
@@ -281,6 +296,12 @@ Since dblanken-yale/not-me#144 a git write is judged on the branch checked out w
 - A `git -C` path the guard cannot work out with no directory change in the command (a variable it does not know, `$W/..`): git reads an empty or unset path as the current directory, so a write that reads the branch blocks when the session's own branch is protected. A push is taken as not reading the branch only when every refspec names its destination after a `:` (`feature/x:feature/x`). Otherwise the write runs and the guard log records it as guided under `protected_branches`. A checkout or switch there may move any checkout's branch, the session's included, so a later write in the command that reads the branch blocks. A rule the command breaks on its own still blocks: a force push, a push to a protected branch it names, `clean -x`, a forced delete of a protected branch. A git alias there blocks, since the guard cannot look it up in a checkout it cannot name.
 
 Skills run git in a run worktree as `git -C <worktree> ...`, never after `cd` (`scripts/check-skills.py` rule R16).
+
+A push whose remote the shell fills in (a variable, `$(...)` or backticks: `git push $R HEAD`, also inside `eval`) is blocked the same way: `Why: the guard does not expand shell variables or substitutions, so the remote $R cannot be checked`, with ``Instead: write the remote name out (`git push origin <branch>`).``
+
+A block on [opaque text](#opaque-text) (inline code, code on stdin, a script file, an `eval` or substitution the shell fills in) names the word it found and says `Instead: run the git, gh or notme command directly, with every word spelled out, so the guard can check it.` The direct command is then judged on its own: `python3 -c 'import subprocess; subprocess.run(["git", "push", "origin", "feature/x"])'` is blocked, and `git push origin feature/x` passes.
+
+One detail in the message is misleading. It names `.claude/not-me/project.md` for "relax this rule", but the repo layer ignores that (see below), so use your global layer, `~/.claude/not-me/project.md`.
 
 ## Allow a repo
 
@@ -378,8 +399,9 @@ What it does not cover:
 - The operator commands. `notme allow-repo add`, `pause off` and `mode live` are not blocked; only `prohibitions.md` keeps a run from issuing them on its own. The settings ledger shows each change after the fact.
 - Pushes and writes through other tools. `curl` or any HTTP client to the GitHub API, a gh extension or alias, a git hook, an external `git-<name>` program, MCP tools other than GitHub ones, the repo a GitHub MCP tool writes to, and your own terminal are outside its view.
 - Reads. Any repo your token can read can be read.
-- Time of check. It looks at your git config when it checks. Something that changes the config between the check and the command is out of reach.
+- Time of check. It looks at your git config, and reads a script file, when it checks. Something that changes the config between the check and the command is out of reach.
 - Git config that runs a command: `core.pager`, `core.editor`, `core.sshCommand`, `diff.*.textconv`, `core.hooksPath`, `GIT_PAGER` and the like, set with `-c` or in the environment, are out of scope; the session can run any command anyway, and GitHub rulesets are the backstop.
+- The repo layer's `tracker` and `repos`. The hook allows the repos named there without looking at your allow list, while the `notme` CLI requires you to confirm them. Review changes to those two keys the way you would review code.
 
 Use the guard with the protections that do not depend on it:
 
