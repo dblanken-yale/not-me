@@ -245,6 +245,21 @@ class OperatorCommandTests(UnderClaudeCase):
         self.assertEqual(out["summary"], "not-me is paused for every project")
         self.assertEqual([x["op"] for x in self.settings_ledger()], ["pause on", "pause off", "pause on"])
 
+    def test_self_widening_commands_refuse_while_a_run_is_active_in_this_worktree(self):
+        started = self.ok("log", "start", "--skill", "new", "--ref", "issue 2")
+        self.ok("pause", "on")  # tightening is never gated
+        for argv in (("allow-repo", "add", "acme/extra"), ("pause", "off"), ("mode", "live")):
+            with self.subTest(argv=argv):
+                code, payload, _ = self.cli(*argv)
+                self.assertEqual((code, payload["kind"]), (1, "active_run"))
+                self.assertEqual(payload["active_run"]["run_id"], started["run_id"])
+        self.assertEqual(self.entries(), [])
+        self.assertTrue(self.ok("status")["paused"]["project"])
+        self.ok("log", "finish", started["path"], "--status", "done")
+        self.assertTrue(self.ok("allow-repo", "add", "acme/extra")["added"])
+        self.assertFalse(self.ok("pause", "off")["paused"])
+        self.assertEqual(self.ok("mode", "live")["mode"], "live")
+
     def test_init_token_is_gone(self):
         code, _, _ = self.cli("doctor", "--init-token")
         self.assertEqual(code, 2)

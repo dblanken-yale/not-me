@@ -118,6 +118,9 @@ nothing in the operator's checkout and holds a branch only for its own life.
    out the PR branch in the main checkout.
 2. Never commit in a review worktree.
 3. Remove only the worktree you created, at the end of the run.
+4. Review worktree names stay `review-` only: `worktree-remove` and `save-patch` use the prefix to refuse a person's or
+   a session's worktree, so a wider name pattern would widen what a run may delete (an earlier
+   issue asked for the change or this note).
 
 ## Epics
 

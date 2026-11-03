@@ -579,7 +579,7 @@ bash(A, None, "echo $(git push https://github.com/acme/lib.git HEAD)", "off")
 bash(A, None, "git push --force https://github.com/acme/lib.git main", "alloff")
 bash(A, None, "git commit -m x", "mainpboff")
 # Activation: config missing but a run is active -> guarded with origin only.
-bash(G, OR, "gh pr comment 1 --repo acme/other -b x", "run")
+bash(B, OR, "gh pr comment 1 --repo acme/other -b x", "run")  # a run is active: blocked, not guided
 bash(A, None, "gh pr comment 1 --repo acme/app -b x", "run")
 bash(A, None, "gh pr comment 1 --repo acme/other -b x", "stale")
 bash(A, None, "gh pr comment 1 --repo acme/other -b x", "bare")

@@ -24,9 +24,10 @@ them in `ctx.guided` and the hook logs the first one to guard.jsonl with
 outcome "guided". The process rule each stands for lives in
 references/prohibitions.md:
   other_repo          git and gh writes to repos off the allowed list, and
-                      changes to where git pushes (`guard.other_repo: off`
-                      stops the log lines, and lifts the CLI write gate's
-                      repo check too)
+                      changes to where git pushes. Guided in a person's
+                      session, but blocked (with an "Instead:" line) while a
+                      not-me run is active (`guard.other_repo: off` stops
+                      both, and lifts the CLI write gate's repo check too)
   process             edits to the repo layer config while a run is active
 GitHub MCP tools get the hard rules only (see _mcp); other MCP tools are not judged.
 Self-protection is always on, in every directory: the allow list file (by
@@ -1118,6 +1119,12 @@ def _blk(shown: str) -> Blk:
     return blk
 
 
+def _guided(rule: str, ctx: GuardContext) -> bool:
+    """A guided rule is logged, not blocked. other_repo is guided only while no not-me run is active: a person's
+    own session is guided, a run is blocked (it must not reach a repo off the allowed list)."""
+    return rule in GUIDED and not (rule == "other_repo" and ctx.active_run)
+
+
 def decide(event: Mapping[str, Any], ctx: GuardContext) -> Decision:
     global _norm_memo
     if _norm_memo is not None:
@@ -1149,7 +1156,7 @@ def _decide(event: Mapping[str, Any], ctx: GuardContext) -> Decision:
             continue
         if block.rule == OPAQUE:
             enabled = [r for r in (block.rules or RULES) if ctx.rules.get(r, True)]
-            hard = [r for r in enabled if r not in GUIDED]
+            hard = [r for r in enabled if not _guided(r, ctx)]
             if not hard:
                 if enabled:  # only a guided rule is left: record it, keep looking for a hard block
                     block.rule = enabled[0]
@@ -1160,7 +1167,7 @@ def _decide(event: Mapping[str, Any], ctx: GuardContext) -> Decision:
         elif block.rule != SELF and not ctx.rules.get(block.rule, True):
             continue
         block.tool = tool
-        if block.rule in GUIDED or block.guide_only:
+        if _guided(block.rule, ctx) or block.guide_only:
             ctx.guided.append(block)
             continue
         block.message = render(block, ctx)

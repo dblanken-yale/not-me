@@ -1278,8 +1278,9 @@ class DoctorAndPreflightTests(base.CliCase):
         self.assertTrue(files["ok"], files)
         self.assertIn("global: project.md", files["detail"])
         self.assertTrue(all({"name", "ok", "detail", "required", "fix", "hint"} <= set(c) for c in payload["checks"]))
-        self.assertEqual(payload["checks"][5], {"name": "mode", "ok": True, "detail": "live",
-                                                "required": False, "fix": None, "hint": None})
+        mode = payload["checks"][5]  # the fixture's `mode: live` is hand-edited, so doctor says so (a warning)
+        self.assertEqual((mode["name"], mode["ok"], mode["required"], mode["fix"]), ("mode", False, False, None))
+        self.assertTrue(mode["detail"].startswith("live; "))
 
     def test_doctor_queue_check_warns_about_a_missing_pick_label(self):
         payload = self.ok("doctor")  # the fake repo has no labels defined

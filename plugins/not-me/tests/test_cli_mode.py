@@ -295,6 +295,39 @@ class ModeLiveTests(ModeCliCase):
         self.assertIn(":3", out["note"])
 
 
+class HandEditedLiveTests(UnderClaudeCase):
+    """A global `mode: live` typed in by hand works, and is flagged once and by doctor (information only)."""
+
+    def setUp(self):
+        super().setUp()
+        (self.home / "project.md").write_text(base.GLOBAL_PROJECT, encoding="utf-8")  # live, by hand
+        self.notice = self.home / cli.LIVE_NOTICE_MARKER
+        self.notice.unlink(missing_ok=True)  # CliCase marks the notice as seen
+
+    def hand_warnings(self, payload):
+        return [w for w in payload.get("warnings", []) if "set by hand" in w]
+
+    def test_first_run_notice_shows_once(self):
+        first = self.ok("mode", "show")
+        self.assertEqual((first["mode"], first["dry_run"]), ("live", False))
+        self.assertEqual(len(self.hand_warnings(first)), 1)
+        self.assertTrue(self.notice.is_file())
+        self.assertEqual(self.hand_warnings(self.ok("mode", "show")), [])
+
+    def test_no_notice_once_live_is_on_record(self):
+        self.ok("mode", "dry-run", "--global")
+        out = self.ok("mode", "live")
+        self.assertEqual(self.hand_warnings(out), [])
+        self.assertFalse(self.notice.exists())
+
+    def test_doctor_warns_about_it_every_time(self):
+        for _ in range(2):
+            code, payload, _ = self.cli("doctor")
+            mode = [c for c in payload["checks"] if c["name"] == "mode"][0]
+            self.assertEqual((mode["ok"], mode["required"]), (False, False))
+            self.assertIn("set by hand", mode["detail"])
+
+
 class ModeLiveUnderClaudeTests(UnderClaudeCase):
     """The operator's /not-me:mode live runs the CLI inside the session (dblanken-yale/not-me#118)."""
 

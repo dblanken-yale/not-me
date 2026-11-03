@@ -1218,6 +1218,23 @@ class GuideNotBlockTests(_Fixtures):
                 self.assertIsNone(result, getattr(result, "message", ""))
                 self.assertEqual([b.rule for b in ctx.guided][:1], ["other_repo"])
 
+    def test_writes_to_another_repo_are_blocked_while_a_run_is_active(self):
+        for cmd in ("gh issue comment 5 --repo acme/other --body-file b.md",
+                    "git push https://github.com/acme/lib.git HEAD",
+                    "git remote set-url origin " + gc.GH + "acme/lib",
+                    "git remote add up " + gc.GH + "acme/lib",
+                    "git config remote.origin.pushurl " + gc.GH + "acme/lib"):
+            with self.subTest(cmd=cmd):
+                result, ctx = self.decide(cmd, "running")
+                self.assertIsInstance(result, Block)
+                self.assertEqual(result.rule, "other_repo")
+                if cmd.startswith(("git remote", "git config")):
+                    self.assertIn("Instead:", result.message)
+                self.assertEqual(ctx.guided, [])
+                person, pctx = self.decide(cmd)  # the same call in a session with no run: guided, runs
+                self.assertIsNone(person)
+                self.assertEqual([b.rule for b in pctx.guided][:1], ["other_repo"])
+
     def test_off_rule_is_neither_blocked_nor_guided(self):
         result, ctx = self.decide("gh pr comment 5 --repo acme/other --body hi", "off")
         self.assertIsNone(result)

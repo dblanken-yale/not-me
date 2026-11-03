@@ -16,7 +16,8 @@ A not-me run never does any of these:
    commits).
 3. Merge a pull request. Merging is no skill's step: a person merges, by hand or by
    asking Claude directly outside a run. The guard does not stop a merge, so this
-   rule is yours to keep.
+   rule is yours to keep. Skills never choose to merge, but a merge a person directly asks for
+   in a session is fine.
 4. Change repository settings, secrets, variables, branch protection, or the
    permissions of workflows.
 5. Touch production, databases, or live sites beyond what `verify.md` explicitly

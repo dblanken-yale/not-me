@@ -180,6 +180,14 @@ class FixTests(unittest.TestCase):
         self.assertEqual((mode["ok"], mode["detail"], mode["required"]), (True, "live", False))
         self.assertIsNone(mode["fix"])
 
+    def test_hand_edited_live_mode_is_a_warning_not_a_failure(self):
+        mode = doctor.mode_check("live", unsigned=True)
+        self.assertEqual((mode["ok"], mode["required"], mode["fix"]), (False, False, None))
+        self.assertIn("set by hand", mode["detail"])
+        self.assertTrue(doctor.mode_check("live", unsigned=False)["ok"])
+        self.assertTrue(doctor.mode_check("dry-run", unsigned=True)["ok"])
+        self.assertIsNone(doctor.exit_kind([mode]))
+
     def test_no_failures_means_nothing_to_offer(self):
         with on("linux"):
             checks = doctor.run(ok_runner, [], lambda: StubGh(), lambda: {"active": True, "selftest": True},

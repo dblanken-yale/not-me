@@ -84,6 +84,7 @@ CLAUDE_ENV = ("CLAUDECODE", "CLAUDE_PROJECT_DIR")  # either one keeps the CLI re
 # what the operator changed with allow-repo, pause and mode: one JSON line each, under the not-me home, so a change
 # made for every project is logged once and the operator can see and undo it
 SETTINGS_LEDGER = "settings-changes.jsonl"
+LIVE_NOTICE_MARKER = "live-unsigned-notice"  # in the not-me home: the first-run notice was shown
 _AUTH_RE = re.compile(r"(?i)gh auth login|not logged in|bad credentials|http 401|requires?\b.*\bscopes?\b|"
                       r"missing\b.*\bscopes?\b|token has not been granted|authentication required")
 _REF_RES = (
@@ -383,6 +384,31 @@ class Context:
         except (LedgerError, OSError) as exc:
             self.warn(f"the settings ledger was not written ({exc}); the change stands")
         return {"summary": summary, "ledger": str(path)}
+
+    def live_unsigned(self) -> bool:
+        """Effective mode is live but the settings ledger does not end with a `mode live` entry: the global layer
+        was edited by hand. Information only; it changes no behaviour."""
+        if str(self.meta.get("mode") or "dry-run") != "live":
+            return False
+        try:
+            lines = Ledger(Path(self.cfg.home) / SETTINGS_LEDGER).read()
+        except (LedgerError, OSError):
+            return True
+        ops = [x.get("op") for x in lines if str(x.get("op", "")).startswith("mode ")]
+        return not ops or ops[-1] != "mode live"
+
+    def first_run_notice(self) -> None:
+        """Once per not-me home, warn that a live mode was set by hand (see live_unsigned). Never fails the call."""
+        if self._cfg is None:
+            return
+        try:
+            marker = Path(self.cfg.home) / LIVE_NOTICE_MARKER
+            if marker.exists() or not self.live_unsigned():
+                return
+            self.warn(doctor_mod.UNSIGNED_LIVE + " (shown once; `notme doctor` keeps showing it)")
+            marker.write_text(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n", encoding="utf-8")
+        except (OSError, ValueError, CliExit):
+            return
 
     # --- config ---
 
@@ -2012,7 +2038,20 @@ def _origin(ctx: Context) -> Optional[str]:
     return (writes.parse_origin(git_mod.origin_url(work)) if work else None) or getattr(ctx.args, "repo", None)
 
 
+def _refuse_during_run(ctx: Context, what: str) -> None:
+    """Refuse a self-widening setting change (allow-repo add, mode live, pause off) while a not-me run is active in
+    this worktree: a run never widens itself, only a person does, from a session with no run here."""
+    active = ctx.active_run()
+    if active:
+        raise fail(ExitCode.ERROR, "active_run",
+                   f"a not-me run is active ({active.get('skill')} on {active.get('ref')}); runs never {what}, "
+                   "only a person does, from a session with no run in this worktree; nothing changed",
+                   active_run=active)
+
+
 def _allow_change(ctx: Context, args: argparse.Namespace, add: bool) -> Dict[str, Any]:
+    if add:
+        _refuse_during_run(ctx, "widen the allow list")
     scope = None
     if not args.everywhere:
         scope = _origin(ctx)
@@ -2044,7 +2083,8 @@ _ALLOW_ARGS = [arg("slug", nargs="?", metavar="SLUG"), arg("--board", metavar="O
 @command("allow-repo add", "allow a repo or board", args=_ALLOW_ARGS)
 def cmd_allow_repo_add(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """Allow a repo (or, with --board, a project board) for this project or everywhere. The operator runs it
-    through /not-me:allow-repo, in the session; a run never does on its own (references/prohibitions.md). Repos
+    through /not-me:allow-repo, in the session; a run never does on its own: refused (kind active_run) while a
+    run is active in this worktree (references/prohibitions.md). Repos
     and the board named in the repo layer on the default branch are allowed without it. summary says in words what
     changed (or that nothing did); a change also appends a line to the settings ledger, whose path is ledger;
     entries is the allow list afterwards, as `allow-repo list` shows it.
@@ -2485,11 +2525,14 @@ def _status_items(ctx: Context) -> List[Dict[str, Any]]:
 def cmd_pause(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """Turn not-me off or on for this project (or for every project with --global) by writing or removing the
     PAUSED file. Pick and claim commands then report paused. The operator runs it through /not-me:pause; a run
-    never turns a pause off on its own (references/prohibitions.md). summary says in words what changed (or that
+    never turns a pause off on its own: `pause off` is refused (kind active_run) while a run is active in this
+    worktree (references/prohibitions.md). summary says in words what changed (or that
     nothing did); a change also appends a line to the settings ledger, whose path is ledger.
 
     Output: paused, scope, summary, ledger (when something changed)
     """
+    if args.state == "off":
+        _refuse_during_run(ctx, "turn a pause off")
     scope = "global" if args.global_ else "project"
     files = ctx.pause_files()
     if scope not in files:
@@ -2572,13 +2615,15 @@ def cmd_mode_dry_run(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
 @command("mode live", "set mode: live in the global layer")
 def cmd_mode_live(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """Set `mode: live` in the global layer only (the repo layer can never turn live mode on). The operator runs it
-    through /not-me:mode live, in the session; a run never does on its own (references/prohibitions.md). When the
+    through /not-me:mode live, in the session; a run never does on its own: refused (kind active_run) while a run
+    is active in this worktree (references/prohibitions.md). When the
     repo layer still pins dry-run, the global layer is written anyway, repo_pin names that file and line, and note
     says so. summary and ledger as for mode dry-run.
 
     Output: the mode show keys, plus written (layer, file, mode), summary, ledger and, when the repo pins dry-run,
     note
     """
+    _refuse_during_run(ctx, "go live")
     out = _set_mode(ctx, "global", "live")
     pin = out["repo_pin"]
     if pin:
@@ -2601,7 +2646,7 @@ def cmd_doctor(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     """
     checks = doctor_mod.run(ctx.deps.runner or gh_mod._default_runner, ctx.config_errors(), lambda: ctx.gh,
                             ctx.guard_state, ctx.env,
-                            doctor_mod.mode_check(ctx.meta.get("mode")),
+                            doctor_mod.mode_check(ctx.meta.get("mode"), ctx.live_unsigned()),
                             config_files=ctx.cfg.layers.files, pass_labels=lambda: _pass_label_check(ctx),
                             queue=lambda: _doctor_queue(ctx), drift=lambda: _doctor_drift(ctx))
     verdict = doctor_mod.exit_kind(checks)
@@ -2756,6 +2801,7 @@ def main(argv: Optional[Sequence[str]] = None, *, runner: Optional[gh_mod.Runner
         ctx = Context(args, deps)
         log = ctx.open_log(args.log) if getattr(args, "log", None) else None
         payload = args.cmd.run(ctx, args)
+        ctx.first_run_notice()
         dry = args.writes and ctx.mode_is_dry
         if dry:
             payload.setdefault("dry_run", True)

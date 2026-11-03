@@ -136,9 +136,18 @@ def config_files_check(files: Mapping[str, Sequence[str]]) -> Check:
     return check("config files", bool(found), detail, required=False, fix=SETUP_FIX)
 
 
-def mode_check(mode: Any) -> Check:
-    """The effective mode, for information. Never a fix: the operator changes it with /not-me:mode."""
-    return check("mode", True, str(mode or "dry-run"), required=False)
+UNSIGNED_LIVE = ("mode: live in the global layer was set by hand: the settings ledger has no entry for it. "
+                 "It works; to put it on record, switch to dry-run and back with /not-me:mode")
+
+
+def mode_check(mode: Any, unsigned: bool = False) -> Check:
+    """The effective mode, for information; a warning (never a failure) when mode is live but was edited in by hand
+    (unsigned: the settings ledger does not end with a live entry). Never a fix: the operator changes it with
+    /not-me:mode."""
+    shown = str(mode or "dry-run")
+    if unsigned and shown == "live":
+        return check("mode", False, f"live; {UNSIGNED_LIVE}", required=False)
+    return check("mode", True, shown, required=False)
 
 
 def pass_label_check(result: Mapping[str, Any]) -> Check:

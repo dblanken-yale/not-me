@@ -83,7 +83,7 @@ Decided by the owner on 2026-10-30 (dblanken-yale/not-me#141): guide runs to the
 | The write gate (`writes.check_write`): CLI writes only to origin, tracker, companions and the allow list | keep | Now the line that keeps runs to their project's repos, since the guard only guides there. |
 | A tracker, companion or board named only in the repo layer counts when the same name is in that file on the default branch, without an allow-list entry: the commit `git ls-remote origin HEAD` reports, read from the local object store when it has been fetched | keep (new in dblanken-yale/not-me#118) | The file reaches the default branch only through a reviewed merge. A PR branch, a checked-out branch, the working tree or a moved local ref still cannot widen anything. The hook does not ask the remote; only the CLI write gate does. |
 | The repo layer may only tighten (decision 1) | keep | A PR branch must not widen what not-me may touch. |
-| `APPROVE` needs `review.auto_approve` in the global layer; `assign-issue` refused during a run; branch and worktree names checked | keep | Process rules the CLI can enforce exactly, with no false blocks. |
+| `APPROVE` needs `review.auto_approve` in the global layer; `assign-issue`, `allow-repo add`, `pause off` and `mode live` refused during a run (kind `active_run`; a person's slash commands from a session with no run in that worktree always work); branch and worktree names checked | keep | Process rules the CLI can enforce exactly, with no false blocks. |
 
 ## The rule groups
 
@@ -94,15 +94,15 @@ There are four rule keys. Each is on by default. Each is switched by a key under
 | `guard.protected_branches` | hard | No commits, merges, rebases, cherry-picks or hard resets on protected branches, and no pushes to them |
 | `guard.force_push` | hard | No history rewrites and no deleting remote branches |
 | `guard.destructive_git` | hard | No changing GitHub settings, secrets or rulesets, no deleting on GitHub, no `rm -rf .git`, `git clean -x` or forced deletes of a protected branch |
-| `guard.other_repo` | guided | git and gh writes to repos off the allowed list, and changes to where git pushes, run and are logged |
+| `guard.other_repo` | guided, hard during a run | git and gh writes to repos off the allowed list, and changes to where git pushes: logged and run in a session with no run active, blocked while a not-me run is active in that checkout |
 
 A fifth rule, `process`, has no key: it is always guided. It covers edits to the repo layer config while a run is active.
 
 Reads are never blocked. `gh pr view`, `git log`, `gh api repos/acme/lib/pulls` and similar work against any repo.
 
-### other_repo (guided)
+### other_repo (guided in a session, blocked during a run)
 
-The allowed set is: the repo the checkout belongs to (`origin`), plus `tracker`, plus every repo in `repos`, plus `allow_repos` from your global layer, plus your allow list for this project and for all projects. A git or gh write to anything else runs and is logged as guided under `other_repo`, for example:
+The allowed set is: the repo the checkout belongs to (`origin`), plus `tracker`, plus every repo in `repos`, plus `allow_repos` from your global layer, plus your allow list for this project and for all projects. A git or gh write to anything else runs and is logged as guided under `other_repo` when no not-me run is active in the checkout (a person's session), and is blocked while one is, for example:
 
 ```
 gh issue create --repo acme/not-me --title x --body-file b.md   # reporting a bug on the plugin's repo

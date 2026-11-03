@@ -64,6 +64,7 @@ class CliCase(unittest.TestCase):
         self.tc = TempCase()
         self.addCleanup(self.tc.cleanup)
         self.tc.write("global", "project", self.global_project)
+        (self.tc.home / cli.LIVE_NOTICE_MARKER).write_text("seen\n", encoding="utf-8")  # no first-run notice noise
         self.fake = FakeRunner()
         self.env = {"NOT_ME_HOME": str(self.tc.home), "PATH": os.environ.get("PATH", ""),
                     "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT)}

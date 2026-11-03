@@ -823,7 +823,7 @@ Output: run_id, reviewed
 
 ### `notme allow-repo add`
 
-Allow a repo (or, with --board, a project board) for this project or everywhere. The operator runs it through /not-me:allow-repo, in the session; a run never does on its own (references/prohibitions.md). Repos and the board named in the repo layer on the default branch are allowed without it. summary says in words what changed (or that nothing did); a change also appends a line to the settings ledger, whose path is ledger; entries is the allow list afterwards, as `allow-repo list` shows it.
+Allow a repo (or, with --board, a project board) for this project or everywhere. The operator runs it through /not-me:allow-repo, in the session; a run never does on its own: refused (kind active_run) while a run is active in this worktree (references/prohibitions.md). Repos and the board named in the repo layer on the default branch are allowed without it. summary says in words what changed (or that nothing did); a change also appends a line to the settings ledger, whose path is ledger; entries is the allow list afterwards, as `allow-repo list` shows it.
 
 ```
 notme allow-repo add SLUG [--board OWNER/NUMBER] [--everywhere]
@@ -1040,7 +1040,7 @@ Output: enabled, paused (global, project), mode, repo, tracker, operator, active
 
 ### `notme pause`
 
-Turn not-me off or on for this project (or for every project with --global) by writing or removing the PAUSED file. Pick and claim commands then report paused. The operator runs it through /not-me:pause; a run never turns a pause off on its own (references/prohibitions.md). summary says in words what changed (or that nothing did); a change also appends a line to the settings ledger, whose path is ledger.
+Turn not-me off or on for this project (or for every project with --global) by writing or removing the PAUSED file. Pick and claim commands then report paused. The operator runs it through /not-me:pause; a run never turns a pause off on its own: `pause off` is refused (kind active_run) while a run is active in this worktree (references/prohibitions.md). summary says in words what changed (or that nothing did); a change also appends a line to the settings ledger, whose path is ledger.
 
 ```
 notme pause state [--global]
@@ -1079,7 +1079,7 @@ Output: the mode show keys, plus written (layer, file, mode), summary, ledger
 
 ### `notme mode live`
 
-Set `mode: live` in the global layer only (the repo layer can never turn live mode on). The operator runs it through /not-me:mode live, in the session; a run never does on its own (references/prohibitions.md). When the repo layer still pins dry-run, the global layer is written anyway, repo_pin names that file and line, and note says so. summary and ledger as for mode dry-run.
+Set `mode: live` in the global layer only (the repo layer can never turn live mode on). The operator runs it through /not-me:mode live, in the session; a run never does on its own: refused (kind active_run) while a run is active in this worktree (references/prohibitions.md). When the repo layer still pins dry-run, the global layer is written anyway, repo_pin names that file and line, and note says so. summary and ledger as for mode dry-run.
 
 ```
 notme mode live
