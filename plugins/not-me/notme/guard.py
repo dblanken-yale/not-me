@@ -154,8 +154,14 @@ def _then(first: "re.Pattern[str]", second: "re.Pattern[str]") -> Matcher:
     return match
 
 
+# push as a word in opaque text is judged by _opaque_push, not listed here: it blocks only when it can reach a
+# protected branch or is forced, never merely for being there
+_PUSH_WORD = re.compile(r"(?<![^\s'\"(\[,;|&{=`])push(?=[\s'\")\],;|&}`]|$)")
+_PUSH_FORCE = re.compile(r"--force|--mirror|--delete|(?<![A-Za-z0-9_-])-[A-Za-z]*f(?![A-Za-z0-9_-])|(?<=[\s'\"])\+(?![\s'\"+])")
+
+_PUSH_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://|[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:|github\.com[:/]", re.IGNORECASE)
+
 _DANGER: Tuple[Tuple[Matcher, Tuple[str, ...]], ...] = (
-    (_found(re.compile(r"(?<![^\s'\"(\[,;|&{=`])push(?=[\s'\")\],;|&}`]|$)")), (_PB, _FP, _OR)),  # push as a word
     (_found(re.compile(r"reset\s+(?:\S+\s+)?--hard")), (_PB,)),
     # gh pr merge|close --delete-branch (or -d) deletes the remote branch
     (_then(re.compile(r"(?<![A-Za-z0-9_-])pr\s+(?:merge|close)(?![A-Za-z0-9_-])"),
@@ -453,7 +459,7 @@ def _spellings(text: str) -> List[str]:
 def risky_text(text: str) -> bool:
     """text, read as opaque, holds a word that would block: used by the hook when it cannot decide a call at all."""
     return any(_SELF_TEXT.search(v) or _NOTME_TEXT.search(v) or any(match(v) for match, _ in _DANGER)
-               for v in _spellings(text))
+               or _PUSH_WORD.search(v) for v in _spellings(text))
 
 
 class Unparsed(ValueError):
@@ -1417,7 +1423,8 @@ def _bash(cmd: str, cwd: str, ctx: GuardContext, depth: int = 0,
     try:
         parsed = lex(cmd)
     except Unparsed as exc:
-        yield from _opaque(cmd, _blk(_short(cmd)), f"the guard cannot parse this command ({exc})")
+        st = _State(cwd, Parsed([], [], cmd, False), cmd, depth, parent)  # no commands, but the checkout's branch
+        yield from _opaque(cmd, _blk(_short(cmd)), f"the guard cannot parse this command ({exc})", ctx=ctx, st=st)
         return
     for p in (parsed, _raw_variant(parsed)):
         if p is None:
@@ -1446,10 +1453,11 @@ def _raw_variant(parsed: Parsed) -> Optional[Parsed]:
     return Parsed(commands, parsed.subs, parsed.code, parsed.funcdef)
 
 
-def _opaque(text: str, blk: Blk, what: str, inline: bool = True) -> Iterator[Block]:
+def _opaque(text: str, blk: Blk, what: str, inline: bool = True, ctx: Optional[GuardContext] = None,
+            st: Optional[_State] = None) -> Iterator[Block]:
     """Text the guard does not parse: allowed unless a spelling of it names a protected path (or, when it sits in
-    the command itself, a not-me switch), which is self-protection, or holds a word in _DANGER, which blocks under
-    the first of that word's rules that is on."""
+    the command itself, a not-me switch), which is self-protection, holds a word in _DANGER, which blocks under
+    the first of that word's rules that is on, or pushes to a protected branch or with force (_opaque_push)."""
     spellings = _spellings(text)
     for v in spellings:
         m = _SELF_TEXT.search(v) or (_NOTME_TEXT.search(v) if inline else None)
@@ -1463,13 +1471,49 @@ def _opaque(text: str, blk: Blk, what: str, inline: bool = True) -> Iterator[Blo
             if hit:
                 yield blk(OPAQUE, f"{what}, and it holds `{_short(hit, 40)}`", _OPAQUE_HINT, rules=rules)
                 return
+    for v in spellings:
+        if _PUSH_WORD.search(v):
+            found = _opaque_push(v, ctx, st)
+            if found:
+                rules, why = found
+                yield blk(OPAQUE, f"{what}, and it {why}", _OPAQUE_HINT, rules=rules)
+                return
+
+
+def _opaque_push(v: str, ctx: Optional[GuardContext], st: Optional[_State]) -> Optional[Tuple[Tuple[str, ...], str]]:
+    """The rules and reason when opaque text that pushes can reach a protected branch, is forced or names a URL
+    (other_repo, so `guard: {other_repo: off}` in the global layer relaxes it). Every rule that applies is returned,
+    so a rule that is off cannot hide one that is on. A push that names none of these, from a checkout on a feature
+    branch, runs. With no context to look at, any push blocks."""
+    if ctx is None:
+        return (_PB,), "holds `push`"
+    rules: List[str] = []
+    whys: List[str] = []
+    forced = _then(_PUSH_WORD, _PUSH_FORCE)(v)
+    if forced:
+        rules.append(_FP)
+        whys.append(f"holds `{_short(forced, 40)}`, a forced or deleting push")
+    names = sorted(ctx.protected_branches, key=len, reverse=True)
+    named = names and _then(_PUSH_WORD, re.compile(r"(?:(?<=heads/)|(?<![A-Za-z0-9_./-]))(?:%s)(?![A-Za-z0-9_-])"
+                                                   % "|".join(re.escape(n) for n in names)))(v)
+    if named:
+        rules.append(_PB)
+        whys.append(f"holds `{_short(named, 40)}`, a push naming a protected branch")
+    elif st is not None and _branch(ctx, st, st.dir) in ctx.protected_branches:
+        rules.append(_PB)
+        whys.append("pushes while the checkout is on a protected branch")
+    url = _then(_PUSH_WORD, _PUSH_URL)(v)
+    if url:
+        rules.append(_OR)
+        whys.append(f"holds `{_short(url, 40)}`, a push to a URL the guard cannot check against the allowed repos")
+    return (tuple(rules), "; and it ".join(whys)) if rules else None
 
 
 def _body(text: str, st: _State, ctx: GuardContext, blk: Blk, what: str) -> Iterator[Block]:
     """A string a shell runs as a command (bash -c, eval, a here-document fed to a shell): judged as a command in
     its own right, or as opaque text past MAX_BODY_DEPTH."""
     if st.depth >= MAX_BODY_DEPTH:
-        yield from _opaque(text, blk, f"{what} nests commands more than {MAX_BODY_DEPTH} deep")
+        yield from _opaque(text, blk, f"{what} nests commands more than {MAX_BODY_DEPTH} deep", ctx=ctx, st=st)
         return
     yield from _bash(text, st.dir, ctx, st.depth + 1, st)
 
@@ -1529,7 +1573,7 @@ def _command(c: SimpleCommand, st: _State, ctx: GuardContext) -> Iterator[Block]
         return
     word = t[0]
     if getattr(word, "glob", False) or getattr(word, "brace", False) or _unresolved(word) or word.startswith("="):
-        yield from _opaque(seg, blk, f"the shell decides what '{_short(word, 40)}' runs")
+        yield from _opaque(seg, blk, f"the shell decides what '{_short(word, 40)}' runs", ctx=ctx, st=st)
         return
     head = _head(word)
     handler = _COMMANDS.get(head)
@@ -2033,7 +2077,7 @@ def _script_file(path: str, st: _State, ctx: GuardContext, blk: Blk) -> Iterator
     """A script file runs text the guard does not parse: judged as opaque text (a file it cannot read is allowed)."""
     text = _read_script(_norm(_script_path(path, ctx), st.dir), st)
     if text is not None:
-        yield from _opaque(text, blk, f"{_short(path, 60)} is a script the guard does not parse", inline=False)
+        yield from _opaque(text, blk, f"{_short(path, 60)} is a script the guard does not parse", inline=False, ctx=ctx, st=st)
 
 
 _SHELL_VALUE_OPTS = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
@@ -2077,13 +2121,13 @@ def _from_input(c: SimpleCommand, st: _State, ctx: GuardContext, blk: Blk, what:
     if c.bodies:
         for b in c.bodies:
             yield from (_body(b, st, ctx, blk, what) if shell
-                        else _opaque(b, blk, f"{what} runs code the guard does not parse"))
+                        else _opaque(b, blk, f"{what} runs code the guard does not parse", ctx=ctx, st=st))
         return
     files = [target for op, target in c.redirs if op == "<"]
     for f in files:
         yield from _script_file(f, st, ctx, blk)
     if not files:
-        yield from _opaque(st.raw, blk, f"{what} reads its program from a pipe")
+        yield from _opaque(st.raw, blk, f"{what} reads its program from a pipe", ctx=ctx, st=st)
 
 
 def _cmd_shell(t, c, st, ctx, blk):
@@ -2137,14 +2181,14 @@ def _interp(prog: str, args: List[str], c: SimpleCommand, st: _State, ctx: Guard
         if "-file" in low and low.index("-file") + 1 < len(args):
             yield from _script_file(args[low.index("-file") + 1], st, ctx, blk)
         else:
-            yield from _opaque(" ".join(args), blk, what)
+            yield from _opaque(" ".join(args), blk, what, ctx=ctx, st=st)
         return
     letters = _INLINE_SHORT.get(family, "")
     inline = (family == "deno" and args[:1] == ["eval"]) or any(
         a in _INLINE_LONG or a.split("=", 1)[0] in _INLINE_LONG
         or (letters and a.startswith("-") and not a.startswith("--") and set(a[1:]) & set(letters)) for a in args)
     if inline:
-        yield from _opaque("\n".join([" ".join(args)] + c.bodies), blk, what)
+        yield from _opaque("\n".join([" ".join(args)] + c.bodies), blk, what, ctx=ctx, st=st)
         return
     takes_value = _INTERP_VALUE.get(family, set())
     i = 0
@@ -2173,11 +2217,11 @@ def _wrapped(takes_value: Set[str], stop: Tuple[str, ...] = (), adds_input: bool
                 break
         if not rest:
             if _prog(t[0]) == "parallel":
-                yield from _opaque(st.raw, blk, "parallel runs its input lines as commands")
+                yield from _opaque(st.raw, blk, "parallel runs its input lines as commands", ctx=ctx, st=st)
             return
         yield from _command(SimpleCommand(rest, " ".join(rest)), st, ctx)
         if adds_input:  # the words come from its input: the whole command (here-documents too) is the text to judge
-            yield from _opaque(st.raw, blk, f"{_prog(t[0])} adds words from its input")
+            yield from _opaque(st.raw, blk, f"{_prog(t[0])} adds words from its input", ctx=ctx, st=st)
     return handler
 
 
@@ -2267,7 +2311,7 @@ def _cmd_git(t, c, st, ctx, blk, depth: int = 0):
     sub, args = (t[i] if i < len(t) else ""), t[i + 1:]
     if _unresolved(sub) or any(getattr(w, "brace", False) or getattr(w, "glob", False) for w in t[:i + 1]) or \
             any(getattr(w, "brace", False) for w in args):
-        yield from _opaque(c.raw, blk, "the shell fills in part of this git command")
+        yield from _opaque(c.raw, blk, "the shell fills in part of this git command", ctx=ctx, st=st)
         return
     key = next((k for k in c_keys if _PUSH_KEY.match(k.lower())), None)
     if key is not None:
@@ -2359,14 +2403,14 @@ def _git_alias(alias: str, sub: str, args: List[str], prefix: List[str], c: Simp
     deep is opaque text."""
     what = f"git {sub} is an alias"
     if alias.startswith("!") or depth >= MAX_BODY_DEPTH:
-        yield from _opaque(alias + " " + " ".join(args), blk, what)
+        yield from _opaque(alias + " " + " ".join(args), blk, what, ctx=ctx, st=st)
         return
     try:
         parsed = lex(alias)
     except Unparsed:
         parsed = None
     if parsed is None or len(parsed.commands) != 1 or parsed.subs:
-        yield from _opaque(alias + " " + " ".join(args), blk, what)
+        yield from _opaque(alias + " " + " ".join(args), blk, what, ctx=ctx, st=st)
         return
     words = list(prefix) + list(parsed.commands[0].words) + list(args)
     yield from _cmd_git(words, c, st, ctx, blk, depth + 1)
@@ -2705,7 +2749,7 @@ def _cmd_gh(t, c, st, ctx, blk):
     group = t[1] if len(t) > 1 else ""
     if any(_unresolved(w) or getattr(w, "brace", False) or getattr(w, "glob", False) for w in t[1:3]) or \
             any(getattr(w, "brace", False) for w in t):
-        yield from _opaque(c.raw, blk, "the shell fills in part of this gh command")
+        yield from _opaque(c.raw, blk, "the shell fills in part of this gh command", ctx=ctx, st=st)
         return
     if group in ("", "--version", "--help", "-h") or group.startswith("-") or group in _GH_READ_GROUPS:
         return

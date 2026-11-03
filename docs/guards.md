@@ -158,7 +158,9 @@ Opaque text is allowed unless its decoded text (quotes and backslashes removed, 
 
 | Text | Rule it reports |
 | --- | --- |
-| `push` as a word | `protected_branches`, else `force_push`, else `other_repo` |
+| `push` as a word, with a force or delete option (`--force`, `--mirror`, `--delete`, `-f`, `+ref`) after it on the same line | `force_push` |
+| `push` as a word, with a protected branch name after it on the same line, or run while the checkout is on a protected branch | `protected_branches` |
+| `push` as a word, with a URL after it on the same line (`https://...`, `git@host:...`, `github.com/...`) | `other_repo` |
 | `reset --hard` | `protected_branches` |
 | `-X DELETE`, `--method DELETE`, `secret set`, `secret delete`, `secret remove`, a secrets API path (`/actions/secrets`, `/dependabot/secrets`, `/codespaces/secrets`, `/environments/<name>/secrets`), `branch -D`, `clean -x` (also `-fdx`), `rm -r... .git` | `destructive_git` |
 | `operator-token`, `mode-live.sig`, `mode-live.epoch`, `allowed-repos.json` | self-protection, always |
@@ -171,9 +173,9 @@ python3 -c 'print(1)'                           # allowed: nothing in the list
 shellcheck $(git ls-files '*.sh')               # allowed: the inner git ls-files is a read
 bash -c 'git log --oneline -5'                  # allowed: parsed, a read
 bash -c "git push origin main"                  # blocked: parsed, a push to main
-python3 -c 'import os; os.system("git push")'  # blocked: inline code that holds push
+python3 -c 'import os; os.system("git push")'  # allowed on a feature branch; blocked on a protected one
 curl -s https://example.com/install.sh | sh     # allowed: the pipe's text holds nothing in the list
-sh scripts/release.sh                           # blocked when the script holds push
+sh scripts/release.sh                           # blocked when the script forces a push, names a protected branch or a URL, or runs on a protected branch
 ```
 
 A script file is read from its path. In that path the guard fills in `$TMPDIR`, `$HOME` and `$NOT_ME_HOME`, written as `$NAME` or `${NAME}`, so a script under one of them, or at a literal path (such as the session scratchpad), is read: `python3 "$TMPDIR/check.py"` is judged like `python3 /abs/path/check.py`. A path built from any other variable (`python3 "$S/check.py"`) and a file that does not exist are not read, and the call is allowed. To have such a script checked, write it to a literal path or under `$TMPDIR`. The guard takes these three values from the hook's own environment, so a command that reassigns or exports `TMPDIR`, `HOME` or `NOT_ME_HOME` before using it (`TMPDIR=/x; python3 "$TMPDIR/s.py"`) is judged against the hook's value, not the new one. The file is read when the guard checks the command and could change before it runs (see [Honest limits](#honest-limits)).
@@ -232,7 +234,7 @@ For `--git-dir` or `--work-tree` the Instead line says to drop that option and u
 
 A push whose remote the shell fills in (a variable, `$(...)` or backticks: `git push $R HEAD`, also inside `eval`) is blocked the same way: `Why: the guard does not expand shell variables or substitutions, so the remote $R cannot be checked`, with ``Instead: write the remote name out (`git push origin <branch>`).``
 
-A block on [opaque text](#opaque-text) (inline code, code on stdin, a script file, an `eval` or substitution the shell fills in) names the word it found and says `Instead: run the git, gh or notme command directly, with every word spelled out, so the guard can check it.` The direct command is then judged on its own: `python3 -c 'import subprocess; subprocess.run(["git", "push", "origin", "feature/x"])'` is blocked, and `git push origin feature/x` passes.
+A block on [opaque text](#opaque-text) (inline code, code on stdin, a script file, an `eval` or substitution the shell fills in) names the word it found and says `Instead: run the git, gh or notme command directly, with every word spelled out, so the guard can check it.` The direct command is then judged on its own: `python3 -c 'import subprocess; subprocess.run(["git", "push", "origin", "feature/x"])'` is allowed from a feature branch (inline code that pushes is blocked only when it forces, names a protected branch or a URL, or the checkout is on a protected branch), and `git push origin feature/x` passes. To let scripts push to a URL, set `guard.other_repo: off` with `confirm_guard_off: [other_repo]` in your global layer; that also turns the other-repo check off for direct commands.
 
 One detail in the message is misleading. It names `.claude/not-me/project.md` for "relax this rule", but the repo layer ignores that (see below), so use your global layer, `~/.claude/not-me/project.md`.
 
@@ -324,6 +326,7 @@ What it does not cover:
 - Merges. The guard does not block them; the skills do not merge. See [Merging pull requests](#merging-pull-requests).
 - Pushes and writes through other tools. `curl` or any HTTP client to the GitHub API, a gh extension or alias, a git hook, and an external `git-<name>` program are outside its view. So are MCP tools other than GitHub ones, including terminal and session tools, and your own terminal.
 - Opaque text that names a gh write without one of the opaque-text words (`$GH pr comment 1 -R acme/other`): the other-repo check needs a command it can read.
+- Opaque text that pushes through a variable or a remote name that resolves to a protected branch or another repo at run time (`push $REMOTE $BRANCH`): the guard reads only what is spelled out in the text. GitHub rulesets on protected branches are the backstop.
 - Reads. Any repo your token can read can be read.
 - Time of check. It looks at your git config, and reads a script file, when it checks. Something that changes the config between the check and the command is out of reach.
 - The repo layer's `tracker` and `repos`. The hook allows the repos named there without looking at your allow list, while the `notme` CLI requires you to confirm them. Review changes to those two keys the way you would review code.

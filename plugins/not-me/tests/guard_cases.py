@@ -563,7 +563,7 @@ bash(A, None, "python3 -c 'import subprocess; subprocess.run([\"gh\", \"pr\", \"
             "\"acme/other\", \"-b\", \"x\"])'")
 bash(B, OR, "gh api --method PUT repos/acme/other/issues/5/labels --input x.json")
 bash(B, DG, "gh secret set TOKEN --repo acme/app --body x")
-bash(B, PB, "bash ./scripts/ship.sh")
+bash(B, OR, "bash ./scripts/ship.sh")  # ship.sh pushes to a URL: other_repo
 write(B, SP, "Write", "{P}/hooks/repo_guard.py")
 BYPASS_IDS = [c[0] for c in CASES[_first_bypass:]]
 # 1. command names built from variables, quotes or backslashes.
@@ -584,9 +584,20 @@ bash(B, OR, "parallel gh pr comment {} -R acme/other -b x ::: 1 2")
 bash(A, None, "env -S \"gh pr comment 1 -R acme/other -b x\"")
 bash(B, OR, "sudo -u bot gh pr comment 1 -R acme/other -b x")
 # 3. inline interpreter code.
-bash(B, PB, "node -e 'require(\"child_process\").execSync(\"git push\")'")
+bash(A, None, "node -e 'require(\"child_process\").execSync(\"git push\")'")  # from a feature branch: runs
+bash(B, PB, "node -e 'require(\"child_process\").execSync(\"git push origin main\")'")
+bash(B, PB, "node -e 'require(\"child_process\").execSync(\"git push origin HEAD:refs/heads/main\")'")  # refs/heads/ names the branch too
+bash(B, PB, "node -e 'require(\"child_process\").execSync(\"git push origin HEAD:heads/main\")'")  # the short ref form too
+bash(B, PB, "python3 -c 'import os; os.system(\"git push origin develop\")'")
+bash(B, FP, "python3 -c 'import os; os.system(\"git push --force origin feature/x\")'")
+bash(B, FP, "node -e 'require(\"child_process\").execSync(\"git push origin +feature/x\")'")
+for _spec in ("+$B", "+@:x", "+:main", "+1.0", "+HEAD:feature/x"):  # a forced refspec, whatever follows the plus
+    bash(B, FP, "node -e 'require(\"child_process\").execSync(\"git push origin " + _spec + "\")'")
+bash(A, None, "python3 -c 'import os; os.system(\"git push origin feature/x\")'")
+bash(A, None, "python3 -c 'import os; os.system(\"git push origin HEAD\")'")
+bash(B, PB, "python3 -c 'import os; os.system(\"git push\")'", "main")  # a bare push from a protected branch
 bash(A, None, "perl -e 'system(\"gh pr merge 1\")'")
-bash(B, PB, "php -r 'echo shell_exec(\"git push\");'")
+bash(A, None, "php -r 'echo shell_exec(\"git push\");'")
 bash(A, None, "python3 -c 'print(1)'")  # inline interpreter code is blocked whatever it holds
 bash(A, None, "ruby -e 'puts 1'")
 bash(A, None, "curl -X POST https://api.github.com/repos/acme/other/issues -d x")
@@ -611,9 +622,9 @@ bash(B, DG, "gh api -X PUT repos/acme/app/branches/main/protection --input p.jso
 # 6. scripts are read and scanned.
 bash(A, None, "sh scripts/clean.sh")
 bash(A, None, "./scripts/clean.sh")
-bash(B, PB, "source scripts/ship.sh")
-bash(B, PB, ". scripts/ship.sh")
-bash(B, PB, "./scripts/ship.sh")
+bash(B, OR, "source scripts/ship.sh")
+bash(B, OR, ". scripts/ship.sh")
+bash(B, OR, "./scripts/ship.sh")
 bash(A, None, "zsh scripts/missing.sh")
 # 7. the plugin's own files.
 write(B, SP, "Edit", "{P}/notme/guard.py")
@@ -1240,7 +1251,7 @@ for cmd in (
 for cmd in (
         "cd {F}/other; xargs cd {F}/app </dev/null; git push",
 ):
-    bash(B, PB, cmd)
+    bash(A, None, cmd)
 bash(B, SP, "cd {F}/other; cd {F}/app & git push")  # a background job after a cd
 bash(B, SP, "cd {F}/other; if true; then cd {F}/app; fi & git push")
 bash(B, SP, "cd {F}/other; nohup cd {F}/app; git push")
@@ -1286,7 +1297,7 @@ for cmd in (
 for cmd in (
         "cd {F}/other && xargs git push </dev/null",
 ):
-    bash(B, PB, cmd)
+    bash(A, None, cmd)
 # A quoted assignment prefix, backslash-newline, braces, globs and =cmd no longer hide a command.
 for cmd in (
         'x="a b" gh pr create --repo acme/other --title x --body y',
@@ -1310,12 +1321,15 @@ for cmd in (
     bash(A, None, cmd)
 for cmd in (
         "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['git', 'push'])\nEOF",
+):
+    bash(A, None, cmd)
+for cmd in (
         "{git,push} https://github.com/acme/other HEAD",
-        "git {push,--force}",
         "/usr/bin/gi? push https://github.com/acme/other HEAD",
         "=git push https://github.com/acme/other HEAD",
 ):
-    bash(B, PB, cmd)
+    bash(B, OR, cmd)
+bash(B, FP, "git {push,--force}")
 bash(B, FP, "git push \\\n  --force")
 bash(B, FP, "noglob git push --force")
 # GIT_DIR, GIT_WORK_TREE and --git-dir/--work-tree with a write
@@ -1327,7 +1341,8 @@ for cmd in (
 # Too long, too deep or unreadable: judged as opaque text, so allowed unless it holds an opaque-text word.
 bash(A, None, "true " * 7000 + "; git status")
 bash(A, None, "echo " + "$(" * 70 + "x" + ")" * 70)
-bash(B, PB, "echo 'unclosed && git push")
+bash(A, None, "echo 'unclosed && git push")
+bash(B, PB, "echo 'unclosed && git push", "main")  # unparseable, from a protected branch: a push there blocks
 bash(A, None, "true " * 7000, "alloff")
 # After a directory change, relative paths are judged against the session's working directory (cd is not followed).
 bash(A, None, "cd scripts && grep -r x .")
@@ -1442,12 +1457,15 @@ for cmd in (
 ):
     bash(A, None, cmd)
 for cmd in (
-        f"echo push {OTHER} | xargs git",
         "parallel git ::: push",
+):
+    bash(A, None, cmd)
+for cmd in (
+        f"echo push {OTHER} | xargs git",
         f"cat <<EOF | bash\ngit push {OTHER}\nEOF",
         f"cat <<-EOF | sh\n\tgit push {OTHER}\n\tEOF",
 ):
-    bash(B, PB, cmd)
+    bash(B, OR, cmd)
 bash(B, OR, "git push origin feature/x", "recurse")  # push.recurseSubmodules in the repo config
 ROUND1_END = len(CASES)
 for cmd in ("git log --oneline", "git diff --stat", "git -c color.ui=always log", "git remote -v",
@@ -1608,11 +1626,14 @@ for cmd in (
 ):
     bash(A, None, cmd)
 for cmd in (
-        f"sh -c \"\\$(printf '\\\\147')it push {OTHER}\"",
-        "bash < scripts/ship.sh",
         "printf 'g%sit push x' '' | sh",
 ):
-    bash(B, PB, cmd)
+    bash(A, None, cmd)
+for cmd in (
+        f"sh -c \"\\$(printf '\\\\147')it push {OTHER}\"",
+        "bash < scripts/ship.sh",
+):
+    bash(B, OR, cmd)
 bash(B, PB, "git push", "mirror")  # 7. remote.origin.mirror decides a bare push
 ROUND3_END = len(CASES)
 for cmd in ('rg "git push" docs', 'rg -n "gh pr" docs', 'grep -rn "gh pr" docs', "git diff main...HEAD --stat",
@@ -1635,7 +1656,7 @@ for cmd in (
         "ruby -e 'system(\"g\"+\"it push https://gith\"+\"ub.com/acme/other HEAD\")'",
         "node -e 'require(\"child_process\").execSync(\"g\"+\"it push https://gith\"+\"ub.com/acme/other HEAD\")'",
 ):
-    bash(B, PB, cmd)
+    bash(B, OR, cmd)
 for cmd in (
         "vim -c 'exe \"!g\".\"it push https://gith\".\"ub.com/acme/other HEAD\"'",
         "python3 -c 'print(1)'",
@@ -1898,7 +1919,7 @@ _OPAQUE_ID = f"G{len(CASES) + 1:03d}"
 bash(B, PB, "python3 -c 'import os; os.system(\"git push origin main\")'")
 bash(B, PB, 'bash -c "git push origin main"')
 bash(B, OR, "bash -c 'gh pr comment 5 --repo acme/other --body x'")
-bash(B, PB, "xargs git push < refs.txt")
+bash(A, None, "xargs git push < refs.txt")
 bash(B, DG, "eval \"$(printf 'gh secret set X')\"")
 # "secret" counts only as a GitHub secrets action: gh secret set|delete|remove or a secrets API path
 for cmd in ("python3 -c 'import os; os.system(\"gh secret delete X -R acme/app\")'",
@@ -1908,8 +1929,8 @@ for cmd in ("python3 -c 'import os; os.system(\"gh secret delete X -R acme/app\"
 SCRIPTS["envsecret.sh"] = "#!/bin/sh\ncurl -X PUT https://api.github.com/repos/acme/app/environments/prod/secrets/X\n"
 for cmd in ("python3 -c 'print(\"secret\")'", "node -e 'const secretKey = 1'", "gh secret list --repo acme/app"):
     bash(A, None, cmd)
-bash(B, PB, "sh scripts/ship.sh")
-bash(B, PB, "git push --force 'unclosed")  # opaque: push reports under the first of its rules
+bash(B, OR, "sh scripts/ship.sh")
+bash(B, FP, "git push --force 'unclosed")  # opaque: a forced push reports under force_push
 bash(B, FP, "bash -c 'git push --force'", "off")
 bash(A, None, "bash -c 'git push --force'", "alloff")
 # and what it lets through
@@ -2057,10 +2078,17 @@ for _where in ("app", "running"):
         bash(A, None, cmd, _where)
 # 3 and 4 holding a push: blocked as opaque text; the named rewrite, the git command itself, passes
 _ISSUE79_INLINE_ID = f"G{len(CASES) + 1:03d}"
-bash(B, PB, "python3 -c 'import subprocess; subprocess.run([\"git\", \"push\", \"origin\", \"feature/x\"])'")
+bash(A, None, "python3 -c 'import subprocess; subprocess.run([\"git\", \"push\", \"origin\", \"feature/x\"])'")
 _ISSUE79_STDIN_ID = f"G{len(CASES) + 1:03d}"
-bash(B, PB, "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['git', 'push', 'origin', 'feature/x'])\nEOF")
+bash(A, None, "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['git', 'push', 'origin', 'feature/x'])\nEOF")
 bash(A, None, "git push origin feature/x")
+# opaque text that pushes to a URL blocks under other_repo; global other_repo: off relaxes it
+bash(B, OR, "python3 -c 'import os; os.system(\"git push https://github.com/acme/other.git x\")'")
+bash(B, OR, "python3 -c 'import os; os.system(\"git push git@github.com:acme/other.git x\")'")
+bash(A, None, "python3 -c 'import os; os.system(\"git push https://github.com/acme/other.git x\")'", "off")
+# other_repo off must not skip the protected-branch check: a URL push from main still blocks
+bash(B, PB, "python3 -c 'import os; os.system(\"git push https://github.com/acme/other.git x\")'", "offalias")
+bash(B, OR, "python3 -c 'import os; os.system(\"git push https://github.com/acme/other.git x\")'", "mainpboff")  # PB off: OR still blocks
 # 5. eval of a push whose remote the shell fills in: the message says to write the remote out, which passes
 _ISSUE79_EVAL_ID = f"G{len(CASES) + 1:03d}"
 bash(B, OR, 'eval "git push $R HEAD"')
@@ -2097,7 +2125,8 @@ MESSAGE_CHECKS: Dict[str, List[str]] = {
     _mode_cli_id: ["/not-me:mode live"],
     _marker_id: ["live-mode marker", "/not-me:mode live"],
     _epoch_id: ["live-mode epoch", "/not-me:mode live"],
-    _OPAQUE_ID: ["python3 runs code the guard does not parse", "holds `push`", "not-me guard [protected_branches]"],
+    _OPAQUE_ID: ["python3 runs code the guard does not parse", "a push naming a protected branch",
+                  "not-me guard [protected_branches]"],
     _VAR_C_ID: ["Why: the guard does not expand shell variables in a `git -C` path",
                 "Instead: write the path out in full (`git -C /abs/path <sub> ...`); a rewritten command is "
                 "checked afresh, so this is not a retry."],
@@ -2117,16 +2146,12 @@ MESSAGE_CHECKS: Dict[str, List[str]] = {
     _VAR_C_SWITCH_ID: ["shell variables in a `git -C` path"],
     _REMOTE_V_ID: ["git remote add can redirect pushes"],
     _REMOTE_VV_ID: ["git remote add can redirect pushes"],
-    _ISSUE79_INLINE_ID: ["python3 runs code the guard does not parse, and it holds `push`",
-                         "Instead: run the git, gh or notme command directly, with every word spelled out"],
-    _ISSUE79_STDIN_ID: ["python3 runs code the guard does not parse, and it holds `push`",
-                        "Instead: run the git, gh or notme command directly, with every word spelled out"],
     _ISSUE79_EVAL_ID: ["the guard does not expand shell variables or substitutions, so the remote $R cannot be "
                        "checked",
                        "Instead: write the remote name out (`git push origin <branch>`)"],
     _ISSUE79_SUBST_REMOTE_ID: ["does not expand shell variables or substitutions, so the remote $(echo origin) "
                                "cannot be checked", "Instead: write the remote name out"],
-    _ISSUE79_TMP_ID: ["is a script the guard does not parse, and it holds `push`",
+    _ISSUE79_TMP_ID: ["is a script the guard does not parse, and it holds", "a push naming a protected branch",
                       "Instead: run the git, gh or notme command directly, with every word spelled out"],
     _ISSUE79_SUBST_ID: ["commits on the protected branch main are not allowed",
                         "Instead: create a feature branch first (git switch -c <type>/<topic>)"],
