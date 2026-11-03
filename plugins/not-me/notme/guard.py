@@ -1495,11 +1495,11 @@ def _opaque_push(v: str, ctx: Optional[GuardContext], st: Optional[_State]) -> O
                                              % "|".join(re.escape(n) for n in names)))(v)
         if named:
             return _PB, f"holds `{_short(named, 40)}`, a push naming a protected branch"
+    if st is not None and _branch(ctx, st, st.dir) in ctx.protected_branches:
+        return _PB, "pushes while the checkout is on a protected branch"
     url = _then(_PUSH_WORD, _PUSH_URL)(v)
     if url:
         return _OR, f"holds `{_short(url, 40)}`, a push to a URL the guard cannot check against the allowed repos"
-    if st is not None and _branch(ctx, st, st.dir) in ctx.protected_branches:
-        return _PB, "pushes while the checkout is on a protected branch"
     return None
 
 

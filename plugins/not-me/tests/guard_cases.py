@@ -2086,6 +2086,8 @@ bash(A, None, "git push origin feature/x")
 bash(B, OR, "python3 -c 'import os; os.system(\"git push https://github.com/acme/other.git x\")'")
 bash(B, OR, "python3 -c 'import os; os.system(\"git push git@github.com:acme/other.git x\")'")
 bash(A, None, "python3 -c 'import os; os.system(\"git push https://github.com/acme/other.git x\")'", "off")
+# other_repo off must not skip the protected-branch check: a URL push from main still blocks
+bash(B, PB, "python3 -c 'import os; os.system(\"git push https://github.com/acme/other.git x\")'", "offalias")
 # 5. eval of a push whose remote the shell fills in: the message says to write the remote out, which passes
 _ISSUE79_EVAL_ID = f"G{len(CASES) + 1:03d}"
 bash(B, OR, 'eval "git push $R HEAD"')
