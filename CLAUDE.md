@@ -129,8 +129,9 @@ the owner's say-so, not a cleanup.
 
 10. **Skills call the CLI for every GitHub action.** No raw `gh` or `git`
     writes in skill prose (lint R6). Text goes to GitHub through files, never
-    shell arguments. The `--bg` result is exactly one line in the grammar in
-    `references/bg-mode.md`; `NONE` means only "nothing to do".
+    shell arguments. A `--bg` run ends with one result line in the grammar in
+    `references/bg-mode.md`; the router may print a second, prove line after it
+    (a `PR` or `PUSHED` leg, then the proof's line). `NONE` means only "nothing to do".
 
 11. **Merging is a person's call, never a skill's.** No not-me skill merges,
     and merging is not part of any skill's flow; autonomous runs never merge.

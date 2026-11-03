@@ -15,7 +15,8 @@ also in `write-back.md`; this file owns the contract around it.
 3. Dispatch it from the current checkout. Make no worktree yourself: update and
    new make their own run worktree, review its detached one (`branching.md`).
 4. Print the subagent's result line exactly as returned. Then stop. No summary, no
-   follow-up work, no second dispatch.
+   follow-up work, no second dispatch. The one exception is the router's prove step
+   ([The router](#the-router) item 5).
 
 ## The subagent's job
 
@@ -67,12 +68,21 @@ The `/not-me` router runs its legs in `router` order, each as its own run.
    update ends `NONE - idle - skipped <refs> (branch held)` and new runs next.
 2. The first leg that does work (PR, PUSHED, PARKED, HELD, REVIEWED, PROVED), any
    STOP, and a `FAILED -` with no ref (config invalid, guard not working) end the
-   router: print that line and stop; later legs do not run.
+   router: print that line and stop; later legs do not run. Only the prove line in
+   item 5 may follow it.
 3. An earlier `FAILED <ref>` goes into the note of the line printed, for example
    `PR acme/app#88 opened - update FAILED acme/app#57 not-committed`. No leg ended
    the router: print the last `FAILED <ref>` line, else NONE (a success).
 4. At most one leg per router run finishes its work; a leg that failed on one item
    before it may also have left that item partly done (its log says what).
+5. After a leg whose VERB is PR or PUSHED, run `notme prove-target <ref>`. A URL:
+   dispatch `/not-me:prove <ref> --bg` as its own foreground subagent, the way a leg is
+   dispatched, and print its line after the leg's line. No URL: no prove step, no
+   line, no error. When the router's arguments include `--dry-run`, skip this step
+   entirely: no prove-target call, no dispatch, no line. A FAILED prove line does
+   not change the leg's result. Print nothing after the two lines, then go on to
+   retro, which prints nothing. Only the router does this; `new` and `update` do not start
+   prove under `--bg`.
 
 ## Spawn depth
 
@@ -93,7 +103,8 @@ The typical schedule is a loop in a Claude Code session:
 /loop 2h /not-me --bg
 ```
 
-Each tick is one router run and prints one line. Do not start or extend a loop from
+Each tick is one router run and prints one line, or two when it proves after a PR or
+PUSHED leg (the leg's line, then the prove line). Do not start or extend a loop from
 inside a run.
 
 ## Checklist

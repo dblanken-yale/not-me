@@ -56,10 +56,25 @@ unchanged.
    No leg stopped it: print the last `FAILED <ref>` line if there was one, else
    `NONE - nothing to do`, which is a success, not a failure.
 
-## Step 4: Retro
+## Step 4: Prove (only under `--bg`)
+
+After a leg whose VERB is `PR` or `PUSHED`, and only under `--bg`, and only when the
+arguments do not include `--dry-run` (then skip this step: no `prove-target` call, no
+dispatch, no line):
+
+1. `notme prove-target <ref>`, with the `<ref>` from the leg's line. No URL: no
+   prove step, no line, no error. Go to Step 5.
+2. A URL: dispatch `/not-me:prove <ref> --bg` as its own foreground subagent, the way
+   Step 3 dispatches a leg under `--bg`, and wait for it.
+3. Print only the prove line, exactly as returned, right after the leg's line from
+   Step 3. The leg's line is not printed again.
+4. A `FAILED` prove line does not change the leg's result. Print nothing after the
+   two lines, then go on to Step 5.
+
+## Step 5: Retro
 
 After each leg that did work (any VERB other than `NONE`, `STOP`; a `FAILED <ref>`
-leg counts), run `/not-me:retro` on that leg's log, once per leg. If that skill is
+leg counts), run `/not-me:retro` on that leg's log, once per leg, after the prove step. If that skill is
 not installed, skip it silently.
 
 ## Checklist
@@ -69,4 +84,5 @@ not installed, skip it silently.
 - [ ] Read `router` from the config and ran only those legs, in order.
 - [ ] Forwarded `$ARGUMENTS`; under `--bg` each leg was its own subagent.
 - [ ] Went on past `NONE` and `FAILED <ref>`; stopped at work done, `STOP` or a run-wide `FAILED -`, and printed it exactly.
+- [ ] Under `--bg`, after a `PR` or `PUSHED` leg with a prove target, proved in a foreground subagent and printed both lines.
 - [ ] Printed `NONE - nothing to do` only when every leg was `NONE`.
