@@ -180,7 +180,7 @@ From widest to narrowest. Only a person undoes any of them. Details are in [conf
 | A `PAUSED` file in `.claude/not-me/` or `~/.claude/not-me/` | the same, with no commit | `STOP - paused` |
 | The `paused` label on an issue or PR | that one item | every leg skips it; a run that sees it appear mid-run releases its claim and stops work on it |
 
-`notme pause on` writes the file for you. `notme pause off` needs a person at a terminal. A guard block never has to be argued with: the message names the allow command. See [guards.md](guards.md).
+`/not-me:pause on` writes the file for you and `/not-me:pause off` removes it (add `--global` for every project); only a person can start that command, and a run never lifts a pause on its own. A guard block never has to be argued with: the message names the allow command. See [guards.md](guards.md).
 
 ## Companion sets
 
@@ -234,7 +234,7 @@ Start a loop yourself. A run never starts or extends one.
 5. Read the ledger and the run log. Ask: is this the label change, the comment and the PR I would have wanted?
 6. Run `/not-me:status` and `/not-me:config`. Confirm the roster, the label names and the protected branches.
 7. Repeat the dry run on a `needs work` PR and on a PR you are asked to review. Read each log summary.
-8. When the dry runs look right, run `/not-me:mode live` and follow its steps (you confirm in your own terminal with the operator token). That is the only way to go live: it signs the switch with your token, so a `mode: live` typed by hand stays dry-run. A repo file can never set it. `/not-me:mode` or `/not-me:config` should show `live` with source `global`.
+8. When the dry runs look right, type `/not-me:mode live`. It sets `mode: live` in your global layer in the session and prints what changed. A repo file can never set it. `/not-me:mode` or `/not-me:config` should show `live` with source `global`.
 9. Run one live pass by hand: `/not-me`. Watch the result line and open the PR it made.
 10. Start the loop: `/loop 2h /not-me --bg`. Check `/not-me:status` each morning for the first week, and run `/not-me:suggest` when your queue runs dry.
 11. After a few runs, let `/not-me:retro` suggest config edits, and read each diff before you commit it.

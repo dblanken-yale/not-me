@@ -9,8 +9,8 @@ user what was found next to each question so most answers are a confirmation.
 | Operator login | `notme me` | roster first row (lead) |
 | Repo labels | `gh label list --json name,description --limit 500` (read only) | `labels` mapping |
 | Configured labels missing today | `notme labels-ensure --check` (`present`, `missing`) | labels step |
-| Projects v2 boards | `gh project list --owner <owner> --format json` (read only); keep boards linked to the repo | `queue.source`, `queue.board` |
-| Board columns | `gh project field-list <number> --owner <owner> --format json`; the single-select field named Status | `queue.board_states` |
+| Projects v2 boards linked to the repo | `gh api graphql -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){projectsV2(first:50){nodes{number title closed}}}}' -f o=<owner> -f r=<name>` (a read) | `queue.source`, `queue.board` |
+| Board columns | `gh api graphql -f query='query($o:String!,$n:Int!){repositoryOwner(login:$o){... on ProjectV2Owner{projectV2(number:$n){field(name:"Status"){... on ProjectV2SingleSelectField{options{name}}}}}}}' -f o=<owner> -F n=<number>` (a read) | `queue.board_states` |
 | Collaborators | `gh api repos/<owner>/<name>/collaborators --jq '.[].login'` (a GET) | roster rows |
 | Code owners | `CODEOWNERS`, `.github/CODEOWNERS`, `docs/CODEOWNERS` | roster rows, `reviewers` |
 | Sibling checkouts | symlinks in the checkout, and sibling directories of the checkout that hold their own `.git`; read each one's origin | `repos` companion set |

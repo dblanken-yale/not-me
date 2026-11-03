@@ -53,7 +53,10 @@ exist. Result line: `STOP acme/app#88 blocked - base release-2.4 not found`.
 ## Checkpoint B: before push
 
 1. Fetch again. Merge the base in again.
-2. If the merge brought in commits, run the final tests again before the push.
+2. If the merge brought in commits, run the targeted tests again before the push
+   (the final tests when no targeted command is configured), and the full set
+   only when the targeted tests cannot cover what came in (`verification.md`,
+   "Targeted tests").
 3. Then push the branch to its own name on origin.
 
 ## Merge, never rebase
@@ -115,6 +118,9 @@ nothing in the operator's checkout and holds a branch only for its own life.
    out the PR branch in the main checkout.
 2. Never commit in a review worktree.
 3. Remove only the worktree you created, at the end of the run.
+4. Review worktree names stay `review-` only: `worktree-remove` and `save-patch` use the prefix to refuse a person's or
+   a session's worktree, so a wider name pattern would widen what a run may delete (an earlier
+   issue asked for the change or this note).
 
 ## Epics
 

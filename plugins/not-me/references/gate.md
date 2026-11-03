@@ -29,7 +29,11 @@ Run these in order. Log each as a `GATE` line with its result.
    security review brief. Not through the Skill tool: a skill run there ends on its
    own report and the run loses control.
 5. **CI-parity lint.** The lint command CI runs, on the whole tree.
-6. **Final tests.** The full test command, after every fix above.
+6. **Final tests.** The full `## Tests`, `## Lint` and `## Build` commands, once,
+   after every fix above and right before the push. During the work (red then
+   green, the audit after the implementer, each fix round) only the targeted
+   tests run when `notme verify-plan` lists them (`verification.md`, "Targeted
+   tests"); with none configured, the full commands run at every step.
 
 Then run each step listed under `## Gate additions` in `verify.md`, in order.
 
@@ -73,7 +77,9 @@ follow-up for @octocat.
 
 1. Verify (`verification.md`), then gate, then commit, then merge the base in
    (Checkpoint B in `branching.md`), then push.
-2. If Checkpoint B brings in changes, run final tests again before the push.
+2. If Checkpoint B brings in changes, run the targeted tests again before the
+   push, and the full set again only when the targeted tests cannot cover what
+   came in. With no targeted command, run the final tests again.
 
 ## Checklist
 
@@ -81,7 +87,7 @@ follow-up for @octocat.
 - [ ] Ran `/simplify` when the diff is over about 20 changed lines.
 - [ ] Ran the code review (the named agent, or a general-purpose subagent when it is not installed), briefed it to flag only bugs and missed requirements, and logged `reviewer=`.
 - [ ] Ran the security review as a foreground general-purpose subagent.
-- [ ] Ran the CI lint command on the whole tree and the full tests last.
+- [ ] Ran the CI lint command on the whole tree and the full tests, lint and build once, last.
 - [ ] Ran every step under `## Gate additions` in `verify.md`.
 - [ ] Fixed every finding except product reversals, new scope, or attestations.
 - [ ] Logged each gate step as a `GATE` line.

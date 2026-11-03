@@ -7,10 +7,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -320,40 +318,25 @@ class StageTest(unittest.TestCase):
         self.assertFalse((home / ".not-me-eval.json").exists(), "the record must not land in the home")
         self.assertFalse((home / ".config").exists(), "gh is not signed in by the stage step")
 
-    def test_github_backend_signs_live_mode_like_a_person(self):
+    def test_github_backend_stages_live_mode_in_the_global_layer(self):
         from notme import config as config_mod
-        from notme import humans
 
         self.make_stage("L9", {})
         ws, home, record = self.stage("new-L9")
         gdir = home / ".claude" / "not-me"
-        self.assertTrue(humans.live_confirmed(gdir), "a staged live mode must be signed")
-        token = humans.read_token(gdir)
-        self.assertRegex(token, r"^[A-Za-z0-9_-]{40,}$")
-        if os.name == "posix":
-            for name in (humans.TOKEN_NAME, humans.LIVE_EPOCH, humans.LIVE_MARKER):
-                self.assertEqual(stat.S_IMODE((gdir / name).stat().st_mode), 0o600, name)
         cfg = config_mod.load(project_dir=str(ws), home=str(gdir), plugin_root=str(PLUGIN))
         self.assertEqual(cfg.meta["project"]["mode"], "live")
-        self.assertIsNone(cfg.live_unconfirmed)
-        self.assertIn("~/.claude/not-me/" + humans.LIVE_MARKER, record["written"])
-        self.assertNotIn(token, json.dumps(record))
-        self.make_stage("L8", {})  # a second case run gets its own fresh token
-        _, home2, _ = self.stage_into("new-L8", "ws2", "home2")
-        self.assertNotEqual(humans.read_token(home2 / ".claude" / "not-me"), token)
+        self.assertEqual(sorted(p.name for p in gdir.iterdir() if p.name.startswith("mode-live")), [])
+        self.assertIn("~/.claude/not-me/project.md", record["written"])
 
-    def test_ledger_backend_and_no_layer_are_not_signed(self):
-        from notme import humans
-
+    def test_ledger_backend_and_no_layer_stay_dry_run(self):
         self.make_stage("D9", {}, backend="ledger")
         _, home, _ = self.stage("new-D9")
         gdir = home / ".claude" / "not-me"
         self.assertIn("mode: dry-run", (gdir / "project.md").read_text(encoding="utf-8"))
-        self.assertFalse((gdir / humans.LIVE_MARKER).exists())
-        self.assertFalse(humans.token_path(gdir).exists())
         self.make_stage("D8", {"none": True})
         _, home2, _ = self.stage_into("new-D8", "ws2", "home2")
-        self.assertFalse((home2 / ".claude" / "not-me" / humans.LIVE_MARKER).exists())
+        self.assertFalse((home2 / ".claude" / "not-me" / "project.md").exists())
 
     def test_companion_is_nested_and_allowed(self):
         self.make_stage("M9", {"allow_companions": True}, companion=True)

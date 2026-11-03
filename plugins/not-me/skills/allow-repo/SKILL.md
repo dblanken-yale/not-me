@@ -1,44 +1,43 @@
 ---
 name: allow-repo
-description: "Show the repos and project boards not-me may write to, and print the exact terminal command a person runs to allow or remove one. Adding or removing is a human action and this skill never does it. Use when the operator runs /not-me:allow-repo, a run reported a write blocked for a repo, or they ask to allow a repo. NOT for editing config (use /not-me:config to see layers), NOT for running the add or remove itself (only a person at a terminal can)."
-argument-hint: "<owner/name> [--everywhere] | --board OWNER/NUMBER | --list | --remove <owner/name>"
+description: "Show the repos and project boards not-me may write to, and add or remove one when the operator asks: runs the change in this session and shows exactly what changed (repo or board, this project or every project). Only a person typing the slash command can start it. Use when the operator runs /not-me:allow-repo, a run reported a write blocked for a repo, or they ask to allow a repo or board. NOT for editing config (use /not-me:config to see layers), NOT for repos and the board already named in the repo layer on the default branch (those count without it)."
+argument-hint: "<owner/name> [--everywhere] | --board OWNER/NUMBER [--everywhere] | --list | --remove <owner/name> | --remove --board OWNER/NUMBER"
 disable-model-invocation: true
 ---
 
 # /not-me:allow-repo
 
-Changing the allow list is a human action. The CLI refuses unless stdin is a real
-terminal and the person types the operator token (created once with
-`notme doctor --init-token`) at its hidden prompt; scripts can set
-`NOT_ME_OPERATOR_CONFIRM` to the token instead. The guard blocks the command in a
-session, so this skill never runs an add or a remove. It lists, and prints the
-command. `${CLAUDE_PLUGIN_ROOT}` is substituted at load time with this plugin's
-directory, but a person's terminal does not have it: print absolute paths.
+The operator typing this command is the approval: run the change here, then show
+it. Repos and the board named in `.claude/not-me/project.md` count as allowed once
+that file is on the default branch, so this is for anything else, or for using a
+new name before its pull request merges.
 
 Arguments: `$ARGUMENTS`.
+
 ## Steps
 
 1. `--list`, or no argument: run `notme allow-repo list` and print its `entries`
-   (scope, repo or board, added). Say that the global entries apply everywhere.
-2. `<owner/name>`: run `notme mode show`. Print the command below, with `<notme>`
-   its `launcher` and `<project>` this checkout's top folder (no token yet,
-   `token_present` false: give `"<notme>" doctor --init-token` first):
-
-```
-cd "<project>" && "<notme>" allow-repo add owner/name
-```
-
-3. `--everywhere` adds it to the command (every project). `--board OWNER/NUMBER`
-   goes in place of the repo name. `--remove <owner/name>` uses `allow-repo remove`.
-4. Stop. On Windows (`shell` `git-bash`), prefix `bash` and say to use Git Bash. Say to run it in a terminal outside the session, then `--list` to confirm.
+   (scope, repo or board, added). Say that entries with scope `*` apply to every
+   project.
+2. `<owner/name>`: run `notme allow-repo add owner/name`. With `--everywhere`, add
+   `--everywhere`. With `--board OWNER/NUMBER` (alone or after the repo), run
+   `notme allow-repo add --board OWNER/NUMBER` too, with the same `--everywhere`.
+3. `--remove <owner/name>` or `--remove --board OWNER/NUMBER`: run
+   `notme allow-repo remove` with the same arguments.
+4. After each command, print its `summary` line as it is, then the `entries` it
+   returned as a short list. The change and its line in the settings ledger (the
+   `ledger` path) are what the operator can check and undo.
+5. A failed command (non-zero exit): print its `error` and stop. Do not retry
+   with other arguments.
 
 ## Rules
 
-1. Never run an add or a remove, even when asked, never set
-   `NOT_ME_OPERATOR_CONFIRM` yourself, and never read the token. A refusal carries the command; do not retry.
-2. Never edit a config file to add a repo. The repo layer cannot add `allow_repos`.
+1. Run an add or a remove only for what the operator typed in this invocation.
+   Never add a repo or board they did not name.
+2. Never edit `allowed-repos.json` or a config file to allow a repo. The repo layer
+   cannot add `allow_repos`.
 
 ## Checklist
 
-- [ ] Ran only `notme allow-repo list` and `notme mode show`.
-- [ ] Printed the full command for a person; ran no add or remove.
+- [ ] Ran exactly the add, remove or list the operator asked for.
+- [ ] Printed each `summary` and the resulting `entries`.

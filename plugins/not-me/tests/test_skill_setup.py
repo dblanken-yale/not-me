@@ -167,9 +167,18 @@ class SetupSkillTest(unittest.TestCase):
         self.assertIn("## Queue mode (`project --queue`)", self.text)
         queue = (SKILL_DIR / "references" / "queue.md").read_text(encoding="utf-8")
         self.assertIn("references/queue.md", self.text)
-        for needle in ("notme config --explain", "gh label list", "gh project list", "gh project field-list",
+        for needle in ("notme config --explain", "gh label list", "gh api graphql", "projectsV2", "projectV2(number:",
                        "--board owner/number", "notme doctor", "keep everything else", "--global"):
             self.assertIn(needle, queue)
+
+    def test_boards_are_read_through_graphql(self):
+        """dblanken-yale/not-me#117: board reads use gh api graphql, never gh project, in every skill and reference."""
+        docs = list(SKILL_DIR.rglob("*.md")) + list((PLUGIN / "references").rglob("*.md")) + \
+            list((PLUGIN / "skills").rglob("*.md"))
+        for path in docs:
+            self.assertNotIn("gh project", path.read_text(encoding="utf-8"), path)
+        detection = (SKILL_DIR / "references" / "detection.md").read_text(encoding="utf-8")
+        self.assertIn("gh api graphql", detection)
 
     def test_no_forbidden_strings(self):
         tokens = [ln.strip().lower() for ln in DENYLIST.read_text(encoding="utf-8").splitlines()

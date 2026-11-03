@@ -130,28 +130,18 @@ The `pr-review-toolkit` plugin is optional. When it is installed, the gate runs 
 
 Do this when a new release is announced. If a release raises the config `schema` number, `/not-me:config` warns about older docs, and `/not-me:setup --upgrade` shows a diff before it changes them.
 
-## The operator token
+## Your own commands
 
-Some actions must be confirmed by a person, not by the program: allowing a repo (`allow-repo add` and `remove`), removing a pause (`pause off`) and going live (`mode live`). The operator token is how not-me tells the difference. It is a random secret kept in `~/.claude/not-me/operator-token`, readable only by you. Claude Code cannot run these actions and the guard blocks any attempt to read the file.
+Some actions are yours, not the program's: allowing a repo or board (`/not-me:allow-repo`), pausing and lifting a pause (`/not-me:pause`) and going live (`/not-me:mode live`). Only a person can start these slash commands; Claude cannot call them on its own. Typing one is the approval: it runs in your session and prints what changed (the repo or board, and whether for this project or every project). Each change also adds a line to `~/.claude/not-me/settings-changes.jsonl`, so you can see it later and undo it. A run never issues these on its own; an unattended run asks you in its log instead.
 
-Create it once, in your own terminal app (for example the macOS Terminal app, not the terminal panel inside Claude Code):
-
-```
-<path to notme> doctor --init-token
-```
-
-`/not-me:mode` prints the exact path to use. The token is shown once. Save it in a password manager. When an action needs it, the command asks for the token and hides what you type. Scripts can set `NOT_ME_OPERATOR_CONFIRM` to the token instead.
-
-If you lose it, delete `~/.claude/not-me/operator-token` and run `doctor --init-token` again. While the file exists, `--init-token` refuses and tells you to delete it first.
-
-A new token also turns live mode off, because the live switch is signed with the old one (see [Going live](#going-live)). Run `/not-me:mode live` again after you make a new token.
+Earlier versions used an operator token and a separate terminal for these. If you have `~/.claude/not-me/operator-token`, `mode-live.sig` or `mode-live.epoch`, they do nothing now and you may delete them.
 
 ## 4. First run
 
 Run these in the repo you want to automate, in a Claude Code session started in that repo:
 
 1. `/not-me:doctor` checks the tool versions, the effective config, and that the guard hook really blocks something. Each failed check comes with an install hint for your operating system when one applies. After the list, it asks once which failed checks you want it to fix, and changes only the ones you pick. It sets `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` in your `~/.claude/settings.json` itself (start a new Claude Code session for that to take effect). For the rest it gives you the step to take: `gh auth login` or `gh auth refresh -s repo` in a terminal, or `/not-me:setup` for a missing config. Run `/not-me:doctor` again after you take those steps. It never installs tools or changes the guard, the allow list, or the not-me config. If a hook or the sandbox blocks a change, it shows you the exact change to make by hand. Fix anything still failing before you go on.
-2. `/not-me:setup` asks a few questions and writes `.claude/not-me/*.md` in the repo. Commit those files. They are the only thing not-me asks you to commit. Setup also records the allowed repos on your allow list. It also has a picking step: it shows how issues are picked, lists the board fields and labels it finds that could rank them, and writes your rules to the layer you choose. Rerun just that step with `/not-me:setup project --picking`, or `/not-me:setup --global --picking` for your global layer.
+2. `/not-me:setup` asks a few questions and writes `.claude/not-me/*.md` in the repo. Commit those files. They are the only thing not-me asks you to commit. The companion repos and board they name count as allowed once that commit is on the default branch; setup prints `/not-me:allow-repo` commands for using them sooner. It also has a picking step: it shows how issues are picked, lists the board fields and labels it finds that could rank them, and writes your rules to the layer you choose. Rerun just that step with `/not-me:setup project --picking`, or `/not-me:setup --global --picking` for your global layer.
 3. `/not-me --dry-run` runs the whole loop as if live. Reads are real. Every write goes into a ledger instead of GitHub.
 
 A fresh install picks only issues assigned to you. Issues with no assignee are left alone until you set `queue: {include_unassigned: true}` in `~/.claude/not-me/project.md`. Issues assigned to someone else are never picked. The picking step of `/not-me:setup` can set this for you. See [config.md](config.md#which-issues-the-queue-picks).
@@ -160,15 +150,13 @@ Read the ledger before you trust it. It is `<git-common-dir>/not-me/logs/intende
 
 ### Going live
 
-Not-me starts in `mode: dry-run`. A repo file can set `dry-run` but can never set `live`, because a repo file is committed by anyone with push access. Only you can switch to live, from your own terminal.
+Not-me starts in `mode: dry-run`. A repo file can set `dry-run` but can never set `live`, because a repo file is committed by anyone with push access. Only your global layer can.
 
-Run `/not-me:mode live`. It checks whether you have an [operator token](#the-operator-token) and gives you one command to paste into your own terminal app. That command asks for the token and hides what you type. Then run `/not-me:mode` again to confirm it shows `live` with source `global`.
+Type `/not-me:mode live`. It sets `mode: live` in `~/.claude/not-me/project.md`, in this session, and prints what changed. That setting is all live mode needs. If the repo layer still pins `mode: dry-run`, it says which file and line keep this project in dry-run.
 
-That command is the only way to go live. It sets `mode: live` in `~/.claude/not-me/project.md` and writes a small signature file next to it, `~/.claude/not-me/mode-live.sig`, made with your operator token and a random secret in `~/.claude/not-me/mode-live.epoch` (created the first time). Not-me runs live only when both are there and the signature matches your current token and epoch. Typing `mode: live` into the file by hand is not enough: not-me keeps running in dry-run and `/not-me:mode`, `/not-me:config` and `/not-me:doctor` warn that live is set but not confirmed. A new operator token makes the old signature invalid, so run `/not-me:mode live` again after you rotate it.
+`/not-me:mode dry-run --global` switches back at any time; `/not-me:mode dry-run` pins only this project. You can also set `mode: dry-run` by hand.
 
-`/not-me:mode dry-run --global` switches back at any time: it deletes the signature and replaces the epoch with a new random one, so a copy of an old signature can never turn live back on. You can also set `mode: dry-run` by hand. Returning to dry-run by any means revokes the signature (the next time not-me reads its config), so going live again needs `/not-me:mode live`.
-
-Upgrading from an older version: if your global `project.md` already says `mode: live`, not-me runs in dry-run until you run `/not-me:mode live` once.
+Upgrading from an older version: a global `mode: live` that an earlier version kept in dry-run (because it was never signed) is now live as it stands. Check `/not-me:mode` after you update.
 
 ## Uninstall cleanly
 

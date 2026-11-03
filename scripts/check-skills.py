@@ -36,6 +36,7 @@ RULES = {
     "R13": "--bg verb list",
     "R14": "no em dashes",
     "R15": "state changes say why",
+    "R16": "git -C, not cd then git",
 }
 
 ALLOW_MARKER = "<!-- allowed-raw-write -->"
@@ -65,6 +66,8 @@ def reason_violations(text: str) -> List[Tuple[int, str]]:
         out.append((text[:m.start()].count("\n") + 1, text[m.start():m.end()]))
     return out
 
+# cd <dir> then git in the same command, joined by && or ;
+CD_GIT = re.compile(r"(?<![\w-])cd\s+[^\s;&|`]+\s*(?:&&|;)\s*git\b")
 VERBS = "NONE | PR | PUSHED | PARKED | HELD | REVIEWED | PROVED | FAILED | STOP"
 BASH_TAGS = {"bash", "sh", "shell", "zsh", "console"}
 # The repo slug covers the URL and the "marketplace add" install command.
@@ -374,6 +377,17 @@ class Linter:
             for no, found in reason_violations(self.text(path)):
                 self.add(path, no, "R15", f"'{found}' without --reason-file: every state change says why")
 
+    # R16 --------------------------------------------------------------
+    def r16(self) -> None:
+        """git runs with `git -C <dir>`, never after a `cd <dir>` in the same command: the guard follows only a
+        leading cd and logs a write in a checkout it cannot work out instead of checking it
+        (dblanken-yale/not-me#144)."""
+        for path in self.skill_docs + self.ref_docs:
+            for no, line in enumerate(self.text(path).splitlines(), start=1):
+                m = CD_GIT.search(line)
+                if m:
+                    self.add(path, no, "R16", f"'{m.group(0)}': run git with `git -C <dir>`, not after cd")
+
     def run(self, only: Set[str]) -> None:
         if "R1" in only:
             self.r1()
@@ -393,6 +407,8 @@ class Linter:
             self.r14()
         if "R15" in only:
             self.r15()
+        if "R16" in only:
+            self.r16()
         self.violations = sorted({v for v in self.violations if v[2] in only},
                                  key=lambda v: (v[0], v[1], int(v[2][1:]), v[3]))
 
