@@ -44,7 +44,7 @@ An issue is ready to pick up when it has:
 
 - a goal
 - an acceptance criteria checklist
-- reproduction steps or context (a report of a guard block quotes each blocked command exactly)
+- reproduction steps or context (a report of a guard block quotes each blocked command, with any secret, token or key value replaced by `<redacted>`)
 - what is out of scope
 
 An issue whose body says another PR or issue must merge first is not ready
