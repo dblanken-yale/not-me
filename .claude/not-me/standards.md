@@ -27,6 +27,8 @@ title, `type(scope): summary`, with type one of feat, fix, docs, refactor,
 chore, ci or test. Issue titles here usually start with a type already, so the
 title is the issue title. When it has no type, add the one that fits the change.
 Never put the issue number first: `40: feat: ...` fails the check.
+The title must also pass `notme check-text`. Issue titles that name a config
+key such as `models` fail it; reword that part and keep the type.
 
 ## PR description
 
@@ -42,7 +44,7 @@ An issue is ready to pick up when it has:
 
 - a goal
 - an acceptance criteria checklist
-- reproduction steps or context
+- reproduction steps or context (a report of a guard block quotes each blocked command, with any secret, token or key value replaced by `<redacted>`)
 - what is out of scope
 
 An issue whose body says another PR or issue must merge first is not ready

@@ -55,11 +55,13 @@ This skill ends in NONE, PUSHED, PARKED, FAILED or STOP.
 
 ## Step 1: Target and claim
 
+On every path (idle too) follow `${CLAUDE_PLUGIN_ROOT}/references/interrupted-runs.md`.
+
 1. A PR ref in `$ARGUMENTS` is the target.
 2. Else `notme pick-needs-work`. `{"none": true}`: look for an answered question
    (`${CLAUDE_PLUGIN_ROOT}/skills/update/references/findings.md`, "Answered
    questions"). Still nothing: `notme log start --skill update --ref -`, finish it
-   with status `idle`, print `NONE - idle  log=<path>`. Write nothing else.
+   with status `idle`, print `NONE - idle  log=<path>`. Write nothing else but an interrupted-run hand-off.
 3. Walk `candidates` in order (the pick, then `others`). One whose `worktree` is not
    null has its head branch held by another worktree: skip it, touch nothing there,
    and keep its ref, `path` and `status`. Never remove it, even a clean `run-*` one.
