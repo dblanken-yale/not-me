@@ -47,8 +47,27 @@ exist. Result line: `STOP acme/app#88 blocked - base release-2.4 not found`.
 
 1. Fetch. Check out the branch. Fast-forward it to its remote.
 2. Merge the base into it: `git merge origin/<base>`.
-3. Conflicts you can resolve with confidence: resolve, run the tests, commit the
-   merge. Conflicts you cannot: abort the merge, log the files, park.
+3. A merge that stops on conflicts: resolve it yourself, as "Resolving conflicts"
+   below says. Never leave it for a person unless that section says to abort.
+
+## Resolving conflicts
+
+The run resolves a conflict at either checkpoint and writes every choice down, so a
+person can undo it through git.
+1. Log `pre_merge` (`git -C <wt> rev-parse HEAD`), `base_sha` (`MERGE_HEAD`) and the
+   conflicted files.
+2. Keep both sides' intent: take both when each added something, regenerate generated
+   files with the project's generator, and where they disagree keep what the base
+   landed and re-apply the branch's purpose on top. Stage files by name.
+3. Abort (`git -C <wt> merge --abort`), log the files and fail `merge-conflict` only
+   when you cannot tell what a side meant, or the checks still fail after
+   `models.max_tries`. Run the verify commands before anything is pushed.
+4. The merge commit message holds one entry per file: path, what the branch did, what
+   the base did, what you kept and why, marked `judgment` when the sides truly
+   disagreed. End with `pre_merge`, `base_sha` and `Undo: git revert -m 1 <this
+   commit>`. Never amend or squash it, and never force-push to undo.
+5. Log `DECISION conflict <path> <kept>` per file and list them under a `Conflict
+   resolution` heading in the PR comment, `judgment` entries first.
 
 ## Checkpoint B: before push
 

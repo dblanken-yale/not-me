@@ -44,7 +44,7 @@ the claim, post nothing, change no labels, and stop the run.
 | Every finding deferred or refused | `findings.md` park labels | summary and thread replies | `PARKED <ref> needs_review - waiting on @<login>` |
 | Guard block | unchanged, claim released | none | `FAILED <ref> blocked - <target>`; run stops |
 | Other failure on our side before a push | unchanged, claim released | none | `FAILED <ref> <what>`; run stops |
-| Merge conflict at Checkpoint A | `needs_work`, `needs_human`, claim released | names the conflicting files | `FAILED <ref> merge-conflict` |
+| Merge conflict that `branching.md` says to abort | `needs_work`, `needs_human`, claim released | names the conflicting files | `FAILED <ref> merge-conflict` |
 | A check or CI job fails the same way on the base (`verification.md`, "A failure that is also on the base") | unchanged; claim released before a push, kept after | none | `FAILED <ref> base-red - <check>`; run stops |
 | Implementation or gate fails after `models.max_tries` on every finding | `needs_work`, `needs_human`, claim released | names the failing check | `FAILED <ref> <check>` |
 | Push fails after commit | unchanged | none | `FAILED <ref> not-pushed` (log says "committed but NOT PUSHED") |
