@@ -2392,12 +2392,13 @@ def cmd_git_unstash(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
 
 
 WORKTREES_EXCLUDE = "/.claude/worktrees/"
-# review-, run- (and the notme-new-/notme-update- names parallel runs use) keep notme off the other worktrees in the
-# same dir (Claude Code keeps its session worktrees there, under names a person picks)
-REVIEW_NAME_RE = re.compile(r"(?:review|notme-new|notme-update)-[A-Za-z0-9._-]{1,57}")
+# review- and run- keep notme off the other worktrees in the same dir (Claude Code keeps its session worktrees
+# there, under names a person picks). A detached worktree takes either prefix: run-new-<N> and run-update-<N> are
+# what a run makes before its log starts, so its marker lands there; --branch mode takes run- only.
+REVIEW_NAME_RE = re.compile(r"(?:review|run)-[A-Za-z0-9._-]{1,57}")
 RUN_NAME_RE = re.compile(r"run-[A-Za-z0-9._-]{1,57}")
 WORKTREE_NAME_RE = re.compile(f"{REVIEW_NAME_RE.pattern}|{RUN_NAME_RE.pattern}")
-WORKTREE_NAME_HINT = "review-, notme-new-, notme-update- or run- then [A-Za-z0-9._-]{1,57}"
+WORKTREE_NAME_HINT = "review- or run- then [A-Za-z0-9._-]{1,57}"
 
 
 def worktrees_root(ctx: Context) -> Path:
@@ -2420,11 +2421,11 @@ def worktrees_root(ctx: Context) -> Path:
 
 
 def worktree_path(root: Path, path: Union[str, Path]) -> Path:
-    """`path` realpath'd when it is a review-*, run-*, notme-new-* or notme-update-* dir directly under `root` with no
+    """`path` realpath'd when it is a review-* or run-* dir directly under `root` with no
     symlink on the way; else unsafe_path."""
     real = Path(os.path.realpath(str(path)))
     if real.parent != root or not WORKTREE_NAME_RE.fullmatch(real.name) or ".." in real.name:
-        raise fail(ExitCode.ERROR, "unsafe_path", "worktree path must be a review-*, run-*, notme-new-* or notme-update-* dir "
+        raise fail(ExitCode.ERROR, "unsafe_path", "worktree path must be a review-* or run-* dir "
                    "directly under <main checkout>/.claude/worktrees/")
     return real
 
@@ -2456,8 +2457,8 @@ def cmd_git_worktree_add(ctx: Context, args: argparse.Namespace) -> Dict[str, An
     """Add a worktree at <main checkout>/.claude/worktrees/NAME; the CLI picks the path. Give SHA or --branch.
 
     Review mode (SHA): detached at the sha. NAME defaults to review-<first 12 chars of SHA> and must match
-    review-, notme-new- or notme-update- followed by [A-Za-z0-9._-]{1,57} (the
-    notme-new- and notme-update- names are what parallel runs give their worktrees).
+    review- or run- followed by [A-Za-z0-9._-]{1,57} (run-new-<N> and run-update-<N> are what a run that works
+    in its own worktree names it, so its log and marker start there; make the branch in it with `git branch-create`).
     Run mode (--branch): the branch checked out, for one update or new run; --base B creates BRANCH from B without
     tracking, else the existing branch is used (git makes it from origin/BRANCH when only the remote has it). NAME
     defaults to run-<12 random hex> and must match run-[A-Za-z0-9._-]{1,57}. A protected BRANCH is refused as
@@ -2511,7 +2512,7 @@ def cmd_git_worktree_add(ctx: Context, args: argparse.Namespace) -> Dict[str, An
 
 @command("git worktree-remove", "remove a worktree notme made", args=[arg("path", metavar="PATH")])
 def cmd_git_worktree_remove(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
-    """Remove a worktree made by `git worktree-add`. PATH must be a review-*, run-*, notme-new-* or notme-update-* dir directly under
+    """Remove a worktree made by `git worktree-add`. PATH must be a review-* or run-* dir directly under
     <main checkout>/.claude/worktrees/; anything else, including Claude Code's own session worktrees there, is refused
     as unsafe_path. git refuses a worktree with uncommitted changes (git_error): save them with `git save-patch`
     first. The branch of a run worktree stays.
@@ -2529,7 +2530,8 @@ def cmd_git_save_patch(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]
     as a binary patch under <git-common-dir>/not-me/patches/, then reset that worktree to HEAD and delete its
     untracked files (ignored files stay), so its branch is free for the next run. Use it when a run cannot commit.
 
-    The work dir must be a run-* worktree that `git worktree-add --branch` made: directly under
+    The work dir must be a run-* worktree that `git worktree-add` made (with --branch, or detached with a run- name and a
+    branch made in it): directly under
     <main checkout>/.claude/worktrees/, registered with git, on a branch that is not protected. The main checkout,
     a review-* worktree, any other worktree or directory is refused as unsafe_path and nothing is touched. Bring the
     work back with `git apply <path>` in a later run worktree on the same branch.
@@ -2543,8 +2545,8 @@ def cmd_git_save_patch(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]
     real = worktree_path(worktrees_root(ctx), top)
     registered = {os.path.realpath(w["path"]) for w in git_mod.worktree_list(work)}
     if not RUN_NAME_RE.fullmatch(real.name) or str(real) not in registered:
-        raise fail(ExitCode.ERROR, "unsafe_path", f"{real} is not a run worktree made by `notme git worktree-add "
-                                                  "--branch`; save-patch resets nothing else")
+        raise fail(ExitCode.ERROR, "unsafe_path", f"{real} is not a run worktree made by `notme git worktree-add`; "
+                                                  "save-patch resets nothing else")
     branch = git_mod.current_branch(real)
     if branch is None:
         raise fail(ExitCode.ERROR, "unsafe_path", f"{real} has no branch checked out")

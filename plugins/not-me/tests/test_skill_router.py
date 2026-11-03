@@ -42,8 +42,6 @@ class RouterSkillTest(unittest.TestCase):
         self.assertEqual(meta["limits"]["parallel_runs"], 3)
 
     def test_parallel_needs_worktree_mode_and_refuses_bg(self):
-        self.assertIn("`workspace.new` must be `worktree`", self.flat)
-        self.assertIn("STOP - parallel needs workspace.new: worktree", self.flat)
         self.assertIn("Refuse it with `--bg`", self.flat)
 
     def test_parallel_dispatches_one_unisolated_new_run_per_distinct_issue(self):
@@ -58,7 +56,7 @@ class RouterSkillTest(unittest.TestCase):
 
     def test_worktree_rules_for_new_work(self):
         branching = flat(text(BRANCHING))
-        for phrase in ("## Worktrees for new and update work", "--name notme-new-<N>", "`notme-update-<N>`",
+        for phrase in ("## Worktrees for new and update work", "--name run-new-<N>", "`run-update-<N>`",
                        "A lost claim keeps the worktree, its log and run marker", "Never remove it mid-run",
                        "Only when the run ends, after `notme log finish`", "pass `--project-dir <path>` to every `notme` call", "`git -C <path> ...`",
                        "`notme git worktree-remove <path>`"):

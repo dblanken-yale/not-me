@@ -62,14 +62,13 @@ unchanged.
 `--parallel N` starts up to N `/not-me:new` runs at once, one issue and worktree each, in place of Steps 2 to 4.
 
 1. Refuse it with `--bg` and when N is not a whole number of 1 or more. Lower N to `limits.parallel_runs` (default 3), with a note.
-2. `workspace.new` must be `worktree` in `notme config`, else `STOP - parallel needs workspace.new: worktree`.
-3. `notme pick-issue`; `{"none": true}` prints `NONE - nothing to do`. Else choose up to N distinct issues by the
+2. `notme pick-issue`; `{"none": true}` prints `NONE - nothing to do`. Else choose up to N distinct issues by the
    `picking` rules, never a `held_back` one.
-4. Dispatch one subagent per issue, all in one message, started here without worktree isolation (the harness
+3. Dispatch one subagent per issue, all in one message, started here without worktree isolation (the harness
    refuses `notme git` from an isolated one), each running `/not-me:new <issue>` (plus `--dry-run`).
-5. Each run claims its issue by compare-and-set: a lost claim ends that run with `STOP <ref> claimed elsewhere`;
+4. Each run claims its issue by compare-and-set: a lost claim ends that run with `STOP <ref> claimed elsewhere`;
    the rest go on. Never retry a run.
-6. Print each result line exactly, in issue order. Skip the retro.
+5. Print each result line exactly, in issue order. Skip the retro.
 
 ## Step 4: Retro
 
@@ -85,5 +84,5 @@ not installed, skip it silently.
 - [ ] Forwarded `$ARGUMENTS`; under `--bg` each leg was its own subagent.
 - [ ] Went on past `NONE` and `FAILED <ref>`; stopped at work done, `STOP` or a run-wide `FAILED -`, and printed it exactly.
 - [ ] Printed `NONE - nothing to do` only when every leg was `NONE`.
-- [ ] `--parallel N`: capped at `limits.parallel_runs`, needed `workspace.new: worktree`,
+- [ ] `--parallel N`: capped at `limits.parallel_runs`,
   one unisolated subagent per distinct issue, printed every run's line.

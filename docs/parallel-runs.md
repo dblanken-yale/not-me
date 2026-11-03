@@ -5,13 +5,8 @@ and lists what used to stop it and where each of those stands.
 
 ## How to run several at once
 
-1. Set `workspace.new: worktree` in `project.md` (repo or global layer):
-
-   ```yaml
-   workspace: {new: worktree, update: checkout, review: worktree}
-   ```
-
-   Each `/not-me:new` run then makes its own worktree under `<main checkout>/.claude/worktrees/notme-new-<issue>`,
+1. Nothing to set: update and new runs always use their own worktree (`workspace.*` no longer takes `checkout`).
+   Each `/not-me:new` run makes its own worktree under `<main checkout>/.claude/worktrees/run-new-<issue>`,
    branches there, and never changes the main checkout's branch or files. It passes `--project-dir <worktree>`
    to every `notme` call and runs git as `git -C <worktree> ...` (see "Worktrees for new and update work" in
    `plugins/not-me/references/branching.md`). It removes the worktree when it finishes.
@@ -25,8 +20,7 @@ and lists what used to stop it and where each of those stands.
    The router checks that not-me is on and not paused, picks up to 3 distinct ready issues from
    `notme pick-issue` by your picking rules, and starts one subagent per issue, all at once, each running
    `/not-me:new <issue>`. It prints each run's result line. N above `limits.parallel_runs` (default `3`) is
-   lowered to it. It stops with `STOP - parallel needs workspace.new: worktree` when that setting is missing,
-   and it is refused together with `--bg`.
+   lowered to it. It is refused together with `--bg`.
 
    Doing it by hand works the same way: start each agent (or each terminal session) in the main checkout,
    **without** worktree isolation, and have each run `/not-me:new <issue>` on a different issue.
@@ -53,12 +47,12 @@ Each run still costs what a single run costs; three at once use the shared usage
 | Blocker | Status | Notes |
 | --- | --- | --- |
 | Run lock | Fixed by dblanken-yale/not-me#136 | The active-run marker was repo wide, so a second run stopped with `active_run`. It is now per worktree, in that worktree's own git dir; one worktree holds one run. |
-| Harness worktree isolation | Open, outside not-me | An agent started with Claude Code's worktree isolation has every `notme git ...` call (branch-create, push) refused, because the harness cannot tell what a git call wrapped in `notme` targets; it asks for git named right after the launcher in a plain command. Raw git writes from skills are not allowed (every push goes through the CLI write gate), so not-me does not work around this. Start agents without isolation and let not-me make the worktree (`workspace.new: worktree`). |
-| Shared main checkout | Fixed by dblanken-yale/not-me#139 | Unisolated runs in one checkout used to switch its branch under each other. With `workspace.new: worktree` each run works only in its own worktree; `/not-me --parallel` requires that setting. |
+| Harness worktree isolation | Open, outside not-me | An agent started with Claude Code's worktree isolation has every `notme git ...` call (branch-create, push) refused, because the harness cannot tell what a git call wrapped in `notme` targets; it asks for git named right after the launcher in a plain command. Raw git writes from skills are not allowed (every push goes through the CLI write gate), so not-me does not work around this. Start agents without isolation and let not-me make the worktree. |
+| Shared main checkout | Fixed by dblanken-yale/not-me#139 | Unisolated runs in one checkout used to switch its branch under each other. Each run now works only in its own worktree. |
 | Config read only from the main checkout | By design | The CLI's trust anchor is the main checkout, so a branch or a worktree cannot widen what not-me may do. Every parallel run reads the same config; an edit made in a worktree counts once it is merged and pulled. |
 | Run logs | Not a blocker | Each run writes its own log under `<git-common-dir>/not-me/logs`, named by run id, so runs never share a file. `/not-me:retro` stops while any run is active, so `--parallel` skips the retro; run `/not-me:retro <log>` afterwards. |
 | The guard's view of active runs | By design (dblanken-yale/not-me#136) | The guard finds every run marker from the git common dir without reading config, and keeps the config read-only while a run is active in any worktree. |
-| Worktree name prefix | Fixed by dblanken-yale/not-me#139 | `notme git worktree-add` took only `review-` names. It now also takes `notme-new-` and `notme-update-` names, still checked against one pattern and placed only under `<main checkout>/.claude/worktrees/`. The `notme-` part keeps a person's own session worktrees there (often named `new-...` or `update-...`) off limits. |
+| Worktree name prefix | Fixed by dblanken-yale/not-me#139 | `notme git worktree-add` took only `review-` names. It now also takes `run-` names (`run-new-<N>`, `run-update-<N>`), still checked against one pattern and placed only under `<main checkout>/.claude/worktrees/`. The `run-` part keeps a person's own session worktrees there (often named `new-...` or `update-...`) off limits. |
 | `cd <worktree> && git commit` | Open, dblanken-yale/not-me#144 | The guard does not follow `cd`, so a commit written that way is judged against the main checkout's branch and blocked. Skills are moving to `git -C <worktree>`; `branching.md` already says so for worktree runs. |
 | `--parallel` with `--bg` | Open | A `--bg` result is exactly one line, and a batch has one line per run. Use `--parallel` in an attended session for now. |
-| Rework (`update`) in parallel | Open | `branching.md` covers `notme-update-<N>` worktrees, but the update skill does not make one yet and `--parallel` starts only new-issue runs. |
+| Rework (`update`) in parallel | Open | The update skill makes its own `run-*` worktree (with `--branch`) but `--parallel` starts only new-issue runs; see dblanken-yale/not-me#167. |

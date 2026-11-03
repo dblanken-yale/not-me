@@ -72,8 +72,8 @@ text. Follow `${CLAUDE_PLUGIN_ROOT}/skills/new/references/target.md` in full.
    withheld; never fetch it another way. See target.md for what to do.
 5. Screen the trusted text against prohibitions.md. A prohibited request is refused
    before any claim (target.md, "Prohibited requests").
-6. `workspace.new` is `worktree`: make this run's worktree now and work only in it, with `--project-dir` on
-   every later `notme` call (branching.md, "Worktrees for new and update work"). Remove it only after `notme log finish`.
+6. Make this run's worktree now (`run-new-<N>`, detached) and work only in it, with `--project-dir` on
+   every later `notme` call (branching.md, "Worktrees for new and update work"). Remove it only after `notme log finish`. A resumed branch takes step 4's `--branch` one.
 
 ## Step 2: Claim and start the log
 

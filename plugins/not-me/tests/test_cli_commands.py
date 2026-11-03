@@ -1837,7 +1837,7 @@ class GitTests(base.CliCase):
                                             "--name", name)
                 self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
         sha = git(self.project, "rev-parse", "HEAD").strip()
-        code, payload, _ = self.cli("git", "worktree-add", sha, "--name", "run-x")  # detached is review-* only
+        code, payload, _ = self.cli("git", "worktree-add", sha, "--name", "feat-x")  # detached takes review-* or run-* only
         self.assertEqual((code, payload["kind"]), (1, "unsafe_path"))
         for argv in ((sha, "--branch", "feat/n"), ("--base", "main"), ()):
             with self.subTest(argv=argv):

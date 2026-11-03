@@ -110,7 +110,7 @@ nothing in the operator's checkout and holds a branch only for its own life.
    the work.
 5. Never edit, stash, reset or commit in a worktree you did not create: the main
    checkout, a person's worktree, a session worktree. `save-patch` and
-   `worktree-remove` refuse anything but a `run-*` or `review-*` worktree.
+   `worktree-remove` refuse anything but a `run-*` or `review-*` worktree (`save-patch` only `run-*`).
 
 ## Worktrees for review
 
@@ -121,9 +121,9 @@ nothing in the operator's checkout and holds a branch only for its own life.
 
 ## Worktrees for new and update work
 
-`workspace.new` or `workspace.update` set to `worktree` (and `--parallel N`) makes the run's worktree before `notme log start`. Already in a linked worktree: work in place.
+A `/not-me:new` run makes its worktree before `notme log start`, so the run marker, claim and branch all land in it: a `run-new-<N>` one, detached, that `git save-patch` and `worktree-remove` accept like any `run-*`. Already in a linked worktree: work in place. Rework (`/not-me:update`) has no such step: it makes its `run-*` worktree after the claim, with `--branch` ("Run worktrees").
 
-1. `notme git worktree-add <sha> --name notme-new-<N>` (`notme-update-<N>` for rework), the sha from
+1. `notme git worktree-add <sha> --name run-new-<N>` (`run-update-<N>` for rework), the sha from
    `git rev-parse HEAD`. `path_exists`: add `-2`, `-3`. A lost claim keeps the worktree, its log and run marker
    for the next pick. Never remove it mid-run, since that deletes the marker; make no second one.
 2. From then on pass `--project-dir <path>` to every `notme` call, so the marker, branch and checkpoints land
