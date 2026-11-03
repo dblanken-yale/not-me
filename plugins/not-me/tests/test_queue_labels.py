@@ -615,6 +615,24 @@ class ClaimTests(QueueTestCase):
         self.assertEqual(claims.parse_marker(markers[0]["body"])["ts"], "2026-03-01T12:05:00Z")
         self.assertEqual(second.marker_comment_id, markers[0]["id"])
 
+    def test_a_parallel_run_cannot_claim_the_issue_another_run_holds(self):
+        # Two runs of one operator in two worktrees share the claims dir (it lives in the git common dir).
+        self.q.claim(1)
+        with self.assertRaises(claims.ClaimLost):
+            self.queue("run-2").claim(1)
+        self.assertEqual(self.thing(1)["labels"], ["in progress"])
+        markers = self.marker_comments(1)
+        self.assertEqual([claims.parse_marker(c["body"])["run"] for c in markers], ["run-1"])
+        self.assertEqual(claims.read_lock(self.claims_dir / "issue-1.lock")["run_id"], "run-1")
+
+    def test_a_parallel_run_loses_to_a_live_local_lock_before_any_write(self):
+        # The race: run-1 has taken the issue's local lock but not yet written; run-2 still sees "to do".
+        claims.acquire_lock(self.claims_dir / "issue-1.lock", "run-1", 8, NOW)
+        with self.assertRaises(claims.ClaimLost):
+            self.queue("run-2").claim(1)
+        self.assertEqual(self.fake.writes_made(), [])
+        self.assertEqual(self.thing(1)["labels"], ["to do"])
+
     def test_refuses_when_assigned_to_someone_else(self):
         self.thing(1)["assignees"] = ["hubot"]
         with self.assertRaises(claims.ClaimLost):

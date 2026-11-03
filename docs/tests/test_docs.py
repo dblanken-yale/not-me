@@ -20,7 +20,7 @@ from notme import frontmatter  # noqa: E402
 GUIDES = ("requirements.md", "install.md", "config.md", "guards.md")
 DOC_NAMES = ("project", "standards", "verify", "review", "prove", "role")
 RULES = ("other_repo", "protected_branches", "force_push", "destructive_git")
-NEW_DOCS = ("workflow.md", "testing.md")
+NEW_DOCS = ("workflow.md", "testing.md", "parallel-runs.md")
 READMES = (ROOT / "README.md", PLUGIN / "README.md")
 VERBS = ("NONE", "PR", "PUSHED", "PARKED", "HELD", "REVIEWED", "PROVED", "FAILED", "STOP")
 SKILLS = ("not-me", "new", "update", "review", "prove", "ticket", "suggest", "retro", "status", "setup", "config",
@@ -241,7 +241,8 @@ class TestWorkflowAndTestingDocs(unittest.TestCase):
     def test_docs_are_linked_from_the_readmes(self):
         for readme in READMES:
             text = readme.read_text(encoding="utf-8")
-            for doc in ("requirements", "install", "config", "guards", "workflow", "cli", "testing", "release"):
+            for doc in ("requirements", "install", "config", "guards", "workflow", "parallel-runs", "cli", "testing",
+                        "release"):
                 self.assertIn(f"docs/{doc}.md", text, f"{readme.name} does not link docs/{doc}.md")
 
 

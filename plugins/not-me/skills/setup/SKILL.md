@@ -58,8 +58,9 @@ An unknown argument: print the argument hint and stop.
 
 1. Run `notme doctor`. Show each failed check with its detail. A failed required
    check does not stop setup, but say live mode cannot be turned on until it passes.
-2. Run `notme status`. When `active_run` is set and its marker is fresh, stop:
-   "A not-me run is active; run setup when it ends." Do not override this.
+2. Run `notme status`. When `active_runs` is not empty (a run in any worktree of
+   this checkout), stop: "A not-me run is active; run setup when it ends." Do not
+   override this.
 3. Run `notme config --explain`. Show a table per doc: `project.md`,
    `standards.md`, `verify.md`, `review.md`, `prove.md`, `role.md`, with the layer that wins
    today (default, global layer, repo layer), the file path, and warnings.
@@ -95,7 +96,7 @@ and `queue.sync` when both labels and a board were detected;
 roster rows and tiers; reviewers; whether every reviewer must approve, and
 each reviewer's role and pass label; companion set and push order; label mapping;
 protected branches to add; `models.strategy` (`orchestrate` or `single`);
-confirmation of the verify commands; the prove `target` strategy; `notify.command`;
+confirmation of the verify commands and of `shared_env` (detected, else asked); the prove `target` strategy; `notify.command`;
 and whether to turn on live mode at the end.
 
 With `--global`, ask only `mode`, `attribution`, `limits`, `models`, `router`,
@@ -177,7 +178,9 @@ Body sections the interview produces:
 - `standards.md`: `## Delegation` paths and kinds, `## Ticket format`,
   `## Issue readiness`.
 - `verify.md`: `## Tests`, `## Lint`, `## Build`, `## Environment start` with the
-  confirmed commands and where each was found, and `## Gate additions`.
+  confirmed commands and where each was found, and `## Gate additions`. Write
+  `shared_env: true` in its frontmatter only when the checks need one environment
+  every worktree shares (detected, or the user said so); otherwise leave the default.
 - `role.md`: only when the user wants every reviewer to approve, a starter
   `## Roles` table with one row per roster reviewer (Reviewer yes), Role and
   Pass label as answered or left empty. Any row turns the rule on; no rows
@@ -211,6 +214,7 @@ Keep every other section's default text. Do not invent sections.
    ledger and nothing is sent, until the user runs `/not-me:mode live`.
 4. Print the next commands: `/not-me:doctor`, `/not-me --dry-run`, and each
    `/not-me:allow-repo` confirmation from Step 4.
+5. Once, point to `docs/permissions.md` for the allow rules that keep auto mode from refusing routine work; edit no settings.
 
 ## Queue mode (`project --queue`)
 

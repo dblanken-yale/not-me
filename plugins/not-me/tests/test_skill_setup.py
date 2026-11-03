@@ -22,7 +22,7 @@ MAX_LINES = 250
 VOCAB = {
     "all", "default", "global", "repo", "extends", "orchestrate", "single", "primary",
     "companion", "create", "skip", "keep", "detected", "extend", "replace", "body",
-    "layers", "present", "missing", "active_run", "default_branch", "create_labels",
+    "layers", "present", "missing", "active_run", "active_runs", "default_branch", "create_labels",
     "mode_live", "ticket_format", "live", "run", "auto",
     "picking", "fields", "rules", "layer", "target_epics", "include_unassigned", "true", "false",
     "eligible", "unassigned", "usable", "values", "issues", "ranking_like", "other_owner_items",

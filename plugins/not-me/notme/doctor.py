@@ -1,5 +1,5 @@
 """The `notme doctor` probes: tools, gh auth and scopes, config, mode, the queue source, the guard self-test and the
-spawn depth.
+spawn depth, and the recommended permission allow rules (reported, never written).
 
 Each probe gives {name, ok, detail, required, fix, hint}. `fix` is a short description of a safe change that clears
 a failed check; `hint` is an install or repair hint for this operating system (sys.platform). Both are null on a
@@ -8,9 +8,11 @@ passing check, and null when no safe fix or hint exists. The CLI exits 7 when th
 """
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from . import states
@@ -52,6 +54,57 @@ INSTALL_HINTS: Dict[str, Dict[str, str]] = {
 }
 
 Check = Dict[str, Any]
+
+# permissions.allow rules that let routine not-me housekeeping run in auto permission mode without a refusal
+# (docs/permissions.md explains each one). Doctor only reports the missing ones; it never edits settings.
+HOUSEKEEPING_RULES = ("Bash(gh issue close:*)", "Bash(gh issue comment:*)", "Bash(gh issue edit:*)",
+                      "Bash(gh pr comment:*)", "Bash(notme:*)")
+BLANKET_RULES = ("Bash", "Bash(*)", "Bash(gh:*)", "Bash(gh *)")  # cover the rules, but allow far too much
+_PREFIX_RULE = re.compile(r"^Bash\((?P<prefix>.+?)(?::\*| \*)\)$")
+
+
+def permission_rules(launcher: str) -> List[str]:
+    """The recommended allow rules: the housekeeping ones and this plugin's launcher by its full path."""
+    return [*HOUSEKEEPING_RULES, f"Bash({launcher}:*)"]
+
+
+def _covers(have: str, want: str) -> bool:
+    """True when the allow rule `have` allows everything the recommended prefix rule `want` does."""
+    if have == want or have in ("Bash", "Bash(*)"):
+        return True
+    h, w = _PREFIX_RULE.match(have), _PREFIX_RULE.match(want)
+    return bool(h and w) and (w.group("prefix") + " ").startswith(h.group("prefix") + " ")
+
+
+def permissions_check(files: Sequence[Any], launcher: str) -> Check:
+    """Which recommended permissions.allow rules no settings file has. files: settings.json paths (user, project,
+    project local); a missing one is skipped, an unreadable one counts as empty and is named. Never writes."""
+    allow: List[str] = []
+    unreadable: List[str] = []
+    for f in files:
+        path = Path(f)
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            rules = ((data.get("permissions") or {}).get("allow") or []) if isinstance(data, dict) else []
+        except (OSError, ValueError, AttributeError):
+            unreadable.append(str(path))
+            continue
+        allow += [r for r in rules if isinstance(r, str)] if isinstance(rules, list) else []
+    wanted = permission_rules(launcher)
+    missing = [w for w in wanted if not any(_covers(h, w) for h in allow)]
+    notes = [f"{', '.join(unreadable)} could not be read"] if unreadable else []
+    blanket = [r for r in allow if r in BLANKET_RULES]
+    if blanket:
+        notes.append(f"{', '.join(blanket)} allows more than not-me needs (repo and release deletes too)")
+    if not missing:
+        return check("permissions", True, "; ".join(["every recommended allow rule is set", *notes]), required=False)
+    add = json.dumps({"permissions": {"allow": missing}}, indent=2)
+    detail = f"{len(missing)} of {len(wanted)} recommended allow rules missing: {', '.join(missing)}"
+    return check("permissions", False, "; ".join([detail, *notes]), required=False,
+                 hint="add these to permissions.allow in ~/.claude/settings.json yourself (see docs/permissions.md); "
+                      f"doctor does not edit settings:\n{add}")
 
 
 def check(name: str, ok: bool, detail: str, required: bool = True, *,
@@ -282,12 +335,13 @@ def run(runner: Callable[[Sequence[str]], Any], config_errors: List[str], gh: Ca
         mode: Optional[Check] = None, config_files: Optional[Mapping[str, Sequence[str]]] = None,
         pass_labels: Optional[Callable[[], Optional[Check]]] = None,
         queue: Optional[Callable[[], Check]] = None,
-        drift: Optional[Callable[[], Optional[Check]]] = None) -> List[Check]:
+        drift: Optional[Callable[[], Optional[Check]]] = None,
+        permissions: Optional[Callable[[], Check]] = None) -> List[Check]:
     """Every probe in order. gh, guard_state, pass_labels, queue and drift are called only when needed (gh needs a
     valid config; pass_labels, queue and drift also a logged-in gh, and the queue check is reported as not run
     otherwise; drift returns None when queue.board is not set and adds no check then).
     config_files maps a layer to the config docs found in it; the "config files" probe runs only when it is
-    given."""
+    given; permissions adds the recommended allow rules check (it reads settings files, never writes them)."""
     checks = [python_check(), git_check(), gh_check(runner)]
     installed = checks[-1]["ok"]
     detail = "valid" if not config_errors else f"{len(config_errors)} error(s): {config_errors[0]}"
@@ -312,6 +366,8 @@ def run(runner: Callable[[Sequence[str]], Any], config_errors: List[str], gh: Ca
         if found is not None:
             checks.append(found)
     checks += [guard_check(guard_state()), depth_check(env)]
+    if permissions is not None:
+        checks.append(permissions())
     return checks
 
 

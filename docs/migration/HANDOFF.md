@@ -137,7 +137,17 @@ them without asking him.
    global standard for every issue and PR reference.
 7. **The happy path of `new` leaves one upserted `new` marker comment on the
    issue naming the PR**, so a person reading the issue sees the run happened.
-8. Everything in `CLAUDE.md` "Decisions that must survive edits" (layers that
+8. **Runs in different worktrees of one checkout run in parallel**
+   (dblanken-yale/not-me#136). The active-run marker is per worktree (in the
+   worktree's own git dir); the guard reads every worktree's marker from the
+   common dir, so the config is read-only while any run is active. Only a
+   shared test environment is serialized: `verify.md` `shared_env: true`
+   (default `false`) makes the verify step take `notme verify-lock acquire`
+   and give it back after the last check. Call `notme` alone in its Bash
+   command: a sandbox matches the command's first word, and a chained
+   command cannot write the run log under the main checkout's `.git` from a
+   worktree.
+9. Everything in `CLAUDE.md` "Decisions that must survive edits" (layers that
    only tighten, one gated write path, a small guard, trust anchor, untrusted
    text never reaches the model, compare-and-set claims, dry-run default, no
    project names in the plugin, abstract labels, CLI for every GitHub action,

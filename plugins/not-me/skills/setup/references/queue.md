@@ -55,7 +55,8 @@ With AskUserQuestion, one call, current values first and marked as current:
    the PR's branch, its PR starting with `Builds on owner/repo#PR`. Only a trusted
    author's line counts. Then ask for the default: declared (the default: only
    issues with the line stack) or off (never stack; such an issue waits for the
-   merge).
+   merge). Say `auto` (stack on a blocker's open PR with no line) exists, but only a
+   person sets it, in the global layer (`docs/config.md`); never write it here.
 
 With `--answers`, read the `queue` object of the answers file (keys shaped like
 `queue` in the shipped `project.md`) instead and ask

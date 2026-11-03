@@ -19,7 +19,7 @@ from .. import claims, paths
 from ..gh import GhClient, GhError, _login, login_of, names_of, tmp_text_file
 from ..layers import is_field_name, is_positive_int
 from ..states import LabelCollision, Labels
-from ..stacking import stack_fact
+from ..stacking import auto_fact, stack_fact
 from ..writes import WriteTarget, valid_slug
 
 
@@ -422,10 +422,10 @@ class BaseQueue:
     # --- stacking (`Stack on:`) ---
 
     def stacking(self) -> str:
-        """queue.stacking: declared | off. Not set (a config without the default layer) counts as off."""
+        """queue.stacking: auto | declared | off. Not set (a config without the default layer) counts as off."""
         value = self.queue_cfg.get("stacking")
-        if value not in (None, "declared", "off"):
-            raise ValueError(f"queue.stacking must be declared or off, got {value!r}")
+        if value not in (None, "auto", "declared", "off"):
+            raise ValueError(f"queue.stacking must be auto, declared or off, got {value!r}")
         return value or "off"
 
     def blocked_by(self, n: int) -> Optional[List[Dict[str, Any]]]:
@@ -434,17 +434,25 @@ class BaseQueue:
             self._blockers[n] = self._dependencies(n, "blocked_by")
         return self._blockers[n]
 
+    def blocking(self, n: int) -> Optional[List[Dict[str, Any]]]:
+        """Issues GitHub records as blocked by n: repo, number, state; None when the read fails."""
+        return self._dependencies(n, "blocking")
+
     def stack_on(self, n: int, author: Optional[str], body: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """The `Stack on:` fact of issue n (see stacking.stack_fact), or None: no honoured line, or the body
-        cannot be read. The line counts only when the roster trusts the author. body: already read, else read here."""
+        cannot be read. The line counts only when the roster trusts the author. body: already read, else read here.
+        With queue.stacking auto and no honoured line, the fact its open blockers give (stacking.auto_fact)."""
         if n not in self._stack_facts:
             if body is None:
                 issue = self._read_issue(n, "body")
                 body = issue.get("body") if issue else None
-            self._stack_facts[n] = stack_fact(
-                self.gh, number=n, body=body, author_trusted=self.trusted(author), tracker=self.tracker,
-                stacking=self.stacking(), trusted=self.trusted,
-                blocked_by=lambda: self.blocked_by(n))
+            stacking, trusted = self.stacking(), self.trusted(author)
+            fact = stack_fact(self.gh, number=n, body=body, author_trusted=trusted, tracker=self.tracker,
+                              stacking=stacking, trusted=self.trusted, blocked_by=lambda: self.blocked_by(n))
+            if fact is None and stacking == "auto":
+                fact = auto_fact(self.gh, number=n, body=body, author_trusted=trusted, tracker=self.tracker,
+                                 trusted=self.trusted, blocked_by=lambda: self.blocked_by(n))
+            self._stack_facts[n] = fact
         return self._stack_facts[n]
 
     def stack_filter(self, found: List[Candidate], limit: Optional[int]) -> Tuple[List[Candidate], List[Dict[str, Any]]]:

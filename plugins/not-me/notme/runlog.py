@@ -9,11 +9,16 @@ root out of version control (the default root sits inside the git common dir,
 which git never tracks; a configured or env root inside the repo needs a
 gitignore entry).
 
-The active-run marker is a small JSON file saying a run is in progress. It
-always lives at ``<git common dir>/not-me/active-run`` (``<project>/.not-me/active-run``
-outside git), wherever the log root is, so the guard finds it without config.
-Other commands read it to find the current run; a marker older than ``stale_hours``
-is ignored (not deleted), so a crashed run cannot block anything for long.
+The active-run marker is a small JSON file saying a run is in progress. Each
+worktree has its own, in its own git dir: ``<git dir>/not-me/active-run``, which
+is ``<git common dir>/not-me/active-run`` for the main worktree and
+``<git common dir>/worktrees/<id>/not-me/active-run`` for a linked one
+(``<project>/.not-me/active-run`` outside git), wherever the log root is. So one
+worktree holds at most one run, and runs in different worktrees of a checkout go
+side by side. ``active_runs`` lists every fresh marker of a checkout from the
+common dir alone (no git call, no config), which is how the guard knows a run is
+active anywhere in it. A marker older than ``stale_hours`` is ignored (not
+deleted), so a crashed run cannot block anything for long.
 """
 from __future__ import annotations
 
@@ -187,14 +192,56 @@ def marker_path_in(common_dir: PathLike) -> Path:
     return Path(common_dir) / "not-me" / MARKER_NAME
 
 
+def _project(project_dir: Optional[PathLike], env: Optional[Mapping[str, str]] = None) -> Path:
+    return Path(project_dir) if project_dir else (paths.project_dir(env=env) or Path(os.getcwd()))
+
+
 def default_marker_path(project_dir: Optional[PathLike] = None, env: Optional[Mapping[str, str]] = None) -> Path:
-    """The marker for a project, independent of the log root.
+    """The marker for a project's worktree (in its own git dir), independent of the log root.
 
     The project defaults to $CLAUDE_PROJECT_DIR, else the checkout around cwd, else cwd.
     """
-    project = Path(project_dir) if project_dir else (paths.project_dir(env=env) or Path(os.getcwd()))
+    project = _project(project_dir, env)
+    git_dir = paths.git_dir(project)
+    return marker_path_in(git_dir) if git_dir is not None else project / ".not-me" / MARKER_NAME
+
+
+def marker_paths(common_dir: PathLike) -> List[Path]:
+    """Every worktree's marker path in a checkout, from its git common dir alone (no git call): the main
+    worktree's, then each linked worktree's under ``worktrees/``. Paths may not exist."""
+    common = Path(common_dir)
+    try:
+        linked = sorted(p for p in (common / "worktrees").iterdir() if p.is_dir())
+    except OSError:
+        linked = []
+    return [marker_path_in(common)] + [marker_path_in(p) for p in linked]
+
+
+def checkout_marker_paths(project_dir: Optional[PathLike] = None) -> List[Path]:
+    """Every worktree's marker path in the checkout around a project; outside git, the project's own."""
+    project = _project(project_dir)
     common = paths.git_common_dir(project)
-    return marker_path_in(common) if common is not None else project / ".not-me" / MARKER_NAME
+    return marker_paths(common) if common is not None else [project / ".not-me" / MARKER_NAME]
+
+
+def active_runs(common_dir: PathLike, stale_hours: float = 6, now: Optional[datetime] = None) -> List[dict]:
+    """The fresh markers of every worktree in a checkout (see ``marker_paths``), main worktree first."""
+    return [m for m in (active_run(p, stale_hours, now) for p in marker_paths(common_dir)) if m is not None]
+
+
+def checkout_active_runs(project_dir: Optional[PathLike] = None, stale_hours: float = 6,
+                         now: Optional[datetime] = None) -> List[dict]:
+    """The fresh markers of every worktree in the checkout around a project (see ``checkout_marker_paths``)."""
+    return [m for m in (active_run(p, stale_hours, now) for p in checkout_marker_paths(project_dir)) if m is not None]
+
+
+def find_marker(project_dir: Optional[PathLike], run_id: str) -> Optional[Path]:
+    """The marker in the checkout that names run_id (fresh or not), or None."""
+    for path in checkout_marker_paths(project_dir):
+        marker = _read_marker(path)
+        if marker is not None and _owned_by(marker, run_id):
+            return path
+    return None
 
 
 def guard_log_path(root: PathLike) -> Path:
@@ -217,14 +264,24 @@ def guard_log_append(path: PathLike, fields: Mapping[str, Any]) -> None:
 class RunLog:
     """One run's log file. Build with ``RunLog.start`` or ``RunLog.open``."""
 
-    def __init__(self, path: PathLike, skill: str, ref: str, run_id: str, marker_path: PathLike) -> None:
+    def __init__(self, path: PathLike, skill: str, ref: str, run_id: str, marker_path: Optional[PathLike],
+                 project_dir: Optional[PathLike] = None) -> None:
         self.path = Path(path)
         self.skill = skill
         self.ref = ref
         self.run_id = run_id
-        self.marker_path = Path(marker_path)
+        self._marker_path = Path(marker_path) if marker_path else None
+        self._project_dir = project_dir
         self.status: Optional[str] = None
         self.entries: List[Dict[str, str]] = []
+
+    @property
+    def marker_path(self) -> Path:
+        """The marker that names this run in the checkout, else this worktree's (found on first use)."""
+        if self._marker_path is None:
+            self._marker_path = (find_marker(self._project_dir, self.run_id)
+                                 or default_marker_path(self._project_dir))
+        return self._marker_path
 
     @property
     def questions(self) -> List[Dict[str, str]]:
@@ -271,7 +328,7 @@ class RunLog:
         head, summary, timeline = _split(path.read_text(encoding="utf-8"))
         title = _TITLE_RE.match(head.strip())
         skill, ref, run_id = title.groups() if title else (path.parent.name, "", path.stem)
-        log = cls(path, skill, ref, run_id, marker_path or default_marker_path(project_dir))
+        log = cls(path, skill, ref, run_id, marker_path, project_dir)
         found = _STATUS_RE.search(summary)
         log.status = found.group(1).strip() if found else None
         for line in timeline.splitlines():

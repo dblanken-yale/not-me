@@ -105,6 +105,10 @@ class ReasonRuleTest(unittest.TestCase):
                 'notme labels-sync 5 --add "needs human"\n')
         self.assertEqual(self.found(text), ["notme\" move-issue", "$NOTME\" transition", "notme labels-sync"])
 
+    def test_release_issue_with_no_comment_needs_no_reason(self):
+        self.assertEqual(self.found("`notme release-issue 5 --no-comment --log <p>`"), [])
+        self.assertEqual(self.found("`notme move-issue 5 --to todo --no-comment`"), ["notme move-issue"])
+
     def test_labels_sync_check_needs_no_reason(self):
         self.assertEqual(self.found("`notme labels-sync 5 --set a --check`"), [])
 

@@ -16,6 +16,7 @@ user what was found next to each question so most answers are a confirmation.
 | Sibling checkouts | symlinks in the checkout, and sibling directories of the checkout that hold their own `.git`; read each one's origin | `repos` companion set |
 | Test, lint, build commands | `package.json` scripts; `pyproject.toml` tool and script tables; the PHP package manifest scripts; `Makefile` targets named test, lint, check, build; `run:` steps in `.github/workflows/*.yml` | verify sections |
 | Environment start | README sections on running locally, `docker-compose*.yml`, a Makefile target named up or start | `## Environment start` |
+| Shared test environment | the environment start or test commands use one stack for the whole checkout (a local dev stack named by project, a fixed container or database, a fixed host port) rather than one per worktree; unsure: ask | `shared_env` in verify.md |
 | Issue format | `.github/ISSUE_TEMPLATE/*`, then the ten most recent issues that have a goal and a checklist (`gh issue list --state all --limit 30 --json number,title,body`, read only) | `## Ticket format`, `## Issue readiness` |
 | PR template | `.github/pull_request_template.md` | `pr_template` (leave `auto` when found) |
 | Ranking signals (picking step) | `notme picking-signals` (a read): board fields and labels with counts over the eligible issues; no raw gh read; see `picking.md` | `picking.fields`, `## Picking work` |

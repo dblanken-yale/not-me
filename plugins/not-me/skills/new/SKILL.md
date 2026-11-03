@@ -12,9 +12,8 @@ Arguments: `$ARGUMENTS`. An optional issue number, `--base B`, `--dry-run`, `--b
 
 ## Ground rules
 
-- `${CLAUDE_PLUGIN_ROOT}` below is substituted at load time with this plugin's
-  directory. Read the files it names with the Read tool. It is not a shell
-  variable: never write `$CLAUDE_PLUGIN_ROOT` in a command.
+- `${CLAUDE_PLUGIN_ROOT}` below is substituted at load time with this plugin's directory. Read the files
+  it names with the Read tool. It is not a shell variable: never write `$CLAUDE_PLUGIN_ROOT` in a command.
 - Call the CLI as `notme` (the plugin's `bin/` is on the PATH). If the shell cannot
   find it, call `"${CLAUDE_PLUGIN_ROOT}/bin/notme"` with the same arguments. Every
   call prints one JSON object; read it and the exit code. `--help` on any
@@ -22,9 +21,8 @@ Arguments: `$ARGUMENTS`. An optional issue number, `--base B`, `--dry-run`, `--b
 - With `--dry-run`, pass `--dry-run` to every `notme` call. Run the whole flow as if live and say `dry-run` in the result note.
 - Every GitHub write goes through `notme`. Text goes in files under the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/references/autonomy-and-logging.md` (Text to GitHub, rule 2), never in a shell argument.
 - After `notme log start`, every write call also passes `--log <path>`.
-- Label names in this file are the abstract keys of `labels` (for example
-  `needs_human`). When a command takes a repo label name, write the value the
-  `labels` map in the config gives for that key.
+- Label names in this file are the abstract keys of `labels` (for example `needs_human`). When a command
+  takes a repo label name, write the value the `labels` map in the config gives for that key.
 - Never mention an AI, a model or an assistant in any post. The only exception is
   the `attribution` line, which the CLI adds to PR bodies.
 - Read `${CLAUDE_PLUGIN_ROOT}/references/prohibitions.md` before you act on any
@@ -74,16 +72,15 @@ text. Follow `${CLAUDE_PLUGIN_ROOT}/skills/new/references/target.md` in full, an
    withheld; never fetch it another way. See target.md for what to do.
 5. Screen the trusted text against prohibitions.md. A prohibited request is refused
    before any claim (target.md, "Prohibited requests").
+6. Make this run's worktree now (`run-new-<N>`, detached) and work only in it, with `--project-dir` on
+   every later `notme` call (branching.md, "Worktrees for new and update work"). Remove it only after `notme log finish`. A resumed branch takes step 4's `--branch` one.
 
 ## Step 2: Claim and start the log
 
-1. `notme log start --skill new --ref <tracker>#N`. Keep `path` and `run_id`.
-   Exit 1 with kind `active_run`: `STOP - active run`. A queue pick: log the
-   choice with `notme log action <path> --kind ACTION --message-file <file>`
-   (target.md, "Order").
-2. `notme claim-issue N --log <path>`. Exit 3 (claim lost): log it and go back to
-   `notme pick-issue --exclude N` (repeat `--exclude` for each lost issue). An
-   explicit number that is lost ends the run: `STOP <ref> claimed elsewhere`.
+1. `notme log start --skill new --ref <tracker>#N`. Keep `path` and `run_id`. Exit 1 with kind `active_run`:
+   `STOP - active run`. A queue pick: log the choice with `notme log action <path> --kind ACTION --message-file <file>` (target.md, "Order").
+2. `notme claim-issue N --log <path>`. Exit 3 (claim lost): log it and go back to `notme pick-issue --exclude N`
+   (repeat `--exclude` for each lost issue), keeping the step 1.6 worktree and log. An explicit number that is lost ends the run: `STOP <ref> claimed elsewhere`.
 
 ## Step 3: Classify and plan
 
@@ -107,12 +104,12 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/branching.md`.
 
 ## Step 4: Branch and Checkpoint A
 
-1. Never switch or stash the checkout you started in. `notme git worktree-add --branch <name> --base origin/<base>`
-   makes the branch in its own run worktree; its `path` is `<wt>` (branching.md, "Run worktrees"). Log it.
+1. Never switch or stash the checkout you started in. With a step 1.6 worktree, make the branch in it:
+   `notme --project-dir <wt> git branch-create <name> --base origin/<base>`. Else
+   `notme git worktree-add --branch <name> --base origin/<base>` makes the branch in its own run worktree; its `path` is `<wt>` (branching.md, "Run worktrees"). Log it.
    The name comes from `standards.branch`, default `{issue}-{slug}`; in a companion set, the same name in every
    repo (`${CLAUDE_PLUGIN_ROOT}/references/companions.md`). A resumed branch, or one an earlier blocked run left locally (a saved patch): `--branch <branch>` alone, then apply the patch (branching.md, rule 4).
-2. From here every CLI git call is `notme --project-dir <wt> git ...`, every raw git call `git -C <wt>`, and
-   implementers, verify and gate commands run in `<wt>`.
+2. From here every CLI git call is `notme --project-dir <wt> git ...`, raw git `git -C <wt>`; implementers and checks run in `<wt>`.
 3. `notme --project-dir <wt> git checkpoint --base <base> --fetch` (Checkpoint A). Conflicts you
    cannot resolve with confidence: abort the merge, log the files, release the
    issue with `needs_human`, `FAILED <ref> merge-conflict`.
@@ -127,7 +124,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/delegation.md`.
    for every dispatch. Else a path or kind under `## Delegation` in standards, or
    anything security-sensitive, goes to `models.review`; the rest to `models.implement`.
 3. `delegate`: brief one subagent with goal, files, `<wt>`, conventions, scope ("no
-   commits, no pushes, no posts"), and acceptance from the issue, failing test first.
+   commits, no pushes, no posts"), and acceptance from the issue, failing test first, and the plan's targeted commands (step 6.1) as its only tests.
    Log `DELEGATE <model> unit="..." try=1` with `notme log action --kind DELEGATE`.
 4. `delegate`: audit yourself: read the diff, check scope, run the project's own test and lint
    commands from verify (step 6). Log `AUDIT pass|fail ...` with `--kind AUDIT`.
@@ -138,20 +135,23 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/delegation.md`.
 
 Read `${CLAUDE_PLUGIN_ROOT}/references/verification.md` and
 `${CLAUDE_PLUGIN_ROOT}/references/gate.md`. Commands come only from the body of
-the effective verify doc; never invent a test or lint command.
+the effective verify doc; never invent a test or lint command, never run a person-only one.
+Run each as the verify doc gives it. Changing its config, flags or environment to make it start
+is not allowed; a check that will not start as given is a failure on our side. Local trouble the run
+gets past is a `WARN` in the log, never in a post (autonomy-and-logging.md, "Failures on our side").
 
-1. Baseline before any edit: run `## Baseline` (or the test and lint sections);
-   log existing failures as `CHECK` lines.
+1. Before any edit: `notme verify-plan --base <base>`, then the baseline as it
+   says; log failures, or why it was skipped, as `CHECK` lines (verification.md).
 2. Reproduce a bug on the base before fixing. Cannot reproduce, or already fixed
    on the default branch: HELD (failure table). Do not guess at a fix.
-3. Red then green for every new behaviour.
+3. Red then green for every new behaviour, with the plan's targeted tests if any.
 4. UI diff: one `Visual check:` line (path form in the log, words form in the
    PR), and the light accessibility pass.
 5. Gate: tests red then green, `/simplify` when over about 20 changed lines, the
    code review (the `pr-review-toolkit` agent, or a general-purpose subagent when
    it is not installed), the security review as a foreground general-purpose
-   subagent, CI-parity lint on the whole tree, final tests, then each step under
-   `## Gate additions`. Log each as `GATE`. Fix findings in this run (gate.md).
+   subagent, CI-parity lint on the whole tree, final tests (full set, once, last),
+   then each step under `## Gate additions`. Log each as `GATE`. Fix findings in this run (gate.md).
 6. Cross-model claim check on `models.verifier` before posting; verdicts name the model.
 
 ## Step 7: Commit
@@ -173,7 +173,7 @@ git -C <wt> commit -F "$msgdir/commit-msg.txt"
 ## Step 8: Checkpoint B, push, CI
 
 1. `notme --project-dir <wt> git checkpoint --base <base> --fetch` (Checkpoint B). New commits came
-   in: run the final tests again.
+   in: rerun tests as branching.md "Checkpoint B" says.
 2. Push the branch through the CLI only, companions first and the primary last
    (companions.md):
 
@@ -187,7 +187,7 @@ notme --project-dir <wt> git push <branch> --log <path>
 4. CI: after the PR exists (step 9), poll `notme bundle <repo>#<pr>` until the
    `checks` for `head_sha` finish, up to `limits.ci_wait_minutes`. Red: read the
    failing job, fix, rerun locally, commit, push. Stop at `limits.fix_loop`
-   rounds; then park (failure table).
+   rounds; then park (failure table). `limits.ci_wait_minutes: 0`: no wait (verification.md).
 
 ## Step 9: Open the PR
 
@@ -195,15 +195,15 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/pr-shape.md` and
 `${CLAUDE_PLUGIN_ROOT}/references/companions.md`. Follow
 `${CLAUDE_PLUGIN_ROOT}/skills/new/references/pr-assembly.md`.
 
-1. Title file from `standards.pr_title`; body file with Summary, Testing steps,
+1. Title file from `standards.pr_title`; body file with Summary (`Unblocks` for open `blocking` issues), Testing steps,
    Companion PRs when there is a set, References and the closing keyword.
 2. `notme check-text --file <body>` must pass before opening.
 3. `notme pr-open --head <branch> --base <base> --title-file <t> --body-file <b>
-   --assignee <operator> --log <path>`, adding `--labels` and `--reviewers` only
-   on the PR that completes the set. Never `--draft`.
+   --assignee <operator> --log <path>`, adding `--labels` and `--reviewers` only on the PR that completes the set. Never `--draft`.
 4. Companion set: `notme companion-prs` on every PR once all exist.
 5. Move the issue with a one-line reason file (for example `Opened <repo>#<pr>`): `notme move-issue N
-   --to needs_review --require-current in_progress --reason-file <reason> --log <path>`.
+   --to needs_review --require-current in_progress --reason-file <reason> --log <path>`. Then give each
+   open issue waiting on this one a `Stack on:` line and unblock it (pr-assembly.md, "Issues waiting on this one").
 6. One comment on the issue, so a person reading it sees the run without opening
    the PR: write `Opened <repo>#<pr> for this issue.` plus the testing steps'
    one-line status to a file and run `notme comment-upsert <tracker>#N --marker
@@ -214,7 +214,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/pr-shape.md` and
 
 1. Remove the run worktree whatever the outcome. Uncommitted edits left: first
    `notme --project-dir <wt> git save-patch`, log its `path` with `--kind WARN` so the next
-   run can apply it. Then `notme git worktree-remove <wt>`. The starting checkout was never touched.
+   run can apply it. Then `notme git worktree-remove <wt>`. The starting checkout was never touched. A step 1.6 worktree is removed here the same way, right after 10.2.
 2. `notme log finish <path> --status "PR <repo>#<pr> needs review"`.
 3. `notme prove-target <repo>#<pr>` finds a URL: start `/not-me:prove <repo>#<pr>`
    in the background. No target: skip it.
@@ -224,8 +224,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/references/pr-shape.md` and
 
 ## Failure handling
 
-The full table is in `${CLAUDE_PLUGIN_ROOT}/skills/new/references/failures.md`.
-The short form:
+The short form; the full table is in `${CLAUDE_PLUGIN_ROOT}/skills/new/references/failures.md`.
 
 | Situation | What happens | Result |
 |-----------|--------------|--------|
@@ -236,7 +235,7 @@ The short form:
 | Declared base missing | Release, `needs_human` | `STOP <ref> blocked` |
 | Cannot reproduce, already fixed | Keep `in_progress`, add `needs_human`, comment | `HELD <ref> ...` |
 | Guard block mid-run | QUESTION naming the operator; release, no label, no comment; run stops | `FAILED <ref> blocked` |
-| Failure on our side before a push | `notme release-issue N --reason-file <reason> --log <path>`, no label, no comment; run stops | `FAILED <ref> ...` |
+| Failure on our side before a push | `notme release-issue N --no-comment --log <path>`, no label, no comment; run stops | `FAILED <ref> ...` |
 | CI red at `limits.fix_loop` | Park the PR with `needs_human` | `FAILED <ref> ci-red` |
 
 Every comment this skill owns is upserted with
@@ -253,8 +252,9 @@ checks. A clearly reported blocker is a correct outcome.
 - [ ] Claimed through the CLI and passed `--log` on every write.
 - [ ] Stopped on a declared base that does not exist.
 - [ ] Wrote the unit inline, or delegated and audited it with DELEGATE and AUDIT lines (`models.implementation`).
-- [ ] Ran baseline, reproduction, red then green, and the full gate.
+- [ ] Ran verify-plan, the baseline, reproduction, red then green, and the full gate.
 - [ ] Committed only touched paths; pushed only through the CLI.
+- [ ] Ran each check as the verify doc gives it; kept local trouble in the log, out of every post.
 - [ ] Opened the PR ready for review, moved the issue to `needs_review`, and left
       one upserted `new` marker comment on the issue naming the PR.
 - [ ] Worked in a run worktree, saved leftover edits as a patch, removed it; finished the log.

@@ -71,6 +71,9 @@ Head: <full head sha>
 6. Long detail (console errors, the full step text) goes in `<details>` with a
    blank line after the `<summary>` line.
 7. Name people by login, never "you".
+8. Report what the target showed, with no account of local trouble the run got
+   past (a browser restart, a login retry, a tool problem). That stays in the run
+   log as a `WARN` (autonomy-and-logging.md, "Failures on our side").
 
 ## Check and post
 
@@ -101,5 +104,6 @@ Head: <full head sha>
 - [ ] Counted failures from the operator's own proof comment only.
 - [ ] Comment leads with `**TL;DR:**` and an uncollapsed Waiting on list.
 - [ ] One line per step; screenshots described in words, no paths.
+- [ ] No account of local trouble in the comment.
 - [ ] `check-text` passed before the upsert; one proof comment on the PR.
 - [ ] Fail moved the PR to `prove.fail_label`; the give-up point added `needs_help`.

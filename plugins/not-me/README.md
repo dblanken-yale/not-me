@@ -39,7 +39,7 @@ Update with:
 
 | Command | What it does |
 | --- | --- |
-| `/not-me [--dry-run] [--bg]` | Router: runs the legs in `router` order (default `update`, then `new`) and stops at the first that does work |
+| `/not-me [--dry-run] [--bg] [--parallel N]` | Router: runs the legs in `router` order (default `update`, then `new`) and stops at the first that does work. `--parallel N` starts up to N new-issue runs at once, each in its own worktree |
 | `/not-me:new [issue#] [--base B] [--dry-run] [--bg]` | Pick up a ready issue, implement it through a delegated implementer, gate it, open a PR |
 | `/not-me:update [PR ref] [--dry-run] [--bg]` | Decide each review finding on a `needs work` PR, fix, push, reply, swap to `needs review` |
 | `/not-me:review [owner/repo#N ...] [--dry-run] [--bg]` | Review `needs review` PRs where you are a reviewer: approve, request changes, or ask a person. Never merges |
@@ -65,6 +65,7 @@ git >= 2.30, gh >= 2.40, python3 >= 3.9.
 - [Configuration](https://github.com/dblanken-yale/not-me/blob/main/docs/config.md)
 - [Guards](https://github.com/dblanken-yale/not-me/blob/main/docs/guards.md)
 - [Workflow](https://github.com/dblanken-yale/not-me/blob/main/docs/workflow.md)
+- [Parallel runs](https://github.com/dblanken-yale/not-me/blob/main/docs/parallel-runs.md)
 - [CLI](https://github.com/dblanken-yale/not-me/blob/main/docs/cli.md)
 - [Testing](https://github.com/dblanken-yale/not-me/blob/main/docs/testing.md)
 - [Releases](https://github.com/dblanken-yale/not-me/blob/main/docs/release.md)

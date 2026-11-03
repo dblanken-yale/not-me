@@ -103,6 +103,12 @@ def remote_branch_sha(name: str, cwd: Any = None) -> Optional[str]:
     return None
 
 
+def remote_tracking_sha(name: str, cwd: Any = None) -> Optional[str]:
+    """The sha the local origin/<name> ref points at (no network), or None when there is no such ref."""
+    proc = _run(["rev-parse", "-q", "--verify", f"refs/remotes/origin/{_branch(name)}^{{commit}}"], cwd, check=False)
+    return (proc.stdout.strip() or None) if proc.returncode == 0 else None
+
+
 def merge_base_into_current(base: str, cwd: Any = None) -> bool:
     """Merge base into the current branch (never rebase). True when it stopped on conflicts."""
     proc = _run(["merge", "--ff", "--no-edit", _branch(base)], cwd, check=False)

@@ -179,5 +179,6 @@ Never fake a pass: a step not run is never a pass, and a screenshot not read is
 - [ ] Refused prohibited steps and ran no command that writes.
 - [ ] Read every screenshot and logged one `Visual check:` line per step.
 - [ ] Upserted one proof comment with the `prove` marker after `check-text` passed.
+- [ ] Kept local trouble the run got past in the log as a `WARN`, out of the comment.
 - [ ] On a fail, moved the PR to `prove.fail_label`; at `prove.give_up_after`, added `needs_help`.
 - [ ] Changed nothing in the repository and finished the log.

@@ -25,6 +25,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 from . import claims
 from .gh import GhClient, GhError, login_of, names_of
 from .roster import Roster
+from .stacking import last_editor
 
 MARKER_UPDATE = "<!-- not-me:update -->"
 MARKER_NEW = "<!-- not-me:new -->"
@@ -501,19 +502,27 @@ def author_trusted(roster: Roster, author: str, operator: str) -> bool:
 
 def issue_view(gh: GhClient, repo: str, n: int, roster: Roster, operator: str, labels: Any) -> Dict[str, Any]:
     """An issue's facts. The title, body and comments of an author the roster does not trust are withheld, and
-    an untrusted commenter's comments are always dropped (only counted). labels is a states.Labels."""
+    an untrusted commenter's comments are always dropped (only counted). The title and body are also withheld when
+    the body was last edited by someone the roster does not trust, or when that cannot be read: body_withheld says
+    why (untrusted_author, untrusted_editor; None when shown). labels is a states.Labels."""
     issue = gh.issue(repo, n, comments=True)
     author = login_of(issue.get("author"))
     ok = author_trusted(roster, author, operator)
+    withheld = None if ok else "untrusted_author"
+    if ok:
+        read, editor = last_editor(gh, repo, n)
+        if not read or (editor and not author_trusted(roster, editor, operator)):
+            withheld = "untrusted_editor"
+    shown = withheld is None
     every = issue.get("comments") or []
     comments = [c for c in every if trusted(roster, login_of(c.get("author")))]
     names = names_of(issue.get("labels"))
     current = labels.current(names)
-    return {"repo": repo, "number": issue.get("number"), "title": issue.get("title") if ok else None,
+    return {"repo": repo, "number": issue.get("number"), "title": issue.get("title") if shown else None,
             "state": issue.get("state"), "url": issue.get("url"), "author": author, "author_trusted": ok,
             "labels": names, "status": current[0] if current else None,
             "assignees": [login_of(a) for a in issue.get("assignees") or []],
-            "body": issue.get("body") if ok else None,
+            "body": issue.get("body") if shown else None, "body_withheld": withheld,
             "comments": [{"id": c.get("id"), "author": login_of(c.get("author")), "body": c.get("body")}
                          for c in comments] if ok else [],
             "comments_ignored": len(every) - len(comments)}

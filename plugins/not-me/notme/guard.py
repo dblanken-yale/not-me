@@ -959,13 +959,14 @@ class GuardContext:
                  allowlist_path: Optional[Path] = None, active_run: bool = False,
                  plugin_root: Optional[Path] = None, home: Optional[Path] = None,
                  env: Optional[Mapping[str, str]] = None, git: GitFn = paths.run_git,
-                 write_ctx: Optional[writes.GuardContext] = None):
+                 write_ctx: Optional[writes.GuardContext] = None, main_config_dir: Optional[Path] = None):
         self.env = os.environ if env is None else env
         self.cwd = str(cwd)
         self.root = root
         self.git_dir = git_dir
         self.common_dir = common_dir
         self.config_dir = Path(config_dir) if config_dir else Path(root or self.cwd) / ".claude" / "not-me"
+        self.main_config_dir = Path(main_config_dir) if main_config_dir else None  # set in a linked worktree
         self.home = Path(home) if home else paths.home_dir(self.env)
         self.allowlist_path = Path(allowlist_path) if allowlist_path else writes.allowlist_path(self.home)
         self.active_run = active_run
@@ -1001,14 +1002,16 @@ class GuardContext:
                 found = (str(top), git_dir, common)
         root, git_dir, common = found if found else (None, None, None)
         config_dir = Path(root or cwd) / ".claude" / "not-me"
-        if not config_dir.is_dir() and git_dir is not None and git_dir != common and common.name == ".git":
-            main = common.parent / ".claude" / "not-me"
-            if main.is_dir():
-                config_dir = main
-        active = common is not None and runlog.active_run(runlog.marker_path_in(common),
-                                                          stale_hours=ACTIVE_RUN_STALE_HOURS) is not None
+        main_config: Optional[Path] = None
+        if git_dir is not None and git_dir != common and common.name == ".git":
+            main_config = common.parent / ".claude" / "not-me"  # the repo layer the CLI reads
+            if not config_dir.is_dir() and main_config.is_dir():
+                config_dir = main_config
+        # A run in any worktree of the checkout counts: every worktree's marker is found from the common dir.
+        active = common is not None and bool(runlog.active_runs(common, stale_hours=ACTIVE_RUN_STALE_HOURS))
         return cls(cwd=cwd, root=root, git_dir=git_dir, common_dir=common, config_dir=config_dir,
-                   home=Path(home) if home else None, env=env, active_run=active, git=git)
+                   home=Path(home) if home else None, env=env, active_run=active, git=git,
+                   main_config_dir=main_config)
 
     @cached_property
     def write_ctx(self) -> writes.GuardContext:
@@ -1345,7 +1348,9 @@ def _file(tool: str, fpath: str, cwd: str, ctx: GuardContext, tin: Mapping[str, 
                   "describe the change in a QUESTION for the operator")
     if ctx.active_run:
         home = _norm(str(ctx.home), cwd)
-        if _under(full, _norm(str(ctx.config_dir), cwd)) or (_path.dirname(full) == home and full.endswith(".md")):
+        dirs = (ctx.config_dir, ctx.main_config_dir) if ctx.main_config_dir else (ctx.config_dir,)
+        if any(_under(full, _norm(str(d), cwd)) for d in dirs) or (_path.dirname(full) == home
+                                                                   and full.endswith(".md")):
             yield blk(SELF, "not-me config is read-only while a not-me run is active",
                       "log a QUESTION proposing the config change for the operator")
     low = fpath.replace("\\", "/").lower()

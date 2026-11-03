@@ -53,7 +53,10 @@ exist. Result line: `STOP acme/app#88 blocked - base release-2.4 not found`.
 ## Checkpoint B: before push
 
 1. Fetch again. Merge the base in again.
-2. If the merge brought in commits, run the final tests again before the push.
+2. If the merge brought in commits, run the targeted tests again before the push
+   (the final tests when no targeted command is configured), and the full set when
+   `ci_wait` is false (`limits.ci_wait_minutes: 0`: nothing else checks the merge)
+   or the targeted tests cannot cover it (`verification.md`, "Targeted tests").
 3. Then push the branch to its own name on origin.
 
 ## Merge, never rebase
@@ -107,7 +110,7 @@ nothing in the operator's checkout and holds a branch only for its own life.
    the work.
 5. Never edit, stash, reset or commit in a worktree you did not create: the main
    checkout, a person's worktree, a session worktree. `save-patch` and
-   `worktree-remove` refuse anything but a `run-*` or `review-*` worktree.
+   `worktree-remove` refuse anything but a `run-*` or `review-*` worktree (`save-patch` only `run-*`).
 
 ## Worktrees for review
 
@@ -115,6 +118,19 @@ nothing in the operator's checkout and holds a branch only for its own life.
    out the PR branch in the main checkout.
 2. Never commit in a review worktree.
 3. Remove only the worktree you created, at the end of the run.
+
+## Worktrees for new and update work
+
+A `/not-me:new` run makes its worktree before `notme log start`, so the run marker, claim and branch all land in it: a `run-new-<N>` one, detached, that `git save-patch` and `worktree-remove` accept like any `run-*`. Already in a linked worktree: work in place. Rework (`/not-me:update`) has no such step: it makes its `run-*` worktree after the claim, with `--branch` ("Run worktrees").
+
+1. `notme git worktree-add <sha> --name run-new-<N>` (`run-update-<N>` for rework), the sha from
+   `git rev-parse HEAD`. `path_exists`: add `-2`, `-3`. A lost claim keeps the worktree, its log and run marker
+   for the next pick. Never remove it mid-run, since that deletes the marker; make no second one.
+2. From then on pass `--project-dir <path>` to every `notme` call, so the marker, branch and checkpoints land
+   there. Run local git as `git -C <path> ...`, never `cd`; run checks with it as their directory.
+3. It starts detached: nothing to stash. `notme --project-dir <path> git branch-create <name> --base origin/<base>`.
+4. Only when the run ends, after `notme log finish`, run `notme git worktree-remove <path>` without
+   `--project-dir`. A tree that will not come off clean stays, with a `WARN`; "committed but NOT PUSHED": keep it.
 
 ## Epics
 
@@ -131,7 +147,10 @@ An issue may declare one line, `Stack on: <owner/repo#PR>`, `Based on: <owner/re
 or `On top of: <owner/repo#PR>` (a PR, or an issue whose single open PR is used).
 It counts only from a trusted author, and only the CLI reads it: `notme issue N`
 returns `stack_on`, and `notme pick-issue` leaves out an issue whose `stack_on` has
-`ready` false (it lists them in `stack_held` with the reason).
+`ready` false (it lists them in `stack_held` with the reason). With
+`queue.stacking: auto`, an issue with no line gets a `stack_on` from its open
+blockers (`via` is `blockers`): ready when they all resolve to one open PR that
+passes the same checks, held when a blocker has no open PR yet. Treat it the same.
 
 1. `stacks` true: branch from `origin/<head>`, the `head` field of `stack_on`, and
    open the PR against that branch with `Builds on <pr>`, the `pr` field (see

@@ -16,7 +16,7 @@ The guard is a small safety net for an agent that is trying to follow the rules.
 The four rule groups only apply when not-me is in play:
 
 - The checkout has a `.claude/not-me/` folder (or, in a linked worktree, the main checkout does), or
-- A not-me run is in progress. A run drops a marker file at `<git-common-dir>/not-me/active-run`. A marker older than 6 hours is ignored, so a crashed run cannot keep a repo locked.
+- A not-me run is in progress in any worktree of the checkout. Each run drops a marker file in its worktree's own git dir: `<git-common-dir>/not-me/active-run` for the main worktree, `<git-common-dir>/worktrees/<id>/not-me/active-run` for a linked one. The guard reads all of them from the common dir, without config. A marker older than 6 hours is ignored, so a crashed run cannot keep a repo locked.
 
 Anywhere else (outside any git repo, or in a git repo that is not a not-me project, such as one nested inside a not-me checkout) the rule groups are off and only [self-protection](#self-protection) is checked. Those checks start no process and read no config, and their blocks are not logged.
 

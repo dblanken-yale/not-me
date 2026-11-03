@@ -56,7 +56,8 @@ standards doc. Every item on it must be filled before the issue is created.
 ## Step 2: Create (no `--check`)
 
 1. Collect what you already have: `--title`, the operator's request, the
-   conversation, files they named. Draft every section of the format.
+   conversation, files they named. Draft every section of the format, with a
+   `Stack on:` line when the only blocker has an open PR (format.md, "Stacking").
 2. Questions: list only readiness items you cannot fill from that context. With
    `--title` and enough context, ask nothing. Otherwise ask them all in at most
    one AskUserQuestion call (this skill has no `--bg`). Never ask about assignee,
@@ -90,8 +91,7 @@ notme followup --title-file "$d/title.txt" --body-file "$d/body.md" \
    another way and post nothing. Report the author login and stop:
    `TICKET <tracker>#N - untrusted author`.
 2. Compare the trusted body (and trusted comments that add detail) with each
-   readiness item. Report each item as present or missing, with the line that
-   satisfies it.
+   readiness item. Report each item as present or missing, with the line that satisfies it.
 3. Nothing missing: offer to add `todo` (and the opt-in label) when absent (yes:
    `notme labels-sync N --add "<todo>,<opt-in>" --reason-file <reason>`; no other label), and a
    `Stack on:` line when the only blocker is an open PR (format.md, "Stacking").
