@@ -5,6 +5,7 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from notme import gh as ghmod
 from notme import writeback as wb
@@ -86,6 +87,118 @@ class CommentUpsertTests(Base):
             wb.comment_upsert(self.gh, REPO, 1, "a --> b", "x", RUN)
         with self.assertRaises(ValueError):
             wb.comment_upsert(self.gh, REPO, 1, "claim", "x", "bad id -->")
+
+
+class CommentEditTests(Base):
+    def own_issue_comment(self, body="Old text\n\n<!-- not-me:status -->\n<!-- not-me:run=r-1 -->", n=1):
+        return self.fake.post_comment(REPO, n, "octocat", body)
+
+    def own_review(self, body="Old review"):
+        things(self.fake)["3"]["reviews"].append({"id": 900, "event": "COMMENT", "body": body})
+        return 900
+
+    def own_inline(self, body="Old inline"):
+        thread = things(self.fake)["3"]["threads"][0]
+        thread["comments"].append({"id": "PRRC_901", "databaseId": 901, "author": "octocat",
+                                   "authorAssociation": "OWNER", "body": body, "path": "src/widget.py", "line": 12,
+                                   "url": "https://github.com/acme/app/pull/3#discussion_r901"})
+        return 901
+
+    def test_edits_an_own_issue_comment_and_keeps_its_markers(self):
+        cid = self.own_issue_comment()
+        out = wb.comment_edit(self.gh, REPO, 1, "issue", cid, "New text\n", "octocat")
+        self.assertEqual(out, {"kind": "issue", "id": cid, "updated": True})
+        [body] = self.comment_bodies()
+        self.assertTrue(body.startswith("New text"))
+        self.assertNotIn("Old text", body)
+        self.assertEqual(body.count("<!-- not-me:status -->"), 1)
+        self.assertEqual(body.count("<!-- not-me:run=r-1 -->"), 1)
+        self.assertEqual(self.tmp_leftovers(), [])
+
+    def test_edits_an_own_review_body(self):
+        rid = self.own_review()
+        out = wb.comment_edit(self.gh, REPO, 3, "review", rid, "New review\n", "OctoCat")
+        self.assertEqual(out, {"kind": "review", "id": rid, "updated": True})
+        self.assertEqual(things(self.fake)["3"]["reviews"][0]["body"].strip(), "New review")
+        self.assertEqual(self.fake.writes_made()[-1][:4], ["api", "-X", "PUT", f"repos/{REPO}/pulls/3/reviews/{rid}"])
+
+    def test_edits_an_own_inline_comment(self):
+        cid = self.own_inline()
+        out = wb.comment_edit(self.gh, REPO, 3, "inline", cid, "New inline\n", "octocat")
+        self.assertEqual(out, {"kind": "inline", "id": cid, "updated": True})
+        self.assertEqual(things(self.fake)["3"]["threads"][0]["comments"][-1]["body"].strip(), "New inline")
+        self.assertEqual(self.fake.writes_made()[-1][:4], ["api", "-X", "PATCH", f"repos/{REPO}/pulls/comments/{cid}"])
+
+    def test_refuses_another_authors_comment_review_or_inline_without_writing(self):
+        cid = self.fake.post_comment(REPO, 1, "mallory", "Theirs")
+        things(self.fake)["3"]["reviews"].append({"id": 902, "event": "COMMENT", "body": "Theirs", "user": "mallory"})
+        for kind, n, target in (("issue", 1, cid), ("review", 3, 902), ("inline", 3, 501)):
+            with self.subTest(kind), self.assertRaises(wb.NotOwnTarget):
+                wb.comment_edit(self.gh, REPO, n, kind, target, "Mine now\n", "octocat")
+        self.assertEqual(self.fake.writes_made(), [])
+
+    def test_refuses_a_target_by_the_configured_operator_that_the_gh_user_did_not_write(self):
+        # a repo file can set project.operator; the logged-in gh user (octocat) must also be the author
+        cid = self.fake.post_comment(REPO, 1, "hubot", "Theirs")
+        things(self.fake)["3"]["reviews"].append({"id": 903, "event": "COMMENT", "body": "Theirs", "user": "hubot"})
+        for kind, n, target in (("issue", 1, cid), ("review", 3, 903)):
+            with self.subTest(kind), self.assertRaises(wb.NotOwnTarget):
+                wb.comment_edit(self.gh, REPO, n, kind, target, "Mine now\n", "hubot")
+        own = self.own_issue_comment()
+        with self.assertRaises(wb.NotOwnTarget):  # the gh user wrote it, but it is not the operator's
+            wb.comment_edit(self.gh, REPO, 1, "issue", own, "Mine now\n", "hubot")
+        self.assertEqual(self.fake.writes_made(), [])
+
+    def test_refuses_new_text_that_carries_a_marker_before_reading(self):
+        cid = self.own_issue_comment()
+        self.fake.calls.clear()
+        for text in ("New\n\n<!-- not-me:claim=octocat:r-9 -->\n", "New <!--not-me:status-->\n"):
+            with self.subTest(text), self.assertRaises(ValueError):
+                wb.comment_edit(self.gh, REPO, 1, "issue", cid, text, "octocat")
+        self.assertEqual(self.fake.calls, [])
+
+    def test_refuses_a_review_that_names_another_pr(self):
+        rid = self.own_review()
+        stray = {"id": rid, "user": {"login": "octocat"}, "body": "Old review",
+                 "pull_request_url": f"https://api.github.com/repos/{REPO}/pulls/4"}
+        for found in (stray, {**stray, "pull_request_url": None}):
+            with self.subTest(found["pull_request_url"]), mock.patch.object(self.gh, "review", return_value=found):
+                with self.assertRaises(LookupError):
+                    wb.comment_edit(self.gh, REPO, 3, "review", rid, "x\n", "octocat")
+        self.assertEqual(self.fake.writes_made(), [])
+
+    def test_refuses_a_target_on_another_item(self):
+        cid = self.own_issue_comment(n=2)
+        with self.assertRaises(LookupError):
+            wb.comment_edit(self.gh, REPO, 1, "issue", cid, "x\n", "octocat")
+        inline = self.own_inline()
+        with self.assertRaises(LookupError):
+            wb.comment_edit(self.gh, REPO, 2, "inline", inline, "x\n", "octocat")
+        self.assertEqual(self.fake.writes_made(), [])
+
+    def test_keeps_the_attribution_only_when_the_old_body_had_it(self):
+        cid = self.own_issue_comment("Old\n\nMade by a helper\n")
+        wb.comment_edit(self.gh, REPO, 1, "issue", cid, "New\n", "octocat", attribution_text="Made by a helper")
+        self.assertIn("Made by a helper", self.comment_bodies()[0])
+        rid = self.own_review("Old review")
+        wb.comment_edit(self.gh, REPO, 3, "review", rid, "New review\n", "octocat",
+                        attribution_text="Made by a helper")
+        self.assertNotIn("Made by a helper", things(self.fake)["3"]["reviews"][0]["body"])
+
+    def test_dry_run_records_and_writes_nothing(self):
+        cid = self.own_issue_comment()
+        ledger = Ledger(self.case.root / "ledger.jsonl")
+        gh = GhClient(self.ctx, runner=self.fake, dry_run=True, ledger=ledger)
+        out = wb.comment_edit(gh, REPO, 1, "issue", cid, "New text\n", "octocat")
+        self.assertTrue(out["dry_run"])
+        self.assertEqual(self.fake.writes_made(), [])
+        self.assertIn("Old text", self.comment_bodies()[0])
+        self.assertEqual(len(ledger.read()), 1)
+
+    def test_unknown_kind_refused(self):
+        with self.assertRaises(ValueError):
+            wb.comment_edit(self.gh, REPO, 1, "commit", 5, "x\n", "octocat")
+        self.assertEqual(self.fake.calls, [])
 
 
 class ReplyTests(Base):

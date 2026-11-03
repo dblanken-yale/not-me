@@ -340,7 +340,7 @@ def report(results, crashed, units, workers, wall, out, times, times_path) -> in
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=" ".join(__doc__.split("\n\n")[0].split()))
     parser.add_argument("-j", "--jobs", type=int, default=0,
                         help=f"worker processes (default: CPU count, at most {MAX_DEFAULT_JOBS}; 1 runs serially)")
     parser.add_argument("--suite", action="append", default=[], metavar="NAME",

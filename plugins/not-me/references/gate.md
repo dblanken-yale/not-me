@@ -78,8 +78,10 @@ follow-up for @octocat.
 1. Verify (`verification.md`), then gate, then commit, then merge the base in
    (Checkpoint B in `branching.md`), then push.
 2. If Checkpoint B brings in changes, run the targeted tests again before the
-   push, and the full set again only when the targeted tests cannot cover what
-   came in. With no targeted command, run the final tests again.
+   push. Run the full set again when `ci_wait` is false in the plan
+   (`limits.ci_wait_minutes: 0`, nothing else checks the merge), else only when the
+   targeted tests cannot cover what came in. With no targeted command, run the
+   final tests again.
 
 ## Checklist
 

@@ -22,8 +22,10 @@ not-me runs these git operations and nothing else:
 - `fetch` of named refs from `origin`.
 - `merge --ff --no-edit <base>` to bring a base branch into a feature branch. It never rebases. If the merge stops on conflicts, not-me reports that and carries on from there.
 - `checkout --no-track -b <branch> <base>` to start a branch.
-- `stash push --include-untracked` and `stash apply` by commit id, to keep your uncommitted work safe while it switches branches.
+- `stash push --include-untracked` and `stash apply` by commit id, to keep uncommitted work safe when a branch must be set aside.
 - `worktree add --detach` and `worktree remove` for review runs, which use a separate worktree by default.
+- `worktree add <path> <branch>` (or `--no-track -b <branch> <path> <base>`), `worktree list --porcelain` and `worktree remove` for the run worktree each update and new run works in, so your own checkout is never switched.
+- In a run worktree that could not commit, and only there: `add --intent-to-add` and `diff --binary HEAD` to save a patch under `.git/not-me/patches/`, then `reset --hard HEAD` and `clean -f -d` (never `-x`) to free the branch.
 - `push --dry-run` to a throwaway ref name, to test that a push would work. Nothing is sent.
 - `push -- origin refs/heads/<name>:refs/heads/<name>`.
 

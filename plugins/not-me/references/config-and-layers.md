@@ -55,6 +55,10 @@ A repo layer is committed by anyone with push access, so it may only tighten:
 The CLI drops a loosening value and reports it as shadowed. Report it in the log as
 a `WARN`; do not try to honour it.
 
+Keys that only change how a run works, not what it may touch, are open to every
+layer: `models.implementation` (`inline`, the default, or `delegate`),
+`models.strategy` and the model names.
+
 Companion repos in `repos` and a project board declared only in the repo layer take
 effect only when the operator's allow list confirms them. Unconfirmed, the guard
 blocks writes there; treat that as any guard block.

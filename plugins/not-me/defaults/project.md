@@ -34,7 +34,7 @@ labels:                          # label names used in the tracker, keyed by rol
   paused: paused                 # skip this issue until the label is removed
 reviewers: {default: []}         # GitHub logins requested as reviewers, keyed by repo name or default
 router: [update, new]            # order in which the router tries work kinds
-workspace: {new: checkout, update: checkout, review: worktree}  # checkout | worktree per work kind
+workspace: {new: worktree, update: worktree, review: worktree}  # update and new always use a run worktree, review a detached one
 guard: {other_repo: on, protected_branches: on, force_push: on, destructive_git: on}  # on | off; off needs confirm_guard_off in the same file; the repo layer may only set on (repo layer may only tighten)
 confirm_guard_off: []            # guard rules this file deliberately turns off
 allow_repos: []                  # extra owner/name repos the guard lets not-me touch; union across layers; repo-layer entries are ignored (use /not-me:allow-repo)
@@ -42,7 +42,7 @@ logs: {root: null}               # directory for run logs; null = <git-common-di
 markers: {legacy: []}            # older run-marker strings still recognised; union across layers
 attribution: inherit             # inherit | none | "<text>"
 limits: {fix_loop: 3, ci_wait_minutes: 20, claim_stale_hours: 8}  # fix rounds, CI wait, hours before a claim is stale
-models: {strategy: orchestrate, single_model: opus, bg: opus, implement: sonnet, review: opus, triage: haiku, verifier: auto, max_tries: 3}  # strategy: orchestrate | single; verifier: auto (a different model than the run's) | a model name | none
+models: {strategy: orchestrate, implementation: inline, single_model: opus, bg: opus, implement: sonnet, review: opus, triage: haiku, verifier: auto, max_tries: 3}  # strategy: orchestrate | single; implementation: inline (the run writes the code) | delegate (implementer subagents); verifier: auto (a different model than the run's) | a model name | none
 notify: {command: null}          # shell command run with a summary when a run ends; null = none
 retro: {file_upstream: false}    # true files retro findings as issues on the plugin repo
 ---

@@ -46,7 +46,8 @@ Example: `CHECK baseline: 212 passed, 2 failed (test_tz_offset, test_locale_sort
    after the implementer, each fix round) run only those, with the changed test
    files or test names as trailing arguments. None listed: the full commands.
 2. The full `## Tests`, `## Lint` and `## Build` run once, right before the push
-   (gate step 6). Checkpoint B commits: targeted again, the full set only when the
+   (gate step 6). Checkpoint B commits: targeted again, and the full set again when `ci_wait` is false
+   (`limits.ci_wait_minutes: 0`: nothing else checks the merge), else only when the
    targeted tests cannot cover them (shared config, fixtures, the build).
 3. Only a command pinned under `## Targeted tests` is targeted; never narrow one.
 4. Never run a command under `## Person only` in `verify.md` (live evals, real

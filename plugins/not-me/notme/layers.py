@@ -80,6 +80,7 @@ SCHEMA: Dict[str, Dict[str, KeySpec]] = {
         "picking.value_max_chars": KeySpec(tighten_only="max"),  # field text can come from other people
         "mode": KeySpec(enum=("dry-run", "live"), tighten_only="dry-run"),
         "models.strategy": KeySpec(enum=("orchestrate", "single")),
+        "models.implementation": KeySpec(enum=("inline", "delegate")),  # neither widens what may be touched
         "labels": KeySpec(values=str),
         "repos": KeySpec(item_key="name"),
         "guard.*": KeySpec(enum=("on", "off"), confirm=Confirm("off", "confirm_guard_off"), tighten_only="on"),

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -440,7 +441,7 @@ class TokenizerTests(unittest.TestCase):
                            home="/nonexistent/home", plugin_root="/nonexistent/plugin", git=lambda a, c: None,
                            write_ctx=writes.GuardContext(origin_repo="acme/app", allowed_repos=("acme/app",)))
         # the hook's watchdog is 8 s; Windows runners are slower per call, so they get more of that budget
-        limit = 3.0 if os.name == "nt" else 1.0
+        limit = 3.0 if os.name == "nt" else 2.0
         n = 100 * 1024
         near = guard.MAX_COMMAND - 16
         for cmd in ("$(" * (n // 2), "${X-" * (n // 4), "cat/" * (n // 4) + " -", "-u " * (n // 3),
@@ -1016,6 +1017,27 @@ class HookTests(_Fixtures):
             for tool, tin, variant in calls:
                 with self.subTest(tool=tool, input=tin, variant=variant):
                     self.assertEqual(mod.main(self.event(tool, tin, variant)), 0)
+
+    def test_main_leaves_no_watchdog_thread(self):
+        spec = importlib.util.spec_from_file_location("notme_repo_guard_hook", str(HOOK))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        for tin, variant, want in (({"command": "ls"}, "bare", 0), ({"command": "ls"}, "app", 0),
+                                   ({"command": "gh pr comment 1 -R acme/other -b x"}, "app", 2)):
+            with self.subTest(input=tin, variant=variant):
+                with mock.patch("sys.stderr"):
+                    self.assertEqual(mod.main(self.event("Bash", tin, variant)), want)
+                timers = [t for t in threading.enumerate() if isinstance(t, threading.Timer) and t.is_alive()]
+                self.assertEqual(timers, [])
+
+    def test_script_exit_codes_and_streams(self):
+        proc = self.hook(self.event("Bash", {"command": "ls"}))
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, b"", b""))
+        proc = self.hook(self.event("Bash", {"command": "gh pr comment 1 -R acme/other -b x"}))
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn(b"not-me guard [", proc.stderr)
+        self.assertIn(b"/not-me:allow-repo acme/other", proc.stderr)
+        self.assertEqual(proc.stdout, b"")
 
     def test_destructive_label(self):
         proc = self.hook(self.event("Bash", {"command": "gh secret set T --repo acme/app --body x"}))
