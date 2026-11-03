@@ -1421,7 +1421,8 @@ def _bash(cmd: str, cwd: str, ctx: GuardContext, depth: int = 0,
     try:
         parsed = lex(cmd)
     except Unparsed as exc:
-        yield from _opaque(cmd, _blk(_short(cmd)), f"the guard cannot parse this command ({exc})", ctx=ctx)
+        st = _State(cwd, Parsed([], [], cmd, False), cmd, depth, parent)  # no commands, but the checkout's branch
+        yield from _opaque(cmd, _blk(_short(cmd)), f"the guard cannot parse this command ({exc})", ctx=ctx, st=st)
         return
     for p in (parsed, _raw_variant(parsed)):
         if p is None:

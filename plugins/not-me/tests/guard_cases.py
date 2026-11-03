@@ -1339,6 +1339,7 @@ for cmd in (
 bash(A, None, "true " * 7000 + "; git status")
 bash(A, None, "echo " + "$(" * 70 + "x" + ")" * 70)
 bash(A, None, "echo 'unclosed && git push")
+bash(B, PB, "echo 'unclosed && git push", "main")  # unparseable, from a protected branch: a push there blocks
 bash(A, None, "true " * 7000, "alloff")
 # After a directory change, relative paths are judged against the session's working directory (cd is not followed).
 bash(A, None, "cd scripts && grep -r x .")
