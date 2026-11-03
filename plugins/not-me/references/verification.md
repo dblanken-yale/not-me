@@ -5,8 +5,7 @@
 Read this before you change any code, and again before you claim a change works.
 It covers the verify plan, the baseline, reproducing the problem, red-then-green
 tests, targeted tests, running the project's own checks, the visual check, a light
-accessibility pass, the cross-model claim check, and the CI wait. The minimum gate that follows
-verification is in `gate.md`.
+accessibility pass, the cross-model claim check, and the CI wait. See `gate.md` next.
 
 ## Baseline first
 
@@ -44,8 +43,9 @@ Example: `CHECK baseline: 212 passed, 2 failed (test_tz_offset, test_locale_sort
    after the implementer, each fix round) run only those, with the changed test
    files or test names as trailing arguments. None listed: the full commands.
 2. The full `## Tests`, `## Lint` and `## Build` run once, right before the push
-   (gate step 6). Checkpoint B commits: targeted again, the full set only when the
-   targeted tests cannot cover them (shared config, fixtures, the build).
+   (gate step 6). Checkpoint B commits: targeted again, and the full set again
+   when `ci_wait` is false (`limits.ci_wait_minutes: 0`: nothing else checks the
+   merge), else only when targeted tests cannot cover them (config, fixtures, build).
 3. Only a command pinned under `## Targeted tests` is targeted; never narrow one.
 4. Never run a command under `## Person only` in `verify.md` (live evals, real
    model or paid service calls), not even when CI runs it. A person runs those.

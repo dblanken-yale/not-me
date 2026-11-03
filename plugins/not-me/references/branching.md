@@ -54,9 +54,9 @@ exist. Result line: `STOP acme/app#88 blocked - base release-2.4 not found`.
 
 1. Fetch again. Merge the base in again.
 2. If the merge brought in commits, run the targeted tests again before the push
-   (the final tests when no targeted command is configured), and the full set
-   only when the targeted tests cannot cover what came in (`verification.md`,
-   "Targeted tests").
+   (the final tests when no targeted command is configured), and the full set when
+   `ci_wait` is false (`limits.ci_wait_minutes: 0`: nothing else checks the merge)
+   or the targeted tests cannot cover it (`verification.md`, "Targeted tests").
 3. Then push the branch to its own name on origin.
 
 ## Merge, never rebase
