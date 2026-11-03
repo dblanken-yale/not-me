@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.7.0](https://github.com/dblanken-yale/not-me/compare/not-me-v0.6.1...not-me-v0.7.0) (2026-11-03)
+
+
+### Features
+
+* **94:** hand an interrupted run's item to a person ([#125](https://github.com/dblanken-yale/not-me/issues/125)) ([e1187ce](https://github.com/dblanken-yale/not-me/commit/e1187ceadca264779fbbcc407d0cf07c1644d96b))
+* edit the operator's own comments and review bodies ([#155](https://github.com/dblanken-yale/not-me/issues/155)) ([f31a630](https://github.com/dblanken-yale/not-me/commit/f31a630992563489f4284a5ed8c1e767c3c10956))
+
+
+### Bug Fixes
+
+* **124:** stop the guard hook crashing during interpreter shutdown ([#138](https://github.com/dblanken-yale/not-me/issues/138)) ([0b8455d](https://github.com/dblanken-yale/not-me/commit/0b8455d23a28be424f6949dfa7e25331fb2b5faf))
+* **157:** skip a PR held by another worktree and keep the queue moving ([#159](https://github.com/dblanken-yale/not-me/issues/159)) ([9ac808b](https://github.com/dblanken-yale/not-me/commit/9ac808b50577968dea62344a5ebe6ba283b2e53c))
+* **79:** read $TMPDIR script paths and name rewrites for kept guard blocks ([#126](https://github.com/dblanken-yale/not-me/issues/126)) ([bc92c2b](https://github.com/dblanken-yale/not-me/commit/bc92c2b8d431aaa8b575dbc66f66f5559bcf36d5))
+
 ## [0.6.1](https://github.com/dblanken-yale/not-me/compare/not-me-v0.6.0...not-me-v0.6.1) (2026-10-30)
 
 
