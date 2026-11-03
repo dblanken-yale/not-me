@@ -1475,32 +1475,38 @@ def _opaque(text: str, blk: Blk, what: str, inline: bool = True, ctx: Optional[G
         if _PUSH_WORD.search(v):
             found = _opaque_push(v, ctx, st)
             if found:
-                rule, why = found
-                yield blk(OPAQUE, f"{what}, and it {why}", _OPAQUE_HINT, rules=(rule,))
+                rules, why = found
+                yield blk(OPAQUE, f"{what}, and it {why}", _OPAQUE_HINT, rules=rules)
                 return
 
 
-def _opaque_push(v: str, ctx: Optional[GuardContext], st: Optional[_State]) -> Optional[Tuple[str, str]]:
-    """The rule and reason when opaque text that pushes can reach a protected branch, is forced or names a URL
-    (other_repo, so `guard: {other_repo: off}` in the global layer relaxes it). A push that names none of these,
-    from a checkout on a feature branch, runs. With no context to look at, any push blocks."""
+def _opaque_push(v: str, ctx: Optional[GuardContext], st: Optional[_State]) -> Optional[Tuple[Tuple[str, ...], str]]:
+    """The rules and reason when opaque text that pushes can reach a protected branch, is forced or names a URL
+    (other_repo, so `guard: {other_repo: off}` in the global layer relaxes it). Every rule that applies is returned,
+    so a rule that is off cannot hide one that is on. A push that names none of these, from a checkout on a feature
+    branch, runs. With no context to look at, any push blocks."""
     if ctx is None:
-        return _PB, "holds `push`"
+        return (_PB,), "holds `push`"
+    rules: List[str] = []
+    whys: List[str] = []
     forced = _then(_PUSH_WORD, _PUSH_FORCE)(v)
     if forced:
-        return _FP, f"holds `{_short(forced, 40)}`, a forced or deleting push"
+        rules.append(_FP)
+        whys.append(f"holds `{_short(forced, 40)}`, a forced or deleting push")
     names = sorted(ctx.protected_branches, key=len, reverse=True)
-    if names:
-        named = _then(_PUSH_WORD, re.compile(r"(?:(?<=heads/)|(?<![A-Za-z0-9_./-]))(?:%s)(?![A-Za-z0-9_-])"
-                                             % "|".join(re.escape(n) for n in names)))(v)
-        if named:
-            return _PB, f"holds `{_short(named, 40)}`, a push naming a protected branch"
-    if st is not None and _branch(ctx, st, st.dir) in ctx.protected_branches:
-        return _PB, "pushes while the checkout is on a protected branch"
+    named = names and _then(_PUSH_WORD, re.compile(r"(?:(?<=heads/)|(?<![A-Za-z0-9_./-]))(?:%s)(?![A-Za-z0-9_-])"
+                                                   % "|".join(re.escape(n) for n in names)))(v)
+    if named:
+        rules.append(_PB)
+        whys.append(f"holds `{_short(named, 40)}`, a push naming a protected branch")
+    elif st is not None and _branch(ctx, st, st.dir) in ctx.protected_branches:
+        rules.append(_PB)
+        whys.append("pushes while the checkout is on a protected branch")
     url = _then(_PUSH_WORD, _PUSH_URL)(v)
     if url:
-        return _OR, f"holds `{_short(url, 40)}`, a push to a URL the guard cannot check against the allowed repos"
-    return None
+        rules.append(_OR)
+        whys.append(f"holds `{_short(url, 40)}`, a push to a URL the guard cannot check against the allowed repos")
+    return (tuple(rules), "; and it ".join(whys)) if rules else None
 
 
 def _body(text: str, st: _State, ctx: GuardContext, blk: Blk, what: str) -> Iterator[Block]:
