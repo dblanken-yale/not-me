@@ -563,7 +563,7 @@ bash(A, None, "python3 -c 'import subprocess; subprocess.run([\"gh\", \"pr\", \"
             "\"acme/other\", \"-b\", \"x\"])'")
 bash(B, OR, "gh api --method PUT repos/acme/other/issues/5/labels --input x.json")
 bash(B, DG, "gh secret set TOKEN --repo acme/app --body x")
-bash(A, None, "bash ./scripts/ship.sh")
+bash(B, OR, "bash ./scripts/ship.sh")  # ship.sh pushes to a URL: other_repo
 write(B, SP, "Write", "{P}/hooks/repo_guard.py")
 BYPASS_IDS = [c[0] for c in CASES[_first_bypass:]]
 # 1. command names built from variables, quotes or backslashes.
@@ -622,9 +622,9 @@ bash(B, DG, "gh api -X PUT repos/acme/app/branches/main/protection --input p.jso
 # 6. scripts are read and scanned.
 bash(A, None, "sh scripts/clean.sh")
 bash(A, None, "./scripts/clean.sh")
-bash(A, None, "source scripts/ship.sh")
-bash(A, None, ". scripts/ship.sh")
-bash(A, None, "./scripts/ship.sh")
+bash(B, OR, "source scripts/ship.sh")
+bash(B, OR, ". scripts/ship.sh")
+bash(B, OR, "./scripts/ship.sh")
 bash(A, None, "zsh scripts/missing.sh")
 # 7. the plugin's own files.
 write(B, SP, "Edit", "{P}/notme/guard.py")
@@ -1321,11 +1321,14 @@ for cmd in (
     bash(A, None, cmd)
 for cmd in (
         "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['git', 'push'])\nEOF",
+):
+    bash(A, None, cmd)
+for cmd in (
         "{git,push} https://github.com/acme/other HEAD",
         "/usr/bin/gi? push https://github.com/acme/other HEAD",
         "=git push https://github.com/acme/other HEAD",
 ):
-    bash(A, None, cmd)
+    bash(B, OR, cmd)
 bash(B, FP, "git {push,--force}")
 bash(B, FP, "git push \\\n  --force")
 bash(B, FP, "noglob git push --force")
@@ -1454,12 +1457,15 @@ for cmd in (
 ):
     bash(A, None, cmd)
 for cmd in (
-        f"echo push {OTHER} | xargs git",
         "parallel git ::: push",
+):
+    bash(A, None, cmd)
+for cmd in (
+        f"echo push {OTHER} | xargs git",
         f"cat <<EOF | bash\ngit push {OTHER}\nEOF",
         f"cat <<-EOF | sh\n\tgit push {OTHER}\n\tEOF",
 ):
-    bash(A, None, cmd)
+    bash(B, OR, cmd)
 bash(B, OR, "git push origin feature/x", "recurse")  # push.recurseSubmodules in the repo config
 ROUND1_END = len(CASES)
 for cmd in ("git log --oneline", "git diff --stat", "git -c color.ui=always log", "git remote -v",
@@ -1620,11 +1626,14 @@ for cmd in (
 ):
     bash(A, None, cmd)
 for cmd in (
-        f"sh -c \"\\$(printf '\\\\147')it push {OTHER}\"",
-        "bash < scripts/ship.sh",
         "printf 'g%sit push x' '' | sh",
 ):
     bash(A, None, cmd)
+for cmd in (
+        f"sh -c \"\\$(printf '\\\\147')it push {OTHER}\"",
+        "bash < scripts/ship.sh",
+):
+    bash(B, OR, cmd)
 bash(B, PB, "git push", "mirror")  # 7. remote.origin.mirror decides a bare push
 ROUND3_END = len(CASES)
 for cmd in ('rg "git push" docs', 'rg -n "gh pr" docs', 'grep -rn "gh pr" docs', "git diff main...HEAD --stat",
@@ -1647,7 +1656,7 @@ for cmd in (
         "ruby -e 'system(\"g\"+\"it push https://gith\"+\"ub.com/acme/other HEAD\")'",
         "node -e 'require(\"child_process\").execSync(\"g\"+\"it push https://gith\"+\"ub.com/acme/other HEAD\")'",
 ):
-    bash(A, None, cmd)
+    bash(B, OR, cmd)
 for cmd in (
         "vim -c 'exe \"!g\".\"it push https://gith\".\"ub.com/acme/other HEAD\"'",
         "python3 -c 'print(1)'",
@@ -1920,7 +1929,7 @@ for cmd in ("python3 -c 'import os; os.system(\"gh secret delete X -R acme/app\"
 SCRIPTS["envsecret.sh"] = "#!/bin/sh\ncurl -X PUT https://api.github.com/repos/acme/app/environments/prod/secrets/X\n"
 for cmd in ("python3 -c 'print(\"secret\")'", "node -e 'const secretKey = 1'", "gh secret list --repo acme/app"):
     bash(A, None, cmd)
-bash(A, None, "sh scripts/ship.sh")
+bash(B, OR, "sh scripts/ship.sh")
 bash(B, FP, "git push --force 'unclosed")  # opaque: a forced push reports under force_push
 bash(B, FP, "bash -c 'git push --force'", "off")
 bash(A, None, "bash -c 'git push --force'", "alloff")
@@ -2073,6 +2082,10 @@ bash(A, None, "python3 -c 'import subprocess; subprocess.run([\"git\", \"push\",
 _ISSUE79_STDIN_ID = f"G{len(CASES) + 1:03d}"
 bash(A, None, "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['git', 'push', 'origin', 'feature/x'])\nEOF")
 bash(A, None, "git push origin feature/x")
+# opaque text that pushes to a URL blocks under other_repo; global other_repo: off relaxes it
+bash(B, OR, "python3 -c 'import os; os.system(\"git push https://github.com/acme/other.git x\")'")
+bash(B, OR, "python3 -c 'import os; os.system(\"git push git@github.com:acme/other.git x\")'")
+bash(A, None, "python3 -c 'import os; os.system(\"git push https://github.com/acme/other.git x\")'", "off")
 # 5. eval of a push whose remote the shell fills in: the message says to write the remote out, which passes
 _ISSUE79_EVAL_ID = f"G{len(CASES) + 1:03d}"
 bash(B, OR, 'eval "git push $R HEAD"')

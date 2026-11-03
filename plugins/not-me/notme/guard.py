@@ -159,6 +159,8 @@ def _then(first: "re.Pattern[str]", second: "re.Pattern[str]") -> Matcher:
 _PUSH_WORD = re.compile(r"(?<![^\s'\"(\[,;|&{=`])push(?=[\s'\")\],;|&}`]|$)")
 _PUSH_FORCE = re.compile(r"--force|--mirror|--delete|(?<![A-Za-z0-9_-])-[A-Za-z]*f(?![A-Za-z0-9_-])|(?<=[\s'\"])\+(?![\s'\"+])")
 
+_PUSH_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://|[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:|github\.com[:/]", re.IGNORECASE)
+
 _DANGER: Tuple[Tuple[Matcher, Tuple[str, ...]], ...] = (
     (_found(re.compile(r"reset\s+(?:\S+\s+)?--hard")), (_PB,)),
     # gh pr merge|close --delete-branch (or -d) deletes the remote branch
@@ -1479,8 +1481,9 @@ def _opaque(text: str, blk: Blk, what: str, inline: bool = True, ctx: Optional[G
 
 
 def _opaque_push(v: str, ctx: Optional[GuardContext], st: Optional[_State]) -> Optional[Tuple[str, str]]:
-    """The rule and reason when opaque text that pushes can reach a protected branch or is forced. A push that
-    names neither, from a checkout on a feature branch, runs. With no context to look at, any push blocks."""
+    """The rule and reason when opaque text that pushes can reach a protected branch, is forced or names a URL
+    (other_repo, so `guard: {other_repo: off}` in the global layer relaxes it). A push that names none of these,
+    from a checkout on a feature branch, runs. With no context to look at, any push blocks."""
     if ctx is None:
         return _PB, "holds `push`"
     forced = _then(_PUSH_WORD, _PUSH_FORCE)(v)
@@ -1492,6 +1495,9 @@ def _opaque_push(v: str, ctx: Optional[GuardContext], st: Optional[_State]) -> O
                                              % "|".join(re.escape(n) for n in names)))(v)
         if named:
             return _PB, f"holds `{_short(named, 40)}`, a push naming a protected branch"
+    url = _then(_PUSH_WORD, _PUSH_URL)(v)
+    if url:
+        return _OR, f"holds `{_short(url, 40)}`, a push to a URL the guard cannot check against the allowed repos"
     if st is not None and _branch(ctx, st, st.dir) in ctx.protected_branches:
         return _PB, "pushes while the checkout is on a protected branch"
     return None
