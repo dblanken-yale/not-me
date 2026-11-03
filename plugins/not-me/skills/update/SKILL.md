@@ -134,22 +134,22 @@ Follow `${CLAUDE_PLUGIN_ROOT}/skills/update/references/findings.md` in full.
 Read `${CLAUDE_PLUGIN_ROOT}/references/delegation.md`,
 `${CLAUDE_PLUGIN_ROOT}/references/verification.md` and
 `${CLAUDE_PLUGIN_ROOT}/references/gate.md`. Commands come only from the body of
-the effective verify doc; never invent a test or lint command.
+the effective verify doc; never invent a test or lint command, never run a person-only one.
 
-1. Baseline before any edit; log existing failures as `CHECK` lines.
+1. Before any edit: `notme verify-plan --base <base> --sha <sha>`, where `<sha>` is `git rev-parse HEAD` (a read) after Checkpoint A, then the baseline as it says; log failures, or why it was skipped, as `CHECK` lines.
 2. One unit per implemented finding. `models.implementation` `inline` (default):
    write each unit yourself in `<wt>`, failing test first; log it as `ACTION`.
 3. `delegate`: classify each unit (`models.strategy` `single`: `models.single_model`;
    else a path or kind under `## Delegation` in standards, or anything
    security-sensitive, to `models.review`, the rest to `models.implement`). Brief one
    subagent per unit with goal, files, `<wt>`, conventions, scope ("no commits, no
-   pushes, no posts") and acceptance from the finding. Failing test first. Log
+   pushes, no posts") and acceptance from the finding. Failing test first; the plan's targeted commands are its only tests. Log
    `DELEGATE` and, after your own audit of the diff and checks, `AUDIT`.
 4. `delegate` only: retry ladder from delegation.md, capped at `models.max_tries`,
    then do the unit yourself. Never read the subagent's transcript.
-5. Red then green for every changed behaviour. UI diff: one `Visual check:` line
+5. Red then green for every changed behaviour, with the plan's targeted tests if any. UI diff: one `Visual check:` line
    (path form in the log, words form in the PR) and the light accessibility pass.
-6. Gate in full, then each step under `## Gate additions`. Log each as `GATE`. Fix
+6. Gate in full (final tests: full set, once, last), then each step under `## Gate additions`. Log each as `GATE`. Fix
    findings in this run. A unit still failing after `limits.fix_loop` rounds is
    deferred with the failing check named.
 
@@ -168,7 +168,7 @@ git -C <wt> commit -F "$msgdir/commit-msg.txt"
 
    A commit that is blocked or fails: save the work (step 9) and fail (failure table).
 4. `notme --project-dir <wt> git checkpoint --base <base> --fetch` (Checkpoint B). New commits came
-   in: run the final tests again.
+   in: rerun tests as branching.md "Checkpoint B" says.
 5. Push through the CLI only, companions first in `repos` order and the primary
    last (`${CLAUDE_PLUGIN_ROOT}/references/companions.md`):
 
@@ -183,7 +183,7 @@ notme --project-dir <wt> git push <head_ref> --log <path>
    worktree (`notme git worktree-add --branch <child head>`), merge this branch in with
    `checkpoint --base <head_ref> --fetch`, final tests, send it up the same way, remove it.
 8. CI: poll `notme bundle <ref>` until the `checks` for the new `head_sha` finish,
-   up to `limits.ci_wait_minutes`. Red: read the failing job, fix, rerun locally,
+   up to `limits.ci_wait_minutes` (0: no wait, verification.md). Red: read the failing job, fix, rerun locally,
    commit, push. Stop at `limits.fix_loop` rounds (failure table).
 
 ## Step 7: Cross-model claim check
