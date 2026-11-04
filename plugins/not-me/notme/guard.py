@@ -2638,7 +2638,10 @@ def _names_every_branch(sub: str, args: List[str]) -> bool:
     """A push whose every refspec names its destination branch: where it runs does not decide what it changes."""
     if sub != "push":
         return False
-    refspecs = _push_positionals(args)[1:]
+    positionals, known = _push_parse(args)
+    if not known:
+        return False
+    refspecs = positionals[1:]
     # fails closed: each refspec must name its destination after a `:`, so a word the guard took for a refspec but
     # git reads as an option's value never makes a push of the current branch look exempt
     return bool(refspecs) and all(":" in r and r.lstrip("+").split(":", 1)[1] not in ("", "HEAD", "@")
@@ -2648,24 +2651,47 @@ def _names_every_branch(sub: str, args: List[str]) -> bool:
 _PUSH_LONG_VALUE = ("push-option", "repo", "receive-pack", "exec")
 
 
-def _push_positionals(args: List[str]) -> List[str]:
-    """git push's remote and refspecs, without the values of options that take one (-o x, --repo x, any prefix of
-    a long one)."""
-    out, i = [], 0
+# push options the guard knows. Any other option (long or short) means it cannot tell what the push does, so the
+# "names every branch" exemption is dropped and the push is judged on the session's branch.
+_PUSH_LONG_FLAGS = ("all", "branches", "mirror", "tags", "delete", "dry-run", "porcelain", "force", "thin", "no-thin",
+                    "verbose", "quiet", "set-upstream", "progress", "prune", "follow-tags", "no-follow-tags",
+                    "atomic", "no-atomic", "verify", "no-verify", "signed", "no-signed", "ipv4", "ipv6",
+                    "force-with-lease", "force-if-includes", "no-force-with-lease", "no-force-if-includes")
+_PUSH_SHORT_FLAGS = set("fnqvu46d")
+
+
+def _push_parse(args: List[str]) -> Tuple[List[str], bool]:
+    """git push's remote and refspecs, without the values of options that take one (-o x, -ox, --repo x, any
+    prefix of a long one), and whether every option was one the guard knows. A short bundle is read one letter at
+    a time: at `o` the rest of the word is the value, and only a trailing `o` takes the next word."""
+    out, known, i = [], True, 0
     while i < len(args):
         a = args[i]
         i += 1
         if a == "--":
-            return out + args[i:]
+            return out + args[i:], known
         if not a.startswith("-") or a == "-":
             out.append(a)
         elif a.startswith("--"):
-            name = a[2:]
-            if "=" not in name and any(o.startswith(name) for o in _PUSH_LONG_VALUE):
-                i += 1
-        elif a.endswith("o"):  # -o, or a bundle ending in it (-vo): the value is the next word; -ox has it attached
-            i += 1
-    return out
+            name = a[2:].split("=", 1)[0]
+            if name and any(o.startswith(name) for o in _PUSH_LONG_VALUE):
+                if "=" not in a:
+                    i += 1
+            elif not (name and any(o.startswith(name) for o in _PUSH_LONG_FLAGS)):
+                known = False
+        else:
+            for j, ch in enumerate(a[1:], 1):
+                if ch == "o":
+                    if j == len(a) - 1:
+                        i += 1
+                    break
+                if ch not in _PUSH_SHORT_FLAGS:
+                    known = False
+    return out, known
+
+
+def _push_positionals(args: List[str]) -> List[str]:
+    return _push_parse(args)[0]
 
 
 # git branch options that only list; git accepts abbreviated long options, so anything not spelled out here is a write

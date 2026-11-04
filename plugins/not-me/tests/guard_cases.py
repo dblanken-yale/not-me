@@ -2155,6 +2155,11 @@ for cmd in ('git -C "$W" push -o opt origin', 'git -C "$W" push --push-option op
             'git -C "$W" push --repo origin x', 'git -C "$W" push -vo opt origin'):
     bash(B, PB, cmd, "main")
 bash(G, OR, 'git -C "$W" push -o opt origin HEAD:feature/x', "main")  # names its destination: no branch read
+# #148: an attached -o value is not the next word; HEAD is still pushed. Unknown options drop the exemption
+for cmd in ('git -C "$W" push -oz origin HEAD a:b', 'git -C "$W" push -voz origin HEAD a:b',
+            'git -C "$W" push --recurse-submodules=check origin a:b'):
+    bash(B, PB, cmd, "main")
+bash(G, OR, 'git -C "$W" push -vo opt origin a:b', "main")
 # a mention of GH_REPO that does not set it leaves gh's default repo found the usual way
 for cmd in ("echo GH_REPO; gh issue comment 1 --body-file f", "echo $GH_REPO && gh issue comment 1 --body-file f"):
     bash(A, None, cmd)
