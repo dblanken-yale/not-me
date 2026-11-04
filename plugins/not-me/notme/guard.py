@@ -1414,6 +1414,11 @@ _ENV_LONG_FLAG = ("ignore-environment", "null", "debug", "help", "version", "lis
                   "default-signal", "ignore-signal")
 
 
+# GNU env applies its own quoting to an -S string: a quote, a backslash or `$` can hide an option from a plain split,
+# so such a string counts as a directory change (fails closed).
+_ENV_S_QUOTING = re.compile(r"""['"\\$]""")
+
+
 def _env_chdir(words: List[str]) -> bool:
     """env runs its command in another directory: -C dir, -Cdir, --chdir (or any prefix of it, with or without =),
     anywhere among env's options. Fails closed: an env option the guard does not know counts as a directory change.
@@ -1438,6 +1443,8 @@ def _env_chdir(words: List[str]) -> bool:
                     if not eq:
                         value = rest.pop(0) if rest else ""
                     if "split-string".startswith(name):
+                        if _ENV_S_QUOTING.search(value):
+                            return True
                         rest = value.split() + rest
                     continue
                 if not any(o.startswith(name) for o in _ENV_LONG_FLAG):
@@ -1450,6 +1457,8 @@ def _env_chdir(words: List[str]) -> bool:
                     return True
                 value = a[j + 1:] or (rest.pop(0) if rest else "")
                 if ch == "S":
+                    if _ENV_S_QUOTING.search(value):
+                        return True
                     rest = value.split() + rest
                 break
     return False
