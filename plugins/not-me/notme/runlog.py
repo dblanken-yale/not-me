@@ -36,6 +36,7 @@ ALL_KINDS = KINDS + ("QUESTION",)
 IN_PROGRESS = "(run in progress)"
 MARKER_NAME = "active-run"
 GUARD_LOG_NAME = "guard.jsonl"
+PAYLOADS_DIR = "payloads"  # dry-run payload copies live beside the run logs, not in them
 LOG_ROOT_ENV = "NOT_ME_LOG_ROOT"
 CREATE_ATTEMPTS = 20
 
@@ -319,7 +320,7 @@ def last(root: PathLike, skill: Optional[str] = None) -> Optional[RunLog]:
     root = Path(root)
     if not root.is_dir():
         return None
-    folders = [root / _slug(skill)] if skill else [p for p in root.iterdir() if p.is_dir()]
+    folders = [root / _slug(skill)] if skill else [p for p in root.iterdir() if p.is_dir() and p.name != PAYLOADS_DIR]
     files = [f for folder in folders if folder.is_dir() for f in folder.glob("*.md")]
     return RunLog.open(max(files, key=lambda f: f.name)) if files else None
 
