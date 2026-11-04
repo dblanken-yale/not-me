@@ -3185,12 +3185,14 @@ def _gh_write(t: List[str], c: SimpleCommand, st: _State, ctx: GuardContext, blk
 # gh orders remotes this way when it picks a default repo: upstream, github, origin, then the rest by name
 _GH_REMOTE_ORDER = ("upstream", "github", "origin")
 _GH_REPO_ASSIGN = re.compile(r"^GH_REPO=")
-# GH_REPO set where the guard does not read it: by assignment, ${GH_REPO:=x}, `for GH_REPO in`, or a builtin or env
+# GH_REPO set where the guard does not read it: by assignment (quoted name too), ${GH_REPO:=x}, `for`/`select GH_REPO in`, or a builtin or env
 # that sets or unsets it by name (export, declare, read, unset, env -u ...). A bare mention (echo GH_REPO, $GH_REPO)
 # does not count.
-_GH_REPO_SET = re.compile(r"(?<![A-Za-z0-9_$])GH_REPO(?:\[[^\]]*\])?\s*\+?=|\$\{GH_REPO:?=|(?<![A-Za-z0-9_-])"
-                          r"(?:export|declare|typeset|local|readonly|read|mapfile|readarray|unset|printf|env|for)"
-                          r"(?![A-Za-z0-9_-])[^;&|\n]*?(?<![A-Za-z0-9_${])GH_REPO(?![A-Za-z0-9_])")
+_GH_REPO_SET = re.compile(r"(?<![A-Za-z0-9_$])GH_REPO[\"']*(?:\[[^\]]*\])?[\"']*\s*\+?=|\$\{GH_REPO:?=|(?<![A-Za-z0-9_-])"
+                          r"(?:export|declare|typeset|local|readonly|read|mapfile|readarray|unset|printf|env|for|select|getopts)"
+                          r"(?![A-Za-z0-9_-])[^;&|\n]*?(?<![A-Za-z0-9_${])GH_REPO(?![A-Za-z0-9_])"
+                          # eval and source run text the guard does not read, so they may set it: fail closed
+                          r"|(?<![A-Za-z0-9_./-])(?:eval|source)(?![A-Za-z0-9_-])|(?:^|[;&|(){}\n!]|(?<![A-Za-z0-9_-])(?:then|do|else|elif|time|command|builtin)(?![A-Za-z0-9_-]))\s*\.\s")
 
 
 def _gh_default_repo(c: SimpleCommand, st: _State, ctx: GuardContext) -> Tuple[Optional[str], str]:

@@ -2155,6 +2155,15 @@ for cmd in ('git -C "$W" push -o opt origin', 'git -C "$W" push --push-option op
             'git -C "$W" push --repo origin x', 'git -C "$W" push -vo opt origin'):
     bash(B, PB, cmd, "main")
 bash(G, OR, 'git -C "$W" push -o opt origin HEAD:feature/x', "main")  # names its destination: no branch read
+# dblanken-yale/not-me#150: select, getopts, eval, source, a dot-source and a quoted name also set GH_REPO
+for cmd in ("select GH_REPO in a; do :; done; gh issue comment 1 --body-file f", "eval GH_REPO=x; gh issue comment 1 --body-file f",
+            "getopts x GH_REPO; gh issue comment 1 --body-file f", "source ./e.sh; gh issue comment 1 --body-file f",
+            ". ./e.sh; gh issue comment 1 --body-file f", 'GH_REPO""=x gh issue comment 1 --body-file f',
+            'export "GH_REPO"=x; gh issue comment 1 --body-file f', "true\n. ./e.sh\ngh issue comment 1 --body-file f",
+            "if true; then . ./e.sh; fi; gh issue comment 1 --body-file f", "{ . ./e.sh; }; gh issue comment 1 --body-file f"):
+    bash(G, OR, cmd)
+for cmd in ("echo ${GH_REPO} && gh issue comment 1 --body-file f", "echo ${GH_REPO:-x} && gh issue comment 1 --body-file f"):
+    bash(A, None, cmd)
 # a mention of GH_REPO that does not set it leaves gh's default repo found the usual way
 for cmd in ("echo GH_REPO; gh issue comment 1 --body-file f", "echo $GH_REPO && gh issue comment 1 --body-file f"):
     bash(A, None, cmd)
