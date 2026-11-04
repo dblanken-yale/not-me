@@ -2150,6 +2150,12 @@ for cmd in ("env -u FOO -C {F}/main git commit -m x", "env -uFOO -C{F}/main git 
             "env -S '--chd {F}/main' git commit -m x", "env '--split-string=--chd {F}/main' git commit -m x",
             "env -Q {F}/main git commit -m x", "env --frobnicate {F}/main git commit -m x"):
     bash(B, PB, cmd)
+# dblanken-yale/not-me#149: an -S string with a quote, backslash or $ is read by env's own quoting rules, so it
+# counts as a directory change; a plain one is still split and scanned
+for cmd in ("env -S \"'--chd' {F}/main\" git commit -m x", "env -S '\\--chd {F}/main' git commit -m x",
+            "env '--split-string=$X {F}/main' git commit -m x"):
+    bash(B, PB, cmd)
+bash(A, None, "env -S 'A=1' git status")
 # a push option's value is not a refspec: this push still pushes the current branch, main
 for cmd in ('git -C "$W" push -o opt origin', 'git -C "$W" push --push-option opt origin',
             'git -C "$W" push --repo origin x', 'git -C "$W" push -vo opt origin'):
