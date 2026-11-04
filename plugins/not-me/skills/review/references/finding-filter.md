@@ -62,6 +62,17 @@ review, one security review. Each brief is self-contained:
 3. It fits a dimension in `review.dimensions` and is not under "What never counts"
    in the effective review doc.
 
+## The merge test
+
+Ask of every finding: must the author change this before merge?
+
+1. Yes: it is `major` (or `blocker`) and blocks. A real accessibility defect or an
+   unmet acceptance criterion is `major` by default.
+2. No: drop it. At most three such notes may stay, each as one line under a
+   `Not blocking` heading in the body, with no inline comment, and each must name
+   an action or a person ("file a follow-up", "ask <login>"). A note with neither
+   is dropped.
+
 ## Drop
 
 1. Nits, naming, and formatting the project linter already enforces.
@@ -85,7 +96,7 @@ The last column is the default of `review.block_on`. The effective list decides;
 |-------|-------|-----------------|
 | blocker | Wrong result, data loss, security hole, or a failing check caused by the change | yes |
 | major | A missed acceptance criterion, a missing test for new behaviour, a likely bug | yes |
-| minor | Real but small: an unclear error message, a stale doc line | no |
+| minor | Not a defect: the author need not change it before merge. Drop it, or keep it as a `Not blocking` line under the merge test. Never an inline comment | no |
 
 ## Checklist
 
@@ -93,5 +104,6 @@ The last column is the default of `review.block_on`. The effective list decides;
 - [ ] Classified every earlier trusted thread as fixed, answered, or open.
 - [ ] Briefed code and security subagents read-only, bugs and missed requirements only.
 - [ ] Confirmed each finding in the code and kept only those with a file and line.
+- [ ] Asked of each finding whether the author must change it before merge; kept at most three non-blocking notes, each naming an action or a person.
 - [ ] Dropped nits, speculation, duplicates, and reversals of earlier asks.
 - [ ] Filed out-of-scope problems as follow-ups, non-blocking.

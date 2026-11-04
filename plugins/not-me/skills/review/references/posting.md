@@ -17,6 +17,7 @@ Make one work directory in the temp directory made as in `${CLAUDE_PLUGIN_ROOT}/
    - `**Waiting on:**` one line per login with what they owe, or "nobody".
    - `**Findings**`: one line per finding, level first, file and line, one
      sentence. Inline ones are summarised here too.
+   - `**Not blocking**`: at most three one-line notes, each naming an action or a person; no inline comment. Leave the heading out when there are none.
    - `**Earlier threads**`: fixed, answered, or still open, one line each.
    - `**Checks**`: each command run on the head SHA and its result.
    - `**Follow-ups**`: each follow-up issue as `owner/repo#N`, non-blocking.
@@ -33,7 +34,7 @@ Name people by login, never "you". No AI or model mention anywhere.
 ## Check the text
 
 Run `notme check-text --file body.md` and `notme check-text --file comments.md`.
-Fix every problem it lists and run it again. Never post on a failing check.
+Fix every problem it lists and run it again. Never post on a failing check. `review-post` runs the same check on the body and every comment itself and refuses, posting nothing, on a problem.
 
 ## Post
 

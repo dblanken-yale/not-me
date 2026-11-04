@@ -1116,6 +1116,20 @@ class PullRequestTests(base.CliCase):
                           "--comments-file", inline)
         self.assertEqual(payload["state"], "CHANGES_REQUESTED")
 
+    def test_review_post_refuses_unclean_text_before_posting(self):
+        bad = self.write_file("bad.md", "Fix the thing, written by an AI\n")
+        good = self.write_file("good.md", "Please change\n")
+        inline = self.write_file("inline.json", json.dumps(
+            [{"path": "a.py", "line": 3, "body": "rename"}, {"path": "b.py", "line": 4, "body": "an AI wrote this"}]))
+        code, payload, _ = self.cli("review-post", "3", "--event", "REQUEST_CHANGES", "--body-file", bad)
+        self.assertEqual((code, payload["kind"]), (1, "text_lint"))
+        self.assertTrue(any("body file" in p and "AI" in p for p in payload["problems"]))
+        code, payload, _ = self.cli("review-post", "3", "--event", "REQUEST_CHANGES", "--body-file", good,
+                                    "--comments-file", inline)
+        self.assertEqual((code, payload["kind"]), (1, "text_lint"))
+        self.assertTrue(any("comment 2" in p and "b.py" in p and "AI" in p for p in payload["problems"]))
+        self.assertEqual(self.fake.writes_made(), [])
+
     def test_reply_resolve_and_comment_upsert(self):
         body = self.write_file("body.md", "Fixed in the last commit\n")
         self.ok("reply-thread", "3", "--to", "501", "--body-file", body)

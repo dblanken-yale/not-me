@@ -1641,6 +1641,9 @@ def cmd_review_post(ctx: Context, args: argparse.Namespace, repo: str, n: int) -
     review.changes_label. COMMENT only updates the pass labels. A pass label missing from the repo is skipped with
     one warning.
 
+    The body and every comment body are checked as check-text does first; any problem refuses the post (exit 1,
+    kind text_lint, problems naming the body or the comment) before anything is written.
+
     When the labels set change a state label (needs review, needs work, ready to merge, ...), one comment follows
     the review naming what was added and removed and the reason: the first line of --reason-file, else "a <EVENT>
     review was posted". A failed comment is a warning and the review and labels stand.
@@ -1656,11 +1659,20 @@ def cmd_review_post(ctx: Context, args: argparse.Namespace, repo: str, n: int) -
         if not isinstance(inline, list) or not all(isinstance(c, dict) and {"path", "line", "body"} <= set(c)
                                                     for c in inline):
             raise fail(ExitCode.USAGE, "usage", "comments file must be a JSON list of {path, line, body}")
+    body_text = ctx.read_input(args.body_file)
+    attribution = writeback.attribution(ctx.cfg)
+    problems = [f"body file: {p}" for p in writeback.check_text(body_text, ctx.tracker, repo, attribution, False)]
+    for i, c in enumerate(inline or [], 1):
+        problems += [f"comment {i} ({c['path']}:{c['line']}): {p}"
+                     for p in writeback.check_text(str(c["body"]), ctx.tracker, repo, attribution, False)]
+    if problems:
+        raise CliExit(ExitCode.ERROR, {"error": f"{len(problems)} problem(s) in the review text; nothing posted",
+                                       "kind": "text_lint", "ok": False, "problems": problems})
     report: Dict[str, Any] = {}
     reason = ctx.read_reason(args.reason_file, repo) if args.reason_file else f"a {args.event} review was posted"
     before = ctx.gh.labels(repo, n) if args.labels_auto or args.labels_set is not None else []
     auto = _labels_after_review(ctx, repo, n, args.event, report) if args.labels_auto else None
-    out = writeback.review_post(ctx.gh, repo, n, args.event.lower(), ctx.read_input(args.body_file), inline,
+    out = writeback.review_post(ctx.gh, repo, n, args.event.lower(), body_text, inline,
                                 csv(args.labels_set) if args.labels_set is not None else None, ctx.run_id,
                                 labels_from_reviews=auto)
     after = out.get("labels") if args.labels_auto else csv(args.labels_set) if args.labels_set is not None else None
