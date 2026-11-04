@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from . import paths
+from . import paths, runlog
 
 
 class LedgerError(RuntimeError):
@@ -83,10 +83,10 @@ class Ledger:
         _real_dir(self.path.parent, self.base)
         if payload_bytes is not None:
             sha = hashlib.sha256(payload_bytes).hexdigest()
-            dest = self.path.parent / "payloads" / f"{sha}.md"
+            dest = self.path.parent / runlog.PAYLOADS_DIR / f"{sha}.md"
             _real_dir(dest.parent, self.base)
             _write_new(dest, payload_bytes)
-            copied = f"payloads/{sha}.md"
+            copied = f"{runlog.PAYLOADS_DIR}/{sha}.md"
         entry = {"ts": utc_now(), "op": op, "target": target,
                  "argv": list(argv), "payload_sha256": sha, "payload_path": copied, "description": description}
         if os.path.islink(self.path):  # O_NOFOLLOW does not exist everywhere

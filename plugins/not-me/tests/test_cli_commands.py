@@ -744,6 +744,14 @@ class StatusAndPauseTests(base.CliCase):
         self.assertEqual(payload["last_runs"]["new"]["status"], "done")
         self.assertIsNone(payload["active_run"])
 
+    def test_status_last_runs_omits_the_payloads_folder(self):
+        started = self.ok("log", "start", "--skill", "new", "--ref", "1")
+        self.ok("log", "finish", started["path"], "--status", "done")
+        payloads = Path(started["path"]).parent.parent / runlog.PAYLOADS_DIR
+        payloads.mkdir()
+        (payloads / "zzzz.md").write_text("a dry-run payload copy\n", encoding="utf-8")
+        self.assertEqual(list(self.ok("status")["last_runs"]), ["new"])
+
     def test_status_lists_an_unfinished_log_that_is_not_the_active_run(self):
         started = self.ok("log", "start", "--skill", "new", "--ref", "7")
         runlog.default_marker_path(self.project).unlink()  # the run died; its marker is gone

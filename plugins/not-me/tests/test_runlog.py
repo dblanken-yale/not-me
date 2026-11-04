@@ -142,6 +142,14 @@ class LastTests(TmpDirTestCase):
         self.assertIsNone(runlog.last(root, "missing"))
         self.assertIsNone(runlog.last(Path(self.tmp) / "nope"))
 
+    def test_last_without_a_skill_skips_the_payloads_folder(self):
+        log = RunLog.start(self.root, "review", "a", now=NOW, force=True)
+        payloads = self.root / runlog.PAYLOADS_DIR
+        payloads.mkdir()
+        (payloads / "zzzz.md").write_text("a dry-run payload copy\n", encoding="utf-8")
+        self.assertEqual(runlog.last(self.root).run_id, log.run_id)
+        self.assertIsNone(runlog.last(self.root / "empty-nothing"))
+
 
 class MarkerTests(TmpDirTestCase):
 

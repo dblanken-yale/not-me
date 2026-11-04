@@ -2399,7 +2399,7 @@ def cmd_status(ctx: Context, args: argparse.Namespace) -> Dict[str, Any]:
     try:
         root = ctx.log_root()
         active_id = (out["active_run"] or {}).get("run_id")
-        for folder in sorted(p for p in root.iterdir() if p.is_dir()):
+        for folder in sorted(p for p in root.iterdir() if p.is_dir() and p.name != runlog.PAYLOADS_DIR):
             log = runlog.last(root, folder.name)
             if log is not None:
                 if log.status is None and log.run_id != active_id and runlog.is_run_log(log.path):  # never finished
