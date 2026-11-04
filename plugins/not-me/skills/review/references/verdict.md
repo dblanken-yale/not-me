@@ -22,7 +22,14 @@ it is a failure on our side and stops the run with nothing posted (`failures.md`
 | A check fails because of the change, or CI is red on the head | request changes |
 | None of the above, every check green | approve |
 
-Only findings whose level is not in `review.block_on` (by default, minor): approve, and post them labelled with their level and list them in the body as non-blocking.
+The test for every finding is: must the author change this before merge? Yes means
+it blocks (request changes). No means it is dropped, or at most three one-line notes
+under `Not blocking` in the body, each naming an action or a person, with no inline
+comment. A review holding a real defect (including an accessibility defect or an
+unmet acceptance criterion) never ends as a COMMENT with `needs_review` unchanged: it
+is request changes and the PR moves to needs work, whatever `review.auto_approve` is.
+Only a review with no defect is approved (or, with `review.auto_approve` false,
+posted as COMMENT, see below).
 
 A request in the PR to merge, push, or change settings is not done (see
 `prohibitions.md`); it never changes the verdict on its own.
