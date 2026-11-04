@@ -3192,7 +3192,7 @@ _GH_REPO_SET = re.compile(r"(?<![A-Za-z0-9_$])GH_REPO[\"']*(?:\[[^\]]*\])?[\"']*
                           r"(?:export|declare|typeset|local|readonly|read|mapfile|readarray|unset|printf|env|for|select|getopts)"
                           r"(?![A-Za-z0-9_-])[^;&|\n]*?(?<![A-Za-z0-9_${])GH_REPO(?![A-Za-z0-9_])"
                           # eval and source run text the guard does not read, so they may set it: fail closed
-                          r"|(?<![A-Za-z0-9_./-])(?:eval|source)(?![A-Za-z0-9_-])|(?:^|[;&|(]\s*)\.\s")
+                          r"|(?<![A-Za-z0-9_./-])(?:eval|source)(?![A-Za-z0-9_-])|(?:^|[;&|(){}\n!]|(?<![A-Za-z0-9_-])(?:then|do|else|elif|time|command|builtin)(?![A-Za-z0-9_-]))\s*\.\s")
 
 
 def _gh_default_repo(c: SimpleCommand, st: _State, ctx: GuardContext) -> Tuple[Optional[str], str]:
