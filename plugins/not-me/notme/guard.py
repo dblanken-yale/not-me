@@ -2621,15 +2621,15 @@ def _cmd_git(t, c, st, ctx, blk, depth: int = 0):
                 why = "a checkout or switch earlier in the command, in a checkout the guard cannot name, may have " \
                       "moved this checkout's branch"
             else:
-                here = _branch(ctx, st, st.dir)
-                why = f"git reads an empty or unset -C path as the current directory, which is on the protected " \
-                      f"branch {here}" if here in ctx.protected_branches else ""
-            if why:
-                b = blk("protected_branches", f"git {sub} may land on a protected branch: {why}",
-                        "write the checkout out in full: `git -C /abs/path <command>`")
-                b.no_relax = True
-                yield b
-                return
+                # the path may point at any checkout, on a protected branch or not: it is not the session's branch
+                # that decides (dblanken-yale/not-me#152)
+                why = "the -C path is not one the guard can work out, so the checkout it names may be on a " \
+                      "protected branch"
+            b = blk("protected_branches", f"git {sub} may land on a protected branch: {why}",
+                    "write the checkout out in full: `git -C /abs/path <command>`")
+            b.no_relax = True
+            yield b
+            return
         if (d is None and not _git_reads(sub, args)) or (call.blind and sub in _BRANCH_READERS):
             yield _unknown_checkout(call)
 

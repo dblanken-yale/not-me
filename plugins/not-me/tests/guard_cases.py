@@ -1990,7 +1990,7 @@ for cmd in ("python3 -c 'print(1)'", "shellcheck $(git ls-files '*.sh')",
 # command is filled in; a path the guard cannot work out is not judged by the session's directory: the write runs and
 # is logged (guided). Rules the command breaks on its own (a force push, a protected branch it names) still block, and
 # --git-dir, --work-tree and GIT_DIR still block on a write, as before.
-bash(G, PB, "git -C $W commit -m x")
+bash(B, PB, "git -C $W commit -m x")  # #152: blocks from a feature-branch session too
 bash(G, OR, 'git -C "$W" push origin HEAD:refs/heads/x')
 _VAR_GIT_DIR_ID = f"G{len(CASES) + 1:03d}"
 bash(B, PB, "git --git-dir=$G commit -m x")
@@ -2016,17 +2016,18 @@ for cmd in ("git -C $W status", 'git -C "$W" log --oneline', "git -C $W diff", "
 bash(A, None, "git -C $W commit -m x", "alloff")
 # writes through an unknown path: guided under protected_branches (the checkout may be on one), not blocked
 for cmd in ("git -C $W merge feature/y", 'git -C "$W/.." commit -m x', "git -C $W reset --hard",
-            "git -C $W reset HEAD~1", "git -C $W rebase feature/y", "git -C $W am x.patch", "git -C $W cherry-pick abc",
-            "git -C $W branch -D feature/y", "git -C $W clean -fd", "git -C $W/.. merge feature/y",
-            "git -C $W branch feature/y", "git -C $W config user.name x", "git -C $W submodule update",
-            "git -C $W -C sub commit -m x"):
+            "git -C $W rebase feature/y", "git -C $W am x.patch", "git -C $W cherry-pick abc",
+            "git -C $W branch -D feature/y", "git -C $W/.. merge feature/y", "git -C $W -C sub commit -m x"):
+    cd_case(cmd, "app", B, PB)  # dblanken-yale/not-me#152: blocked from any session branch
+for cmd in ("git -C $W reset HEAD~1", "git -C $W clean -fd", "git -C $W branch feature/y",
+            "git -C $W config user.name x", "git -C $W submodule update"):
     cd_case(cmd, "app", G, PB)
 bash(G, OR, 'git -C "$W/.." push origin HEAD:refs/heads/x')
 bash(B, PB, "git -C $W subtree add --prefix=x y")  # subtree is not built in: looked up as an alias
-for variant, want in (("offalias", B), ("off", G)):  # offalias sits on main: the unset path may be main too
+for variant, want in (("offalias", B), ("off", B)):  # the unset path may be main, whatever the session is on
     bash(want, PB, 'git -C "$W/.." commit -m x', variant)
     bash(want, PB, "git -C $W/.. merge feature/y", variant)
-bash(G, PB, "git -C $W reset --hard", "off")
+bash(B, PB, "git -C $W reset --hard", "off")
 bash(A, None, "git -C $W merge feature/y", "mainpboff")  # protected_branches off: nothing to log
 bash(A, None, "git -C $W merge feature/y", "alloff")
 bash(A, None, 'git -C "$W/.." commit -m x', "alloff")
@@ -2065,8 +2066,9 @@ for cmd in ("git -C $W clean -f --e -n", "git -C $W clean -f --ex -n", "git -C $
     cd_case(cmd, "app", G, PB)
 # branch: abbreviated long write options next to --list are not a listing (a write: logged)
 for cmd in ("git -C $W branch --list --del feature/y", "git -C $W branch --list --set-up=origin/x",
-            "git -C $W branch -l --mov a b", "git -C $W branch --list --forc main"):
+            "git -C $W branch -l --mov a b"):
     cd_case(cmd, "app", G, PB)
+cd_case("git -C $W branch --list --forc main", "app", B, PB)  # reads the branch (#152): blocked
 # dblanken-yale/not-me#144: a run commits in its own worktree on a feature branch while the session sits on main.
 # {F}/live is a checkout of acme/app on feature/x; the "main" fixture is on main.
 bash(A, None, "git -C {F}/live add x && git -C {F}/live commit -F m", "main")
@@ -2093,7 +2095,7 @@ for cmd in ("W={F}/live; W=$(pwd); git -C $W commit -m x", "W={F}/live; read W <
             "W={F}/live; declare -x Y=1; git -C $W commit -m x", "W={F}/live; export Y; git -C $W commit -m x",
             "W={F}/live; read -r Y < f; git -C $W commit -m x"):
     bash(B, PB, cmd, "main")
-    bash(G, PB, cmd)
+    bash(B, PB, cmd)
 # any other directory change (a cd that is not leading or not joined by &&, cd after ;, || or &, a second cd,
 # pushd, popd, source, eval, trap, a function definition) next to a git write that reads the branch: blocked, in
 # whichever checkout the session sits
@@ -2127,9 +2129,8 @@ for cmd in ('git -C "$WT" commit -m x', 'git -C "$WT" push origin HEAD', 'git -C
             'git -C "$W" switch main && git commit -m x'):
     bash(B, PB, cmd, "main")
 bash(B, PB, 'git -C "$W" switch main && git commit -m x')  # the switch may move the session's checkout to main
-for cmd in ('git -C "$WT" commit -m x', 'git -C "$WT" reset --hard'):
-    bash(G, PB, cmd)  # the session's own branch is not protected: logged
-bash(G, OR, 'git -C "$WT" push origin HEAD')  # logged: the remote's repo is not known either
+for cmd in ('git -C "$WT" commit -m x', 'git -C "$WT" reset --hard', 'git -C "$WT" push origin HEAD'):
+    bash(B, PB, cmd)  # #152: the session's own branch does not clear an unknown path
 # a refspec with no `:` destination is not taken as naming the branch (fails closed): judged on the session's branch
 bash(B, PB, 'git -C "$WT" push origin feature/x', "main")
 bash(G, OR, 'git -C "$WT" push origin feature/x:feature/x', "main")  # names its destination: no current branch read
